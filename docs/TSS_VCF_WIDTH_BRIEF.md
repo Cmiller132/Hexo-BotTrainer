@@ -213,3 +213,140 @@ The turn-forcing prune is a WIN-search restriction (it can only cause missed
 wins, never false WINs) — soundness of WIN certificates is unchanged. Keep
 the NO entries' requirement (never WIN) as-is; UNKNOWN via forcing-universe
 exhaustion is the expected NO behavior and is cheap under the discipline.
+
+---
+
+## ADDENDUM 2 (2026-07-14, mid round 2 — new ground truth + optimization directives)
+
+### 1. PROVEN: every corpus WIN is reachable under turn-forcing (checked externally)
+The session lead replayed all 14 reference lines from
+`rust/corpus/forcing_corpus_lines.txt` against their corpus positions with an
+independent window model (3 axes, 6-windows). Result: **every attacker turn
+of every line — including all 9 turns of `0l4291i_live` — either wins
+outright or creates a new defender-free count>=4 window.** All 14 lines end
+in a verified 6-in-a-row; zero parity/legality flags.
+
+Consequences, binding:
+- The turn-forcing prune is NEVER the reason an entry fails. If an entry
+  exhausts without proof, the gap is (a) a missing width tier (some line
+  placement not in the candidate set at that ply) or (b) ordering/caps.
+  Backward-walk the reference line (ADDENDUM §2 protocol) to find which.
+- `0l4291i_live` is pure-VCF. Do not design a quiet-move/strategy tier for
+  it — it needs only width + ordering + budget under the forcing discipline.
+
+### 1b. Width tier is SETTLED — count>=2 is sufficient, do NOT build escalation
+Externally measured (same checker): all 181 attacker placements across the
+14 reference lines sit inside the count>=2 defender-free-window universe at
+the moment they are played — 128 are tier-0 (count>=3, the narrow universe),
+53 need the count>=2 tier, **zero need count>=1/r3 escalation, zero need
+full width**. Binding consequences:
+- Do NOT implement the count>=1/dist-3 escalation tier from the original
+  brief — it is provably unnecessary for this gate and the owner's
+  single-path directive forbids dead machinery. Strike it.
+- Any entry that exhausts without proof under count>=2 + turn-forcing has an
+  ORDERING or BUDGET problem, never a width problem. Stop widening; fix
+  selection.
+- Ordering prior: tier-0 candidates (count>=3 forcing extensions) before
+  tier-1 (count>=2 builds) — 71% of reference placements are tier-0.
+
+### 2. Optimization directives (owner-approved, apply inside wide mode)
+- **Kernel restriction at forced defender nodes**: when the minimum hitting
+  set size equals the defender budget b, restrict defender replies to the
+  extendable-hit kernel (cells whose block keeps a live defense possible).
+  Under turn-forcing every defender node is forced, so this applies at every
+  AND node. Sound (zones paper T6; scope mhs<=b only).
+- **Sparse LOSS/exhaustion witnesses**: when concluding a branch is dead,
+  witness with <=3 windows (defender budget 1) / <=5 (budget 2) rather than
+  full enumeration (paper L13, round-7 tightened caps 3/5).
+- **Fork-degree ordering** stays the top ordering signal for count-2
+  pair-starts (measured ~100x on refutations in the zone experiments).
+- **tau-informed pn/dn initialization** (proof-derived, soundness-free —
+  pn/dn only steer expansion): initialize defender-node disproof numbers
+  with the hitting-set size tau (the number of replies that must actually
+  be refuted; the mhs machinery already computes it), and attacker-node
+  proof numbers from fork degree, instead of uniform 1/1 or hand-tuned rank
+  biases. This is the principled fix for selection-cost blowups on deep
+  cases (hayes/lz60mfb class).
+- **U9 ES-potential futility is STRUCK — do not implement.** The round-7
+  proof campaign REFUTED the all-ties greedy ES argument (the raw
+  existential claim remains open), so the futility cut has no proven basis.
+  If any U9 scaffolding exists in the WIP, delete it.
+- **Consolidate selection machinery under the principled form.** Any ad-hoc
+  selection state accumulated during the corpus fight (scouting phases,
+  commitment thresholds, bespoke tie-breakers) should be replaced by, or
+  re-validated against, tau-informed pn/dn initialization + fork-degree
+  ordering + kernel K_b. Keep a bespoke rule only if it beats the principled
+  form on the full corpus in a direct A/B; otherwise delete it. The
+  horizon-advance-on-top-ranked-cutoff staging is a keeper. After every
+  engine change, re-verify ALL previously closed entries at their caps
+  (no silent regressions).
+- Pair canonicalization via ply-level PN nodes + TT meet (if that is the
+  current representation) is an accepted implementation of P3 — keep the
+  forcing gate exactly at turn completion (after the second stone).
+- **Keep `WidthOptions` minimal**: one constructor, no sub-flag
+  proliferation. Owner directive: after validation this design gets
+  CONSOLIDATED into the single mainline TSS path (flags are build
+  scaffolding, not final architecture) — do not add structural mode
+  switches beyond narrow/vcf_pair_complete.
+
+### 3. Out of scope (owner directive)
+Zone-based defender sets at unforced nodes (ranked zone T4 / quiet-turn
+allowance) are DEFERRED — proof work is still in flight. Do not implement
+any AND-node dismissal machinery in this task.
+
+---
+
+## ADDENDUM 3 (2026-07-14, round-3 handoff — round-2 state + binding marching orders)
+
+### A. Round-2 status (verified from its logs; its WIP is UNCOMMITTED in this tree)
+- 12/14 WIN entries prove at <=100k under the round-2 engine, including
+  hayes_turn16 (83,421 nodes) and hayes_20260712_placement31 (94,115).
+  Remaining: lz60mfb and 0l4291i_live only.
+- FIRST ACTIONS, before any new engine work: (1) cargo build; run the
+  forcing regression test plus 2-3 solved-entry spot checks; repair anything
+  left half-edited; (2) `git commit` the round-2 WIP as a checkpoint
+  immediately. Commit working checkpoints frequently from then on (round 2
+  committed nothing in 4.5 hours — do not repeat that).
+- Round-2 engine capital to KEEP (all in the WIP): staged deepening that
+  advances the horizon on a top-ranked-completion cutoff; defender-risk
+  priority at partial-turn roots; urgent-block sequential treatment at pair
+  roots; the width-sorter fix (count-2 second-ply moves completing a tight
+  forcing turn join the top tier); compact varint exact TT keys + full
+  512MiB wide budget + parentless deepest-first stage refresh (reaches a
+  clean 1M cap).
+- Known bugs round 2 identified but did NOT fix — fix these early:
+  (a) table-full stall at ~92k nodes (search stalls instead of failing over
+  when the table fills); (b) zero-cap semantics; (c) an unaffordable
+  attacker child repeatedly stalling the frontier.
+
+### B. Failure localizations (do not re-derive these)
+- lz60mfb: everything from prefix 4 inward proves <=100k (prefix 4 =
+  92,007). The root blocker is the FIRST defender universal: 4 hitting
+  cells -> 2 nonterminal unordered reply pairs; each proves individually at
+  ~78-92k; together they exhaust 100k. The gate ladder allows 1M — FIRST
+  check whether lz already proves at the 1M rung with the PN frontier and
+  bank that, THEN optimize toward 100k. Also verify the two replies share
+  transposed continuations in the TT (the second should cost far less than
+  solo if sharing works).
+- 0l4291i_live: first failing checkpoint is prefix 12; at a clean 1M cap
+  (memory verified not the limiter) it is still UNKNOWN at depth 34. This
+  is a search-shape problem and it is the gate's priority entry.
+
+### C. Marching orders (binding order)
+1. Stabilize + commit (section A).
+2. Implement ADDENDUM 2 section-2's principled toolkit BEFORE building any
+   more bespoke ordering machinery, in this order: tau-informed pn/dn
+   initialization; kernel restriction K_b at forced defender nodes (this
+   should directly shrink the lz defender conjunction — and every AND
+   node); L13 sparse witnesses (3/5 caps); fork-degree as the top OR-side
+   ordering signal. U9 is STRUCK — delete any scaffolding if present.
+3. Bespoke-heuristic audit: each round-2 special case (scouting phases,
+   commitment thresholds, tie-breakers) must beat or complement the
+   principled form in a full-corpus A/B, or be deleted. One system, few
+   flags — WidthOptions stays minimal.
+4. After EVERY engine change: re-verify all 12 closed entries at their
+   proven caps. No silent regressions.
+5. Then close lz60mfb and 0l4291i_live.
+6. Gate unchanged: all 14 expect=WIN prove on the ladder, zero WIN on the
+   5 expect=NO entries, full suite green, narrow/default mode
+   byte-identical.

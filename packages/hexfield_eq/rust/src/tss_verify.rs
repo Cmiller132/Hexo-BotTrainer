@@ -127,8 +127,9 @@ pub enum CertNode {
     /// A claimant move selecting one winning continuation.
     Choice { mv: HexCoord, child: CertNodeId },
     /// All listed opponent moves are replayed.  When `implicit_dispatch` is
-    /// true, the unlisted complement must satisfy the forced-boundary rule and
-    /// is individually checked by applying the move and invoking lambda-1.
+    /// true, every extendable-hit kernel cell must be listed. The unlisted
+    /// complement is individually checked by the debug oracle by applying the
+    /// move and invoking lambda-1.
     Universal {
         edges: Vec<CertEdge>,
         implicit_dispatch: bool,
@@ -827,12 +828,12 @@ fn verify_universal(
     }
 
     if implicit_dispatch {
-        // U3 theorem staple: at a checked post-opening ¬own_win_now, mhs=b
-        // boundary, every legal non-hitting reply is lambda-1 lost.  Requiring
-        // every independently derived hitting cell to be materialized is the
-        // complete obligation; the legal complement is not enumerated.
-        let hitting = boundary.as_ref().expect("checked above");
-        if hitting.iter().any(|mv| {
+        // T6 kernel staple: at a checked post-opening ¬own_win_now, tau=b
+        // boundary, only cells extendable to a size-b transversal can retain a
+        // live defense. Requiring the independently derived kernel is the
+        // complete obligation; certificates may explicitly prove any superset.
+        let kernel = boundary.as_ref().expect("checked above");
+        if kernel.iter().any(|mv| {
             explicit_moves
                 .binary_search_by_key(&coord_key(*mv), |c| coord_key(*c))
                 .is_err()
@@ -880,11 +881,11 @@ fn verify_universal(
     }
 
     if implicit_dispatch && dispatch_oracle {
-        // Paired debug oracle: retain the pre-U3 per-move staple for
-        // differential tests only.  Production never enters this arm.
+        // Paired debug oracle: validate every omitted nonkernel move with the
+        // per-move lambda-1 staple. Production never enters this arm.
         let mut legal = Vec::new();
         state.write_legal_moves(&mut legal);
-        let hitting = boundary.as_ref().expect("checked above");
+        let kernel = boundary.as_ref().expect("checked above");
         for mv in legal {
             if explicit_moves
                 .binary_search_by_key(&coord_key(mv), |c| coord_key(*c))
@@ -892,7 +893,7 @@ fn verify_universal(
             {
                 continue;
             }
-            if hitting
+            if kernel
                 .binary_search_by_key(&coord_key(mv), |c| coord_key(*c))
                 .is_ok()
                 || !with_move(state, mv, |child_state, outcome| match outcome {
@@ -1047,7 +1048,7 @@ fn verify_zone_node(
     true
 }
 
-/// Return the independently collected hitting-cell universe exactly when the
+/// Return the independently derived extendable-hit kernel exactly when the
 /// parent is at the sound instant-dispatch boundary.
 fn dispatch_boundary(state: &RustHexoState, claimant: Player) -> Option<Vec<HexCoord>> {
     if matches!(state.phase(), TurnPhase::Opening) {
@@ -1061,18 +1062,44 @@ fn dispatch_boundary(state: &RustHexoState, claimant: Player) -> Option<Vec<HexC
         return None;
     }
 
-    // At a universal node the claimant is the opponent of the mover.  Collect
-    // its active-window empties directly from the engine, independently of any
-    // solver candidate list or stored coverage claim.
-    let mut cells = Vec::new();
-    for (owner, entry) in state.board().windows().threats() {
-        if owner == claimant {
-            cells.extend(entry.empty_cells());
-        }
+    // At a universal node the claimant is the opponent of the mover. Collect
+    // its active-window empty sets directly from the engine, independently of
+    // any solver candidate list or stored coverage claim.
+    let family = state
+        .board()
+        .windows()
+        .threats()
+        .filter_map(|(owner, entry)| (owner == claimant).then(|| entry.empty_cells()))
+        .collect::<Vec<_>>();
+    let kernel = extendable_hit_kernel_for_family(&family, analysis.b);
+    (!kernel.is_empty()).then_some(kernel)
+}
+
+fn extendable_hit_kernel_for_family(family: &[Vec<HexCoord>], budget: u8) -> Vec<HexCoord> {
+    let mut universe = family.iter().flatten().copied().collect::<Vec<_>>();
+    universe.sort_by_key(|coord| coord_key(*coord));
+    universe.dedup();
+    match budget {
+        1 => universe
+            .into_iter()
+            .filter(|cell| family.iter().all(|threat| threat.contains(cell)))
+            .collect(),
+        2 => universe
+            .iter()
+            .copied()
+            .filter(|cell| {
+                universe.iter().copied().any(|mate| {
+                    mate != *cell
+                        && family
+                            .iter()
+                            .all(|threat| threat.contains(cell) || threat.contains(&mate))
+                })
+            })
+            .collect(),
+        // Connect-6 dispatch boundaries only have one or two placements. Keep
+        // an independently safe full-universe fallback for future phases.
+        _ => universe,
     }
-    cells.sort_by_key(|coord| coord_key(*coord));
-    cells.dedup();
-    (!cells.is_empty()).then_some(cells)
 }
 
 fn lambda1_proves_claimant(state: &RustHexoState, claimant: Player) -> bool {
@@ -1595,6 +1622,58 @@ mod tests {
             mirror_child: 1,
         };
         (cert, edges, item)
+    }
+
+    fn xsnfyll_forced_defender_fixture() -> RustHexoState {
+        let mut state = replay(&[
+            (0, 0),
+            (-1, 0),
+            (1, -2),
+            (-2, 0),
+            (1, 0),
+            (0, -2),
+            (1, -3),
+            (0, -3),
+            (2, -5),
+            (2, -4),
+            (1, -4),
+            (3, -4),
+            (3, -2),
+        ]);
+        for coord in [HexCoord::new(-1, -1), HexCoord::new(1, -5)] {
+            apply_placement(&mut state, Placement { coord }).unwrap();
+        }
+        state
+    }
+
+    #[test]
+    fn verifier_extendable_hit_kernel_matches_k1_and_k2_algebra() {
+        let a = HexCoord::new(0, 0);
+        let b = HexCoord::new(1, 0);
+        let c = HexCoord::new(2, 0);
+        let z = HexCoord::new(3, 0);
+        assert_eq!(
+            extendable_hit_kernel_for_family(&[vec![a, b], vec![a, c]], 1),
+            vec![a]
+        );
+        assert_eq!(
+            extendable_hit_kernel_for_family(&[vec![a, z], vec![a, c], vec![b]], 2),
+            vec![a, b]
+        );
+    }
+
+    #[test]
+    fn verifier_derives_xsnfyll_k2_independently() {
+        let state = xsnfyll_forced_defender_fixture();
+        assert_eq!(state.current_player(), Player::Player0);
+        assert_eq!(
+            dispatch_boundary(&state, Player::Player1),
+            Some(vec![
+                HexCoord::new(1, -6),
+                HexCoord::new(3, -5),
+                HexCoord::new(4, -6),
+            ])
+        );
     }
 
     #[test]

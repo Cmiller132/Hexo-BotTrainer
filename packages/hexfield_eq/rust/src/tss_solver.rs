@@ -13,7 +13,7 @@
 //! failed restricted attack is never interpreted as a proof for the opponent.
 
 use std::cmp::Reverse;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
 
 use hexo_engine::{
@@ -156,7 +156,11 @@ impl TssSolver {
         } else {
             0
         };
-        let (local_tt_cap, shared_tt_cap) = split_tt_cap(effective_tt_cap);
+        let (local_tt_cap, shared_tt_cap) = if self.width.vcf_pair_complete {
+            (effective_tt_cap, 0)
+        } else {
+            split_tt_cap(effective_tt_cap)
+        };
         self.shared_tt.reconfigure(shared_tt_cap, self.hash_mask);
 
         let initial_stats = SolveStats {
@@ -178,7 +182,7 @@ impl TssSolver {
             nodes: 1,
             ..initial_stats
         };
-        if let Some((claimant, leaf)) = immediate_winner(state) {
+        if let Some((claimant, leaf)) = immediate_winner(state, self.width) {
             if node_resolution(&leaf) > caps.semantic_horizon {
                 return unknown(stats);
             }
@@ -204,6 +208,12 @@ impl TssSolver {
         let (primal_cap, dual_cap) = match goal {
             SolveGoal::Win => (remaining, 0),
             SolveGoal::Loss => (0, remaining),
+            // Pair-complete mode is deliberately a restricted VCF WIN search.
+            // Spending half of a `Both` budget on the opponent's independent
+            // restricted attack cannot establish a useful NO result for this
+            // profile (the corpus accepts Loss or Unknown there), while it
+            // halves the advertised forcing-proof cap.
+            SolveGoal::Both if self.width.vcf_pair_complete => (remaining, 0),
             SolveGoal::Both => ((remaining + 1) / 2, remaining / 2),
         };
         let root_player = state.current_player();
@@ -283,35 +293,123 @@ impl TssSolver {
                 MAX_SEARCH_DEPTH,
             );
         }
-
-        const DEPTH_LADDER: [usize; 5] = [16, 32, 64, 128, MAX_SEARCH_DEPTH];
-        let mut stats = SolveStats::default();
-        for (index, depth_cap) in DEPTH_LADDER.into_iter().enumerate() {
-            let remaining = node_cap.saturating_sub(stats.nodes);
-            if remaining == 0 {
-                break;
-            }
-            let attempts_left = (DEPTH_LADDER.len() - index) as u64;
-            let attempt_cap = remaining / attempts_left;
-            let attempt = self.prove_for_at_depth(
+        #[cfg(test)]
+        if std::env::var_os("TSS_WIDE_LEGACY").is_some() {
+            let depth_cap = std::env::var("TSS_WIDTH_DEPTH_CAP")
+                .ok()
+                .map(|value| value.parse::<usize>().expect("numeric TSS width depth"))
+                .unwrap_or(MAX_SEARCH_DEPTH);
+            return self.prove_for_at_depth(
                 state,
                 claimant,
-                attempt_cap,
+                node_cap,
                 local_tt_cap,
                 semantic_horizon,
                 zone,
                 width,
                 depth_cap,
             );
-            merge_stats(&mut stats, attempt.stats);
-            if attempt.cert.is_some() {
-                return AttemptResult {
-                    cert: attempt.cert,
-                    stats,
-                };
+        }
+        let depth_cap = wide_search_final_depth(state.placements_made(), semantic_horizon);
+        // The explicit test probe has final precedence over the production
+        // semantic/certificate bound so depth-specific regressions stay possible.
+        #[cfg(test)]
+        let depth_cap = if let Ok(value) = std::env::var("TSS_WIDTH_DEPTH_CAP") {
+            let requested = value.parse::<usize>().expect("numeric TSS_WIDTH_DEPTH_CAP");
+            assert!(
+                requested <= MAX_SEARCH_DEPTH,
+                "TSS width depth exceeds certificate cap"
+            );
+            requested
+        } else {
+            depth_cap
+        };
+
+        self.prove_for_wide_pn(
+            state,
+            claimant,
+            node_cap,
+            local_tt_cap,
+            semantic_horizon,
+            depth_cap,
+        )
+    }
+
+    fn prove_for_wide_pn(
+        &mut self,
+        state: &RustHexoState,
+        claimant: Player,
+        node_cap: u64,
+        local_tt_cap: usize,
+        semantic_horizon: u32,
+        depth_cap: usize,
+    ) -> AttemptResult {
+        let shared_bytes = self.shared_tt.current_bytes;
+        let mut search = WidePnSearch::new(
+            claimant,
+            state.placements_made(),
+            node_cap,
+            local_tt_cap,
+            semantic_horizon,
+            depth_cap,
+        );
+        let root = search.insert_root(state);
+        search.run(state, root);
+        #[cfg(test)]
+        if std::env::var_os("TSS_TRACE_PN").is_some() {
+            eprintln!(
+                "WIDTH_PN pn={} dn={} expansions={} entries={}",
+                search.entries[root].pn,
+                search.entries[root].dn,
+                search.expansions,
+                search.entries.len(),
+            );
+            if let WidePnNode::Branch { children, .. } = &search.entries[root].node {
+                for (rank, child) in children.iter().take(32).enumerate() {
+                    let (pn, dn) = search.child_numbers(child);
+                    eprintln!(
+                        "WIDTH_PN_ROOT rank={rank} mv={:?} pn={pn} dn={dn} linked={}",
+                        child.mv,
+                        child.entry.is_some(),
+                    );
+                    if let Some(entry) = child.entry {
+                        if let WidePnNode::Branch {
+                            children: replies, ..
+                        } = &search.entries[entry].node
+                        {
+                            for (reply_rank, reply) in replies.iter().take(16).enumerate() {
+                                let (reply_pn, reply_dn) = search.child_numbers(reply);
+                                eprintln!(
+                                    "WIDTH_PN_NESTED root_rank={rank} rank={reply_rank} mv={:?} pn={reply_pn} dn={reply_dn} linked={}",
+                                    reply.mv,
+                                    reply.entry.is_some()
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
-        AttemptResult { cert: None, stats }
+        let stats = SolveStats {
+            nodes: search.expansions,
+            tt_hits: search.tt_hits,
+            peak_tt_bytes: shared_bytes.saturating_add(search.peak_bytes) as u64,
+        };
+        let cert = search
+            .materialize(state, root)
+            .and_then(|(arena, root_node)| {
+                let (nodes, root_node) = compact_certificate(&arena, root_node)?;
+                let mut cert = TssCertificate {
+                    root: RootBinding::from_state(state),
+                    claimant,
+                    root_node,
+                    nodes,
+                    semantic_horizon,
+                };
+                rebase_zone_distances(&mut cert, state)?;
+                Some(cert)
+            });
+        AttemptResult { cert, stats }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -476,7 +574,7 @@ fn status_for_claimant(root_player: Player, claimant: Player) -> ProofStatus {
 /// leaf.  Lambda-one is intentionally unavailable at Opening (the shared
 /// theorem is post-opening), although reachable Opening currently has no
 /// threats and therefore cannot produce a verdict anyway.
-fn immediate_winner(state: &RustHexoState) -> Option<(Player, CertNode)> {
+fn immediate_winner(state: &RustHexoState, width: WidthOptions) -> Option<(Player, CertNode)> {
     if state.is_terminal() {
         return None;
     }
@@ -485,17 +583,122 @@ fn immediate_winner(state: &RustHexoState) -> Option<(Player, CertNode)> {
     }
     let analysis = threats::analyze(state);
     let winner = winner_from_analysis(state, &analysis)?;
-    typed_lambda_leaf(state, winner, &analysis).map(|leaf| (winner, leaf))
+    typed_lambda_leaf(state, winner, &analysis, width).map(|leaf| (winner, leaf))
 }
 
 fn window_key_order(key: WindowKey) -> (u8, i16, i16) {
     (key.axis.index(), key.start.q, key.start.r)
 }
 
+const L13_LOSS_WITNESS_CAP_B1: usize = 3;
+const L13_LOSS_WITNESS_CAP_B2: usize = 5;
+
+/// Whether no set of at most `budget` cells hits every member of `family`.
+/// Connect-6 loss leaves only use budgets one and two; an unsupported budget
+/// deliberately returns false so callers cannot emit an unproved witness.
+fn family_hitting_exceeds_budget(family: &[Vec<HexCoord>], budget: u8) -> bool {
+    if family.is_empty() {
+        return false;
+    }
+    if family.iter().any(Vec::is_empty) {
+        return true;
+    }
+
+    let mut universe = family.iter().flatten().copied().collect::<Vec<_>>();
+    universe.sort_by_key(|coord| (coord.q, coord.r));
+    universe.dedup();
+    if budget >= 1
+        && universe
+            .iter()
+            .any(|cell| family.iter().all(|set| set.contains(cell)))
+    {
+        return false;
+    }
+    if budget >= 2 {
+        for left in 0..universe.len() {
+            for right in (left + 1)..universe.len() {
+                if family
+                    .iter()
+                    .all(|set| set.contains(&universe[left]) || set.contains(&universe[right]))
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    matches!(budget, 1 | 2)
+}
+
+/// L13 reverse deletion preserves the earliest canonical family members when
+/// either choice is redundant and returns an inclusion-minimal obstruction.
+fn inclusion_minimal_loss_obstruction(family: &[Vec<HexCoord>], budget: u8) -> Option<Vec<usize>> {
+    let cap = match budget {
+        1 => L13_LOSS_WITNESS_CAP_B1,
+        2 => L13_LOSS_WITNESS_CAP_B2,
+        _ => return None,
+    };
+    if !family_hitting_exceeds_budget(family, budget) {
+        return None;
+    }
+
+    let mut kept = (0..family.len()).collect::<Vec<_>>();
+    for candidate in (0..family.len()).rev() {
+        let trial = kept
+            .iter()
+            .copied()
+            .filter(|index| *index != candidate)
+            .map(|index| family[index].clone())
+            .collect::<Vec<_>>();
+        if family_hitting_exceeds_budget(&trial, budget) {
+            kept.retain(|index| *index != candidate);
+        }
+    }
+
+    debug_assert!(kept.iter().all(|removed| {
+        let trial = kept
+            .iter()
+            .copied()
+            .filter(|index| index != removed)
+            .map(|index| family[index].clone())
+            .collect::<Vec<_>>();
+        !family_hitting_exceeds_budget(&trial, budget)
+    }));
+    if kept.len() > cap {
+        return None;
+    }
+    Some(kept)
+}
+
+/// Materialize the sparse obstruction as window identities.  The proved 3/5
+/// bounds are checked rather than assumed: an unexpected violation fails
+/// closed by declining to materialize a tactical LOSS leaf.
+fn sparse_loss_witnesses(
+    state: &RustHexoState,
+    winner: Player,
+    budget: u8,
+) -> Option<Vec<WindowKey>> {
+    let mut family = state
+        .board()
+        .windows()
+        .threats()
+        .filter_map(|(owner, entry)| (owner == winner).then(|| (entry.key(), entry.empty_cells())))
+        .collect::<Vec<_>>();
+    family.sort_by_key(|(key, _)| window_key_order(*key));
+    family.dedup_by_key(|(key, _)| *key);
+
+    let full_sets = family
+        .iter()
+        .map(|(_, empties)| empties.clone())
+        .collect::<Vec<_>>();
+    let kept = inclusion_minimal_loss_obstruction(&full_sets, budget)?;
+    Some(kept.into_iter().map(|index| family[index].0).collect())
+}
+
 fn typed_lambda_leaf(
     state: &RustHexoState,
     winner: Player,
     analysis: &threats::ThreatAnalysis,
+    width: WidthOptions,
 ) -> Option<CertNode> {
     if winner == state.current_player() {
         let mut candidates = state
@@ -523,14 +726,19 @@ fn typed_lambda_leaf(
             resolution_ply: state.placements_made().saturating_add(extra),
         })
     } else {
-        let mut witnesses = state
-            .board()
-            .windows()
-            .threats()
-            .filter_map(|(owner, entry)| (owner == winner).then_some(entry.key()))
-            .collect::<Vec<_>>();
-        witnesses.sort_by_key(|key| window_key_order(*key));
-        witnesses.dedup();
+        let witnesses = if width.vcf_pair_complete {
+            sparse_loss_witnesses(state, winner, analysis.b)?
+        } else {
+            let mut witnesses = state
+                .board()
+                .windows()
+                .threats()
+                .filter_map(|(owner, entry)| (owner == winner).then_some(entry.key()))
+                .collect::<Vec<_>>();
+            witnesses.sort_by_key(|key| window_key_order(*key));
+            witnesses.dedup();
+            witnesses
+        };
         (!witnesses.is_empty()).then_some(CertNode::Loss {
             witnesses,
             resolution_ply: state
@@ -562,6 +770,1292 @@ fn winner_from_analysis(
     } else {
         None
     }
+}
+
+const PN_INFINITY: u32 = 1_000_000_000;
+/// Each placement belongs to at most 18 length-six windows (six starts on
+/// each of three axes), so a completed two-stone turn can create at most 36
+/// distinct threats.  This geometry bound turns fork degree into a compact,
+/// strictly monotone proof prior without a tuned scale.
+const MAX_TURN_FORK_DEGREE: u32 = 36;
+
+fn pn_from_fork_degree(fork_degree: usize) -> u32 {
+    let fork_degree = u32::try_from(fork_degree)
+        .unwrap_or(u32::MAX)
+        .min(MAX_TURN_FORK_DEGREE);
+    MAX_TURN_FORK_DEGREE + 1 - fork_degree
+}
+
+fn dn_from_tau(tau: Option<u8>) -> u32 {
+    tau.map(u32::from).unwrap_or(1).max(1)
+}
+
+/// No proof can use more placements than either the caller's remaining
+/// semantic horizon or the verifier's maximum replay depth.
+fn wide_search_final_depth(root_ply: u32, semantic_horizon: u32) -> usize {
+    usize::try_from(semantic_horizon.saturating_sub(root_ply))
+        .unwrap_or(usize::MAX)
+        .min(MAX_SEARCH_DEPTH)
+}
+
+/// Advance only to an exact, strictly deeper selected cutoff. Repeated or
+/// regressive observations terminate fail-closed instead of spinning.
+fn next_wide_stage_depth(
+    current_depth: usize,
+    encountered_depth: usize,
+    final_depth: usize,
+) -> Option<usize> {
+    let next_depth = encountered_depth.min(final_depth);
+    (next_depth > current_depth).then_some(next_depth)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WidePnPrior {
+    pn: u32,
+    dn: u32,
+}
+
+impl WidePnPrior {
+    const UNIFORM: Self = Self { pn: 1, dn: 1 };
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WidePnKind {
+    Choice,
+    Universal { implicit_dispatch: bool },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WidePnMove {
+    One(HexCoord),
+    Pair(HexCoord, HexCoord),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WidePnChildResult {
+    Pending,
+    ClaimantCompletion,
+    ClaimantTactical,
+    Refuted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WidePnStepOutcome {
+    Progress,
+    DepthCutoff { depth: usize, made_progress: bool },
+    Stalled,
+}
+
+#[derive(Clone, Debug)]
+struct WidePnChild {
+    mv: WidePnMove,
+    result: WidePnChildResult,
+    entry: Option<usize>,
+    /// Static estimates used until the child position is linked. Completed
+    /// attacker turns carry both their fork-derived PN and tau-derived DN so
+    /// lazy linking cannot erase the principled ordering signal.
+    prior: WidePnPrior,
+    urgent_block: bool,
+}
+
+fn turn_start_defender_blocks(candidates: &[Candidate]) -> HashSet<HexCoord> {
+    candidates
+        .iter()
+        .filter_map(|candidate| candidate.defender_block.then_some(candidate.coord))
+        .collect()
+}
+
+fn wide_move_contains_defender_block(mv: WidePnMove, defender_blocks: &HashSet<HexCoord>) -> bool {
+    match mv {
+        WidePnMove::One(coord) => defender_blocks.contains(&coord),
+        WidePnMove::Pair(first, second) => {
+            defender_blocks.contains(&first) || defender_blocks.contains(&second)
+        }
+    }
+}
+
+fn wide_choice_has_urgent_block(children: &[WidePnChild]) -> bool {
+    children.iter().any(|child| child.urgent_block)
+}
+
+#[derive(Clone, Debug)]
+enum WidePnNode {
+    Unexpanded,
+    ProvenLeaf(CertNode),
+    /// This restricted horizon did not reach a proof. Unlike a genuine
+    /// refutation, the node is reopened when the retained search deepens.
+    DepthCutoff,
+    Refuted,
+    Branch {
+        kind: WidePnKind,
+        children: Vec<WidePnChild>,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct WidePnEntry {
+    pn: u32,
+    dn: u32,
+    /// Immutable initialization restored whenever a staged depth cutoff is
+    /// reopened. Recompute may replace the live numbers with child aggregates,
+    /// but it never destroys these state-derived priors.
+    prior: WidePnPrior,
+    node: WidePnNode,
+    depth: usize,
+}
+
+/// Exact, compact key used only by the wide proof-number frontier. Coordinates
+/// are zig-zag/varint encoded after sorting `(q,r,owner)` tuples, so equality is
+/// collision-free while dense late-game boards do not duplicate a padded
+/// `StoneKey` vector in every transposition entry.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct WidePositionKey {
+    bytes: Box<[u8]>,
+}
+
+impl WidePositionKey {
+    fn from_state(state: &RustHexoState) -> Self {
+        let mut stones = state
+            .board()
+            .occupied_cells()
+            .iter()
+            .map(|&coord| {
+                (
+                    coord.q,
+                    coord.r,
+                    player_code(state.board().get(coord).expect("occupied cell has owner")),
+                )
+            })
+            .collect::<Vec<_>>();
+        stones.sort_unstable();
+        let mut encoded = Vec::with_capacity(stones.len().saturating_mul(3).saturating_add(12));
+        encoded.push(player_code(state.current_player()));
+        push_wide_varint(&mut encoded, state.placements_made());
+        match state.phase() {
+            TurnPhase::Opening => encoded.push(0),
+            TurnPhase::FirstStone => encoded.push(1),
+            TurnPhase::SecondStone { first } => {
+                encoded.push(2);
+                push_wide_varint(&mut encoded, zigzag_i16(first.q));
+                push_wide_varint(&mut encoded, zigzag_i16(first.r));
+            }
+        }
+        match state.terminal() {
+            None => encoded.push(0),
+            Some(outcome) => {
+                encoded.push(1 + player_code(outcome.winner));
+                push_wide_varint(&mut encoded, outcome.placements);
+            }
+        }
+        for (q, r, owner) in stones {
+            push_wide_varint(
+                &mut encoded,
+                zigzag_i16(q).saturating_mul(2) | u32::from(owner),
+            );
+            push_wide_varint(&mut encoded, zigzag_i16(r));
+        }
+        Self {
+            bytes: encoded.into_boxed_slice(),
+        }
+    }
+
+    fn heap_bytes(&self) -> usize {
+        self.bytes.len()
+    }
+}
+
+/// Conservative retained-byte charge for one exact-key TT index entry.  PN
+/// nodes and their child vectors live in the node-capped search arena and are
+/// deliberately excluded from the caller's TT/cache byte ceiling.
+fn wide_position_index_bytes(key: &WidePositionKey) -> usize {
+    key.heap_bytes()
+        .saturating_add(size_of::<(WidePositionKey, usize)>())
+        .saturating_add(ALLOC_OVERHEAD)
+}
+
+fn zigzag_i16(value: i16) -> u32 {
+    let value = i32::from(value);
+    u32::try_from((value << 1) ^ (value >> 31)).expect("i16 zig-zag is nonnegative")
+}
+
+fn push_wide_varint(out: &mut Vec<u8>, mut value: u32) {
+    while value >= 0x80 {
+        out.push((value as u8 & 0x7f) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+/// Wide VCF search keeps a persistent proof-number frontier.  Unlike the
+/// quota-based DFS experiments, expanding a sibling never discards work in an
+/// earlier forcing turn. Claimant pairs are represented as one OR edge, so
+/// turn-forcing is structural rather than an after-the-fact recursive filter.
+struct WidePnSearch {
+    claimant: Player,
+    root_ply: u32,
+    node_cap: u64,
+    tt_bytes_cap: usize,
+    semantic_horizon: u32,
+    depth_cap: usize,
+    expansions: u64,
+    tt_hits: u64,
+    current_bytes: usize,
+    peak_bytes: usize,
+    entries: Vec<WidePnEntry>,
+    by_position: HashMap<WidePositionKey, usize>,
+}
+
+impl WidePnSearch {
+    fn new(
+        claimant: Player,
+        root_ply: u32,
+        node_cap: u64,
+        tt_bytes_cap: usize,
+        semantic_horizon: u32,
+        depth_cap: usize,
+    ) -> Self {
+        Self {
+            claimant,
+            root_ply,
+            node_cap,
+            tt_bytes_cap,
+            semantic_horizon,
+            depth_cap,
+            expansions: 0,
+            tt_hits: 0,
+            current_bytes: 0,
+            peak_bytes: 0,
+            entries: Vec::new(),
+            by_position: HashMap::new(),
+        }
+    }
+
+    fn insert_root(&mut self, state: &RustHexoState) -> usize {
+        let prior = self.position_prior(state);
+        self.insert_position(WidePositionKey::from_state(state), 0, prior)
+    }
+
+    fn insert_position(&mut self, key: WidePositionKey, depth: usize, prior: WidePnPrior) -> usize {
+        if let Some(&id) = self.by_position.get(&key) {
+            self.tt_hits = self.tt_hits.saturating_add(1);
+            return id;
+        }
+
+        // The retained PN frontier is the search arena, not the transposition
+        // index.  A full (or disabled) TT must only stop indexing new keys;
+        // refusing the arena entry would strand the selected Pending edge and
+        // make a memory-profile choice alter frontier progress.
+        let id = self.entries.len();
+        self.entries.push(WidePnEntry {
+            pn: prior.pn,
+            dn: prior.dn,
+            prior,
+            node: WidePnNode::Unexpanded,
+            depth,
+        });
+
+        let added = wide_position_index_bytes(&key);
+        if self.tt_bytes_cap > 0 && self.current_bytes.saturating_add(added) <= self.tt_bytes_cap {
+            self.by_position.insert(key, id);
+            self.current_bytes = self.current_bytes.saturating_add(added);
+            self.peak_bytes = self.peak_bytes.max(self.current_bytes);
+        }
+        id
+    }
+
+    fn position_prior(&self, state: &RustHexoState) -> WidePnPrior {
+        if state.current_player() == self.claimant {
+            WidePnPrior {
+                pn: pn_from_fork_degree(attacker_fork_degree(state, self.claimant)),
+                dn: 1,
+            }
+        } else {
+            let analysis = threats::analyze(state);
+            WidePnPrior {
+                pn: 1,
+                dn: dn_from_tau(analysis.min_hitting_set),
+            }
+        }
+    }
+
+    fn completed_turn_prior(&self, state: &RustHexoState) -> WidePnPrior {
+        debug_assert_ne!(state.current_player(), self.claimant);
+        let analysis = threats::analyze(state);
+        WidePnPrior {
+            pn: pn_from_fork_degree(analysis.opp_threat_count),
+            dn: dn_from_tau(analysis.min_hitting_set),
+        }
+    }
+
+    fn run(&mut self, root_state: &RustHexoState, root: usize) {
+        let final_depth = self.depth_cap;
+        let mut stage_depth = 0usize;
+
+        // The selected PN path discovers the next useful horizon. Every stage
+        // shares the caller's one global node cap; there are no scouting quotas.
+        loop {
+            self.depth_cap = stage_depth;
+            self.reopen_depth_cutoffs(stage_depth);
+            let is_final = stage_depth == final_depth;
+            let selected_cutoff = self.run_until(root_state, root, self.node_cap, !is_final);
+            // Transposed parents outside the active recursion also need to see
+            // the selected cutoff (or proof) before the stage decision.
+            self.refresh_all_bottom_up();
+
+            if self.entries[root].pn == 0 || self.expansions >= self.node_cap || is_final {
+                break;
+            }
+            let Some(encountered_depth) = selected_cutoff else {
+                break;
+            };
+            let Some(next_depth) =
+                next_wide_stage_depth(stage_depth, encountered_depth, final_depth)
+            else {
+                break;
+            };
+            stage_depth = next_depth;
+        }
+
+        self.depth_cap = final_depth;
+    }
+
+    fn run_until(
+        &mut self,
+        root_state: &RustHexoState,
+        root: usize,
+        expansion_cap: u64,
+        deepen_after_selected_cutoff: bool,
+    ) -> Option<usize> {
+        let mut work = root_state.clone();
+        while self.expansions < self.node_cap && self.expansions < expansion_cap {
+            self.recompute(root);
+            let Some(entry) = self.entries.get(root) else {
+                break;
+            };
+            if entry.pn == 0 || entry.dn == 0 {
+                break;
+            }
+            match self.step(&mut work, root) {
+                WidePnStepOutcome::Progress => {}
+                WidePnStepOutcome::DepthCutoff { depth, .. } if deepen_after_selected_cutoff => {
+                    return Some(depth);
+                }
+                WidePnStepOutcome::DepthCutoff {
+                    made_progress: true,
+                    ..
+                } => {}
+                WidePnStepOutcome::DepthCutoff {
+                    made_progress: false,
+                    ..
+                } => break,
+                WidePnStepOutcome::Stalled => break,
+            }
+        }
+        None
+    }
+
+    fn reopen_depth_cutoffs(&mut self, depth_cap: usize) {
+        let reopened = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(id, entry)| {
+                (entry.depth <= depth_cap && matches!(entry.node, WidePnNode::DepthCutoff))
+                    .then_some(id)
+            })
+            .collect::<Vec<_>>();
+        for &id in &reopened {
+            self.entries[id].node = WidePnNode::Unexpanded;
+        }
+        if reopened.is_empty() {
+            return;
+        }
+
+        // Edges always add placements, so a single deepest-first pass
+        // propagates the reopened frontier through every (possibly
+        // transposed) parent without retaining reverse-parent vectors in each
+        // entry.  Refreshing only the cutoff entries leaves an ancestor's
+        // cached dn=0 in place and can make the next depth stage stop before
+        // doing any work.
+        self.refresh_all_bottom_up();
+    }
+
+    fn refresh_all_bottom_up(&mut self) {
+        let mut ids = (0..self.entries.len()).collect::<Vec<_>>();
+        ids.sort_unstable_by_key(|&id| std::cmp::Reverse(self.entries[id].depth));
+        for id in ids {
+            self.recompute(id);
+        }
+    }
+
+    fn step(&mut self, state: &mut RustHexoState, id: usize) -> WidePnStepOutcome {
+        if matches!(self.entries[id].node, WidePnNode::DepthCutoff) {
+            return WidePnStepOutcome::DepthCutoff {
+                depth: self.entries[id].depth,
+                made_progress: false,
+            };
+        }
+        if matches!(self.entries[id].node, WidePnNode::Unexpanded) {
+            return self.expand(state, id);
+        }
+        self.recompute(id);
+        if self.entries[id].pn == 0 || self.entries[id].dn == 0 {
+            return WidePnStepOutcome::Stalled;
+        }
+        let parent_before = (self.entries[id].pn, self.entries[id].dn);
+        let finish_partial_turn = matches!(state.phase(), TurnPhase::SecondStone { .. });
+        let urgent_pair = matches!(state.phase(), TurnPhase::FirstStone)
+            && matches!(
+                &self.entries[id].node,
+                WidePnNode::Branch {
+                    kind: WidePnKind::Choice,
+                    children,
+                } if wide_choice_has_urgent_block(children)
+            );
+        // Sequential probing is a root bootstrap for the two corpus shapes
+        // that enter mid-turn or under an urgent block.  Applying it at every
+        // descendant discards the proof-number evidence and degenerates into
+        // depth-first search inside each forcing branch.
+        let sequential_root_probe = (self.entries[id].depth == 0
+            && (finish_partial_turn || urgent_pair))
+            || cfg!(test) && std::env::var_os("TSS_WIDE_SEQUENTIAL_CHOICE").is_some();
+        let (kind, child_index, child) = {
+            let WidePnNode::Branch { kind, children } = &self.entries[id].node else {
+                return WidePnStepOutcome::Stalled;
+            };
+            let selected = self.select_child_index(*kind, children, sequential_root_probe);
+            let Some(child_index) = selected else {
+                return WidePnStepOutcome::Stalled;
+            };
+            (*kind, child_index, children[child_index].clone())
+        };
+        let _ = kind;
+        if child.result != WidePnChildResult::Pending {
+            self.recompute(id);
+            return WidePnStepOutcome::Stalled;
+        }
+
+        let outcome = match child.mv {
+            WidePnMove::One(coord) => {
+                let linked = child.entry.is_none();
+                let Ok((_result, delta)) = state.apply_with_delta(Placement { coord }) else {
+                    self.set_child_refuted(id, child_index);
+                    self.refresh(id);
+                    return WidePnStepOutcome::Progress;
+                };
+                let child_id = child.entry.unwrap_or_else(|| {
+                    let depth =
+                        usize::try_from(state.placements_made().saturating_sub(self.root_ply))
+                            .unwrap_or(usize::MAX);
+                    self.insert_position(WidePositionKey::from_state(state), depth, child.prior)
+                });
+                self.set_child_entry(id, child_index, child_id);
+                let outcome = self.step(state, child_id);
+                state.undo(delta);
+                match outcome {
+                    WidePnStepOutcome::DepthCutoff {
+                        depth,
+                        made_progress,
+                    } => WidePnStepOutcome::DepthCutoff {
+                        depth,
+                        made_progress: made_progress || linked,
+                    },
+                    WidePnStepOutcome::Progress => WidePnStepOutcome::Progress,
+                    WidePnStepOutcome::Stalled if linked => WidePnStepOutcome::Progress,
+                    WidePnStepOutcome::Stalled => WidePnStepOutcome::Stalled,
+                }
+            }
+            WidePnMove::Pair(first, second) => {
+                let linked = child.entry.is_none();
+                let Ok((_first_result, first_delta)) =
+                    state.apply_with_delta(Placement { coord: first })
+                else {
+                    self.set_child_refuted(id, child_index);
+                    self.refresh(id);
+                    return WidePnStepOutcome::Progress;
+                };
+                let Ok((_second_result, second_delta)) =
+                    state.apply_with_delta(Placement { coord: second })
+                else {
+                    state.undo(first_delta);
+                    self.set_child_refuted(id, child_index);
+                    self.refresh(id);
+                    return WidePnStepOutcome::Progress;
+                };
+                let child_id = child.entry.unwrap_or_else(|| {
+                    let depth =
+                        usize::try_from(state.placements_made().saturating_sub(self.root_ply))
+                            .unwrap_or(usize::MAX);
+                    self.insert_position(WidePositionKey::from_state(state), depth, child.prior)
+                });
+                self.set_child_entry(id, child_index, child_id);
+                let outcome = self.step(state, child_id);
+                state.undo(second_delta);
+                state.undo(first_delta);
+                match outcome {
+                    WidePnStepOutcome::DepthCutoff {
+                        depth,
+                        made_progress,
+                    } => WidePnStepOutcome::DepthCutoff {
+                        depth,
+                        made_progress: made_progress || linked,
+                    },
+                    WidePnStepOutcome::Progress => WidePnStepOutcome::Progress,
+                    WidePnStepOutcome::Stalled if linked => WidePnStepOutcome::Progress,
+                    WidePnStepOutcome::Stalled => WidePnStepOutcome::Stalled,
+                }
+            }
+        };
+        self.refresh(id);
+        let parent_changed = parent_before != (self.entries[id].pn, self.entries[id].dn);
+        match outcome {
+            WidePnStepOutcome::DepthCutoff {
+                depth,
+                made_progress,
+            } => WidePnStepOutcome::DepthCutoff {
+                depth,
+                made_progress: made_progress || parent_changed,
+            },
+            WidePnStepOutcome::Progress => WidePnStepOutcome::Progress,
+            WidePnStepOutcome::Stalled if parent_changed => WidePnStepOutcome::Progress,
+            WidePnStepOutcome::Stalled => WidePnStepOutcome::Stalled,
+        }
+    }
+
+    fn set_child_entry(&mut self, parent: usize, child: usize, entry: usize) {
+        if let WidePnNode::Branch { children, .. } = &mut self.entries[parent].node {
+            children[child].entry = Some(entry);
+        }
+    }
+
+    fn set_child_refuted(&mut self, parent: usize, child: usize) {
+        if let WidePnNode::Branch { children, .. } = &mut self.entries[parent].node {
+            children[child].result = WidePnChildResult::Refuted;
+        }
+    }
+
+    fn child_numbers(&self, child: &WidePnChild) -> (u32, u32) {
+        match child.result {
+            WidePnChildResult::ClaimantCompletion | WidePnChildResult::ClaimantTactical => {
+                (0, PN_INFINITY)
+            }
+            WidePnChildResult::Refuted => (PN_INFINITY, 0),
+            WidePnChildResult::Pending => child
+                .entry
+                .and_then(|id| self.entries.get(id))
+                .map(|entry| (entry.pn, entry.dn))
+                .unwrap_or((child.prior.pn, child.prior.dn)),
+        }
+    }
+
+    fn select_child_index(
+        &self,
+        kind: WidePnKind,
+        children: &[WidePnChild],
+        sequential_root_probe: bool,
+    ) -> Option<usize> {
+        if kind == WidePnKind::Choice && sequential_root_probe {
+            return children
+                .iter()
+                .enumerate()
+                .filter(|(_, child)| !self.child_is_genuinely_refuted(child))
+                .min_by_key(|(rank, child)| {
+                    let tactical = self.child_numbers(child).0 == 0;
+                    (!tactical, !child.urgent_block, child.prior.pn, *rank)
+                })
+                .map(|(index, _)| index);
+        }
+        children
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, child)| {
+                let (pn, dn) = self.child_numbers(child);
+                match kind {
+                    // Iterator::min_by_key retains the first equal key, so
+                    // canonical generator order is the only normal tie-break.
+                    WidePnKind::Choice => (pn, 0),
+                    WidePnKind::Universal { .. } => (dn, 0),
+                }
+            })
+            .map(|(index, _)| index)
+    }
+
+    /// A staged depth cutoff is unresolved, not a disproof. Sequential root
+    /// probing must stay committed to that static top child so the caller can
+    /// advance the horizon instead of silently moving to a lower-ranked turn.
+    fn child_is_genuinely_refuted(&self, child: &WidePnChild) -> bool {
+        match child.result {
+            WidePnChildResult::Refuted => true,
+            WidePnChildResult::Pending => child
+                .entry
+                .and_then(|id| self.entries.get(id))
+                .is_some_and(|entry| {
+                    entry.dn == 0 && !matches!(entry.node, WidePnNode::DepthCutoff)
+                }),
+            WidePnChildResult::ClaimantCompletion | WidePnChildResult::ClaimantTactical => false,
+        }
+    }
+
+    fn recompute(&mut self, id: usize) -> bool {
+        let previous = (self.entries[id].pn, self.entries[id].dn);
+        let numbers = match &self.entries[id].node {
+            WidePnNode::Unexpanded => {
+                let prior = self.entries[id].prior;
+                (prior.pn, prior.dn)
+            }
+            WidePnNode::ProvenLeaf(_) => (0, PN_INFINITY),
+            WidePnNode::DepthCutoff | WidePnNode::Refuted => (PN_INFINITY, 0),
+            WidePnNode::Branch { kind, children } => match kind {
+                WidePnKind::Choice => {
+                    let pn = children
+                        .iter()
+                        .map(|child| self.child_numbers(child).0)
+                        .min()
+                        .unwrap_or(PN_INFINITY);
+                    let dn = children.iter().fold(0u32, |sum, child| {
+                        sum.saturating_add(self.child_numbers(child).1)
+                            .min(PN_INFINITY)
+                    });
+                    (pn, dn)
+                }
+                WidePnKind::Universal { .. } => {
+                    let pn = children.iter().fold(0u32, |sum, child| {
+                        sum.saturating_add(self.child_numbers(child).0)
+                            .min(PN_INFINITY)
+                    });
+                    let dn = children
+                        .iter()
+                        .map(|child| self.child_numbers(child).1)
+                        .min()
+                        .unwrap_or(0);
+                    (pn, dn)
+                }
+            },
+        };
+        self.entries[id].pn = numbers.0;
+        self.entries[id].dn = numbers.1;
+        previous != numbers
+    }
+
+    fn refresh(&mut self, id: usize) {
+        self.recompute(id);
+    }
+
+    fn expand(&mut self, state: &mut RustHexoState, id: usize) -> WidePnStepOutcome {
+        if self.expansions >= self.node_cap {
+            return WidePnStepOutcome::Stalled;
+        }
+        self.expansions += 1;
+        let depth = usize::try_from(state.placements_made().saturating_sub(self.root_ply))
+            .unwrap_or(usize::MAX);
+        if depth > self.depth_cap {
+            self.entries[id].node = WidePnNode::DepthCutoff;
+            self.refresh(id);
+            return WidePnStepOutcome::DepthCutoff {
+                depth,
+                made_progress: true,
+            };
+        }
+        if state.placements_made() > self.semantic_horizon {
+            self.entries[id].node = WidePnNode::Refuted;
+            self.refresh(id);
+            return WidePnStepOutcome::Progress;
+        }
+        if let Some(outcome) = state.terminal() {
+            self.entries[id].node = if outcome.winner == self.claimant {
+                WidePnNode::Refuted
+            } else {
+                WidePnNode::Refuted
+            };
+            self.refresh(id);
+            return WidePnStepOutcome::Progress;
+        }
+        if !matches!(state.phase(), TurnPhase::Opening) {
+            let analysis = threats::analyze(state);
+            if let Some(winner) = winner_from_analysis(state, &analysis) {
+                if winner == self.claimant {
+                    if let Some(leaf) = typed_lambda_leaf(
+                        state,
+                        winner,
+                        &analysis,
+                        WidthOptions::vcf_pair_complete(),
+                    )
+                    .filter(|leaf| node_resolution(leaf) <= self.semantic_horizon)
+                    {
+                        self.entries[id].node = WidePnNode::ProvenLeaf(leaf);
+                    } else {
+                        self.entries[id].node = WidePnNode::Refuted;
+                    }
+                } else {
+                    self.entries[id].node = WidePnNode::Refuted;
+                }
+                self.refresh(id);
+                return WidePnStepOutcome::Progress;
+            }
+        }
+
+        let (kind, mut children) = if state.current_player() == self.claimant {
+            (WidePnKind::Choice, self.attack_children(state, depth))
+        } else {
+            let analysis = threats::analyze(state);
+            let implicit_dispatch = !matches!(state.phase(), TurnPhase::Opening)
+                && analysis.opp_threat_count > 0
+                && !analysis.own_win_now
+                && analysis.min_hitting_set == Some(analysis.b);
+            if !implicit_dispatch {
+                self.entries[id].node = WidePnNode::Refuted;
+                self.refresh(id);
+                return WidePnStepOutcome::Progress;
+            }
+            let children = self.defender_children(state, analysis.b);
+            (WidePnKind::Universal { implicit_dispatch }, children)
+        };
+        children.shrink_to_fit();
+        self.entries[id].node = if children.is_empty() {
+            WidePnNode::Refuted
+        } else {
+            WidePnNode::Branch { kind, children }
+        };
+        self.refresh(id);
+        WidePnStepOutcome::Progress
+    }
+
+    fn attack_children(&self, state: &mut RustHexoState, depth: usize) -> Vec<WidePnChild> {
+        match state.phase() {
+            TurnPhase::FirstStone => {
+                #[cfg(test)]
+                if std::env::var_os("TSS_WIDE_PLACEMENT_PN").is_some() {
+                    return self.attack_single_children(state, depth, None);
+                }
+                self.attack_pair_children(state, depth)
+            }
+            TurnPhase::SecondStone { first } => {
+                self.attack_single_children(state, depth, Some(first))
+            }
+            TurnPhase::Opening => self.attack_single_children(state, depth, None),
+        }
+    }
+
+    /// Enumerate complete attacker turns. A first stone is never admitted to
+    /// the proof frontier by itself: either it wins immediately, or a retained
+    /// pair must pass the new-threat and tight-dispatch forcing checks.
+    fn attack_pair_children(&self, state: &mut RustHexoState, depth: usize) -> Vec<WidePnChild> {
+        let first_candidates = ordered_threat_creating_moves_with_width(
+            state,
+            self.claimant,
+            WidthOptions::vcf_pair_complete(),
+        );
+        // Freeze urgency at the turn-start position. A block cell can disappear
+        // from the second-stone candidate metadata after the other coordinate is
+        // played, but the unordered pair still contains that original block.
+        let defender_blocks = turn_start_defender_blocks(&first_candidates);
+        let mut children = Vec::new();
+        let mut seen_pairs = HashSet::new();
+        for first_candidate in first_candidates {
+            let first = first_candidate.coord;
+            let Ok((first_result, first_delta)) =
+                state.apply_with_delta(Placement { coord: first })
+            else {
+                continue;
+            };
+            let first_completion_ply = self.root_ply.saturating_add(depth as u32).saturating_add(1);
+            if let Some(outcome) = first_result.outcome {
+                if outcome.winner == self.claimant && first_completion_ply <= self.semantic_horizon
+                {
+                    let mv = WidePnMove::One(first);
+                    children.push(WidePnChild {
+                        mv,
+                        result: WidePnChildResult::ClaimantCompletion,
+                        entry: None,
+                        prior: WidePnPrior::UNIFORM,
+                        urgent_block: wide_move_contains_defender_block(mv, &defender_blocks),
+                    });
+                }
+                state.undo(first_delta);
+                continue;
+            }
+
+            let second_candidates = ordered_threat_creating_moves_with_width(
+                state,
+                self.claimant,
+                WidthOptions::vcf_pair_complete(),
+            );
+            for second_candidate in second_candidates {
+                let second = second_candidate.coord;
+                let Ok((second_result, second_delta)) =
+                    state.apply_with_delta(Placement { coord: second })
+                else {
+                    continue;
+                };
+                let completion_ply = self.root_ply.saturating_add(depth as u32).saturating_add(2);
+                let (child_result, prior) = if let Some(outcome) = second_result.outcome {
+                    (outcome.winner == self.claimant && completion_ply <= self.semantic_horizon)
+                        .then_some(WidePnChildResult::ClaimantCompletion)
+                        .map(|result| (Some(result), WidePnPrior::UNIFORM))
+                        .unwrap_or((None, WidePnPrior::UNIFORM))
+                } else if immediate_winner(state, WidthOptions::vcf_pair_complete()).is_some_and(
+                    |(winner, ref leaf)| {
+                        winner == self.claimant && node_resolution(leaf) <= self.semantic_horizon
+                    },
+                ) {
+                    (
+                        Some(WidePnChildResult::ClaimantTactical),
+                        WidePnPrior::UNIFORM,
+                    )
+                } else {
+                    let forcing =
+                        (turn_created_claimant_threat(state, self.claimant, first, second)
+                            && turn_forces_small_defender_reply(state, self.claimant))
+                        .then_some(WidePnChildResult::Pending);
+                    let prior = forcing
+                        .is_some()
+                        .then(|| self.completed_turn_prior(state))
+                        .unwrap_or(WidePnPrior::UNIFORM);
+                    (forcing, prior)
+                };
+                state.undo(second_delta);
+                if let Some(result) = child_result {
+                    // Deduplicate the two legal orders by their actual
+                    // unordered coordinate pair. Candidate membership is not
+                    // monotone: a defender-block coordinate can disappear
+                    // after the other stone, so coordinate-order pruning can
+                    // incorrectly discard the only generated ordering.
+                    let first_key = raw_coord_key(first);
+                    let second_key = raw_coord_key(second);
+                    let pair_key = if first_key <= second_key {
+                        (first_key, second_key)
+                    } else {
+                        (second_key, first_key)
+                    };
+                    if !seen_pairs.insert(pair_key) {
+                        continue;
+                    }
+                    let mv = WidePnMove::Pair(first, second);
+                    children.push(WidePnChild {
+                        mv,
+                        result,
+                        entry: None,
+                        prior,
+                        urgent_block: wide_move_contains_defender_block(mv, &defender_blocks),
+                    });
+                }
+            }
+            state.undo(first_delta);
+        }
+        children
+    }
+
+    fn attack_single_children(
+        &self,
+        state: &mut RustHexoState,
+        depth: usize,
+        turn_first: Option<HexCoord>,
+    ) -> Vec<WidePnChild> {
+        let candidates = ordered_threat_creating_moves_with_width(
+            state,
+            self.claimant,
+            WidthOptions::vcf_pair_complete(),
+        );
+        let mut children = Vec::new();
+        for candidate in candidates {
+            let Ok((result, delta)) = state.apply_with_delta(Placement {
+                coord: candidate.coord,
+            }) else {
+                continue;
+            };
+            let completion_ply = self.root_ply.saturating_add(depth as u32).saturating_add(1);
+            let (child_result, prior) = if let Some(outcome) = result.outcome {
+                if outcome.winner == self.claimant && completion_ply <= self.semantic_horizon {
+                    (
+                        Some(WidePnChildResult::ClaimantCompletion),
+                        WidePnPrior::UNIFORM,
+                    )
+                } else {
+                    (None, WidePnPrior::UNIFORM)
+                }
+            } else if let Some(first) = turn_first {
+                if immediate_winner(state, WidthOptions::vcf_pair_complete()).is_some_and(
+                    |(winner, ref leaf)| {
+                        winner == self.claimant && node_resolution(leaf) <= self.semantic_horizon
+                    },
+                ) {
+                    (
+                        Some(WidePnChildResult::ClaimantTactical),
+                        WidePnPrior::UNIFORM,
+                    )
+                } else {
+                    let forcing = (turn_created_claimant_threat(
+                        state,
+                        self.claimant,
+                        first,
+                        candidate.coord,
+                    ) && turn_forces_small_defender_reply(state, self.claimant))
+                    .then_some(WidePnChildResult::Pending);
+                    let prior = forcing
+                        .is_some()
+                        .then(|| self.completed_turn_prior(state))
+                        .unwrap_or(WidePnPrior::UNIFORM);
+                    (forcing, prior)
+                }
+            } else {
+                (
+                    Some(WidePnChildResult::Pending),
+                    if state.current_player() == self.claimant {
+                        self.position_prior(state)
+                    } else {
+                        self.completed_turn_prior(state)
+                    },
+                )
+            };
+            state.undo(delta);
+            if let Some(result) = child_result {
+                children.push(WidePnChild {
+                    mv: WidePnMove::One(candidate.coord),
+                    result,
+                    entry: None,
+                    prior,
+                    urgent_block: candidate.defender_block,
+                });
+            }
+        }
+        children
+    }
+
+    fn defender_children(
+        &mut self,
+        state: &mut RustHexoState,
+        defender_budget: u8,
+    ) -> Vec<WidePnChild> {
+        let mut explicit = forced_defender_replies(
+            state,
+            self.claimant,
+            defender_budget,
+            WidthOptions::vcf_pair_complete(),
+        );
+        let frame = canonical_frame(state);
+        explicit.sort_by_key(|coord| canonical_coord_key(frame, *coord));
+        let mut children = Vec::with_capacity(explicit.len());
+        for coord in explicit {
+            let Ok((result, delta)) = state.apply_with_delta(Placement { coord }) else {
+                continue;
+            };
+            let child_result = match result.outcome {
+                Some(outcome) if outcome.winner == self.claimant => {
+                    WidePnChildResult::ClaimantCompletion
+                }
+                Some(_) => WidePnChildResult::Refuted,
+                None => WidePnChildResult::Pending,
+            };
+            let prior = (child_result == WidePnChildResult::Pending)
+                .then(|| self.position_prior(state))
+                .unwrap_or(WidePnPrior::UNIFORM);
+            let entry = (child_result == WidePnChildResult::Pending).then(|| {
+                let depth = usize::try_from(state.placements_made().saturating_sub(self.root_ply))
+                    .unwrap_or(usize::MAX);
+                self.insert_position(WidePositionKey::from_state(state), depth, prior)
+            });
+            state.undo(delta);
+            children.push(WidePnChild {
+                mv: WidePnMove::One(coord),
+                result: child_result,
+                entry,
+                prior,
+                urgent_block: false,
+            });
+        }
+        children
+    }
+
+    fn materialize(
+        &self,
+        state: &RustHexoState,
+        root: usize,
+    ) -> Option<(Vec<CertNode>, CertNodeId)> {
+        if self.entries.get(root)?.pn != 0 {
+            return None;
+        }
+        let mut work = state.clone();
+        let mut builder = WideProofMaterializer {
+            search: self,
+            arena: Vec::new(),
+            edge_count: 0,
+            memo: HashMap::new(),
+        };
+        let root_node = builder.build(&mut work, root)?;
+        Some((builder.arena, root_node))
+    }
+}
+
+struct WideProofMaterializer<'a> {
+    search: &'a WidePnSearch,
+    arena: Vec<CertNode>,
+    edge_count: usize,
+    memo: HashMap<PositionKey, CertNodeId>,
+}
+
+impl<'a> WideProofMaterializer<'a> {
+    fn build(&mut self, state: &mut RustHexoState, id: usize) -> Option<CertNodeId> {
+        let key = PositionKey::from_state(state);
+        if let Some(&node) = self.memo.get(&key) {
+            return Some(node);
+        }
+        let entry = self.search.entries.get(id)?;
+        if entry.pn != 0 {
+            return None;
+        }
+        let node = match entry.node.clone() {
+            WidePnNode::ProvenLeaf(leaf) => self.alloc(leaf, 0)?,
+            WidePnNode::Branch {
+                kind: WidePnKind::Choice,
+                children,
+            } => {
+                let child = children
+                    .iter()
+                    .find(|child| self.search.child_numbers(child).0 == 0)?
+                    .clone();
+                self.build_choice(state, &child)?
+            }
+            WidePnNode::Branch {
+                kind: WidePnKind::Universal { implicit_dispatch },
+                children,
+            } => self.build_universal(state, implicit_dispatch, &children)?,
+            WidePnNode::Unexpanded | WidePnNode::DepthCutoff | WidePnNode::Refuted => return None,
+        };
+        self.memo.insert(key, node);
+        Some(node)
+    }
+
+    fn build_choice(
+        &mut self,
+        state: &mut RustHexoState,
+        child: &WidePnChild,
+    ) -> Option<CertNodeId> {
+        match child.mv {
+            WidePnMove::One(coord) => {
+                let (result, delta) = state.apply_with_delta(Placement { coord }).ok()?;
+                let node = match child.result {
+                    WidePnChildResult::ClaimantCompletion => {
+                        if result.outcome?.winner != self.search.claimant {
+                            state.undo(delta);
+                            return None;
+                        }
+                        let completion = wide_completion_node(
+                            state,
+                            self.search.claimant,
+                            coord,
+                            state.placements_made(),
+                        );
+                        state.undo(delta);
+                        self.alloc(completion?, 0)?
+                    }
+                    WidePnChildResult::ClaimantTactical => {
+                        if result.outcome.is_some() {
+                            state.undo(delta);
+                            return None;
+                        }
+                        let analysis = threats::analyze(state);
+                        let leaf = typed_lambda_leaf(
+                            state,
+                            self.search.claimant,
+                            &analysis,
+                            WidthOptions::vcf_pair_complete(),
+                        )
+                        .filter(|leaf| node_resolution(leaf) <= self.search.semantic_horizon);
+                        state.undo(delta);
+                        let leaf = self.alloc(leaf?, 0)?;
+                        self.alloc(
+                            CertNode::Choice {
+                                mv: coord,
+                                child: leaf,
+                            },
+                            1,
+                        )?
+                    }
+                    WidePnChildResult::Pending => {
+                        let child_id = child.entry?;
+                        let proof = self.build(state, child_id);
+                        state.undo(delta);
+                        self.alloc(
+                            CertNode::Choice {
+                                mv: coord,
+                                child: proof?,
+                            },
+                            1,
+                        )?
+                    }
+                    WidePnChildResult::Refuted => {
+                        state.undo(delta);
+                        return None;
+                    }
+                };
+                Some(node)
+            }
+            WidePnMove::Pair(first, second) => {
+                let (first_result, first_delta) =
+                    state.apply_with_delta(Placement { coord: first }).ok()?;
+                if first_result.outcome.is_some() {
+                    state.undo(first_delta);
+                    return None;
+                }
+                let (second_result, second_delta) =
+                    state.apply_with_delta(Placement { coord: second }).ok()?;
+                let node = match child.result {
+                    WidePnChildResult::ClaimantCompletion => {
+                        if second_result.outcome?.winner != self.search.claimant {
+                            state.undo(second_delta);
+                            state.undo(first_delta);
+                            return None;
+                        }
+                        let completion = wide_completion_node(
+                            state,
+                            self.search.claimant,
+                            second,
+                            state.placements_made(),
+                        );
+                        state.undo(second_delta);
+                        state.undo(first_delta);
+                        let completion = self.alloc(completion?, 0)?;
+                        self.alloc(
+                            CertNode::Choice {
+                                mv: first,
+                                child: completion,
+                            },
+                            1,
+                        )?
+                    }
+                    WidePnChildResult::ClaimantTactical => {
+                        if second_result.outcome.is_some() {
+                            state.undo(second_delta);
+                            state.undo(first_delta);
+                            return None;
+                        }
+                        let analysis = threats::analyze(state);
+                        let leaf = typed_lambda_leaf(
+                            state,
+                            self.search.claimant,
+                            &analysis,
+                            WidthOptions::vcf_pair_complete(),
+                        )
+                        .filter(|leaf| node_resolution(leaf) <= self.search.semantic_horizon);
+                        state.undo(second_delta);
+                        state.undo(first_delta);
+                        let leaf = self.alloc(leaf?, 0)?;
+                        let second_choice = self.alloc(
+                            CertNode::Choice {
+                                mv: second,
+                                child: leaf,
+                            },
+                            1,
+                        )?;
+                        self.alloc(
+                            CertNode::Choice {
+                                mv: first,
+                                child: second_choice,
+                            },
+                            1,
+                        )?
+                    }
+                    WidePnChildResult::Pending => {
+                        let proof = self.build(state, child.entry?);
+                        state.undo(second_delta);
+                        state.undo(first_delta);
+                        let second_choice = self.alloc(
+                            CertNode::Choice {
+                                mv: second,
+                                child: proof?,
+                            },
+                            1,
+                        )?;
+                        self.alloc(
+                            CertNode::Choice {
+                                mv: first,
+                                child: second_choice,
+                            },
+                            1,
+                        )?
+                    }
+                    WidePnChildResult::Refuted => {
+                        state.undo(second_delta);
+                        state.undo(first_delta);
+                        return None;
+                    }
+                };
+                Some(node)
+            }
+        }
+    }
+
+    fn build_universal(
+        &mut self,
+        state: &mut RustHexoState,
+        implicit_dispatch: bool,
+        children: &[WidePnChild],
+    ) -> Option<CertNodeId> {
+        let mut edges = Vec::with_capacity(children.len());
+        for child in children {
+            if self.search.child_numbers(child).0 != 0 || child.result != WidePnChildResult::Pending
+            {
+                return None;
+            }
+            let WidePnMove::One(coord) = child.mv else {
+                return None;
+            };
+            let (_result, delta) = state.apply_with_delta(Placement { coord }).ok()?;
+            let proof = self.build(state, child.entry?);
+            state.undo(delta);
+            edges.push(CertEdge {
+                mv: coord,
+                child: proof?,
+            });
+        }
+        let edge_count = edges.len();
+        self.alloc(
+            CertNode::Universal {
+                edges,
+                implicit_dispatch,
+                zone: None,
+                commutations: Vec::new(),
+            },
+            edge_count,
+        )
+    }
+
+    fn alloc(&mut self, node: CertNode, added_edges: usize) -> Option<CertNodeId> {
+        if self.arena.len() >= MAX_CERT_NODES
+            || self.edge_count.saturating_add(added_edges) > MAX_CERT_EDGES
+        {
+            return None;
+        }
+        let id = u32::try_from(self.arena.len()).ok()?;
+        self.arena.push(node);
+        self.edge_count += added_edges;
+        Some(id)
+    }
+}
+
+fn wide_completion_node(
+    state: &RustHexoState,
+    claimant: Player,
+    coord: HexCoord,
+    completion_ply: u32,
+) -> Option<CertNode> {
+    let mut witnesses = state
+        .board()
+        .windows()
+        .entries()
+        .filter(|entry| {
+            entry.key().contains(coord)
+                && entry.count(claimant) == 6
+                && entry.count(claimant.other()) == 0
+        })
+        .map(|entry| entry.key())
+        .collect::<Vec<_>>();
+    witnesses.sort_by_key(|key| window_key_order(*key));
+    Some(CertNode::OrCompletion {
+        mv: coord,
+        witness: witnesses.first().copied()?,
+        completion_ply,
+    })
 }
 
 struct SearchContext<'a> {
@@ -711,7 +2205,7 @@ impl<'a> SearchContext<'a> {
                 if winner != claimant {
                     return None;
                 }
-                let leaf = typed_lambda_leaf(state, winner, &analysis)?;
+                let leaf = typed_lambda_leaf(state, winner, &analysis, self.width)?;
                 if node_resolution(&leaf) > self.semantic_horizon {
                     return None;
                 }
@@ -767,6 +2261,18 @@ impl<'a> SearchContext<'a> {
                 coords.sort_by_key(|coord| raw_coord_key(*coord));
                 coords
             });
+        // Wide mode is a VCF search, not merely a wider unrestricted attack
+        // search.  Capture the turn's first coordinate so the completed pair
+        // can be rejected unless it created a new count-four (or stronger)
+        // claimant window.  This also covers roots entered at SecondStone.
+        let turn_first = if self.width.vcf_pair_complete {
+            match state.phase() {
+                TurnPhase::SecondStone { first } => Some(first),
+                _ => None,
+            }
+        } else {
+            None
+        };
         for candidate in candidates {
             let Ok((result, delta)) = state.apply_with_delta(Placement {
                 coord: candidate.coord,
@@ -803,6 +2309,13 @@ impl<'a> SearchContext<'a> {
                     },
                     0,
                 );
+            }
+            if let Some(first) = turn_first {
+                let created = turn_created_claimant_threat(state, claimant, first, candidate.coord);
+                if !created || !turn_forces_small_defender_reply(state, claimant) {
+                    state.undo(delta);
+                    continue;
+                }
             }
             let pair_context = turn_start_candidates.as_ref().and_then(|turn_start_legal| {
                 (matches!(state.phase(), TurnPhase::SecondStone { .. })).then(|| PairContext {
@@ -844,6 +2357,14 @@ impl<'a> SearchContext<'a> {
             && !analysis.own_win_now
             && analysis.min_hitting_set == Some(analysis.b);
 
+        // A wide descendant defender is reachable only after a completed
+        // forcing attacker turn.  Keep this invariant at the dispatcher as a
+        // backstop so an opening/special-phase path can never reintroduce the
+        // full-legal fallback that vcf_pair_complete is designed to exclude.
+        if self.width.vcf_pair_complete && !implicit_dispatch {
+            return None;
+        }
+
         // At the proved L1 boundary U3 lets the verifier theorem-dismiss the
         // complement without enumerating it.  At spare nodes the default-off
         // U1 generator is consumable only because U2 re-derives the zone.
@@ -860,7 +2381,7 @@ impl<'a> SearchContext<'a> {
         })
         .flatten();
         let mut explicit = if implicit_dispatch {
-            hitting_universe(state, claimant)
+            forced_defender_replies(state, claimant, analysis.b, self.width)
         } else if let Some(zone) = zone {
             zone_initial_candidates(state, claimant, zone.d, self.zone)
         } else {
@@ -1151,6 +2672,170 @@ fn pair_candidate_allowed(mv: HexCoord, pair: &PairContext) -> bool {
     raw_coord_key(mv) > raw_coord_key(pair.first) || !pair.turn_start_legal.contains(&mv)
 }
 
+/// Reconstruct membership in the pair-complete attacker universe immediately
+/// before `first` was placed.  This lets the proof-number search canonicalize
+/// ordinary `(a,b)/(b,a)` pairs without pruning a second coordinate that only
+/// became a count-two candidate after `first`.
+fn wide_candidate_was_legal_before_first(
+    state: &RustHexoState,
+    claimant: Player,
+    first: HexCoord,
+    candidate: HexCoord,
+) -> bool {
+    debug_assert_eq!(state.board().get(first), Some(claimant));
+    debug_assert_eq!(state.board().get(candidate), None);
+    for axis in Axis::ALL {
+        for offset in 0..6i16 {
+            let key = WindowKey {
+                start: candidate - axis.vector().scale(offset),
+                axis,
+            };
+            let Some(entry) = state.board().windows().entry(key) else {
+                continue;
+            };
+            let first_in_window = key.contains(first);
+            let prior_claimant = entry
+                .count(claimant)
+                .saturating_sub(u8::from(first_in_window));
+            let prior_defender = entry.count(claimant.other());
+            if (prior_defender == 0 && prior_claimant >= 2)
+                || (prior_claimant == 0 && prior_defender >= 4)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// True when the just-completed pair created a claimant count-four-or-stronger
+/// window that was not already a threat at turn start.  Any changed window is
+/// incident to one of the two placements, so at most 36 O(1) store lookups are
+/// needed.  Subtracting both stones reconstructs the pre-turn count exactly.
+fn turn_created_claimant_threat(
+    state: &RustHexoState,
+    claimant: Player,
+    first: HexCoord,
+    second: HexCoord,
+) -> bool {
+    let mut inspected = Vec::with_capacity(36);
+    for placed in [first, second] {
+        for axis in Axis::ALL {
+            for offset in 0..6i16 {
+                let key = WindowKey {
+                    start: placed - axis.vector().scale(offset),
+                    axis,
+                };
+                if inspected.contains(&key) {
+                    continue;
+                }
+                inspected.push(key);
+                let Some(entry) = state.board().windows().entry(key) else {
+                    continue;
+                };
+                if entry.active_player() != Some(claimant) || entry.count(claimant) < 4 {
+                    continue;
+                }
+                let prior_count = entry
+                    .count(claimant)
+                    .saturating_sub(u8::from(key.contains(first)))
+                    .saturating_sub(u8::from(key.contains(second)));
+                if prior_count < 4 {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// The addendum's forcing discipline requires more than merely leaving a live
+/// threat: every ensuing defender placement must stay in the small, verifier-
+/// justified hitting dispatcher.  A tactical claimant leaf is already done;
+/// otherwise this is exactly the dispatch boundary used by `prove_universal`.
+/// Rejecting looser turns only narrows the WIN search.
+fn turn_forces_small_defender_reply(state: &RustHexoState, claimant: Player) -> bool {
+    let analysis = threats::analyze(state);
+    winner_from_analysis(state, &analysis) == Some(claimant)
+        || (!matches!(state.phase(), TurnPhase::Opening)
+            && analysis.opp_threat_count > 0
+            && !analysis.own_win_now
+            && analysis.min_hitting_set == Some(analysis.b))
+}
+
+#[cfg(test)]
+pub(crate) fn debug_wide_pair_ranks(
+    state: &RustHexoState,
+    reference_first: HexCoord,
+    reference_second: HexCoord,
+) -> String {
+    use std::fmt::Write as _;
+
+    let claimant = state.current_player();
+    let width = WidthOptions::vcf_pair_complete();
+    let mut work = state.clone();
+    let first_candidates = ordered_threat_creating_moves_with_width(&work, claimant, width);
+    let mut out = String::new();
+    for (first_rank, first_candidate) in first_candidates.iter().enumerate() {
+        let Ok((first_result, first_delta)) = work.apply_with_delta(Placement {
+            coord: first_candidate.coord,
+        }) else {
+            continue;
+        };
+        let mut forcing_second = None;
+        let mut reference_second_rank = None;
+        if first_result.outcome.is_none() {
+            let second_candidates =
+                ordered_threat_creating_moves_with_width(&work, claimant, width);
+            for (second_rank, second_candidate) in second_candidates.iter().enumerate() {
+                if second_candidate.coord == reference_second {
+                    reference_second_rank = Some((
+                        second_rank,
+                        second_candidate.priority_class,
+                        second_candidate.child_threats,
+                        second_candidate.strength,
+                    ));
+                }
+                let Ok((second_result, second_delta)) = work.apply_with_delta(Placement {
+                    coord: second_candidate.coord,
+                }) else {
+                    continue;
+                };
+                let forcing = second_result
+                    .outcome
+                    .is_some_and(|outcome| outcome.winner == claimant)
+                    || (turn_created_claimant_threat(
+                        &work,
+                        claimant,
+                        first_candidate.coord,
+                        second_candidate.coord,
+                    ) && turn_forces_small_defender_reply(&work, claimant));
+                work.undo(second_delta);
+                if forcing && forcing_second.is_none() {
+                    forcing_second = Some((
+                        second_rank,
+                        second_candidate.coord,
+                        second_candidate.priority_class,
+                        second_candidate.child_threats,
+                        second_candidate.strength,
+                    ));
+                }
+            }
+        }
+        work.undo(first_delta);
+        let _ = writeln!(
+            out,
+            "first#{first_rank} ({},{}) s={} child={} ref={} best2={forcing_second:?} ref2={reference_second_rank:?}",
+            first_candidate.coord.q,
+            first_candidate.coord.r,
+            first_candidate.strength,
+            first_candidate.child_threats,
+            first_candidate.coord == reference_first,
+        );
+    }
+    out
+}
+
 #[derive(Clone)]
 struct Candidate {
     coord: HexCoord,
@@ -1166,9 +2851,6 @@ struct Candidate {
     /// Distinct count-two windows through this cell.  In pair-complete mode
     /// this is the primary ordering key within the newly admitted tier.
     pair_start_degree: usize,
-    /// Distinct local count-one windows through this cell.  This orders the r3
-    /// escalation tier after pair starts.
-    seed_degree: usize,
     /// Nearest claimant stone, used only to break widened-tier ordering ties.
     own_proximity: i16,
     /// Count-three claimant windows this placement turns into live threats.
@@ -1195,6 +2877,10 @@ fn threat_creating_moves_with_threshold(
     claimant: Player,
     minimum_strength: u8,
 ) -> CandidateBatch {
+    assert!(
+        minimum_strength >= 2,
+        "count-one/r3 attacker width is not supported"
+    );
     let mut candidates: Vec<Candidate> = Vec::new();
     let mut claimant_threats = Vec::new();
     let mut defender_threats = Vec::new();
@@ -1218,15 +2904,6 @@ fn threat_creating_moves_with_threshold(
         }
         let empties = entry.empty_cells();
         for &coord in &empties {
-            if strength == 1
-                && !state
-                    .board()
-                    .occupied_cells()
-                    .iter()
-                    .any(|stone| hex_distance(coord, *stone) <= 3)
-            {
-                continue;
-            }
             let created = (strength == 3).then(|| {
                 empties
                     .iter()
@@ -1238,8 +2915,6 @@ fn threat_creating_moves_with_threshold(
                 existing.strength = existing.strength.max(strength);
                 if strength == 2 {
                     existing.pair_start_degree += 1;
-                } else if strength == 1 {
-                    existing.seed_degree += 1;
                 }
                 if let Some(created) = created {
                     existing.created_threats.push(created);
@@ -1252,14 +2927,13 @@ fn threat_creating_moves_with_threshold(
                     child_threats: 0,
                     defender_block: false,
                     pair_start_degree: usize::from(strength == 2),
-                    seed_degree: usize::from(strength == 1),
                     own_proximity: i16::MAX,
                     created_threats: created.into_iter().collect(),
                 });
             }
         }
     }
-    if minimum_strength < 3 {
+    if minimum_strength == 2 {
         for coord in defender_threats.iter().flatten().copied() {
             if let Some(existing) = candidates.iter_mut().find(|item| item.coord == coord) {
                 existing.defender_block = true;
@@ -1271,7 +2945,6 @@ fn threat_creating_moves_with_threshold(
                     child_threats: 0,
                     defender_block: true,
                     pair_start_degree: 0,
-                    seed_degree: 0,
                     own_proximity: i16::MAX,
                     created_threats: Vec::new(),
                 });
@@ -1304,7 +2977,7 @@ fn ordered_threat_creating_moves_with_width(
         claimant_threats,
         defender_threats,
     } = if width.vcf_pair_complete {
-        threat_creating_moves_with_threshold(state, claimant, 1)
+        threat_creating_moves_with_threshold(state, claimant, 2)
     } else {
         threat_creating_moves(state, claimant)
     };
@@ -1347,7 +3020,7 @@ fn ordered_threat_creating_moves_with_width(
             let width_tier = match (item.defender_block, item.strength) {
                 (true, _) | (_, 3..) => 0,
                 (_, 2) => 1,
-                _ => 2,
+                _ => unreachable!("wide candidates are defender blocks or count>=2"),
             };
             let canonical = canonical_coord_key(frame, item.coord);
             (
@@ -1357,12 +3030,17 @@ fn ordered_threat_creating_moves_with_width(
                 } else {
                     0
                 },
-                Reverse(match width_tier {
-                    0 => item.child_threats,
-                    1 => item.pair_start_degree,
-                    _ => item.seed_degree,
+                Reverse(if width_tier == 0 {
+                    item.child_threats
+                } else {
+                    item.pair_start_degree
                 }),
                 Reverse(if width_tier == 0 { item.strength } else { 0 }),
+                if width_tier == 0 && matches!(state.phase(), TurnPhase::SecondStone { .. }) {
+                    item.pair_start_degree
+                } else {
+                    0
+                },
                 if width_tier == 0 {
                     0
                 } else {
@@ -1385,6 +3063,19 @@ fn ordered_threat_creating_moves_with_width(
         });
     }
     candidates
+}
+
+/// Static fork potential for an unexpanded attacker OR node. Count-three
+/// extensions contribute the live threats they expose immediately; count-two
+/// pair starts contribute their distinct continuation windows. The best
+/// available degree is sufficient for an OR prior and is independent of hash
+/// iteration because only the maximum is retained.
+fn attacker_fork_degree(state: &RustHexoState, claimant: Player) -> usize {
+    ordered_threat_creating_moves_with_width(state, claimant, WidthOptions::vcf_pair_complete())
+        .into_iter()
+        .map(|candidate| candidate.child_threats.max(candidate.pair_start_degree))
+        .max()
+        .unwrap_or(0)
 }
 
 /// Reconstruct exactly the child threat-cost class after a claimant's
@@ -1469,6 +3160,62 @@ fn hitting_universe(state: &RustHexoState, claimant: Player) -> Vec<HexCoord> {
     cells.sort_by_key(|coord| (coord.q, coord.r));
     cells.dedup();
     cells
+}
+
+fn forced_defender_replies(
+    state: &RustHexoState,
+    claimant: Player,
+    defender_budget: u8,
+    width: WidthOptions,
+) -> Vec<HexCoord> {
+    if width.vcf_pair_complete {
+        extendable_hit_kernel(state, claimant, defender_budget)
+    } else {
+        hitting_universe(state, claimant)
+    }
+}
+
+/// Cells that can occur in a size-`budget` transversal of the claimant's live
+/// threat family. At the forced boundary `tau == budget`, every omitted cell
+/// leaves the defender without an extendable defense, so T6 permits the wide
+/// WIN search to restrict its explicit universal replies to this kernel.
+///
+/// Connect-6 reaches this boundary only with budgets one and two. The fallback
+/// deliberately returns the full hitting universe for any future budget so an
+/// unsupported phase can lose performance but never lose a necessary reply.
+fn extendable_hit_kernel(state: &RustHexoState, claimant: Player, budget: u8) -> Vec<HexCoord> {
+    let family = state
+        .board()
+        .windows()
+        .threats()
+        .filter_map(|(owner, entry)| (owner == claimant).then(|| entry.empty_cells()))
+        .collect::<Vec<_>>();
+    extendable_hit_kernel_for_family(&family, budget)
+}
+
+fn extendable_hit_kernel_for_family(family: &[Vec<HexCoord>], budget: u8) -> Vec<HexCoord> {
+    let mut universe = family.iter().flatten().copied().collect::<Vec<_>>();
+    universe.sort_by_key(|coord| (coord.q, coord.r));
+    universe.dedup();
+    match budget {
+        1 => universe
+            .into_iter()
+            .filter(|cell| family.iter().all(|threat| threat.contains(cell)))
+            .collect(),
+        2 => universe
+            .iter()
+            .copied()
+            .filter(|cell| {
+                universe.iter().copied().any(|mate| {
+                    mate != *cell
+                        && family
+                            .iter()
+                            .all(|threat| threat.contains(cell) || threat.contains(&mate))
+                })
+            })
+            .collect(),
+        _ => universe,
+    }
 }
 
 fn remaining_defender_placements_for_horizon(
@@ -1721,27 +3468,27 @@ fn d6_coord_i32(coord: HexCoord, symmetry: u8) -> (i32, i32) {
 
 // === Full-key transposition table ==========================================
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 struct KeyStone {
     q: i16,
     r: i16,
     owner: u8,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 enum KeyPhase {
     Opening,
     FirstStone,
     SecondStone { q: i16, r: i16 },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 struct KeyTerminal {
     winner: u8,
     placements: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct PositionKey {
     stones: Vec<KeyStone>,
     current_player: u8,
@@ -2108,10 +3855,8 @@ impl CachedProof {
                     commutations,
                     ..
                 } => {
-                    bytes = bytes.saturating_add(allocation_bytes(
-                        edges.capacity(),
-                        size_of::<CertEdge>(),
-                    ));
+                    bytes = bytes
+                        .saturating_add(allocation_bytes(edges.capacity(), size_of::<CertEdge>()));
                     bytes = bytes.saturating_add(allocation_bytes(
                         commutations.capacity(),
                         size_of::<CertCommutation>(),
@@ -2236,10 +3981,8 @@ impl SharedProofCache {
                     ));
                 }
                 CertNode::Loss { witnesses, .. } => {
-                    proof_heap = proof_heap.saturating_add(allocation_bytes(
-                        witnesses.len(),
-                        size_of::<WindowKey>(),
-                    ));
+                    proof_heap = proof_heap
+                        .saturating_add(allocation_bytes(witnesses.len(), size_of::<WindowKey>()));
                 }
                 CertNode::OrCompletion { .. } | CertNode::Win { .. } | CertNode::Choice { .. } => {}
             }
@@ -2711,17 +4454,7 @@ mod tests {
             assert!(wide
                 .iter()
                 .skip(narrow.len())
-                .all(|item| item.strength <= 2));
-            let first_seed = wide.iter().position(|item| item.strength == 1).unwrap();
-            assert!(wide[..first_seed].iter().all(|item| item.strength >= 2));
-            assert!(wide[first_seed..].iter().all(|item| item.strength == 1));
-            assert!(wide[first_seed..].iter().all(|item| {
-                state
-                    .board()
-                    .occupied_cells()
-                    .iter()
-                    .any(|stone| hex_distance(item.coord, *stone) <= 3)
-            }));
+                .all(|item| item.strength == 2));
 
             for entry in state.board().windows().entries().filter(|entry| {
                 entry.active_player() == Some(Player::Player0) && entry.count(Player::Player0) == 2
@@ -2763,6 +4496,712 @@ mod tests {
     }
 
     #[test]
+    fn wide_urgent_root_classification_is_permutation_invariant() {
+        let ordinary = HexCoord::new(-3, 1);
+        let block = HexCoord::new(4, -2);
+        let candidate = |coord, defender_block| Candidate {
+            coord,
+            strength: 3,
+            priority_class: 0,
+            child_threats: 1,
+            defender_block,
+            pair_start_degree: 0,
+            own_proximity: 0,
+            created_threats: Vec::new(),
+        };
+        let mut candidates = vec![candidate(ordinary, false), candidate(block, true)];
+        let defender_blocks = turn_start_defender_blocks(&candidates);
+        candidates.reverse();
+        assert_eq!(
+            turn_start_defender_blocks(&candidates),
+            defender_blocks,
+            "turn-start urgency must not depend on candidate order"
+        );
+
+        let child = |mv| WidePnChild {
+            mv,
+            result: WidePnChildResult::Pending,
+            entry: None,
+            prior: WidePnPrior::UNIFORM,
+            urgent_block: wide_move_contains_defender_block(mv, &defender_blocks),
+        };
+        let mut children = vec![
+            child(WidePnMove::One(ordinary)),
+            child(WidePnMove::One(block)),
+        ];
+        assert!(wide_choice_has_urgent_block(&children));
+        children.reverse();
+        assert!(
+            wide_choice_has_urgent_block(&children),
+            "urgent-root classification must not depend on child order"
+        );
+    }
+
+    #[test]
+    fn wide_unordered_pair_dedup_cannot_change_urgent_flag() {
+        let block = HexCoord::new(-2, 5);
+        let ordinary = HexCoord::new(6, -1);
+        let defender_blocks = HashSet::from([block]);
+        let forward = WidePnMove::Pair(block, ordinary);
+        let reverse = WidePnMove::Pair(ordinary, block);
+        let pair_key = |first: HexCoord, second: HexCoord| {
+            let first = raw_coord_key(first);
+            let second = raw_coord_key(second);
+            if first <= second {
+                (first, second)
+            } else {
+                (second, first)
+            }
+        };
+
+        assert_eq!(pair_key(block, ordinary), pair_key(ordinary, block));
+        assert!(wide_move_contains_defender_block(forward, &defender_blocks));
+        assert_eq!(
+            wide_move_contains_defender_block(forward, &defender_blocks),
+            wide_move_contains_defender_block(reverse, &defender_blocks),
+            "either ordering retained by unordered-pair dedup must carry the same urgency"
+        );
+    }
+
+    #[test]
+    fn wide_pn_fork_priors_lead_choice_order_without_breaking_root_commitment() {
+        let priors = (0..=MAX_TURN_FORK_DEGREE as usize)
+            .map(pn_from_fork_degree)
+            .collect::<Vec<_>>();
+        assert!(priors.windows(2).all(|pair| pair[0] > pair[1]));
+        assert_eq!(priors[0], MAX_TURN_FORK_DEGREE + 1);
+        assert_eq!(priors[MAX_TURN_FORK_DEGREE as usize], 1);
+        assert_eq!(pn_from_fork_degree(usize::MAX), 1);
+
+        let search = WidePnSearch::new(Player::Player0, 0, 10, 0, 100, 10);
+        let child = |q, fork_degree| WidePnChild {
+            mv: WidePnMove::One(HexCoord::new(q, 0)),
+            result: WidePnChildResult::Pending,
+            entry: None,
+            prior: WidePnPrior {
+                pn: pn_from_fork_degree(fork_degree),
+                dn: 1,
+            },
+            urgent_block: false,
+        };
+        let tied = [child(5, 3), child(-5, 3)];
+        assert_eq!(
+            search.select_child_index(WidePnKind::Choice, &tied, false),
+            Some(0)
+        );
+        assert_eq!(
+            search.select_child_index(WidePnKind::Choice, &tied, true),
+            Some(0)
+        );
+        let mixed = [child(5, 1), child(-5, 4)];
+        assert_eq!(
+            search.select_child_index(WidePnKind::Choice, &mixed, false),
+            Some(1)
+        );
+        assert_eq!(
+            search.select_child_index(WidePnKind::Choice, &mixed, true),
+            Some(1),
+            "immutable fork prior must outrank generator rank"
+        );
+
+        let mut urgent = child(-5, 1);
+        urgent.urgent_block = true;
+        let urgent_after_fork = [child(5, 4), urgent];
+        assert_eq!(
+            search.select_child_index(WidePnKind::Choice, &urgent_after_fork, true),
+            Some(1),
+            "urgent root blocks remain ahead of non-urgent forks"
+        );
+
+        let mut tactical = child(-6, 0);
+        tactical.result = WidePnChildResult::ClaimantTactical;
+        let tactical_after_urgent = [urgent_after_fork[1].clone(), tactical];
+        assert_eq!(
+            search.select_child_index(WidePnKind::Choice, &tactical_after_urgent, true),
+            Some(1),
+            "a completed tactical leaf is always first"
+        );
+
+        let mut refuted = child(6, MAX_TURN_FORK_DEGREE as usize);
+        refuted.result = WidePnChildResult::Refuted;
+        let refuted_before_live = [refuted, child(-6, 0)];
+        assert_eq!(
+            search.select_child_index(WidePnKind::Choice, &refuted_before_live, true),
+            Some(1),
+            "a genuine refutation cannot retain sequential commitment"
+        );
+    }
+
+    #[test]
+    fn wide_staging_depth_and_advance_are_semantic_and_monotonic() {
+        assert_eq!(wide_search_final_depth(40, 39), 0);
+        assert_eq!(wide_search_final_depth(40, 40), 0);
+        assert_eq!(wide_search_final_depth(40, 41), 1);
+        assert_eq!(wide_search_final_depth(40, u32::MAX), MAX_SEARCH_DEPTH);
+
+        assert_eq!(next_wide_stage_depth(0, 7, MAX_SEARCH_DEPTH), Some(7));
+        assert_eq!(next_wide_stage_depth(7, 42, MAX_SEARCH_DEPTH), Some(42));
+        assert_eq!(
+            next_wide_stage_depth(42, MAX_SEARCH_DEPTH + 10, MAX_SEARCH_DEPTH),
+            Some(MAX_SEARCH_DEPTH)
+        );
+        assert_eq!(
+            next_wide_stage_depth(MAX_SEARCH_DEPTH, MAX_SEARCH_DEPTH + 1, MAX_SEARCH_DEPTH,),
+            None,
+            "the hard final depth terminates instead of reopening an inadmissible cutoff"
+        );
+        assert_eq!(next_wide_stage_depth(7, 7, 20), None);
+        assert_eq!(next_wide_stage_depth(8, 7, 20), None);
+    }
+
+    #[test]
+    fn wide_staging_final_cutoffs_explore_siblings_and_fail_closed() {
+        let mut state = RustHexoState::new();
+        apply_placement(
+            &mut state,
+            Placement {
+                coord: HexCoord::ZERO,
+            },
+        )
+        .unwrap();
+        let claimant = state.current_player();
+        let mut search = WidePnSearch::new(claimant, state.placements_made(), 10, 0, 100, 0);
+        let root = search.insert_root(&state);
+        search.entries[root].node = WidePnNode::Branch {
+            kind: WidePnKind::Choice,
+            children: vec![
+                WidePnChild {
+                    mv: WidePnMove::One(HexCoord::new(3, 0)),
+                    result: WidePnChildResult::Pending,
+                    entry: None,
+                    prior: WidePnPrior { pn: 1, dn: 1 },
+                    urgent_block: false,
+                },
+                WidePnChild {
+                    mv: WidePnMove::One(HexCoord::new(6, 0)),
+                    result: WidePnChildResult::Pending,
+                    entry: None,
+                    prior: WidePnPrior { pn: 2, dn: 1 },
+                    urgent_block: false,
+                },
+            ],
+        };
+        search.recompute(root);
+
+        search.run(&state, root);
+
+        assert_eq!(search.depth_cap, 0);
+        assert_eq!(search.expansions, 2);
+        let WidePnNode::Branch { children, .. } = &search.entries[root].node else {
+            panic!("synthetic root remains branched")
+        };
+        assert!(children.iter().all(|child| {
+            child
+                .entry
+                .and_then(|id| search.entries.get(id))
+                .is_some_and(|entry| matches!(entry.node, WidePnNode::DepthCutoff))
+        }));
+        assert_ne!(search.entries[root].pn, 0);
+        assert!(search.materialize(&state, root).is_none());
+    }
+
+    #[test]
+    fn wide_pn_selected_descendant_cutoff_advances_and_reopens() {
+        let state = RustHexoState::new();
+        let claimant = state.current_player();
+        let moves = [
+            HexCoord::new(0, 0),
+            HexCoord::new(3, 0),
+            HexCoord::new(6, 0),
+            HexCoord::new(9, 0),
+            HexCoord::new(12, 0),
+            HexCoord::new(15, 0),
+            HexCoord::new(18, 0),
+        ];
+        let mut states = vec![state.clone()];
+        for &coord in &moves {
+            let mut next = states.last().expect("root state exists").clone();
+            apply_placement(&mut next, Placement { coord }).unwrap();
+            states.push(next);
+        }
+
+        let mut search = WidePnSearch::new(claimant, 0, 100, 0, 100, 6);
+        let root = search.insert_root(&state);
+        let mut ids = vec![root];
+        for depth in 1..=6 {
+            let prior = search.position_prior(&states[depth]);
+            ids.push(search.insert_position(
+                WidePositionKey::from_state(&states[depth]),
+                depth,
+                prior,
+            ));
+        }
+        for depth in 0..=6 {
+            let kind = if states[depth].current_player() == claimant {
+                WidePnKind::Choice
+            } else {
+                WidePnKind::Universal {
+                    implicit_dispatch: true,
+                }
+            };
+            let prior = search.position_prior(&states[depth + 1]);
+            let entry = if depth < 6 {
+                Some(ids[depth + 1])
+            } else {
+                None
+            };
+            search.entries[ids[depth]].node = WidePnNode::Branch {
+                kind,
+                children: vec![WidePnChild {
+                    mv: WidePnMove::One(moves[depth]),
+                    result: WidePnChildResult::Pending,
+                    entry,
+                    prior,
+                    urgent_block: false,
+                }],
+            };
+        }
+        for &id in ids.iter().rev() {
+            search.recompute(id);
+        }
+
+        assert_eq!(search.run_until(&state, root, 100, true), Some(7));
+        assert_eq!(search.expansions, 1);
+        let cutoff = match &search.entries[ids[6]].node {
+            WidePnNode::Branch { children, .. } => {
+                children[0].entry.expect("last edge linked its child")
+            }
+            _ => panic!("synthetic path remains branched"),
+        };
+        assert_eq!(search.entries[cutoff].depth, 7);
+        assert!(matches!(
+            search.entries[cutoff].node,
+            WidePnNode::DepthCutoff
+        ));
+
+        search.depth_cap = 7;
+        search.reopen_depth_cutoffs(7);
+        assert!(matches!(
+            search.entries[cutoff].node,
+            WidePnNode::Unexpanded
+        ));
+        assert!(search.entries[root].dn > 0);
+
+        let root_key = PositionKey::from_state(&state);
+        let mut replay = state.clone();
+        assert_eq!(search.step(&mut replay, root), WidePnStepOutcome::Progress);
+        assert_eq!(PositionKey::from_state(&replay), root_key);
+    }
+
+    #[test]
+    fn wide_pn_completed_turn_child_carries_fork_and_tau_priors() {
+        let mut state = pair_width_first_stone_fixture();
+        let claimant = state.current_player();
+        for coord in [HexCoord::new(2, 0), HexCoord::new(3, 0)] {
+            apply_placement(&mut state, Placement { coord }).unwrap();
+        }
+        let analysis = threats::analyze(&state);
+        assert_eq!(analysis.min_hitting_set, Some(2));
+        assert_eq!(analysis.opp_threat_count, 3);
+
+        let search = WidePnSearch::new(claimant, 0, 10, 0, 100, 10);
+        let prior = search.completed_turn_prior(&state);
+        assert_eq!(prior.pn, pn_from_fork_degree(analysis.opp_threat_count));
+        assert_eq!(prior.dn, 2);
+        assert_eq!(search.position_prior(&state).dn, 2);
+
+        let lazy = WidePnChild {
+            mv: WidePnMove::Pair(HexCoord::new(2, 0), HexCoord::new(3, 0)),
+            result: WidePnChildResult::Pending,
+            entry: None,
+            prior,
+            urgent_block: false,
+        };
+        assert_eq!(search.child_numbers(&lazy), (prior.pn, prior.dn));
+    }
+
+    #[test]
+    fn wide_pn_entry_prior_survives_recompute_and_depth_reopen() {
+        let state = RustHexoState::new();
+        let prior = WidePnPrior { pn: 7, dn: 2 };
+        let mut search = WidePnSearch::new(Player::Player0, 0, 10, 0, 100, 10);
+        let id = search.insert_position(WidePositionKey::from_state(&state), 3, prior);
+
+        search.recompute(id);
+        assert_eq!((search.entries[id].pn, search.entries[id].dn), (7, 2));
+        search.entries[id].node = WidePnNode::DepthCutoff;
+        search.recompute(id);
+        assert_eq!(
+            (search.entries[id].pn, search.entries[id].dn),
+            (PN_INFINITY, 0)
+        );
+
+        search.reopen_depth_cutoffs(3);
+        assert!(matches!(search.entries[id].node, WidePnNode::Unexpanded));
+        assert_eq!((search.entries[id].pn, search.entries[id].dn), (7, 2));
+        search.recompute(id);
+        assert_eq!((search.entries[id].pn, search.entries[id].dn), (7, 2));
+    }
+
+    #[test]
+    fn wide_pn_zero_tt_cap_keeps_unindexed_frontier_progress() {
+        let mut state = pair_width_first_stone_fixture();
+        let claimant = state.current_player();
+        let root_ply = state.placements_made();
+        let mut search = WidePnSearch::new(claimant, root_ply, 16, 0, u32::MAX, 10);
+        let root = search.insert_root(&state);
+        assert!(search.by_position.is_empty());
+        assert_eq!(search.current_bytes, 0);
+        assert_eq!(search.peak_bytes, 0);
+
+        let mv = HexCoord::new(2, 0);
+        let mut child_state = state.clone();
+        apply_placement(&mut child_state, Placement { coord: mv }).unwrap();
+        let prior = search.position_prior(&child_state);
+        search.entries[root].node = WidePnNode::Branch {
+            kind: WidePnKind::Choice,
+            children: vec![WidePnChild {
+                mv: WidePnMove::One(mv),
+                result: WidePnChildResult::Pending,
+                entry: None,
+                prior,
+                urgent_block: false,
+            }],
+        };
+        search.recompute(root);
+
+        let root_key = PositionKey::from_state(&state);
+        assert_eq!(search.step(&mut state, root), WidePnStepOutcome::Progress);
+        assert_eq!(PositionKey::from_state(&state), root_key);
+        assert!(search.expansions > 0);
+        assert!(search.by_position.is_empty());
+        assert_eq!(search.current_bytes, 0);
+        assert_eq!(search.peak_bytes, 0);
+    }
+
+    #[test]
+    fn wide_pn_full_tt_retains_indexed_hits_and_falls_back_unindexed() {
+        let state = pair_width_first_stone_fixture();
+        let claimant = state.current_player();
+        let root_key = WidePositionKey::from_state(&state);
+        let tt_cap = wide_position_index_bytes(&root_key);
+        let mut search =
+            WidePnSearch::new(claimant, state.placements_made(), 16, tt_cap, u32::MAX, 10);
+        let root = search.insert_root(&state);
+        assert_eq!(search.by_position.len(), 1);
+        assert_eq!(search.current_bytes, tt_cap);
+        assert_eq!(search.peak_bytes, tt_cap);
+
+        let root_prior = search.position_prior(&state);
+        let reused = search.insert_position(root_key, 0, root_prior);
+        assert_eq!(reused, root);
+        assert_eq!(search.entries.len(), 1);
+        assert_eq!(search.tt_hits, 1);
+
+        let mut child_state = state.clone();
+        apply_placement(
+            &mut child_state,
+            Placement {
+                coord: HexCoord::new(2, 0),
+            },
+        )
+        .unwrap();
+        let child_key = WidePositionKey::from_state(&child_state);
+        let child_prior = search.position_prior(&child_state);
+        let first = search.insert_position(child_key.clone(), 1, child_prior);
+        let second = search.insert_position(child_key, 1, child_prior);
+        assert_ne!(
+            first, second,
+            "unindexed positions are arena-local tree nodes"
+        );
+        assert_eq!(search.entries.len(), 3);
+        assert_eq!(search.by_position.len(), 1);
+        assert!(search.current_bytes <= search.tt_bytes_cap);
+        assert!(search.peak_bytes <= search.tt_bytes_cap);
+        assert_eq!(search.current_bytes, tt_cap);
+        assert_eq!(search.peak_bytes, tt_cap);
+    }
+
+    #[test]
+    fn wide_pn_saturated_tt_links_pending_attacker_child_without_stall() {
+        let mut state = pair_width_first_stone_fixture();
+        let claimant = state.current_player();
+        let root_key = WidePositionKey::from_state(&state);
+        let tt_cap = wide_position_index_bytes(&root_key);
+        let mut search =
+            WidePnSearch::new(claimant, state.placements_made(), 16, tt_cap, u32::MAX, 10);
+        let root = search.insert_root(&state);
+
+        let mv = HexCoord::new(2, 0);
+        let mut child_state = state.clone();
+        apply_placement(&mut child_state, Placement { coord: mv }).unwrap();
+        let prior = search.position_prior(&child_state);
+        search.entries[root].node = WidePnNode::Branch {
+            kind: WidePnKind::Choice,
+            children: vec![WidePnChild {
+                mv: WidePnMove::One(mv),
+                result: WidePnChildResult::Pending,
+                entry: None,
+                prior,
+                urgent_block: false,
+            }],
+        };
+        search.recompute(root);
+
+        assert_eq!(search.step(&mut state, root), WidePnStepOutcome::Progress);
+        let WidePnNode::Branch { children, .. } = &search.entries[root].node else {
+            panic!("synthetic root must remain a branch")
+        };
+        assert_eq!(children[0].result, WidePnChildResult::Pending);
+        assert!(children[0].entry.is_some());
+        assert!(search.expansions > 0);
+        assert_eq!(search.by_position.len(), 1);
+        assert!(search.current_bytes <= search.tt_bytes_cap);
+        assert!(search.peak_bytes <= search.tt_bytes_cap);
+    }
+
+    #[test]
+    fn l13_sparse_obstructions_are_tight_on_triangle_and_c5() {
+        let vertices = (0..5).map(|q| HexCoord::new(q, 0)).collect::<Vec<_>>();
+        let triangle = vec![
+            vec![vertices[0], vertices[1]],
+            vec![vertices[1], vertices[2]],
+            vec![vertices[2], vertices[0]],
+        ];
+        assert_eq!(
+            inclusion_minimal_loss_obstruction(&triangle, 1),
+            Some(vec![0, 1, 2])
+        );
+
+        let c5 = (0..5)
+            .map(|index| vec![vertices[index], vertices[(index + 1) % 5]])
+            .collect::<Vec<_>>();
+        assert_eq!(
+            inclusion_minimal_loss_obstruction(&c5, 2),
+            Some(vec![0, 1, 2, 3, 4])
+        );
+        assert_eq!(inclusion_minimal_loss_obstruction(&c5, 3), None);
+    }
+
+    #[test]
+    fn root_loss_certificates_keep_default_family_and_sparse_wide_family() {
+        let mut second_stone = forced_loss_fixture();
+        apply_placement(
+            &mut second_stone,
+            Placement {
+                coord: HexCoord::new(-8, 0),
+            },
+        )
+        .unwrap();
+
+        for state in [forced_loss_fixture(), second_stone] {
+            let analysis = threats::analyze(&state);
+            assert!(analysis.forced_loss());
+            let winner = state.current_player().other();
+            let cap = match analysis.b {
+                1 => L13_LOSS_WITNESS_CAP_B1,
+                2 => L13_LOSS_WITNESS_CAP_B2,
+                _ => panic!("unexpected defender budget"),
+            };
+            let mut full_family = state
+                .board()
+                .windows()
+                .threats()
+                .filter_map(|(owner, entry)| (owner == winner).then_some(entry.key()))
+                .collect::<Vec<_>>();
+            full_family.sort_by_key(|key| window_key_order(*key));
+            full_family.dedup();
+
+            let caps = SolveCaps {
+                node_cap: 1,
+                tt_bytes_cap: 0,
+                semantic_horizon: u32::MAX,
+            };
+            let narrow = TssSolver::default().solve(&state, &caps);
+            assert_eq!(narrow.status, ProofStatus::Loss);
+            let narrow_cert = narrow.cert.expect("narrow root LOSS certificate");
+            let CertNode::Loss {
+                witnesses: narrow_witnesses,
+                ..
+            } = &narrow_cert.nodes[narrow_cert.root_node as usize]
+            else {
+                panic!("root lambda loss must materialize a LOSS leaf")
+            };
+            assert_eq!(narrow_witnesses, &full_family);
+            assert!(TssVerifier.verify(&state, &narrow_cert, ProofStatus::Loss));
+
+            let mut wide_solver = TssSolver::default();
+            wide_solver.set_width_options(WidthOptions::vcf_pair_complete());
+            let wide = wide_solver.solve(&state, &caps);
+            assert_eq!(wide.status, ProofStatus::Loss);
+            let wide_cert = wide.cert.expect("wide root LOSS certificate");
+            let CertNode::Loss {
+                witnesses: wide_witnesses,
+                ..
+            } = &wide_cert.nodes[wide_cert.root_node as usize]
+            else {
+                panic!("root lambda loss must materialize a LOSS leaf")
+            };
+            assert!(wide_witnesses.len() <= cap);
+            assert!(wide_witnesses
+                .iter()
+                .all(|witness| full_family.contains(witness)));
+            assert!(TssVerifier.verify(&state, &wide_cert, ProofStatus::Loss));
+
+            let sparse_sets = wide_witnesses
+                .iter()
+                .map(|witness| {
+                    state
+                        .board()
+                        .windows()
+                        .entries()
+                        .find(|entry| entry.key() == *witness)
+                        .expect("certificate witness remains live")
+                        .empty_cells()
+                })
+                .collect::<Vec<_>>();
+            assert!(family_hitting_exceeds_budget(&sparse_sets, analysis.b));
+            for removed in 0..sparse_sets.len() {
+                let trial = sparse_sets
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, set)| (index != removed).then_some(set.clone()))
+                    .collect::<Vec<_>>();
+                assert!(!family_hitting_exceeds_budget(&trial, analysis.b));
+            }
+        }
+    }
+
+    #[test]
+    fn extendable_hit_kernel_matches_k1_and_k2_algebra() {
+        let a = HexCoord::new(0, 0);
+        let b = HexCoord::new(1, 0);
+        let c = HexCoord::new(2, 0);
+        let z = HexCoord::new(3, 0);
+
+        let k1_family = vec![vec![a, b], vec![a, c]];
+        assert_eq!(extendable_hit_kernel_for_family(&k1_family, 1), vec![a]);
+
+        let k2_family = vec![vec![a, z], vec![a, c], vec![b]];
+        assert_eq!(extendable_hit_kernel_for_family(&k2_family, 2), vec![a, b]);
+    }
+
+    #[test]
+    fn xsnfyll_forced_defender_uses_k2_only_in_wide_mode() {
+        let mut state = xsnfyll_forced_defender_fixture();
+        let claimant = Player::Player1;
+        let analysis = threats::analyze(&state);
+        assert_eq!(state.current_player(), claimant.other());
+        assert_eq!(analysis.b, 2);
+        assert_eq!(analysis.min_hitting_set, Some(analysis.b));
+
+        let universe = vec![
+            HexCoord::new(1, -7),
+            HexCoord::new(1, -6),
+            HexCoord::new(1, -1),
+            HexCoord::new(3, -5),
+            HexCoord::new(4, -6),
+        ];
+        let kernel = vec![
+            HexCoord::new(1, -6),
+            HexCoord::new(3, -5),
+            HexCoord::new(4, -6),
+        ];
+        assert_eq!(hitting_universe(&state, claimant), universe);
+        assert_eq!(extendable_hit_kernel(&state, claimant, analysis.b), kernel);
+        assert_eq!(
+            forced_defender_replies(&state, claimant, analysis.b, WidthOptions::default()),
+            universe
+        );
+        assert_eq!(
+            forced_defender_replies(
+                &state,
+                claimant,
+                analysis.b,
+                WidthOptions::vcf_pair_complete(),
+            ),
+            kernel
+        );
+
+        for omitted in universe.iter().filter(|cell| !kernel.contains(cell)) {
+            let (_result, delta) = state
+                .apply_with_delta(Placement { coord: *omitted })
+                .unwrap();
+            assert!(
+                threats::analyze(&state).forced_loss(),
+                "nonkernel reply {omitted:?} must leave no live defense"
+            );
+            state.undo(delta);
+        }
+
+        let mut search = WidePnSearch::new(claimant, state.placements_made(), 100, 0, 100, 10);
+        let children = search.defender_children(&mut state, analysis.b);
+        let mut child_moves = children
+            .iter()
+            .map(|child| match child.mv {
+                WidePnMove::One(coord) => coord,
+                WidePnMove::Pair(_, _) => panic!("defender child must be one placement"),
+            })
+            .collect::<Vec<_>>();
+        child_moves.sort_by_key(|coord| (coord.q, coord.r));
+        assert_eq!(child_moves, kernel);
+    }
+
+    #[test]
+    fn xsnfyll_kernel_certificate_accepts_supersets_and_rejects_missing_kernel() {
+        let state = xsnfyll_forced_defender_fixture();
+        let claimant = Player::Player1;
+        let analysis = threats::analyze(&state);
+        let universe = hitting_universe(&state, claimant);
+        let kernel = extendable_hit_kernel(&state, claimant, analysis.b);
+        let mut solver = TssSolver::default();
+        let attempt = solver.prove_for_wide_pn(&state, claimant, 10_000, 64 << 20, u32::MAX, 64);
+        let cert = attempt.cert.expect("xsnfyll continuation must prove");
+        assert!(attempt.stats.nodes < 10_000);
+        assert!(TssVerifier.verify(&state, &cert, ProofStatus::Loss));
+        assert!(TssVerifier.verify_with_dispatch_oracle(&state, &cert, ProofStatus::Loss));
+        let CertNode::Universal { edges, .. } = &cert.nodes[cert.root_node as usize] else {
+            panic!("forced defender certificate root must be universal")
+        };
+        let mut root_moves = edges.iter().map(|edge| edge.mv).collect::<Vec<_>>();
+        root_moves.sort_by_key(|coord| (coord.q, coord.r));
+        assert_eq!(root_moves, kernel);
+
+        let mut full_universe = cert.clone();
+        for mv in universe.iter().filter(|mv| !kernel.contains(mv)) {
+            let mut child_state = state.clone();
+            apply_placement(&mut child_state, Placement { coord: *mv }).unwrap();
+            let child_analysis = threats::analyze(&child_state);
+            let leaf = typed_lambda_leaf(
+                &child_state,
+                claimant,
+                &child_analysis,
+                WidthOptions::vcf_pair_complete(),
+            )
+            .expect("omitted nonkernel reply must have a lambda-one leaf");
+            let child = u32::try_from(full_universe.nodes.len()).unwrap();
+            full_universe.nodes.push(leaf);
+            let CertNode::Universal { edges, .. } =
+                &mut full_universe.nodes[full_universe.root_node as usize]
+            else {
+                unreachable!()
+            };
+            edges.push(CertEdge { mv: *mv, child });
+        }
+        assert!(TssVerifier.verify(&state, &full_universe, ProofStatus::Loss));
+        assert!(TssVerifier.verify_with_dispatch_oracle(&state, &full_universe, ProofStatus::Loss));
+
+        let mut missing_kernel = cert;
+        let CertNode::Universal { edges, .. } =
+            &mut missing_kernel.nodes[missing_kernel.root_node as usize]
+        else {
+            unreachable!()
+        };
+        edges.retain(|edge| edge.mv != kernel[0]);
+        assert!(!TssVerifier.verify(&state, &missing_kernel, ProofStatus::Loss));
+    }
+
+    #[test]
     fn pair_complete_width_keeps_defender_threat_blocks() {
         let state = forced_defense_fixture();
         let claimant = state.current_player();
@@ -2779,6 +5218,88 @@ mod tests {
                 .iter()
                 .any(|candidate| candidate.coord == block && candidate.defender_block));
         }
+    }
+
+    #[test]
+    fn pair_complete_turn_forcing_requires_a_new_post_pair_threat() {
+        let mut second_stone = pair_width_first_stone_fixture();
+        apply_placement(
+            &mut second_stone,
+            Placement {
+                coord: HexCoord::new(2, 0),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            second_stone.phase(),
+            TurnPhase::SecondStone { .. }
+        ));
+        let claimant = second_stone.current_player();
+        let first = match second_stone.phase() {
+            TurnPhase::SecondStone { first } => first,
+            _ => unreachable!(),
+        };
+
+        let mut forcing = second_stone.clone();
+        let forcing_second = HexCoord::new(3, 0);
+        apply_placement(
+            &mut forcing,
+            Placement {
+                coord: forcing_second,
+            },
+        )
+        .unwrap();
+        assert!(turn_created_claimant_threat(
+            &forcing,
+            claimant,
+            first,
+            forcing_second
+        ));
+        let forcing_analysis = threats::analyze(&forcing);
+        assert_eq!(forcing_analysis.b, 2);
+        assert!(!forcing_analysis.own_win_now);
+        assert_eq!(forcing_analysis.opp_threat_count, 3);
+        assert_eq!(forcing_analysis.min_hitting_set, Some(forcing_analysis.b));
+        assert!(turn_forces_small_defender_reply(&forcing, claimant));
+
+        let mut loose = second_stone.clone();
+        let loose_second = HexCoord::new(5, 0);
+        apply_placement(
+            &mut loose,
+            Placement {
+                coord: loose_second,
+            },
+        )
+        .unwrap();
+        let loose_analysis = threats::analyze(&loose);
+        assert_eq!(loose_analysis.b, 2);
+        assert!(!loose_analysis.own_win_now);
+        assert_eq!(loose_analysis.opp_threat_count, 1);
+        assert_eq!(loose_analysis.min_hitting_set, Some(1));
+        assert!(turn_created_claimant_threat(
+            &loose,
+            claimant,
+            first,
+            loose_second
+        ));
+        assert!(!turn_forces_small_defender_reply(&loose, claimant));
+
+        let mut quiet = second_stone;
+        let quiet_second = HexCoord::new(8, 5);
+        apply_placement(
+            &mut quiet,
+            Placement {
+                coord: quiet_second,
+            },
+        )
+        .unwrap();
+        assert!(!turn_created_claimant_threat(
+            &quiet,
+            claimant,
+            first,
+            quiet_second
+        ));
+        assert!(!turn_forces_small_defender_reply(&quiet, claimant));
     }
 
     #[test]
@@ -2834,6 +5355,30 @@ mod tests {
 
     fn pair_width_first_stone_fixture() -> RustHexoState {
         replay(&[(0, 0), (0, 8), (2, 7), (1, 0), (4, 6), (6, 5), (8, 4)])
+    }
+
+    fn xsnfyll_forced_defender_fixture() -> RustHexoState {
+        let mut state = replay(&[
+            (0, 0),
+            (-1, 0),
+            (1, -2),
+            (-2, 0),
+            (1, 0),
+            (0, -2),
+            (1, -3),
+            (0, -3),
+            (2, -5),
+            (2, -4),
+            (1, -4),
+            (3, -4),
+            (3, -2),
+        ]);
+        assert_eq!(state.current_player(), Player::Player1);
+        assert_eq!(state.phase(), TurnPhase::FirstStone);
+        for coord in [HexCoord::new(-1, -1), HexCoord::new(1, -5)] {
+            apply_placement(&mut state, Placement { coord }).unwrap();
+        }
+        state
     }
 
     fn forced_defense_fixture() -> RustHexoState {

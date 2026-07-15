@@ -15,9 +15,9 @@
 
 use std::time::Instant;
 
-use hexo_engine::{apply_placement, HexCoord, HexoState, Placement, Player};
+use hexo_engine::{apply_placement, HexCoord, HexoState, Placement, Player, TurnPhase};
 
-use crate::tss_core::{DeepSolve, ProofStatus, SolveCaps};
+use crate::tss_core::{DeepSolve, ProofStatus, SolveCaps, SolveGoal};
 use crate::tss_solver::{TssSolver, WidthOptions};
 
 fn status_name(status: ProofStatus) -> &'static str {
@@ -32,6 +32,11 @@ struct CorpusPosition {
     id: String,
     expect_win: bool,
     state: HexoState,
+}
+
+struct ForcingLine {
+    id: String,
+    moves: Vec<HexCoord>,
 }
 
 fn load_corpus() -> Vec<CorpusPosition> {
@@ -70,11 +75,23 @@ fn load_corpus() -> Vec<CorpusPosition> {
             let mut it = line.split_whitespace();
             let q: i16 = it.next().unwrap().parse().unwrap();
             let r: i16 = it.next().unwrap().parse().unwrap();
-            apply_placement(&mut state, Placement { coord: HexCoord { q, r } })
-                .unwrap_or_else(|e| panic!("{id}: illegal replay at ({q},{r}): {e:?}"));
+            apply_placement(
+                &mut state,
+                Placement {
+                    coord: HexCoord { q, r },
+                },
+            )
+            .unwrap_or_else(|e| panic!("{id}: illegal replay at ({q},{r}): {e:?}"));
         }
-        assert_eq!(lines.next().map(str::trim), Some("END"), "{id}: missing END");
-        assert!(!state.is_terminal(), "{id}: replay reached a terminal state");
+        assert_eq!(
+            lines.next().map(str::trim),
+            Some("END"),
+            "{id}: missing END"
+        );
+        assert!(
+            !state.is_terminal(),
+            "{id}: replay reached a terminal state"
+        );
         let expected_player = if attacker == 0 {
             Player::Player0
         } else {
@@ -95,19 +112,93 @@ fn load_corpus() -> Vec<CorpusPosition> {
     out
 }
 
+fn load_forcing_lines() -> Vec<ForcingLine> {
+    let path = format!(
+        "{}/rust/corpus/forcing_corpus_lines.txt",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let text = std::fs::read_to_string(&path).expect("read forcing lines file");
+    let mut out = Vec::new();
+    let mut lines = text.lines();
+    while let Some(header) = lines.next() {
+        let header = header.trim();
+        if header.is_empty() {
+            continue;
+        }
+        assert!(header.starts_with("LINE "), "bad line header: {header}");
+        let mut id = String::new();
+        let mut nmoves = 0usize;
+        for tok in header.split_whitespace().skip(1) {
+            let (key, value) = tok.split_once('=').expect("line k=v token");
+            match key {
+                "id" => id = value.to_string(),
+                "nmoves" => nmoves = value.parse().expect("numeric nmoves"),
+                _ => {}
+            }
+        }
+        let mut moves = Vec::with_capacity(nmoves);
+        for _ in 0..nmoves {
+            let line = lines.next().expect("forcing-line move");
+            let mut fields = line.split_whitespace();
+            let q = fields.next().expect("move q").parse().expect("numeric q");
+            let r = fields.next().expect("move r").parse().expect("numeric r");
+            assert!(fields.next().is_none(), "extra forcing-line move field");
+            moves.push(HexCoord { q, r });
+        }
+        assert_eq!(
+            lines.next().map(str::trim),
+            Some("END"),
+            "{id}: missing END"
+        );
+        out.push(ForcingLine { id, moves });
+    }
+    assert_eq!(out.len(), 14, "expected all 14 WIN reference lines");
+    out
+}
+
 #[test]
 #[ignore = "acceptance gate; run explicitly in --release"]
 fn tss_corpus_check() {
     let corpus = load_corpus();
+    let selected_ids = std::env::var("TSS_CORPUS_ID").ok().map(|value| {
+        let mut ids = value
+            .split(',')
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids.dedup();
+        assert!(!ids.is_empty(), "TSS_CORPUS_ID must name a corpus entry");
+        ids
+    });
     // WIN entries climb the full ladder; NO entries stop at 1M (they only
     // must never come back WIN).
-    let ladder: [u64; 4] = [10_000, 100_000, 1_000_000, 20_000_000];
+    // TSS_CORPUS_MAX_CAP is a debugging guard for addendum-compliant <=100k
+    // iteration.  It is unset in the acceptance gate, preserving its ladder.
+    let max_cap = std::env::var("TSS_CORPUS_MAX_CAP")
+        .ok()
+        .map(|value| value.parse::<u64>().expect("numeric TSS_CORPUS_MAX_CAP"))
+        .unwrap_or(u64::MAX);
+    let ladder = [10_000, 100_000, 1_000_000, 20_000_000]
+        .into_iter()
+        .filter(|cap| *cap <= max_cap)
+        .collect::<Vec<_>>();
+    assert!(
+        !ladder.is_empty(),
+        "TSS_CORPUS_MAX_CAP must be at least 10000"
+    );
 
     let mut failures: Vec<String> = Vec::new();
+    let mut selected = 0usize;
     for pos in &corpus {
-        if std::env::var("TSS_CORPUS_ID").is_ok_and(|id| id != pos.id) {
+        if selected_ids
+            .as_ref()
+            .is_some_and(|ids| !ids.iter().any(|id| id == &pos.id))
+        {
             continue;
         }
+        selected += 1;
         let mut final_status = ProofStatus::Unknown;
         for (i, cap) in ladder.iter().enumerate() {
             if !pos.expect_win && *cap > 1_000_000 {
@@ -147,10 +238,173 @@ fn tss_corpus_check() {
             failures.push(format!("{}: SOUNDNESS: WIN on a NO position", pos.id));
         }
     }
+    if let Some(ids) = &selected_ids {
+        assert_eq!(
+            selected,
+            ids.len(),
+            "TSS_CORPUS_ID contained an unknown corpus entry"
+        );
+    }
     println!("CORPUS_DONE failures={}", failures.len());
     assert!(
         failures.is_empty(),
         "corpus acceptance failures:\n{}",
         failures.join("\n")
     );
+}
+
+/// Walk a selected reference line backward from the last non-terminal attacker
+/// turn.  The first UNKNOWN checkpoint localizes the missing search mechanism.
+///
+/// Run with `TSS_CORPUS_ID=xsnfyll ... tss_corpus_backward_walk -- --ignored
+/// --nocapture`.  The literal full-line state is intentionally skipped because
+/// every fixture's final coordinate is terminal and terminal roots are outside
+/// the solver API's pre-move contract.
+#[test]
+#[ignore = "reference-line debugging helper; run explicitly in --release"]
+fn tss_corpus_backward_walk() {
+    let selected =
+        std::env::var("TSS_CORPUS_ID").expect("set TSS_CORPUS_ID to one of the 14 WIN positions");
+    let corpus = load_corpus();
+    let lines = load_forcing_lines();
+    let position = corpus
+        .iter()
+        .find(|position| position.id == selected)
+        .unwrap_or_else(|| panic!("unknown corpus id: {selected}"));
+    assert!(
+        position.expect_win,
+        "{selected}: NO positions have no WIN line"
+    );
+    let line = lines
+        .iter()
+        .find(|line| line.id == selected)
+        .unwrap_or_else(|| panic!("missing forcing line for {selected}"));
+
+    let attacker = position.state.current_player();
+    let mut replay = position.state.clone();
+    let mut prefix_states = vec![(0usize, replay.clone())];
+    for (index, &coord) in line.moves.iter().enumerate() {
+        apply_placement(&mut replay, Placement { coord })
+            .unwrap_or_else(|error| panic!("{selected}: illegal line move {coord:?}: {error:?}"));
+        let prefix = index + 1;
+        if replay.is_terminal() {
+            assert_eq!(prefix, line.moves.len(), "{selected}: line ended early");
+            break;
+        }
+        prefix_states.push((prefix, replay.clone()));
+    }
+
+    if let Ok(requested) = std::env::var("TSS_BACKWALK_PREFIX") {
+        let requested = requested.parse::<usize>().expect("numeric backwalk prefix");
+        let (_, state) = prefix_states
+            .iter()
+            .find(|(prefix, _)| *prefix == requested)
+            .unwrap_or_else(|| panic!("missing nonterminal prefix {requested}"));
+        let mut exact_state = state.clone();
+        if let Ok(extra) = std::env::var("TSS_BACKWALK_EXTRA") {
+            for encoded in extra.split(';').filter(|value| !value.is_empty()) {
+                let (q, r) = encoded
+                    .split_once(',')
+                    .unwrap_or_else(|| panic!("bad TSS_BACKWALK_EXTRA coord: {encoded}"));
+                let coord = HexCoord {
+                    q: q.parse().expect("numeric extra q"),
+                    r: r.parse().expect("numeric extra r"),
+                };
+                apply_placement(&mut exact_state, Placement { coord }).unwrap_or_else(|error| {
+                    panic!("{selected}: illegal extra move {coord:?}: {error:?}")
+                });
+            }
+        }
+        let goal = if exact_state.current_player() == attacker {
+            SolveGoal::Win
+        } else {
+            SolveGoal::Loss
+        };
+        let node_cap = std::env::var("TSS_BACKWALK_CAP")
+            .ok()
+            .map(|value| value.parse::<u64>().expect("numeric backwalk cap"))
+            .unwrap_or(10_000);
+        let mut solver = TssSolver::default();
+        solver.set_width_options(WidthOptions::vcf_pair_complete());
+        let result = solver.solve_goal(
+            &exact_state,
+            &SolveCaps {
+                node_cap,
+                tt_bytes_cap: 512 << 20,
+                semantic_horizon: u32::MAX,
+            },
+            goal,
+        );
+        println!(
+            "BACKWALK_EXACT id={selected} prefix={requested} status={} nodes={} tt_hits={}",
+            status_name(result.status),
+            result.stats.nodes,
+            result.stats.tt_hits,
+        );
+        let expected = if goal == SolveGoal::Win {
+            ProofStatus::Win
+        } else {
+            ProofStatus::Loss
+        };
+        assert_eq!(result.status, expected);
+        return;
+    }
+
+    let checkpoints = prefix_states
+        .iter()
+        .filter(|(prefix, state)| {
+            *prefix == 0
+                || (state.current_player() == attacker
+                    && matches!(state.phase(), TurnPhase::FirstStone))
+        })
+        .collect::<Vec<_>>();
+    for &&(prefix, ref state) in checkpoints.iter().rev() {
+        let mut solver = TssSolver::default();
+        solver.set_width_options(WidthOptions::vcf_pair_complete());
+        let caps = SolveCaps {
+            node_cap: 10_000,
+            tt_bytes_cap: 512 << 20,
+            semantic_horizon: u32::MAX,
+        };
+        let t0 = Instant::now();
+        let result = solver.solve(&state, &caps);
+        let ms = t0.elapsed().as_secs_f64() * 1e3;
+        println!(
+            "BACKWALK id={selected} prefix={prefix} status={} nodes={} tt_hits={} ms={ms:.1}",
+            status_name(result.status),
+            result.stats.nodes,
+            result.stats.tt_hits,
+        );
+        if result.status != ProofStatus::Win {
+            // Probe the four individual placements leading to the already-
+            // proven next attacker checkpoint.  This distinguishes missing
+            // first/second-stone generation from a defender-universal gap.
+            for (probe_prefix, probe_state) in prefix_states
+                .iter()
+                .filter(|(probe_prefix, _)| *probe_prefix > prefix && *probe_prefix <= prefix + 4)
+            {
+                let goal = if probe_state.current_player() == attacker {
+                    SolveGoal::Win
+                } else {
+                    SolveGoal::Loss
+                };
+                let expected = if goal == SolveGoal::Win {
+                    ProofStatus::Win
+                } else {
+                    ProofStatus::Loss
+                };
+                let mut probe_solver = TssSolver::default();
+                probe_solver.set_width_options(WidthOptions::vcf_pair_complete());
+                let probe = probe_solver.solve_goal(probe_state, &caps, goal);
+                println!(
+                    "BACKWALK_PROBE id={selected} prefix={probe_prefix} status={} expected={} nodes={} tt_hits={}",
+                    status_name(probe.status),
+                    status_name(expected),
+                    probe.stats.nodes,
+                    probe.stats.tt_hits,
+                );
+            }
+            panic!("{selected}: first failing backward checkpoint is prefix {prefix}");
+        }
+    }
 }
