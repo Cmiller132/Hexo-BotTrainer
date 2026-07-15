@@ -1,0 +1,39 @@
+Round 8 of the VCF-width task. Rounds 6-7 completed the diagnosis; your job is to FIX the architecture and CLOSE 0l4291i_live, then run the final gate. Read docs/TSS_VCF_WIDTH_BRIEF.md in full (ADDENDUM 2 + 3 binding except where superseded here), plus .codex-round6/round6-progress.md and .codex-round7/round7-progress.md.
+
+COMMITTED STATE (orchestrator commits; you cannot): HEAD = 435c6722. Contains the verified engine (12/12 easy entries green at defaults; lz60mfb banked WIN 125,020 @ 1M rung) plus round-6's cfg(test)/env-gated experimental scaffolding (inert at defaults — verified by exact spot-check reproduction).
+
+DIAGNOSIS (settled — do NOT re-derive, do NOT re-tune root ordering or width):
+- 0l is the position that killed idtt AND dfpn at 20M in the original races. Only pdspn cracked it: a tiny turn-level search (1,058 nodes) + 733 CHEAP bounded leaf solves (~0.36s each). Our engine is a single-level certificate-grade PN search; it reproduced the historical single-level failure.
+- Round 7 PROVED the sole hard subtree in isolation: prefix 14 + off-reference defense (9,-2)+(12,-1) = WIN 225,924 nodes @ 1M cap, 21 min, staged depth 62, DEFAULT engine (.codex-round7/hard-child-1m.log). The other three canonical defender pairs of the prefix-14 universal prove at ~10k each.
+- The full-position failure mode is PN OBLIGATION-INTERLEAVING at deep universals + 512MiB stage-refresh rework: direct evidence from lz60mfb — its two reply pairs prove individually at ~78-92k but together exhaust 100k. For 0l (3 tied root pairs x 4-pair universal x staged depth ~62) the interleaving tax compounds multiplicatively.
+- Per-node cost is ~5.6ms (mhs/kernel/canonicalization/certificate bookkeeping on every node). A specialized uncertified inner loop would be orders of magnitude cheaper per position.
+
+THE FIX (in this order — B is cheap and may suffice; A only if B is insufficient):
+
+FIX B — obligation-sequential commitment at deep Universal nodes (wide mode only). Generalize the already-proven sequential-root policy to interior AND nodes: once a Universal's children are linked, commit to ONE unresolved obligation (lowest-dn or generator order) and drive it to a verdict before selecting any sibling obligation, instead of letting pn/dn re-selection interleave. Design notes, binding:
+- Wide mode only; narrow/default behavior stays byte-identical (WidthOptions::default() untouched).
+- This is a selection-policy change, not a soundness change: all obligations must still be proven for the Universal to prove; you are only changing VISIT ORDER. Certificates unchanged.
+- Watch for the known failure mode of naive commitment: a committed obligation that stalls (unaffordable child / table pressure) must yield rather than deadlock — reuse the existing stall/failover machinery.
+- Acceptance micro-benchmarks (run at DEFAULT+fix, in this order, before anything else):
+  (1) prefix-14 universal complete (TSS_BACKWALK_PREFIX=14, no extras): target <= ~400k nodes (sum of parts is ~260k; interleaving previously blew this past 1M).
+  (2) lz60mfb ladder: expect the first defender universal to stop double-paying; hope for WIN <= 100k (would upgrade its rung), accept anything <= its 125,020 baseline.
+  (3) 12-entry matrix at <=100k: must stay 12/12 (this is the no-regression gate for the policy change).
+- If (1) and (3) pass, IMMEDIATELY attempt full 0l at the 1M rung (TSS_BACKWALK_PREFIX=0, TSS_BACKWALK_CAP=1000000; expect roughly <=1.5h). If WIN: announce checkpoint LOUDLY, then go to CONSOLIDATION.
+- If full 0l misses 1M but the micro-benchmarks improved substantially, run the 4M ladder step (TSS_BACKWALK_CAP=4000000) before deciding; if it misses that, move to FIX A.
+
+FIX A — pdspn-style bounded cheap leaf solver at frontier nodes (only if B leaves 0l unproven at <=4M):
+- The ProvenFragment/import_fragment scaffolding from round 6 is the certificate-import shell. What's missing is a genuinely CHEAP inner searcher: a bounded, UNCERTIFIED depth-first VCF racer over the same wide forcing universe (make/unmake, no mhs, no kernel, no certificate bookkeeping, tiny fixed-size TT) that returns win/unknown fast; on win, RE-SOLVE the same position with the certified engine at a small cap to materialize the certificate (cheap once the racer confirms a win exists), then import as ProvenFragment. NEVER trust the racer's verdict directly for certificates — it is a scheduling oracle only, so racer bugs cannot create false WINs.
+- Probe once per frontier node, memoized by position key; probe budget thousands of racer nodes (they are ~microseconds each); honest accounting: report racer positions in stats but the rung cap governs certified expansions.
+- Acceptance: hard child (prefix 14 + extras) should drop well below 225,924 certified nodes; 12-entry matrix stays green; then full 0l on the ladder 1M -> 4M -> 20M.
+
+LONG-RUN MECHANICS (binding — learned the hard way):
+- You CANNOT launch detached processes (KILL_ON_JOB_CLOSE, no breakaway — schtasks/Start-Process/WSL broker all confirmed blocked). Run solves SYNCHRONOUSLY in your exec shell.
+- Keep each synchronous exec under ~2 hours wall. Your 1,272s run worked; do not hold a shell dramatically longer than that in one call — chunk by cap rungs (1M then 4M then 20M as separate runs) so no single exec exceeds the window. Before a rung that your own nodes/s measurement predicts will exceed ~2h, STOP and announce a checkpoint asking the orchestrator to run it — do not gamble the session on one exec.
+- Log every solve to .codex-round8/<name>.log via tee. One solve at a time. CARGO_BUILD_JOBS=4.
+
+CONSOLIDATION (after 0l is banked, or after both fixes conclude):
+- Per the owner's one-system directive: DELETE every cfg(test)/env-gated experiment that is not part of the winning path (macro-DFS, DAG choice-PN, sequential-small-choice, root-tier A/B opt-out, frontier machinery if FIX A was not needed). Keep WidthOptions minimal (narrow / vcf_pair_complete only). The winning fix becomes unconditional wide-mode behavior, not a flag.
+- Then: full unit suite; 12-entry matrix; lz rung; 0l rung re-verified on the consolidated engine; the 5 expect=NO entries (zero WIN required); narrow/default byte-identity check.
+- Finish with ONE clean full-gate matrix over all 19 corpus entries at DEFAULT settings; write per-entry rung + node counts to .codex-round8/round8-final.md.
+
+OPERATIONAL RULES (binding, unchanged): no git commits (announce checkpoint boundaries; orchestrator commits); all cargo targets on E: in-worktree (.target-codex/ exists — reuse, do not delete); no workspace-wide formatting (rustfmt --edition 2021 per edited file only); shared 32GB host (live GPU training + Lean campaign) — one solve at a time, never touch anything outside this worktree; branch claude/tss-vcf-width only; update .codex-round8/round8-progress.md after EVERY completed step.

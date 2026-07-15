@@ -782,6 +782,11 @@ fn winner_from_analysis(
 }
 
 const PN_INFINITY: u32 = 1_000_000_000;
+/// Small conjunctions can exploit ordinary PN re-selection and shared TT work
+/// without the multiplicative interleaving measured at the four-way AND
+/// frontier. Latch visit-order commitment only once at least four distinct
+/// linked proof obligations are live.
+const MIN_COMMITTED_UNIVERSAL_OBLIGATIONS: usize = 4;
 /// Each placement belongs to at most 18 length-six windows (six starts on
 /// each of three axes), so a completed two-stone turn can create at most 36
 /// distinct threats.  This geometry bound turns fork degree into a compact,
@@ -950,6 +955,11 @@ struct WidePnEntry {
     prior: WidePnPrior,
     node: WidePnNode,
     depth: usize,
+    /// Wide-mode visit-order state for an AND node. Once an unresolved
+    /// defender obligation is selected, keep driving that same child until it
+    /// proves or refutes. This does not participate in PN/DN recomputation or
+    /// certificate materialization.
+    universal_obligation: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1769,6 +1779,7 @@ impl WidePnSearch {
             prior,
             node: WidePnNode::Unexpanded,
             depth,
+            universal_obligation: None,
         });
 
         let added = wide_position_index_bytes(&key);
@@ -1880,8 +1891,7 @@ impl WidePnSearch {
         if proof.nodes.len() > MAX_PROMOTED_FRAGMENT_NODES
             || proof.explicit_edges > MAX_PROMOTED_FRAGMENT_EDGES
         {
-            self.frontier_probe_large_proofs =
-                self.frontier_probe_large_proofs.saturating_add(1);
+            self.frontier_probe_large_proofs = self.frontier_probe_large_proofs.saturating_add(1);
         }
         entry_depth
             .checked_add(proof.height)
@@ -2006,12 +2016,7 @@ impl WidePnSearch {
     /// misses. Cutoffs never become a refutation and only a materializable
     /// positive proof can escape the transient search.
     #[cfg(test)]
-    fn run_macro_dfs(
-        &mut self,
-        root_state: &RustHexoState,
-        root: usize,
-        work_cap: u64,
-    ) -> u64 {
+    fn run_macro_dfs(&mut self, root_state: &RustHexoState, root: usize, work_cap: u64) -> u64 {
         let mut state = root_state.clone();
         let mut remaining = work_cap;
         let mut memo = HashMap::new();
@@ -2068,9 +2073,8 @@ impl WidePnSearch {
                         WidePnKind::Choice => {
                             let mut proven = false;
                             for (rank, child) in children.iter().enumerate() {
-                                match self.macro_dfs_child(
-                                    state, id, rank, child, remaining, memo,
-                                ) {
+                                match self.macro_dfs_child(state, id, rank, child, remaining, memo)
+                                {
                                     WideMacroDfsResult::Proven => {
                                         proven = true;
                                         break;
@@ -2091,9 +2095,8 @@ impl WidePnSearch {
                         WidePnKind::Universal { .. } => {
                             let mut exhausted = false;
                             for (rank, child) in children.iter().enumerate() {
-                                match self.macro_dfs_child(
-                                    state, id, rank, child, remaining, memo,
-                                ) {
+                                match self.macro_dfs_child(state, id, rank, child, remaining, memo)
+                                {
                                     WideMacroDfsResult::Proven => {}
                                     WideMacroDfsResult::Exhausted => {
                                         exhausted = true;
@@ -2148,10 +2151,9 @@ impl WidePnSearch {
                     return WideMacroDfsResult::Exhausted;
                 };
                 let child_id = child.entry.unwrap_or_else(|| {
-                    let depth = usize::try_from(
-                        state.placements_made().saturating_sub(self.root_ply),
-                    )
-                    .unwrap_or(usize::MAX);
+                    let depth =
+                        usize::try_from(state.placements_made().saturating_sub(self.root_ply))
+                            .unwrap_or(usize::MAX);
                     self.insert_position(WidePositionKey::from_state(state), depth, child.prior)
                 });
                 self.set_child_entry(parent, rank, child_id);
@@ -2174,10 +2176,9 @@ impl WidePnSearch {
                     return WideMacroDfsResult::Exhausted;
                 };
                 let child_id = child.entry.unwrap_or_else(|| {
-                    let depth = usize::try_from(
-                        state.placements_made().saturating_sub(self.root_ply),
-                    )
-                    .unwrap_or(usize::MAX);
+                    let depth =
+                        usize::try_from(state.placements_made().saturating_sub(self.root_ply))
+                            .unwrap_or(usize::MAX);
                     self.insert_position(WidePositionKey::from_state(state), depth, child.prior)
                 });
                 self.set_child_entry(parent, rank, child_id);
@@ -2224,6 +2225,15 @@ impl WidePnSearch {
     }
 
     fn step(&mut self, state: &mut RustHexoState, id: usize) -> WidePnStepOutcome {
+        self.step_with_commitment(state, id, false)
+    }
+
+    fn step_with_commitment(
+        &mut self,
+        state: &mut RustHexoState,
+        id: usize,
+        inherited_commitment: bool,
+    ) -> WidePnStepOutcome {
         if matches!(self.entries[id].node, WidePnNode::DepthCutoff) {
             return WidePnStepOutcome::DepthCutoff {
                 depth: self.entries[id].depth,
@@ -2237,7 +2247,6 @@ impl WidePnSearch {
         if self.entries[id].pn == 0 || self.entries[id].dn == 0 {
             return WidePnStepOutcome::Stalled;
         }
-        let parent_before = (self.entries[id].pn, self.entries[id].dn);
         let finish_partial_turn = matches!(state.phase(), TurnPhase::SecondStone { .. });
         let urgent_pair = matches!(state.phase(), TurnPhase::FirstStone)
             && matches!(
@@ -2270,142 +2279,166 @@ impl WidePnSearch {
             || cfg!(test) && std::env::var_os("TSS_WIDE_SEQUENTIAL_CHOICE").is_some()
             || cfg!(test) && sequential_small_choice;
         let prefer_width_tier = self.prefer_width_tier_at_depth(self.entries[id].depth);
-        let (kind, child_index, child) = {
-            let WidePnNode::Branch { kind, children } = &self.entries[id].node else {
-                return WidePnStepOutcome::Stalled;
+        let commitment_domain = inherited_commitment
+            || match &self.entries[id].node {
+                WidePnNode::Branch {
+                    kind: WidePnKind::Universal { .. },
+                    children,
+                } => self.universal_commitment_active(id, children),
+                _ => false,
             };
+        let mut yielded_universal_children = Vec::new();
+        loop {
+            let parent_before = (self.entries[id].pn, self.entries[id].dn);
             #[cfg(test)]
-            let selected = sequential_small_choice
+            let forced_small_choice = sequential_small_choice
                 .then_some(self.sequential_small_choice_rank)
-                .filter(|&rank| {
-                    children
+                .filter(|&rank| match &self.entries[id].node {
+                    WidePnNode::Branch { children, .. } => children
                         .get(rank)
-                        .is_some_and(|child| !self.child_is_genuinely_refuted(child))
-                })
-                .or_else(|| {
-                    self.select_child_index_with_tier(
-                        *kind,
-                        children,
-                        sequential_root_probe,
-                        prefer_width_tier,
-                    )
+                        .is_some_and(|child| !self.child_is_genuinely_refuted(child)),
+                    _ => false,
                 });
+            #[cfg(test)]
+            let selected = forced_small_choice.or_else(|| {
+                self.select_step_child_index_with_commitment(
+                    id,
+                    sequential_root_probe,
+                    prefer_width_tier,
+                    &yielded_universal_children,
+                    commitment_domain,
+                )
+            });
             #[cfg(not(test))]
-            let selected = self.select_child_index_with_tier(
-                *kind,
-                children,
+            let selected = self.select_step_child_index_with_commitment(
+                id,
                 sequential_root_probe,
                 prefer_width_tier,
+                &yielded_universal_children,
+                commitment_domain,
             );
             let Some(child_index) = selected else {
                 return WidePnStepOutcome::Stalled;
             };
+            let (kind, child, root_children_unlinked) = {
+                let WidePnNode::Branch { kind, children } = &self.entries[id].node else {
+                    return WidePnStepOutcome::Stalled;
+                };
+                (
+                    *kind,
+                    children[child_index].clone(),
+                    children.iter().all(|child| child.entry.is_none()),
+                )
+            };
             #[cfg(test)]
-            if self.entries[id].depth == 0
-                && children.iter().all(|child| child.entry.is_none())
-                && self.trace_enabled()
-            {
-                let selected = &children[child_index];
+            if self.entries[id].depth == 0 && root_children_unlinked && self.trace_enabled() {
                 eprintln!(
                     "WIDTH_PN_ROOT_SELECT sequential={sequential_root_probe} prefer_tier={prefer_width_tier} rank={child_index} mv={:?} first_tier={} prior_pn={} urgent={}",
-                    selected.mv,
-                    selected.first_width_tier,
-                    selected.prior.pn,
-                    selected.urgent_block,
+                    child.mv,
+                    child.first_width_tier,
+                    child.prior.pn,
+                    child.urgent_block,
                 );
             }
-            (*kind, child_index, children[child_index].clone())
-        };
-        let _ = kind;
-        if child.result != WidePnChildResult::Pending {
-            self.recompute(id);
-            return WidePnStepOutcome::Stalled;
-        }
+            if child.result != WidePnChildResult::Pending {
+                self.recompute(id);
+                return WidePnStepOutcome::Stalled;
+            }
 
-        let outcome = match child.mv {
-            WidePnMove::One(coord) => {
-                let linked = child.entry.is_none();
-                let Ok((_result, delta)) = state.apply_with_delta(Placement { coord }) else {
-                    self.set_child_refuted(id, child_index);
-                    self.refresh(id);
-                    return WidePnStepOutcome::Progress;
-                };
-                let child_id = child.entry.unwrap_or_else(|| {
-                    let depth =
-                        usize::try_from(state.placements_made().saturating_sub(self.root_ply))
-                            .unwrap_or(usize::MAX);
-                    self.insert_position(WidePositionKey::from_state(state), depth, child.prior)
-                });
-                self.set_child_entry(id, child_index, child_id);
-                let outcome = self.step(state, child_id);
-                state.undo(delta);
-                match outcome {
-                    WidePnStepOutcome::DepthCutoff {
-                        depth,
-                        made_progress,
-                    } => WidePnStepOutcome::DepthCutoff {
-                        depth,
-                        made_progress: made_progress || linked,
-                    },
-                    WidePnStepOutcome::Progress => WidePnStepOutcome::Progress,
-                    WidePnStepOutcome::Stalled if linked => WidePnStepOutcome::Progress,
-                    WidePnStepOutcome::Stalled => WidePnStepOutcome::Stalled,
+            let outcome = match child.mv {
+                WidePnMove::One(coord) => {
+                    let linked = child.entry.is_none();
+                    let Ok((_result, delta)) = state.apply_with_delta(Placement { coord }) else {
+                        self.set_child_refuted(id, child_index);
+                        self.refresh(id);
+                        return WidePnStepOutcome::Progress;
+                    };
+                    let child_id = child.entry.unwrap_or_else(|| {
+                        let depth =
+                            usize::try_from(state.placements_made().saturating_sub(self.root_ply))
+                                .unwrap_or(usize::MAX);
+                        self.insert_position(WidePositionKey::from_state(state), depth, child.prior)
+                    });
+                    self.set_child_entry(id, child_index, child_id);
+                    let outcome = self.step_with_commitment(state, child_id, commitment_domain);
+                    state.undo(delta);
+                    match outcome {
+                        WidePnStepOutcome::DepthCutoff {
+                            depth,
+                            made_progress,
+                        } => WidePnStepOutcome::DepthCutoff {
+                            depth,
+                            made_progress: made_progress || linked,
+                        },
+                        WidePnStepOutcome::Progress => WidePnStepOutcome::Progress,
+                        WidePnStepOutcome::Stalled if linked => WidePnStepOutcome::Progress,
+                        WidePnStepOutcome::Stalled => WidePnStepOutcome::Stalled,
+                    }
                 }
-            }
-            WidePnMove::Pair(first, second) | WidePnMove::DefenderPair(first, second) => {
-                let linked = child.entry.is_none();
-                let Ok((_first_result, first_delta)) =
-                    state.apply_with_delta(Placement { coord: first })
-                else {
-                    self.set_child_refuted(id, child_index);
-                    self.refresh(id);
-                    return WidePnStepOutcome::Progress;
-                };
-                let Ok((_second_result, second_delta)) =
-                    state.apply_with_delta(Placement { coord: second })
-                else {
+                WidePnMove::Pair(first, second) | WidePnMove::DefenderPair(first, second) => {
+                    let linked = child.entry.is_none();
+                    let Ok((_first_result, first_delta)) =
+                        state.apply_with_delta(Placement { coord: first })
+                    else {
+                        self.set_child_refuted(id, child_index);
+                        self.refresh(id);
+                        return WidePnStepOutcome::Progress;
+                    };
+                    let Ok((_second_result, second_delta)) =
+                        state.apply_with_delta(Placement { coord: second })
+                    else {
+                        state.undo(first_delta);
+                        self.set_child_refuted(id, child_index);
+                        self.refresh(id);
+                        return WidePnStepOutcome::Progress;
+                    };
+                    let child_id = child.entry.unwrap_or_else(|| {
+                        let depth =
+                            usize::try_from(state.placements_made().saturating_sub(self.root_ply))
+                                .unwrap_or(usize::MAX);
+                        self.insert_position(WidePositionKey::from_state(state), depth, child.prior)
+                    });
+                    self.set_child_entry(id, child_index, child_id);
+                    let outcome = self.step_with_commitment(state, child_id, commitment_domain);
+                    state.undo(second_delta);
                     state.undo(first_delta);
-                    self.set_child_refuted(id, child_index);
-                    self.refresh(id);
-                    return WidePnStepOutcome::Progress;
-                };
-                let child_id = child.entry.unwrap_or_else(|| {
-                    let depth =
-                        usize::try_from(state.placements_made().saturating_sub(self.root_ply))
-                            .unwrap_or(usize::MAX);
-                    self.insert_position(WidePositionKey::from_state(state), depth, child.prior)
-                });
-                self.set_child_entry(id, child_index, child_id);
-                let outcome = self.step(state, child_id);
-                state.undo(second_delta);
-                state.undo(first_delta);
-                match outcome {
-                    WidePnStepOutcome::DepthCutoff {
-                        depth,
-                        made_progress,
-                    } => WidePnStepOutcome::DepthCutoff {
-                        depth,
-                        made_progress: made_progress || linked,
-                    },
-                    WidePnStepOutcome::Progress => WidePnStepOutcome::Progress,
-                    WidePnStepOutcome::Stalled if linked => WidePnStepOutcome::Progress,
-                    WidePnStepOutcome::Stalled => WidePnStepOutcome::Stalled,
+                    match outcome {
+                        WidePnStepOutcome::DepthCutoff {
+                            depth,
+                            made_progress,
+                        } => WidePnStepOutcome::DepthCutoff {
+                            depth,
+                            made_progress: made_progress || linked,
+                        },
+                        WidePnStepOutcome::Progress => WidePnStepOutcome::Progress,
+                        WidePnStepOutcome::Stalled if linked => WidePnStepOutcome::Progress,
+                        WidePnStepOutcome::Stalled => WidePnStepOutcome::Stalled,
+                    }
                 }
+            };
+            self.refresh(id);
+            let parent_changed = parent_before != (self.entries[id].pn, self.entries[id].dn);
+            let outcome = match outcome {
+                WidePnStepOutcome::DepthCutoff {
+                    depth,
+                    made_progress,
+                } => WidePnStepOutcome::DepthCutoff {
+                    depth,
+                    made_progress: made_progress || parent_changed,
+                },
+                WidePnStepOutcome::Progress => WidePnStepOutcome::Progress,
+                WidePnStepOutcome::Stalled if parent_changed => WidePnStepOutcome::Progress,
+                WidePnStepOutcome::Stalled => WidePnStepOutcome::Stalled,
+            };
+            if outcome == WidePnStepOutcome::Stalled
+                && matches!(kind, WidePnKind::Universal { .. })
+                && self.entries[id].universal_obligation == Some(child_index)
+                && self.expansions < self.node_cap
+            {
+                yielded_universal_children.push(child_index);
+                continue;
             }
-        };
-        self.refresh(id);
-        let parent_changed = parent_before != (self.entries[id].pn, self.entries[id].dn);
-        match outcome {
-            WidePnStepOutcome::DepthCutoff {
-                depth,
-                made_progress,
-            } => WidePnStepOutcome::DepthCutoff {
-                depth,
-                made_progress: made_progress || parent_changed,
-            },
-            WidePnStepOutcome::Progress => WidePnStepOutcome::Progress,
-            WidePnStepOutcome::Stalled if parent_changed => WidePnStepOutcome::Progress,
-            WidePnStepOutcome::Stalled => WidePnStepOutcome::Stalled,
+            return outcome;
         }
     }
 
@@ -2517,6 +2550,7 @@ impl WidePnSearch {
         let mut state = root_state.clone();
         let mut entry_id = root;
         let mut seen = HashSet::new();
+        let mut inherited_commitment = false;
         for hop in 0..PATH_LIMIT {
             if !seen.insert(entry_id) {
                 eprintln!("WIDTH_PN_PATH hop={hop} entry={entry_id} stop=cycle");
@@ -2543,12 +2577,27 @@ impl WidePnSearch {
                 && wide_choice_has_urgent_block(children);
             let sequential_root_probe = (entry.depth == 0 && (finish_partial_turn || urgent_pair))
                 || std::env::var_os("TSS_WIDE_SEQUENTIAL_CHOICE").is_some();
-            let Some(child_rank) = self.select_child_index_with_tier(
-                *kind,
-                children,
-                sequential_root_probe,
-                self.prefer_width_tier_at_depth(entry.depth),
-            ) else {
+            let commitment_domain = inherited_commitment
+                || matches!(kind, WidePnKind::Universal { .. })
+                    && self.universal_commitment_active(entry_id, children);
+            let selected = match kind {
+                WidePnKind::Choice => self.select_child_index_with_tier(
+                    *kind,
+                    children,
+                    sequential_root_probe,
+                    self.prefer_width_tier_at_depth(entry.depth),
+                ),
+                WidePnKind::Universal { .. } if commitment_domain => {
+                    self.universal_obligation_index(entry_id, children, &[])
+                }
+                WidePnKind::Universal { .. } => self.select_child_index_with_tier(
+                    *kind,
+                    children,
+                    sequential_root_probe,
+                    self.prefer_width_tier_at_depth(entry.depth),
+                ),
+            };
+            let Some(child_rank) = selected else {
                 eprintln!(
                     "WIDTH_PN_PATH hop={hop} entry={entry_id} depth={} node={} pn={} dn={} stop=no_selectable_child",
                     entry.depth,
@@ -2588,6 +2637,7 @@ impl WidePnSearch {
                 );
                 return;
             }
+            inherited_commitment = commitment_domain;
             entry_id = next_entry;
         }
         eprintln!("WIDTH_PN_PATH entry={entry_id} stop=path_limit limit={PATH_LIMIT}");
@@ -2665,6 +2715,146 @@ impl WidePnSearch {
                 }
             })
             .map(|(index, _)| index)
+    }
+
+    /// Return whether this AND node has the high linked fanout where DN
+    /// re-selection compounds obligation interleaving. Exact TT convergence is
+    /// counted once, and an unlinked proof obligation postpones commitment.
+    /// Linked entries remain part of the node's structural fanout after they
+    /// prove so a qualifying Universal stays sequential through its binary
+    /// tail instead of changing policy mid-proof.
+    fn has_commitment_fanout(&self, children: &[WidePnChild]) -> bool {
+        let mut unique = [0usize; MIN_COMMITTED_UNIVERSAL_OBLIGATIONS];
+        let mut unique_len = 0usize;
+        for child in children {
+            let WidePnChildResult::Pending = child.result else {
+                continue;
+            };
+            let Some(entry) = child
+                .entry
+                .filter(|&entry| self.entries.get(entry).is_some())
+            else {
+                return false;
+            };
+            if unique[..unique_len].contains(&entry) {
+                continue;
+            }
+            if unique_len < unique.len() {
+                unique[unique_len] = entry;
+                unique_len += 1;
+            }
+        }
+        unique_len >= MIN_COMMITTED_UNIVERSAL_OBLIGATIONS
+    }
+
+    fn universal_commitment_active(&self, id: usize, children: &[WidePnChild]) -> bool {
+        self.entries[id]
+            .universal_obligation
+            .and_then(|index| children.get(index))
+            .is_some_and(|child| !self.child_is_genuinely_proven(child))
+            || self.has_commitment_fanout(children)
+    }
+
+    /// Select one high-fanout Universal obligation without letting changing
+    /// DN estimates interleave its siblings. The first selection is exactly
+    /// the ordinary lowest-DN/generator-order choice; later selections retain
+    /// it until it resolves. `yielded` contains true-stall failures already
+    /// tried by the current descent and lets the existing stall path fail over
+    /// once per distinct sibling instead of spinning on an unaffordable child.
+    fn universal_obligation_index(
+        &self,
+        id: usize,
+        children: &[WidePnChild],
+        yielded: &[usize],
+    ) -> Option<usize> {
+        let selectable = |index: usize, child: &WidePnChild| {
+            let yielded_same_entry = child.entry.is_some_and(|entry| {
+                yielded.iter().any(|&yielded_index| {
+                    children
+                        .get(yielded_index)
+                        .and_then(|yielded_child| yielded_child.entry)
+                        == Some(entry)
+                })
+            });
+            !yielded.contains(&index)
+                && !yielded_same_entry
+                && !self.child_is_genuinely_proven(child)
+        };
+        if let Some(index) = self.entries[id].universal_obligation {
+            if children
+                .get(index)
+                .is_some_and(|child| selectable(index, child))
+            {
+                return Some(index);
+            }
+        }
+        children
+            .iter()
+            .enumerate()
+            .filter(|(index, child)| selectable(*index, child))
+            .min_by_key(|(_, child)| self.child_numbers(child).1)
+            .map(|(index, _)| index)
+    }
+
+    fn select_step_child_index(
+        &mut self,
+        id: usize,
+        sequential_root_probe: bool,
+        prefer_width_tier: bool,
+        yielded: &[usize],
+    ) -> Option<usize> {
+        self.select_step_child_index_with_commitment(
+            id,
+            sequential_root_probe,
+            prefer_width_tier,
+            yielded,
+            false,
+        )
+    }
+
+    fn select_step_child_index_with_commitment(
+        &mut self,
+        id: usize,
+        sequential_root_probe: bool,
+        prefer_width_tier: bool,
+        yielded: &[usize],
+        inherited_commitment: bool,
+    ) -> Option<usize> {
+        let (selected, universal_commitment) = {
+            let WidePnNode::Branch { kind, children } = &self.entries[id].node else {
+                return None;
+            };
+            match kind {
+                WidePnKind::Choice => (
+                    self.select_child_index_with_tier(
+                        *kind,
+                        children,
+                        sequential_root_probe,
+                        prefer_width_tier,
+                    ),
+                    None,
+                ),
+                WidePnKind::Universal { .. } => {
+                    let commitment =
+                        inherited_commitment || self.universal_commitment_active(id, children);
+                    let selected = if commitment {
+                        self.universal_obligation_index(id, children, yielded)
+                    } else {
+                        self.select_child_index_with_tier(
+                            *kind,
+                            children,
+                            sequential_root_probe,
+                            prefer_width_tier,
+                        )
+                    };
+                    (selected, Some(commitment))
+                }
+            }
+        };
+        if let Some(commitment) = universal_commitment {
+            self.entries[id].universal_obligation = if commitment { selected } else { None };
+        }
+        selected
     }
 
     /// A staged depth cutoff is unresolved, not a disproof. Sequential root
@@ -5856,6 +6046,7 @@ mod tests {
             prior: WidePnPrior { pn, dn: 1 },
             node,
             depth,
+            universal_obligation: None,
         }
     }
 
@@ -6384,6 +6575,7 @@ mod tests {
             prior: WidePnPrior::UNIFORM,
             node: WidePnNode::Refuted,
             depth: 1,
+            universal_obligation: None,
         });
         let child = |q, entry| WidePnChild {
             mv: WidePnMove::One(HexCoord::new(q, 0)),
@@ -6418,6 +6610,7 @@ mod tests {
             prior: WidePnPrior::UNIFORM,
             node: WidePnNode::ProvenLeaf(cache_test_leaf()),
             depth: 1,
+            universal_obligation: None,
         });
         let child = |q, entry| WidePnChild {
             mv: WidePnMove::One(HexCoord::new(q, 0)),
@@ -6446,6 +6639,219 @@ mod tests {
             Some(1),
             "the first unresolved child wins the saturated live tie"
         );
+    }
+
+    #[test]
+    fn wide_pn_universal_obligation_stays_committed_until_verdict() {
+        let state = RustHexoState::new();
+        let mut search = WidePnSearch::new(Player::Player0, 0, 10, 0, 100, 10);
+        let root = search.insert_root(&state);
+        let first = search.entries.len();
+        search
+            .entries
+            .push(graph_pn_test_entry(1, WidePnNode::Unexpanded, 1));
+        let second = search.entries.len();
+        search
+            .entries
+            .push(graph_pn_test_entry(1, WidePnNode::Unexpanded, 1));
+        let third = search.entries.len();
+        search
+            .entries
+            .push(graph_pn_test_entry(1, WidePnNode::Unexpanded, 1));
+        let fourth = search.entries.len();
+        search
+            .entries
+            .push(graph_pn_test_entry(1, WidePnNode::Unexpanded, 1));
+        search.entries[first].dn = 2;
+        search.entries[second].dn = 5;
+        search.entries[third].dn = 7;
+        search.entries[fourth].dn = 9;
+        let child = |q, entry| WidePnChild {
+            mv: WidePnMove::One(HexCoord::new(q, 0)),
+            result: WidePnChildResult::Pending,
+            entry: Some(entry),
+            prior: WidePnPrior::UNIFORM,
+            urgent_block: false,
+            first_width_tier: 0,
+        };
+        search.entries[root].node = WidePnNode::Branch {
+            kind: WidePnKind::Universal {
+                implicit_dispatch: true,
+            },
+            children: vec![
+                child(0, first),
+                child(1, second),
+                child(2, third),
+                child(3, fourth),
+            ],
+        };
+
+        assert_eq!(
+            search.select_step_child_index(root, false, false, &[]),
+            Some(0)
+        );
+        search.entries[first].dn = 50;
+        search.entries[second].dn = 1;
+        assert_eq!(
+            search.select_step_child_index(root, false, false, &[]),
+            Some(0),
+            "changing DN estimates cannot interleave a committed obligation"
+        );
+
+        search.entries[first].node = WidePnNode::DepthCutoff;
+        search.entries[first].pn = PN_INFINITY;
+        search.entries[first].dn = 0;
+        assert_eq!(
+            search.select_step_child_index(root, false, false, &[]),
+            Some(0),
+            "a staged cutoff stays committed so the reopened stage resumes it"
+        );
+
+        search.entries[first].pn = 0;
+        search.entries[first].dn = PN_INFINITY;
+        search.entries[first].node = WidePnNode::ProvenLeaf(cache_test_leaf());
+        assert_eq!(
+            search.select_step_child_index(root, false, false, &[]),
+            Some(1),
+            "a verdict advances a structurally high-fanout Universal"
+        );
+        assert_eq!(search.entries[root].universal_obligation, Some(1));
+
+        search.entries[second].dn = 50;
+        search.entries[third].dn = 1;
+        assert_eq!(
+            search.select_step_child_index(root, false, false, &[]),
+            Some(1),
+            "the qualifying Universal remains committed through its binary tail"
+        );
+        search.entries[second].pn = 0;
+        search.entries[second].dn = PN_INFINITY;
+        search.entries[second].node = WidePnNode::ProvenLeaf(cache_test_leaf());
+        assert_eq!(
+            search.select_step_child_index(root, false, false, &[]),
+            Some(2),
+            "the next lowest-DN unresolved obligation becomes committed"
+        );
+    }
+
+    #[test]
+    fn wide_pn_binary_or_tt_converged_universal_keeps_pn_reselection() {
+        let state = RustHexoState::new();
+        let mut search = WidePnSearch::new(Player::Player0, 0, 10, 0, 100, 10);
+        let root = search.insert_root(&state);
+        let first = search.entries.len();
+        search
+            .entries
+            .push(graph_pn_test_entry(1, WidePnNode::Unexpanded, 1));
+        let second = search.entries.len();
+        search
+            .entries
+            .push(graph_pn_test_entry(1, WidePnNode::Unexpanded, 1));
+        search.entries[first].dn = 2;
+        search.entries[second].dn = 5;
+        let child = |q, entry| WidePnChild {
+            mv: WidePnMove::One(HexCoord::new(q, 0)),
+            result: WidePnChildResult::Pending,
+            entry: Some(entry),
+            prior: WidePnPrior::UNIFORM,
+            urgent_block: false,
+            first_width_tier: 0,
+        };
+        search.entries[root].node = WidePnNode::Branch {
+            kind: WidePnKind::Universal {
+                implicit_dispatch: true,
+            },
+            children: vec![
+                child(0, first),
+                child(1, second),
+                child(2, first),
+                child(3, second),
+            ],
+        };
+
+        assert_eq!(
+            search.select_step_child_index(root, false, false, &[]),
+            Some(0)
+        );
+        assert_eq!(search.entries[root].universal_obligation, None);
+        search.entries[first].dn = 50;
+        search.entries[second].dn = 1;
+        assert_eq!(
+            search.select_step_child_index(root, false, false, &[]),
+            Some(1),
+            "four edges converging to two TT entries remain a binary conjunction"
+        );
+        assert_eq!(search.entries[root].universal_obligation, None);
+
+        assert_eq!(
+            search.select_step_child_index_with_commitment(root, false, false, &[], true),
+            Some(1),
+            "an inherited high-fanout domain commits its descendant conjunction"
+        );
+        search.entries[first].dn = 1;
+        search.entries[second].dn = 50;
+        assert_eq!(
+            search.select_step_child_index_with_commitment(root, false, false, &[], true),
+            Some(1),
+            "descendant DN changes cannot escape the inherited obligation domain"
+        );
+    }
+
+    #[test]
+    fn wide_pn_stalled_universal_obligation_yields_once_per_sibling() {
+        let state = RustHexoState::new();
+        let mut search = WidePnSearch::new(Player::Player0, 0, 10, 0, 100, 10);
+        let root = search.insert_root(&state);
+        let entries = (0..4)
+            .map(|_| {
+                let entry = search.entries.len();
+                search
+                    .entries
+                    .push(graph_pn_test_entry(1, WidePnNode::Unexpanded, 1));
+                entry
+            })
+            .collect::<Vec<_>>();
+        let children = entries
+            .into_iter()
+            .enumerate()
+            .map(|(q, entry)| WidePnChild {
+                mv: WidePnMove::One(HexCoord::new(i16::try_from(q).unwrap(), 0)),
+                result: WidePnChildResult::Pending,
+                entry: Some(entry),
+                prior: WidePnPrior::UNIFORM,
+                urgent_block: false,
+                first_width_tier: 0,
+            })
+            .collect();
+        search.entries[root].node = WidePnNode::Branch {
+            kind: WidePnKind::Universal {
+                implicit_dispatch: true,
+            },
+            children,
+        };
+
+        assert_eq!(
+            search.select_step_child_index(root, false, false, &[]),
+            Some(0)
+        );
+        assert_eq!(
+            search.select_step_child_index(root, false, false, &[0]),
+            Some(1)
+        );
+        assert_eq!(
+            search.select_step_child_index(root, false, false, &[0, 1]),
+            Some(2)
+        );
+        assert_eq!(
+            search.select_step_child_index(root, false, false, &[0, 1, 2]),
+            Some(3)
+        );
+        assert_eq!(
+            search.select_step_child_index(root, false, false, &[0, 1, 2, 3]),
+            None,
+            "all-stalled obligations terminate instead of cycling"
+        );
+        assert_eq!(search.entries[root].universal_obligation, None);
     }
 
     #[test]
