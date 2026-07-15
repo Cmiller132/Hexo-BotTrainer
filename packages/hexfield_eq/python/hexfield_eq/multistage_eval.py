@@ -1856,6 +1856,11 @@ def _stage_d_pool(
     duplicate_edges_skipped: list[dict[str, str]] = []
     if append:
         for e in edges:
+            if e.get("_pooled_incrementally"):
+                # Already durably appended (concurrent path persists each edge
+                # the moment its match completes); the pool loaded above holds
+                # it. Silent skip — this is not a duplicate-epoch rerun.
+                continue
             bt: eval_stats.BTEdge = e["bt"]
             if _epoch_edge_exists(pool_doc, epoch_tag, bt.a, bt.b):
                 duplicate_edges_skipped.append({"a": bt.a, "b": bt.b})
@@ -2165,6 +2170,43 @@ def _epoch_edge_exists(
         if (a == cand_label and b == opp_label) or (a == opp_label and b == cand_label):
             return True
     return False
+
+
+def _persist_edge_incremental(
+    run_dir: Path,
+    cfg: MultiStageEvalSection,
+    epoch_tag: int,
+    edge: dict[str, Any],
+) -> bool:
+    """Durably append ONE completed edge to the on-disk pool, immediately.
+
+    Crash containment for the long concurrent wave: the 2026-07-14
+    hexfield_eq_main_3 ep70 GPU segfault landed mid-wave and discarded BOTH
+    fully-played anchor edges (Strix 64 games + SealBot 32) because the
+    concurrent path pooled only at Stage D. Persisting each edge the moment its
+    match completes means an interruption keeps every finished edge — the same
+    durability the parts path already has per part. The ``(epoch, a, b)`` guard
+    keeps the append idempotent. Returns True when the edge is on disk
+    (already-pooled counts); False on any error, in which case the caller
+    leaves the edge to Stage D's ordinary append — this helper never tightens
+    the wave's fail-soft envelope.
+    """
+
+    try:
+        pool_path = _pool_path(run_dir, cfg)
+        doc = _load_pool(pool_path)
+        bt: eval_stats.BTEdge = edge["bt"]
+        if not _epoch_edge_exists(doc, epoch_tag, bt.a, bt.b):
+            doc["edges"].append(_edge_pool_row(epoch_tag, edge))
+            _save_pool(pool_path, doc)
+        return True
+    except Exception:  # noqa: BLE001 — durability is best-effort by design.
+        _EVAL_LOG.warning(
+            "incremental pool persist failed for edge vs %s; Stage D will append it",
+            (edge.get("descriptive") or {}).get("opponent", "?"),
+            exc_info=True,
+        )
+        return False
 
 
 def _part_opponents(roster: Roster) -> list[Opponent]:
@@ -2911,6 +2953,11 @@ def run_multistage_eval_concurrent(
             strix_ci = sx_ci
             edges.append(sx_edge)
             played.append(roster.strix.label)
+            # Durability: this edge is final — persist it before the next match.
+            if write_diagnostics and _persist_edge_incremental(
+                run_dir, cfg, epoch_tag, sx_edge
+            ):
+                sx_edge["_pooled_incrementally"] = True
 
     # ----- SealBot zero-point (separate concurrent runner; fail-open). -----
     if roster.sealbot is not None and alloc.get(SEALBOT_LABEL, 0) > 0:
@@ -2926,6 +2973,11 @@ def run_multistage_eval_concurrent(
             sealbot_ci = sb_ci
             edges.append(sb_edge)
             played.append(SEALBOT_LABEL)
+            # Durability: this edge is final — persist it before the next match.
+            if write_diagnostics and _persist_edge_incremental(
+                run_dir, cfg, epoch_tag, sb_edge
+            ):
+                sb_edge["_pooled_incrementally"] = True
 
     # ----- ALL checkpoint opponents in ONE concurrent multi-opponent pass. -----
     per = alloc.get("per_checkpoint", 0)
@@ -3001,15 +3053,19 @@ def run_multistage_eval_concurrent(
             match = matches.get(opp.label)
             if match is None:
                 continue
-            edges.append(
-                _build_checkpoint_edge_from_match(
-                    roster, opp, match, cfg=cfg,
-                    opponent_search_profile=(
-                        "puct" if opp.label in foreign_ov else "selfplay"
-                    ),
-                )
+            ck_edge = _build_checkpoint_edge_from_match(
+                roster, opp, match, cfg=cfg,
+                opponent_search_profile=(
+                    "puct" if opp.label in foreign_ov else "selfplay"
+                ),
             )
+            edges.append(ck_edge)
             played.append(opp.label)
+            # Durability: this edge is final — persist it before Stage D.
+            if write_diagnostics and _persist_edge_incremental(
+                run_dir, cfg, epoch_tag, ck_edge
+            ):
+                ck_edge["_pooled_incrementally"] = True
 
     stage_c_status = "completed" if edges else "empty"
     stage_c_detail: dict[str, Any] = {

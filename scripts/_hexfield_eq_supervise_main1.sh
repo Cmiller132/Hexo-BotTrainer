@@ -23,6 +23,17 @@ SUPLOG="$RUNDIR/supervisor.log"; LOCK="$RUNDIR/supervisor.lock"
 HALT="$RUNDIR/supervisor_halted.flag"; DONE="$RUNDIR/supervisor_completed.flag"
 PY="$VENV/bin/python"
 FAST_CRASH_SECONDS=300; MAX_CONSEC_FAST=3; MAX_PER_HOUR=8
+# GPU-health gating (2026-07-15). The 07-14 night crash chain: a driver-level
+# CUDA context death (segfault in libc10_cuda.so) killed the trainer mid-eval,
+# and the blind 3s relaunch went straight into the still-wedged dxg context and
+# died again 588s in — one near-miss short of the fast-crash breaker HALTING
+# the run overnight over a transient driver flake. Before every (re)launch,
+# probe the GPU with a real CUDA matmul and wait (backoff, capped) until it
+# passes; after a CUDA-signature crash, settle first — the wedged WSL dxg
+# layer heals off-load. Probe waits and CUDA-signature crashes do NOT advance
+# the consecutive-fast-crash breaker (the probe gate replaces it); the
+# crashes-per-hour backstop still counts everything.
+GPU_PROBE_TIMEOUT=120; GPU_SETTLE_SECONDS=60; GPU_PROBE_RETRY_MAX=600
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
@@ -127,11 +138,38 @@ trap 'rm -f "$LOCK"' EXIT
 
 latest_ckpt(){ ls -1 "$CKPTS"/epoch_*.pt 2>/dev/null | sort -V | tail -1; }
 
+# A real CUDA round-trip (context init + matmul + sync), not nvidia-smi: after
+# the 07-14 wedge, light queries still succeeded while context work died.
+gpu_probe(){
+  timeout "$GPU_PROBE_TIMEOUT" "$PY" -c '
+import sys
+import torch
+if not torch.cuda.is_available():
+    sys.exit(1)
+a = torch.rand(2048, 2048, device="cuda")
+s = float((a @ a).abs().sum().item())
+torch.cuda.synchronize()
+sys.exit(0 if s > 0 else 1)
+' >/dev/null 2>&1
+}
+
+wait_for_gpu(){
+  local delay=60 n=0
+  until gpu_probe; do
+    n=$((n+1))
+    log "GPU PROBE failed (attempt $n) — GPU/driver not ready; retrying in ${delay}s (probe waits do not count as crashes)"
+    sleep "$delay"
+    delay=$(( delay * 2 )); (( delay > GPU_PROBE_RETRY_MAX )) && delay=$GPU_PROBE_RETRY_MAX
+  done
+  if (( n > 0 )); then log "GPU PROBE ok after $n failed attempt(s)"; else log "GPU PROBE ok"; fi
+}
+
 log "hexfield_eq SUPERVISOR start (pid=$$) run=$RUNDIR config=$CONFIG"
 log "breaker: fast<${FAST_CRASH_SECONDS}s x${MAX_CONSEC_FAST} OR >${MAX_PER_HOUR}/hr -> halt"
 
 declare -a crash_times=(); consec_fast=0
 while :; do
+  wait_for_gpu
   lc="$(latest_ckpt)"
   if [[ -n "$lc" ]]; then
     USE="$RUNDIR/_resume_config.toml"
@@ -149,14 +187,22 @@ while :; do
   cpid=$!; echo "$cpid" > "$RUNDIR/driver.pid"
   wait "$cpid"; code=$?; t1=$(date +%s); up=$((t1-t0))
   log "EXIT pid=$cpid code=$code uptime=${up}s"
+  gpu_sig=0
   if (( code != 0 )); then
     tail -n 40 "$RUNDIR/train.$stamp.out.log" 2>/dev/null \
       | grep -E 'Error|Traceback|raise |CUDA|assert' | tail -n 3 \
       | while IFS= read -r line; do log "CRASH| $line"; done
+    if tail -n 80 "$RUNDIR/train.$stamp.out.log" 2>/dev/null \
+        | grep -qE 'CUDA error|AcceleratorError|cudaError|libc10_cuda|CUDA driver error'; then
+      gpu_sig=1
+    fi
   fi
   if (( code == 0 )); then echo "exit 0 at $(date -u +%FT%TZ)" > "$DONE"; log "DONE (exit 0)"; break; fi
   crash_times+=("$t1"); now=$(date +%s); kept=(); for ct in "${crash_times[@]}"; do (( now-ct < 3600 )) && kept+=("$ct"); done; crash_times=("${kept[@]}")
-  if (( up < FAST_CRASH_SECONDS )); then consec_fast=$((consec_fast+1)); else consec_fast=0; fi
+  if (( gpu_sig )); then
+    log "CUDA-signature crash — settling ${GPU_SETTLE_SECONDS}s (wedged dxg heals off-load); consecFast unchanged, GPU probe gates the relaunch"
+    sleep "$GPU_SETTLE_SECONDS"
+  elif (( up < FAST_CRASH_SECONDS )); then consec_fast=$((consec_fast+1)); else consec_fast=0; fi
   log "breaker: consecFast=$consec_fast crashesLastHour=${#crash_times[@]}"
   if (( consec_fast >= MAX_CONSEC_FAST || ${#crash_times[@]} > MAX_PER_HOUR )); then
     echo "halt: consecFast=$consec_fast crashesLastHour=${#crash_times[@]}" > "$HALT"
