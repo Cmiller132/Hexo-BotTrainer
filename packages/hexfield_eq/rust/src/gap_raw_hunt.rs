@@ -2376,4 +2376,841 @@ mod tests {
             );
         }
     }
+
+    // =======================================================================
+    // BIRTH-LEDGER hunt (HUNT_REPORT_BIRTH_LEDGER.md).
+    //
+    // Item 1 — pure window-incidence geometry: how many count-k-or-better
+    //   length-6 windows can n attacker stones share on the hex lattice?
+    //   These are ABSOLUTE ceilings on simultaneous near-mature threats after
+    //   n placements (no game tree, no defenders).  Enumerated exhaustively
+    //   over edge-connected polyhexes (validated complete against OEIS A000228
+    //   and cross-checked vs full-region brute force for small n); the optimum
+    //   is a single connected cluster (superadditivity, verified below).
+    // Item 2 — game-constrained maturation frontier from Phi<1 roots.
+    // Item 3 — pileup forcibility (the >=3 count-4 fork = the R1b break).
+    // =======================================================================
+
+    const HEX_NBRS: [Cell; 6] = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, -1), (-1, 1)];
+
+    /// Count distinct length-6 windows (all 3 axes) holding `>= thr` of `stones`
+    /// (bare geometry: no defenders, so "alive" == "has >= thr attacker stones").
+    fn windows_ge(stones: &BTreeSet<Cell>, thr: u32) -> usize {
+        let mut seen: BTreeSet<WinKey> = BTreeSet::new();
+        let mut cnt = 0usize;
+        for &a in stones {
+            for (ax, &v) in AXES.iter().enumerate() {
+                for start in windows_through(a, v) {
+                    let key = (ax as u8, start.0, start.1);
+                    if !seen.insert(key) {
+                        continue;
+                    }
+                    let mut acnt = 0u32;
+                    for c in window_cells(start, v) {
+                        if stones.contains(&c) {
+                            acnt += 1;
+                        }
+                    }
+                    if acnt >= thr {
+                        cnt += 1;
+                    }
+                }
+            }
+        }
+        cnt
+    }
+
+    /// Exact profile `n[s]` = #windows with exactly `s` attacker stones (s=1..6).
+    fn geom_profile(stones: &BTreeSet<Cell>) -> [u64; 7] {
+        let mut seen: BTreeSet<WinKey> = BTreeSet::new();
+        let mut n = [0u64; 7];
+        for &a in stones {
+            for (ax, &v) in AXES.iter().enumerate() {
+                for start in windows_through(a, v) {
+                    let key = (ax as u8, start.0, start.1);
+                    if !seen.insert(key) {
+                        continue;
+                    }
+                    let mut acnt = 0usize;
+                    for c in window_cells(start, v) {
+                        if stones.contains(&c) {
+                            acnt += 1;
+                        }
+                    }
+                    if acnt >= 1 {
+                        n[acnt] += 1;
+                    }
+                }
+            }
+        }
+        n
+    }
+
+    /// The 2-empty cell pairs of every EXACTLY-count-4 window at `stones`.
+    fn count4_empty_pairs(stones: &BTreeSet<Cell>) -> Vec<[Cell; 2]> {
+        let mut seen: BTreeSet<WinKey> = BTreeSet::new();
+        let mut out = Vec::new();
+        for &a in stones {
+            for (ax, &v) in AXES.iter().enumerate() {
+                for start in windows_through(a, v) {
+                    let key = (ax as u8, start.0, start.1);
+                    if !seen.insert(key) {
+                        continue;
+                    }
+                    let mut acnt = 0u32;
+                    let mut emp: Vec<Cell> = Vec::new();
+                    for c in window_cells(start, v) {
+                        if stones.contains(&c) {
+                            acnt += 1;
+                        } else {
+                            emp.push(c);
+                        }
+                    }
+                    if acnt == 4 {
+                        out.push([emp[0], emp[1]]);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Min hitting-set size over a family of 2-empty pairs, capped at 3
+    /// (returns 3 for ">= 3").  `>= 3` means two defender stones cannot place
+    /// one blocker into every count-4 window this turn: an UNBLOCKABLE fork.
+    fn min_hitting_set_cap3(fam: &[[Cell; 2]]) -> u32 {
+        if fam.is_empty() {
+            return 0;
+        }
+        let cellset: BTreeSet<Cell> = fam.iter().flatten().copied().collect();
+        let cv: Vec<Cell> = cellset.into_iter().collect();
+        for &c in &cv {
+            if fam.iter().all(|s| s.contains(&c)) {
+                return 1;
+            }
+        }
+        for i in 0..cv.len() {
+            for j in (i + 1)..cv.len() {
+                let (a, b) = (cv[i], cv[j]);
+                if fam.iter().all(|s| s.contains(&a) || s.contains(&b)) {
+                    return 2;
+                }
+            }
+        }
+        3
+    }
+
+    /// Max number of pairwise empty-DISJOINT count-4 windows (each needs its own
+    /// defender stone; `>= 3` disjoint == an unblockable-in-one-turn fork).
+    fn max_disjoint_count4(fam: &[[Cell; 2]]) -> usize {
+        fn rec(fam: &[[Cell; 2]], i: usize, used: &mut BTreeSet<Cell>) -> usize {
+            if i == fam.len() {
+                return 0;
+            }
+            let mut best = rec(fam, i + 1, used);
+            let w = fam[i];
+            if !used.contains(&w[0]) && !used.contains(&w[1]) {
+                used.insert(w[0]);
+                used.insert(w[1]);
+                best = best.max(1 + rec(fam, i + 1, used));
+                used.remove(&w[0]);
+                used.remove(&w[1]);
+            }
+            best
+        }
+        if fam.len() > 26 {
+            return usize::MAX; // guard: never hit for n<=12 (family stays small)
+        }
+        let mut used = BTreeSet::new();
+        rec(fam, 0, &mut used)
+    }
+
+    /// The 12 D6 lattice symmetries of axial `(q,r)`, via cube coords
+    /// (x=q, y=-q-r, z=r; rot60=(-z,-x,-y); reflection swaps y,z).
+    fn d6_images(c: Cell) -> [Cell; 12] {
+        let x = c.0 as i32;
+        let z = c.1 as i32;
+        let y = -x - z;
+        let mut cur = (x, y, z);
+        let mut out = [(0i16, 0i16); 12];
+        for i in 0..6 {
+            out[i] = (cur.0 as i16, cur.2 as i16); // rotation image: q=x, r=z
+            out[i + 6] = (cur.0 as i16, cur.1 as i16); // reflected: q=x, r=y
+            cur = (-cur.2, -cur.0, -cur.1); // rot60
+        }
+        out
+    }
+
+    /// Canonical form of a stone set under D6 + translation: for each of the 12
+    /// symmetries, translate the per-coordinate min corner to origin, sort, and
+    /// take the lexicographically smallest result (translation-invariant).
+    fn canonical(stones: &BTreeSet<Cell>) -> Vec<Cell> {
+        let mut best: Option<Vec<Cell>> = None;
+        for op in 0..12 {
+            let mut pts: Vec<Cell> = stones.iter().map(|&c| d6_images(c)[op]).collect();
+            let minq = pts.iter().map(|p| p.0).min().unwrap();
+            let minr = pts.iter().map(|p| p.1).min().unwrap();
+            for p in pts.iter_mut() {
+                p.0 -= minq;
+                p.1 -= minr;
+            }
+            pts.sort();
+            match &best {
+                None => best = Some(pts),
+                Some(b) => {
+                    if pts < *b {
+                        best = Some(pts);
+                    }
+                }
+            }
+        }
+        best.unwrap()
+    }
+
+    /// All edge-connected polyhexes of size `n`, one canonical rep each (free
+    /// polyhexes under D6+translation).  Count must equal OEIS A000228.
+    fn gen_polyhexes(n: usize) -> Vec<Vec<Cell>> {
+        use std::collections::HashSet;
+        let mut level: HashSet<Vec<Cell>> = HashSet::new();
+        level.insert(vec![(0i16, 0i16)]);
+        for _ in 1..n {
+            let mut next: HashSet<Vec<Cell>> = HashSet::new();
+            for cfg in &level {
+                let set: BTreeSet<Cell> = cfg.iter().copied().collect();
+                let mut cand: BTreeSet<Cell> = BTreeSet::new();
+                for &s in &set {
+                    for d in HEX_NBRS {
+                        let c = (s.0 + d.0, s.1 + d.1);
+                        if !set.contains(&c) {
+                            cand.insert(c);
+                        }
+                    }
+                }
+                for c in cand {
+                    let mut s2 = set.clone();
+                    s2.insert(c);
+                    next.insert(canonical(&s2));
+                }
+            }
+            level = next;
+        }
+        level.into_iter().collect()
+    }
+
+    /// Exhaustive max `windows_ge(thr)` over ALL `n`-subsets of the axial
+    /// rhombus `q,r in [0,l]` (NO connectivity assumption): the belt-and-braces
+    /// cross-check that the edge-connected optimum is the global optimum.
+    fn brute_region_max(n: usize, l: i16, thr: u32) -> usize {
+        let cells: Vec<Cell> = (0..=l)
+            .flat_map(|q| (0..=l).map(move |r| (q, r)))
+            .collect();
+        let m = cells.len();
+        let mut best = 0usize;
+        let mut idx: Vec<usize> = (0..n).collect();
+        loop {
+            let set: BTreeSet<Cell> = idx.iter().map(|&i| cells[i]).collect();
+            let w = windows_ge(&set, thr);
+            if w > best {
+                best = w;
+            }
+            let mut i = n;
+            loop {
+                if i == 0 {
+                    return best;
+                }
+                i -= 1;
+                if idx[i] != i + m - n {
+                    break;
+                }
+            }
+            idx[i] += 1;
+            for j in (i + 1)..n {
+                idx[j] = idx[j - 1] + 1;
+            }
+        }
+    }
+
+    /// Expected free-polyhex counts (OEIS A000228, n=1..12) — generator check.
+    const A000228: [usize; 12] = [1, 1, 3, 7, 22, 82, 333, 1448, 6572, 30490, 143552, 683101];
+
+    /// ITEM 1: pure window-incidence geometry ceilings.
+    #[test]
+    #[ignore = "birth-ledger geometry; run with --nocapture --test-threads=1"]
+    fn birth_ledger_geometry() {
+        println!("BLGEOM commit=9b32db63 lambda=sqrt3 metric=max_#length6_windows_with_ge_k_stones");
+        // Generator completeness + single-cluster (superadditivity) evidence.
+        let mut fmax4: Vec<usize> = vec![0; 13]; // f4[n] = max windows_ge4 over n stones
+        let mut fmax3: Vec<usize> = vec![0; 13];
+        for n in 1..=12usize {
+            let cfgs = gen_polyhexes(n);
+            let gen_ok = cfgs.len() == A000228[n - 1];
+            let mut best4 = 0usize;
+            let mut cfg4: Vec<Cell> = Vec::new();
+            let mut best3 = 0usize;
+            let mut cfg3: Vec<Cell> = Vec::new();
+            let mut best5 = 0usize;
+            let mut best_e4 = 0usize; // max EXACTLY-4 windows
+            let mut max_disj = 0usize; // max pairwise-disjoint count-4 windows
+            let mut cfg_disj: Vec<Cell> = Vec::new();
+            let mut fork_exists = false;
+            let mut fork_cfg: Vec<Cell> = Vec::new();
+            let mut fork_ncount4 = 0usize;
+            for cfg in &cfgs {
+                let set: BTreeSet<Cell> = cfg.iter().copied().collect();
+                let w4 = windows_ge(&set, 4);
+                let w3 = windows_ge(&set, 3);
+                let w5 = windows_ge(&set, 5);
+                let prof = geom_profile(&set);
+                if w4 > best4 {
+                    best4 = w4;
+                    cfg4 = cfg.clone();
+                }
+                if w3 > best3 {
+                    best3 = w3;
+                    cfg3 = cfg.clone();
+                }
+                best5 = best5.max(w5);
+                best_e4 = best_e4.max(prof[4] as usize);
+                let fam = count4_empty_pairs(&set);
+                let disj = max_disjoint_count4(&fam);
+                if disj > max_disj {
+                    max_disj = disj;
+                    cfg_disj = cfg.clone();
+                }
+                if !fork_exists && min_hitting_set_cap3(&fam) >= 3 {
+                    fork_exists = true;
+                    fork_cfg = cfg.clone();
+                    fork_ncount4 = fam.len();
+                }
+            }
+            fmax4[n] = best4;
+            fmax3[n] = best3;
+            let prof4 = geom_profile(&cfg4.iter().copied().collect());
+            println!(
+                "BLGEOM n={n} polyhexes={} gen_ok={gen_ok} max_wge4={best4} max_wge3={best3} \
+                 max_wge5={best5} max_exactly4={best_e4} max_disjoint_c4={max_disj} \
+                 unblockable_fork={fork_exists}",
+                cfgs.len()
+            );
+            println!("BLGEOM_CFG n={n} thr4 config={cfg4:?} exact_profile(n1..n6)={prof4:?}");
+            if best3 > 0 {
+                println!("BLGEOM_CFG n={n} thr3 config={cfg3:?}");
+            }
+            if max_disj > 0 {
+                println!("BLGEOM_CFG n={n} maxdisjoint_c4={max_disj} config={cfg_disj:?}");
+            }
+            if fork_exists {
+                println!(
+                    "BLGEOM_FORK n={n} first_unblockable_fork ncount4={fork_ncount4} config={fork_cfg:?}"
+                );
+            }
+        }
+        // Superadditivity check (justifies "single cluster is optimal"): for all
+        // a+b=n, f4(n) >= f4(a)+f4(b).  If it holds, splitting stones never wins.
+        let mut superadd = true;
+        for n in 2..=12usize {
+            for a in 1..n {
+                if fmax4[n] < fmax4[a] + fmax4[n - a] {
+                    superadd = false;
+                    println!("BLGEOM_SUPERADD_FAIL n={n} a={a} f={} split={}", fmax4[n], fmax4[a] + fmax4[n - a]);
+                }
+            }
+        }
+        println!("BLGEOM_SUPERADD holds={superadd} (single connected cluster is optimal)");
+        // Brute-force cross-check (no connectivity assumption) for small n over
+        // the rhombus q,r in [0,6].  Confirms edge-connected optimum == global.
+        for n in 4..=6usize {
+            let bf4 = brute_region_max(n, 6, 4);
+            let bf3 = brute_region_max(n, 6, 3);
+            println!(
+                "BLGEOM_BRUTE n={n} region=[0,6]^2 brute_wge4={bf4} gen_wge4={} match4={} \
+                 brute_wge3={bf3} gen_wge3={} match3={}",
+                fmax4[n],
+                bf4 == fmax4[n],
+                fmax3[n],
+                bf3 == fmax3[n]
+            );
+        }
+    }
+
+    // =======================================================================
+    // ITEM 2 + 3 shared game-position helpers.
+    // =======================================================================
+
+    /// #attacker-alive windows with `>= thr` attacker stones (defenders kill).
+    fn alive_ge(pos: &Pos, thr: u32) -> usize {
+        let mut c = 0usize;
+        for k in alive_windows(pos) {
+            if let Some((acnt, _)) = window_status_at(pos, k) {
+                if acnt >= thr {
+                    c += 1;
+                }
+            }
+        }
+        c
+    }
+
+    /// The 2-empty pairs of every alive EXACT-count-4 window at `pos`.
+    fn count4_pairs_pos(pos: &Pos) -> Vec<[Cell; 2]> {
+        let mut out = Vec::new();
+        for k in alive_windows(pos) {
+            if let Some((acnt, emp)) = window_status_at(pos, k) {
+                if acnt == 4 {
+                    out.push([emp[0], emp[1]]);
+                }
+            }
+        }
+        out
+    }
+
+    /// Empty-cell sets of alive windows with `<= 2` empties (count-4 and count-5).
+    fn imminent_empty_sets(pos: &Pos) -> Vec<Vec<Cell>> {
+        let mut out = Vec::new();
+        for k in alive_windows(pos) {
+            if let Some((_, emp)) = window_status_at(pos, k) {
+                if emp.len() <= 2 {
+                    out.push(emp);
+                }
+            }
+        }
+        out
+    }
+
+    /// Min hitting set (cap 3) over variable-size empty sets.
+    fn min_hitting_var_cap3(fam: &[Vec<Cell>]) -> u32 {
+        if fam.is_empty() {
+            return 0;
+        }
+        let cells: BTreeSet<Cell> = fam.iter().flatten().copied().collect();
+        let cv: Vec<Cell> = cells.into_iter().collect();
+        for &c in &cv {
+            if fam.iter().all(|s| s.contains(&c)) {
+                return 1;
+            }
+        }
+        for i in 0..cv.len() {
+            for j in (i + 1)..cv.len() {
+                let (a, b) = (cv[i], cv[j]);
+                if fam.iter().all(|s| s.contains(&a) || s.contains(&b)) {
+                    return 2;
+                }
+            }
+        }
+        3
+    }
+
+    /// At a Defender-to-move (first_stone) node: the two defender placements this
+    /// turn cannot touch every `<=2`-empty window (min hitting set `>= 3`), so a
+    /// window survives with all empties open and the attacker completes it next
+    /// turn — a forced attacker win (blanket game).  This is the (I1)-breaking
+    /// UNBLOCKABLE pileup the R1b analysis flags.
+    fn unblockable_at_defender(pos: &Pos) -> bool {
+        min_hitting_var_cap3(&imminent_empty_sets(pos)) >= 3
+    }
+
+    /// Attacker-to-move `Pos` sharing `root`'s stones (used for the "defender
+    /// plays nothing" raw ceiling).
+    fn as_attacker_turn(root: &Pos) -> Pos {
+        Pos {
+            attackers: root.attackers.clone(),
+            defenders: root.defenders.clone(),
+            to_move: Side::Attacker,
+            first_stone: true,
+        }
+    }
+
+    /// Exhaustively enumerate every attacker 2-placement turn from `start`
+    /// (attacker to move, first_stone).  Returns, over all turns, the max
+    /// #count-4+ alive windows facing the defender, max #count-3+, max exact
+    /// delta-Phi surd, and the placement pair achieving argmax `(count4, dPhi)`.
+    fn exhaustive_attacker_turn(start: &Pos) -> (usize, usize, (i128, i128), Vec<Cell>) {
+        let base = start.profile().ab();
+        let mut best_c4 = 0usize;
+        let mut best_c3 = 0usize;
+        let mut best_dab = (0i128, 0i128);
+        // Committed pair maximises (count4, count3, dPhi): a CLUSTER-BUILDER, so
+        // the trajectory packs threats rather than spraying isolated births.
+        let mut best_key: (usize, usize, (i128, i128)) = (0, 0, (0, 0));
+        let mut best_pair: Vec<Cell> = Vec::new();
+        let m1 = start.legal_moves();
+        for &c1 in &m1 {
+            let p1 = start.apply(c1);
+            for &c2 in &p1.legal_moves() {
+                let p2 = p1.apply(c2);
+                let c4 = alive_ge(&p2, 4);
+                let c3 = alive_ge(&p2, 3);
+                let ab = p2.profile().ab();
+                let dab = (ab.0 - base.0, ab.1 - base.1);
+                best_c4 = best_c4.max(c4);
+                best_c3 = best_c3.max(c3);
+                if cmp_surd(dab.0, dab.1, best_dab.0, best_dab.1) == Ordering::Greater {
+                    best_dab = dab;
+                }
+                let better = (c4, c3) > (best_key.0, best_key.1)
+                    || ((c4, c3) == (best_key.0, best_key.1)
+                        && cmp_surd(dab.0, dab.1, best_key.2 .0, best_key.2 .1)
+                            == Ordering::Greater);
+                if best_pair.is_empty() || better {
+                    best_key = (c4, c3, dab);
+                    best_pair = vec![c1, c2];
+                }
+            }
+        }
+        (best_c4, best_c3, best_dab, best_pair)
+    }
+
+    fn phi_f(ab: (i128, i128)) -> f64 {
+        (ab.0 as f64 + ab.1 as f64 * 3f64.sqrt()) / 27.0
+    }
+
+    /// Greedily search defenders (from a candidate ring) that most reduce Phi
+    /// until `Phi<1`, giving a DENSER (2-attacker-stone) Defender-FirstStone root.
+    fn greedy_dense_root(atk: &[Cell], max_def: usize) -> Option<Pos> {
+        let attackers: BTreeSet<Cell> = atk.iter().copied().collect();
+        let mut cand: Vec<Cell> = Vec::new();
+        for q in -3..=3i16 {
+            for r in -3..=3i16 {
+                let c = (q, r);
+                if !attackers.contains(&c) {
+                    cand.push(c);
+                }
+            }
+        }
+        let mut defenders: BTreeSet<Cell> = BTreeSet::new();
+        for _ in 0..max_def {
+            if phi_profile(&attackers, &defenders).phi_lt_one() {
+                break;
+            }
+            let mut best: Option<(Cell, (i128, i128))> = None;
+            for &c in &cand {
+                if attackers.contains(&c) || defenders.contains(&c) {
+                    continue;
+                }
+                let mut d2 = defenders.clone();
+                d2.insert(c);
+                let ab = phi_profile(&attackers, &d2).ab();
+                match &best {
+                    None => best = Some((c, ab)),
+                    Some((_, bab)) => {
+                        if cmp_surd(ab.0, ab.1, bab.0, bab.1) == Ordering::Less {
+                            best = Some((c, ab));
+                        }
+                    }
+                }
+            }
+            match best {
+                Some((c, _)) => {
+                    defenders.insert(c);
+                }
+                None => break,
+            }
+        }
+        if phi_profile(&attackers, &defenders).phi_lt_one() {
+            Some(Pos {
+                attackers,
+                defenders,
+                to_move: Side::Defender,
+                first_stone: true,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// ITEM 2: game-constrained maturation frontier.
+    #[test]
+    #[ignore = "birth-ledger maturation frontier; run with --nocapture --test-threads=1"]
+    fn birth_ledger_maturation() {
+        println!("BLMAT commit=9b32db63 lambda=sqrt3 role=Player0=Defender,Player1=Attacker");
+        // Sparse near-threshold roots (1 attacker stone) + denser 2-stone roots.
+        let mut roots: Vec<(String, Pos)> = vec![
+            ("es_core".into(), defender_first_stone(&[(0, 0)], &[(1, 0)])),
+            ("blocker_2_0".into(), defender_first_stone(&[(0, 0)], &[(2, 0)])),
+            ("blocker_3_0".into(), defender_first_stone(&[(0, 0)], &[(3, 0)])),
+        ];
+        for (tag, atk) in [
+            ("dense_01_10", vec![(0, 0), (1, 0)]),
+            ("dense_01_20", vec![(0, 0), (2, 0)]),
+            ("dense_01_1m1", vec![(0, 0), (1, -1)]),
+        ] {
+            if let Some(p) = greedy_dense_root(&atk, 8) {
+                roots.push((tag.into(), p));
+            }
+        }
+        for (rname, root) in &roots {
+            let ab0 = root.profile().ab();
+            println!(
+                "BLMAT_ROOT {rname} attackers={} defenders={} phi={:.6} phi_lt1={}",
+                root.attackers.len(),
+                root.defenders.len(),
+                phi_f(ab0),
+                root.profile().phi_lt_one()
+            );
+            // Depth-1 EXHAUSTIVE, defender plays nothing (raw ceiling).
+            let start = as_attacker_turn(root);
+            let (c4, c3, dab, pair) = exhaustive_attacker_turn(&start);
+            println!(
+                "BLMAT_RAW1 {rname} exhaustive=1turn max_count4plus={c4} max_count3plus={c3} \
+                 max_dPhi={:.6} argmax_pair={pair:?}",
+                phi_f(dab)
+            );
+            // Depth-1 EXHAUSTIVE after one R1b defender turn (realistic ceiling).
+            let mut afterd = root.clone();
+            for _ in 0..2 {
+                let c = completion_first_move(&afterd, 2);
+                if afterd.occupied(c) {
+                    break;
+                }
+                afterd = afterd.apply(c);
+            }
+            if matches!(afterd.to_move, Side::Attacker) {
+                let (c4b, c3b, dabb, pairb) = exhaustive_attacker_turn(&afterd);
+                println!(
+                    "BLMAT_R1b1 {rname} exhaustive=1turn(after R1b) max_count4plus={c4b} \
+                     max_count3plus={c3b} max_dPhi={:.6} argmax_pair={pairb:?}",
+                    phi_f(dabb)
+                );
+            }
+            // Multi-turn greedy (attacker maximizes (count4, dPhi) each turn),
+            // exhaustive within each turn.  Two defenses: NONE (raw) and R1b.
+            // NOT globally optimal past turn 1 — a per-turn greedy trajectory.
+            for use_r1b in [false, true] {
+                let label = if use_r1b { "R1b" } else { "none" };
+                if use_r1b {
+                    let mut p = root.clone();
+                    for t in 1..=6usize {
+                        for _ in 0..2 {
+                            let c = completion_first_move(&p, 2);
+                            if p.occupied(c) {
+                                break;
+                            }
+                            p = p.apply(c);
+                        }
+                        if !matches!(p.to_move, Side::Attacker) {
+                            break;
+                        }
+                        let (tc4, tc3, tdab, tpair) = exhaustive_attacker_turn(&p);
+                        for &c in &tpair {
+                            if !p.occupied(c) {
+                                p = p.apply(c);
+                            }
+                        }
+                        let disj = max_disjoint_count4(&count4_pairs_pos(&p));
+                        println!(
+                            "BLMAT_TRAJ {rname} def={label} turn={t} atk_stones={} count4plus={tc4} \
+                             count3plus={tc3} disjoint_c4={disj} dPhi_turn={:.4} six={}",
+                            p.attackers.len(),
+                            phi_f(tdab),
+                            p.attacker_has_six()
+                        );
+                        if p.attacker_has_six() || disj >= 3 {
+                            break;
+                        }
+                    }
+                } else {
+                    let mut atk = root.attackers.clone();
+                    let def = root.defenders.clone();
+                    for t in 1..=6usize {
+                        let start = Pos {
+                            attackers: atk.clone(),
+                            defenders: def.clone(),
+                            to_move: Side::Attacker,
+                            first_stone: true,
+                        };
+                        let (tc4, tc3, tdab, tpair) = exhaustive_attacker_turn(&start);
+                        for &c in &tpair {
+                            atk.insert(c);
+                        }
+                        let cur = Pos {
+                            attackers: atk.clone(),
+                            defenders: def.clone(),
+                            to_move: Side::Attacker,
+                            first_stone: true,
+                        };
+                        let disj = max_disjoint_count4(&count4_pairs_pos(&cur));
+                        println!(
+                            "BLMAT_TRAJ {rname} def={label} turn={t} atk_stones={} count4plus={tc4} \
+                             count3plus={tc3} disjoint_c4={disj} dPhi_turn={:.4} six={}",
+                            atk.len(),
+                            phi_f(tdab),
+                            cur.attacker_has_six()
+                        );
+                        if cur.attacker_has_six() || disj >= 3 {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // =======================================================================
+    // ITEM 3: pileup forcibility.
+    // =======================================================================
+
+    /// Sound minimax: can the ATTACKER force an unblockable pileup (or an
+    /// outright six) within `plies_left`, against EVERY defense?  Identical
+    /// soundness to `mb_search`, but recognises the (I1)-breaking pileup two
+    /// plies earlier than a completed six, so it reaches slightly deeper.
+    fn pileup_search(pos: &Pos, plies_left: u32, budget: &mut MbBudget) -> MbOutcome {
+        budget.nodes = budget.nodes.saturating_add(1);
+        if pos.attacker_has_six() {
+            return MbOutcome::AttackerWin;
+        }
+        if matches!(pos.to_move, Side::Defender) && pos.first_stone && unblockable_at_defender(pos) {
+            return MbOutcome::AttackerWin;
+        }
+        if plies_left == 0 || budget.nodes >= budget.cap {
+            return MbOutcome::Unknown;
+        }
+        let mut moves = pos.legal_moves();
+        if moves.is_empty() {
+            return MbOutcome::Unknown;
+        }
+        match pos.to_move {
+            Side::Attacker => {
+                moves.sort_by_key(|&c| {
+                    (
+                        std::cmp::Reverse(attacker_extension_len(&pos.attackers, c)),
+                        c.0,
+                        c.1,
+                    )
+                });
+                for c in moves {
+                    if pileup_search(&pos.apply(c), plies_left - 1, budget) == MbOutcome::AttackerWin
+                    {
+                        return MbOutcome::AttackerWin;
+                    }
+                    if budget.nodes >= budget.cap {
+                        return MbOutcome::Unknown;
+                    }
+                }
+                MbOutcome::Unknown
+            }
+            Side::Defender => {
+                for c in moves {
+                    if pileup_search(&pos.apply(c), plies_left - 1, budget) != MbOutcome::AttackerWin
+                    {
+                        return MbOutcome::Unknown;
+                    }
+                    if budget.nodes >= budget.cap {
+                        return MbOutcome::Unknown;
+                    }
+                }
+                MbOutcome::AttackerWin
+            }
+        }
+    }
+
+    /// Attacker existential search for a pileup/six against a FIXED defender
+    /// `policy` (cheap: branch only at attacker nodes).  Finds whether the
+    /// attacker can REACH an unblockable pileup vs that policy within horizon.
+    fn pileup_vs_policy(
+        pos: &Pos,
+        plies_left: u32,
+        policy: &impl Fn(&Pos) -> Cell,
+        budget: &mut MbBudget,
+    ) -> MbOutcome {
+        budget.nodes = budget.nodes.saturating_add(1);
+        if pos.attacker_has_six() {
+            return MbOutcome::AttackerWin;
+        }
+        if matches!(pos.to_move, Side::Defender) && pos.first_stone && unblockable_at_defender(pos) {
+            return MbOutcome::AttackerWin;
+        }
+        if plies_left == 0 || budget.nodes >= budget.cap {
+            return MbOutcome::Unknown;
+        }
+        match pos.to_move {
+            Side::Defender => {
+                let c = policy(pos);
+                pileup_vs_policy(&pos.apply(c), plies_left - 1, policy, budget)
+            }
+            Side::Attacker => {
+                let mut moves = pos.legal_moves();
+                moves.sort_by_key(|&c| {
+                    (
+                        std::cmp::Reverse(attacker_extension_len(&pos.attackers, c)),
+                        c.0,
+                        c.1,
+                    )
+                });
+                for c in moves {
+                    if pileup_vs_policy(&pos.apply(c), plies_left - 1, policy, budget)
+                        == MbOutcome::AttackerWin
+                    {
+                        return MbOutcome::AttackerWin;
+                    }
+                    if budget.nodes >= budget.cap {
+                        return MbOutcome::Unknown;
+                    }
+                }
+                MbOutcome::Unknown
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "birth-ledger pileup forcibility; run with --nocapture --test-threads=1"]
+    fn birth_ledger_pileup() {
+        println!("BLPILE commit=9b32db63 lambda=sqrt3 predicate=min_hitting_set(<=2empty windows)>=3");
+        let mut roots: Vec<(String, Pos)> = vec![
+            ("es_core".into(), defender_first_stone(&[(0, 0)], &[(1, 0)])),
+            ("blocker_1_-1".into(), defender_first_stone(&[(0, 0)], &[(1, -1)])),
+            ("blocker_2_0".into(), defender_first_stone(&[(0, 0)], &[(2, 0)])),
+            ("blocker_3_0".into(), defender_first_stone(&[(0, 0)], &[(3, 0)])),
+        ];
+        for (tag, atk) in [
+            ("dense_01_10", vec![(0, 0), (1, 0)]),
+            ("dense_01_20", vec![(0, 0), (2, 0)]),
+        ] {
+            if let Some(p) = greedy_dense_root(&atk, 8) {
+                roots.push((tag.into(), p));
+            }
+        }
+        let cap = 1_500_000u64;
+        for (rname, root) in &roots {
+            println!(
+                "BLPILE_ROOT {rname} attackers={} defenders={} phi={:.6}",
+                root.attackers.len(),
+                root.defenders.len(),
+                phi_f(root.profile().ab())
+            );
+            // (a) SOUND minimax vs BEST defense: earliest forced pileup horizon.
+            // `completed=true` = EXHAUSTIVE (no cap abort) => a certificate that
+            // no forced pileup exists within that many plies against ALL defense.
+            for plies in [2u32, 4, 6, 8] {
+                let mut budget = MbBudget { nodes: 0, cap };
+                let out = pileup_search(root, plies, &mut budget);
+                let completed = budget.nodes < cap;
+                println!(
+                    "BLPILE_SOUND {rname} plies={plies} outcome={:?} nodes={} completed={completed} \
+                     forced_pileup={}",
+                    out,
+                    budget.nodes,
+                    out == MbOutcome::AttackerWin
+                );
+                if out == MbOutcome::AttackerWin || !completed {
+                    break;
+                }
+            }
+            // (b) vs FIXED R1b policy: can attacker REACH a pileup within a
+            // short existential horizon?  (The known R1b leak is at placement
+            // ~48-60 -- far beyond exhaustive reach; a capped Unknown here just
+            // confirms no SHORT forced pileup vs R1b.)
+            for plies in [10u32] {
+                let mut budget = MbBudget { nodes: 0, cap };
+                let policy = |p: &Pos| completion_first_move(p, 2);
+                let out = pileup_vs_policy(root, plies, &policy, &mut budget);
+                let completed = budget.nodes < cap;
+                println!(
+                    "BLPILE_R1b {rname} plies={plies} outcome={:?} nodes={} completed={completed} \
+                     reached_pileup={}",
+                    out,
+                    budget.nodes,
+                    out == MbOutcome::AttackerWin
+                );
+            }
+        }
+    }
 }
