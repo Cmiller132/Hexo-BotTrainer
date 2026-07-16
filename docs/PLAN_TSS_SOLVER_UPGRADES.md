@@ -112,11 +112,14 @@ sections its landing updates.
 
 ## I.1 The engine as built (round-9b, gate-verified)
 
-The normative solver is **`WidePnSearch`** (`tss_solver.rs`, branch
-`claude/tss-vcf-width`): a single-level, certificate-grade, staged-deepening
-df-pn **arena** engine. It replaced the old narrow DFS prover as the
-normative solver over rounds 5–9b of the VCF-width campaign. Mechanisms, by
-their in-code names:
+The normative **offline** solver is **`WidePnSearch`** (`tss_solver.rs`): a
+single-level, certificate-grade, staged-deepening df-pn **arena** engine. It
+replaced the narrow DFS prover for corpus/deep root solving over rounds 5–9b
+of the VCF-width campaign. The trainer's production leaf/root-guard/async
+surface still intentionally constructs `TssSolver::default()`, whose
+byte-identity contract selects the narrow DFS and count>=3 generator; that
+separate live dependency is recorded in §I.3. Offline mechanisms, by their
+in-code names:
 
 - **Persistent proof-number frontier.** The arena holds pn/dn per entry; the
   retained PN frontier is the search arena, not the transposition table, so
@@ -167,12 +170,11 @@ cause) to stop indexing 0l's working set around ~1M nodes; 2 GiB is the
 official deep-solve test profile. That finding is why TT capacity/sharing is
 now a first-class bottleneck (§I.4).
 
-**What is slated for deletion** (§I.3): the old narrow DFS prover and its
-narrow generator; the uncertified `WideRacer` oracle ("Fix A": built in
-round 9, A/B'd — 185,790 nodes and 97.9 s with racer on AND off, i.e. no
-benefit because certified search is already frontier-efficient — default OFF
-behind `cfg(test)`, recommended deletion); and the losing experimental
-scaffolds of rounds 5–8.
+**Consolidation outcome** (§I.3): `WideRacer` and its test-only A/B hook are
+deleted. Round-8b had already removed the losing round-5–8 DAG/graph-PN and
+bounded-probe variants. The narrow DFS and count>=3 generator remain because
+they are the live trainer leaf path; deleting them requires a separately
+gated wide-engine-with-narrow-options migration.
 
 ## I.2 The Group-2 arc: closing the λ² structural gap
 
@@ -207,7 +209,7 @@ the round-3 design memo. Key consequence: for genuine λ² positions,
 **acceptance comes from the independent verifier, not an oracle** — a wide
 WIN whose certificate the strict verifier accepts is the deliverable.
 
-**Round 3** (base `1e082d40`, running in this worktree,
+**Round 3** (base `1e082d40`, landed as `bfd03ca9`,
 `.codex-group2/round3-progress.md`) — THE ENGINE ROUND:
 
 - Two tri-state (Off/Shadow/Consume) flags: **`quiet_turn_or_edges`**
@@ -243,7 +245,7 @@ WIN whose certificate the strict verifier accepts is the deliverable.
   separate forced-dispatch contract). No-regression matrix green: all-19
   gate PASS flags-off (445.4 s), spare NO controls unchanged, default suite
   95/0, narrow byte-identity untouched.
-- **Step 4** (in progress): the R1b **seed-radius one-relay shrink**,
+- **Step 4** (green): the R1b **seed-radius one-relay shrink**,
   production `seed_band_radius(d) = 8·(d−1)` for `d ≥ 1` (0 at `d ≤ 1`) in
   BOTH finder and verifier, justified by L9′'s `8(B−1)` bound and gated
   separately (chain fixtures + mutation suite + full all-19 re-run; any
@@ -266,27 +268,31 @@ exposure labels).
 
 Once G2R3 is folded and gate-green at the tip:
 
-- **C1 — delete the old narrow DFS prover and narrow generator.** The wide
-  engine strictly dominates it on the gate (14/14 at 4.3x round-9→9b wall
-  improvement and ~40x cumulative) and now covers the λ² regime the narrow
-  finder reached only heuristically. The historical finder's remaining use —
-  mining evidence (it found `double_fork_compact`'s WIN first) — is
-  discharged by the wide engine's own quiet mode. Keep `tss_reference.rs`
+- **C1 — partially executable; production dependency blocks deletion.** The
+  wide engine strictly dominates the narrow prover as the offline corpus/root
+  solver, but `tree.rs`, `search.rs`, and `tss_async.rs` all construct
+  `TssSolver::default()` for trainer leaf, root-guard, and worker solves. That
+  default selects the narrow DFS, count>=3 generator, and split local/shared
+  TT. The path therefore stays byte-identical. Completing C1 requires a
+  wide-engine-with-narrow-options implementation plus golden-digest and
+  narrow certificate/node-count identity proof. Keep `tss_reference.rs`
   (stock, deliberately unoptimized) and `tss_reference_fast` (validated
-  209/209) as the two independent oracles; they are test-only.
-- **C2 — delete `WideRacer` (Fix A).** Measured useless (§I.1); uncertified
-  code adjacent to the certified path is pure hazard surface. Its one
-  residual idea — zone-cardinality-informed cross-leaf scheduling — moves to
-  U8 (Part II), consuming *verifier-derived* quantities only.
+  209/209) as the two independent test-only oracles.
+- **C2 — DONE: `WideRacer` (Fix A) deleted.** The racer field, probe branch,
+  memo/Zobrist implementation, constants, and `TSS_WIDE_AB_RACER` test hook
+  are gone. Its one residual idea — zone-cardinality-informed cross-leaf
+  scheduling — remains recorded in U8 and consumes *verifier-derived*
+  quantities only.
 - **C3 — delete losing experimental scaffolds** of rounds 5–8 (round-8's
   losing TT variants etc.) and the round-2/3 harness dead ends that did not
   freeze into corpora. Frozen corpora, gate records, and progress memos
   stay.
-- **C4 — single profile, single ladder.** One documented TT profile story
-  (512 MiB default / 2 GiB deep-solve test profile / per-solve byte caps in
-  leaf mode); one rung ladder (`TSS_RUNBOOK.md`); the spare corpus keeps its
-  honest semantics (NO controls; WIN_PENDING only with an exhaustive-oracle
-  or verifier-accepted row).
+- **C4 — single profile, single ladder.** `TSS_RUNBOOK.md` is authoritative:
+  512 MiB ordinary offline default; 2 GiB official deep-solve profile via
+  `TSS_BACKWALK_TT_BYTES=2147483648`; 256 KiB per trainer solve; and the
+  forcing ladder 10k→100k→1M→20M (NO rows stop at 1M). The spare corpus
+  keeps its honest semantics (NO controls; WIN_PENDING only with an
+  exhaustive-oracle or verifier-accepted row).
 - **C5 — paper-quote hygiene.** Any number quoted into the paper re-derives
   from a gate at the exact quoted commit (the round-9b gate at `ac3f455f`
   discharged this for the current headline set; G2R3's fold must repeat it

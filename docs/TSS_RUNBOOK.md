@@ -1,11 +1,40 @@
 # TSS v2 — main_3 Rung-Enablement Run-Book
 
-Everything below is BUILT, tested, and default-off on branch
-`claude/tss-v2-build`. Attaching to the live main_3 run = merge the branch
-into the run branch → rebuild the extension → relaunch at an epoch boundary
-(the launch script doubles as the relauncher) → flip ONE flag per rung.
+Everything below is BUILT, tested, and default-off in the current trainer
+tree. Attaching it to a live main_3 run = rebuild the extension → relaunch at
+an epoch boundary (the launch script doubles as the relauncher) → flip ONE
+flag per rung.
 Revert of any rung = flip the flag back + relaunch (checkpoints unaffected;
 target-semantics rungs additionally note `target_regime` below).
+
+## Canonical solver profiles and offline ladder
+
+There are three memory contexts, all expressed as caller-owned byte caps:
+
+- The ordinary offline test profile is **512 MiB**. This is the bare default
+  in the forcing and spare corpus harnesses.
+- The official deep-solve acceptance profile is **2 GiB**, selected with
+  `TSS_BACKWALK_TT_BYTES=2147483648`. The all-19 forcing gate is one process
+  and uses the fixed node ladder **10k → 100k → 1M → 20M** for WIN
+  rows; NO rows stop after 1M because their acceptance condition is non-WIN.
+- Trainer leaf, root-guard, and async-worker solves use the **256 KiB
+  per-solve cap** in `RustSearch::TSS_SOLVER_TT_BYTES`. The default narrow
+  profile splits that cap equally between the solve-local TT and the
+  persistent positive-fragment cache. Pair-complete offline profiles use the
+  caller's whole cap locally.
+
+The official all-19 gate command from the worktree root is:
+
+```powershell
+$env:CARGO_TARGET_DIR='.target-codex'
+$env:TSS_BACKWALK_TT_BYTES='2147483648'
+cargo test --release -p hexfield_eq tss_corpus_check -- --ignored --test-threads=1 --nocapture
+```
+
+The spare corpus is not a second positive ladder. `NO` rows are soundness
+controls and must remain non-WIN. A positive row may be labelled
+`WIN_PENDING` only after an exhaustive oracle establishes WIN or after a
+strict-verifier-accepted certificate is recorded with explicit provenance.
 
 ## The flags
 
@@ -113,7 +142,9 @@ For park-mode production sizing, leave `tss_solver_async_threads` at the known-s
 - The Stage-0 golden digest (`tests/data/hexfield_eq_tss_stage0_golden.json`)
   pins flag-off bit-identity; regenerate ONLY for an intentional
   behavior-change baseline (two-build procedure in the test docstring).
-- Solver memory: per-solve TT capped at 256 KiB, per-move memo ≤8192 entries
+- Solver memory: the canonical profiles and offline ladder are defined above;
+  trainer solves are capped at 256 KiB per solve, and the per-move memo has
+  ≤8192 entries
   (cleared every move inline; async retains verified `Done` entries for the
   life of the game's search object, still ≤8192) — no unbounded growth (host
   earlyoom discipline). Async adds: request queue ≤16384 state clones + one

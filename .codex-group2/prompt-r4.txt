@@ -1,0 +1,87 @@
+Group-2, round 4 — CONSOLIDATION: the wide engine becomes THE offline solver; dead scaffolds go; every headline number re-derives at the tip.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width at
+commit bfd03ca9 (round-3 landed: quiet-turn OR edges + certified ranked
+zones + the 8*(d-1) seed shrink, all gates green) — actually confirm HEAD
+first; a docs commit (5536b2bb) may be the tip. Your binding spec is
+docs/PLAN_TSS_SOLVER_UPGRADES.md §I.3 (consolidation items C1-C5) — read
+that section plus the IN-FLIGHT register, then .codex-group2/round3-progress.md
+for what just landed. This is a deletion/hygiene round: no new search
+features.
+
+## THE HARD CONSTRAINT THAT OVERRIDES C1's LETTER
+The production MCTS-leaf integration (search.rs / tree.rs, the
+TSS_RUNBOOK.md flag ladder, TssSolver::default()'s narrow solve path with
+its count>=3 OR-generator and split-TT) is LIVE PRODUCTION for the trainer
+and is the substrate of the planned Phase-3 leaf rungs (master plan Part
+II). It MUST survive this round byte-identical: default suite 95/0, every
+narrow byte-identity / golden-digest test green, no default constructor or
+narrow branch behavior change.
+
+Therefore, before deleting ANYTHING under C1 ("delete the old narrow DFS
+prover and narrow generator"), build the dependency map: what code paths
+does TssSolver::default() (as invoked from tree.rs/search.rs and the
+default suite) actually execute? If the "old narrow DFS prover" IS (or
+shares) the production leaf path, C1 as written is NOT executable this
+round — in that case delete only what is provably dead from the production
+path's perspective (e.g., a root/offline-only DFS entry point the wide
+engine has replaced, if one exists as separate code), and WRITE UP the
+dependency map + a concrete proposal for how C1 could ever be completed
+(e.g., wide-engine-with-narrow-options byte-identity proof) as a design
+decision for the orchestrator. An honest "C1 partially executable, here is
+the map" beats a broken trainer by a thousand miles.
+
+## The items (from §I.3, in order)
+- C1 (subject to the constraint above): remove the superseded narrow
+  offline/root prover surface the wide engine has strictly replaced. KEEP
+  tss_reference.rs (stock oracle) and tss_reference_fast.rs (validated
+  209/209) — both test-only, both stay.
+- C2: delete WideRacer (Fix A) entirely — code, flags, cfg(test) env hooks
+  (TSS_WIDE_AB_RACER etc.). Measured useless; uncertified code adjacent to
+  the certified path is hazard surface. Note its one residual idea
+  (zone-cardinality cross-leaf scheduling -> U8) is already recorded in the
+  master plan; you delete, not migrate.
+- C3: delete losing experimental scaffolds from rounds 5-8 (losing TT
+  variants, dead A/B env-gated paths that never became defaults, round-2/3
+  harness dead ends that did not freeze into corpora). KEEP: frozen corpora
+  (forcing + spare), gate records (.codex-round9b-gate/), all round
+  progress memos, the hunt cross-check tests (hunt_*), and anything the
+  default suite or documented regen commands reference. When in doubt
+  whether something is scaffold or load-bearing: grep for references, and
+  if still in doubt, keep it and list it in the memo.
+- C4: unify the profile/ladder documentation: one TT profile story (512 MiB
+  default / 2 GiB deep-solve test profile TSS_BACKWALK_TT_BYTES / per-solve
+  caps in leaf mode) and one rung ladder, documented where the tests and
+  TSS_RUNBOOK.md point; kill contradictory or stale comments. Spare corpus
+  semantics unchanged (NO controls honest; WIN_PENDING only with an
+  exhaustive-oracle or verifier-accepted row — you may now record
+  double_fork_compact's verifier-accepted WIN/409 as a WIN_VERIFIED row
+  with provenance if the semantics in tss_spare_corpus.rs support adding
+  that status class cleanly; if it needs semantics changes, propose in the
+  memo instead).
+- C5: re-derive the headline numbers at the consolidated tip and record
+  them in .codex-group2/round4-progress.md: official all-19 single-process
+  gate (2 GiB profile, expect PASS failures=0), the double_fork_compact
+  consume witness (expect WIN/409 verifier-accepted at 10k), default suite
+  count, and the R1b chain fixtures. These are the numbers the paper will
+  quote; each with its exact regen command.
+
+## Definition of done
+All of: (1) default release suite 95/0 (ignored count may shrink as
+scaffolds go — record it); (2) narrow byte-identity / golden digests green;
+(3) all-19 gate PASS at the consolidated tip; (4) consume witness WIN/409
+verifier-accepted; (5) R1b fixtures green; (6) diff surface = deletions +
+comment/doc edits + the memo (no behavioral additions); (7)
+round4-progress.md complete with the dependency map (C1), per-item
+dispositions, every regen command, and the re-derived headline table.
+
+## Operational rules, binding
+(1) You CANNOT git-commit — checkpoint boundaries in the progress file.
+(2) CARGO_TARGET_DIR=.target-codex; never C:. (3) No workspace-wide
+formatting; rustfmt --edition 2021 only on files you edit. (4) Work only
+in this worktree; siblings read-only. (5) RAM: a Lean lane and hunt lanes
+share this 31 GB host — check free RAM > 8 GB before builds/long solves
+(powershell "Get-CimInstance Win32_OperatingSystem | % {
+$_.FreePhysicalMemory/1MB }"), one build/solve at a time,
+--test-threads=1. (6) Any WIN-vs-LOSS disagreement at matched semantics =
+STOP and write up. (7) Long solves: chunk <= 2h per exec.

@@ -10,8 +10,11 @@
 //! `TssSolver::set_width_options` — the API this branch exists to build.
 //! Narrow-mode behavior must remain byte-identical (existing tests + bench).
 //!
-//! Run with:
-//! `cargo test --release -p hexfield_eq tss_corpus_check -- --ignored --nocapture`
+//! The canonical 512 MiB default, 2 GiB official profile, and fixed node
+//! ladder are documented in `docs/TSS_RUNBOOK.md`. Run the official gate with
+//! `TSS_BACKWALK_TT_BYTES=2147483648` and:
+//! `cargo test --release -p hexfield_eq tss_corpus_check -- --ignored
+//! --test-threads=1 --nocapture`
 
 use std::time::Instant;
 
@@ -23,8 +26,8 @@ use crate::tss_verify::TssVerifier;
 
 const DEFAULT_TSS_TEST_TT_BYTES: usize = 512 << 20;
 
-/// Test-harness resource override shared by both ignored corpus helpers.
-/// Production callers and the default 512 MiB test profile are unchanged.
+/// Test-harness resource override shared by both ignored corpus helpers. See
+/// `docs/TSS_RUNBOOK.md` for the single profile story and official gate.
 fn test_tt_bytes_cap() -> usize {
     std::env::var("TSS_BACKWALK_TT_BYTES")
         .ok()
