@@ -1,641 +1,698 @@
-# PLAN: TSS Solver Upgrades from the Defender-Zone Proof Program
+# PLAN: TSS Solver Upgrades — Unified Master Plan (wide-engine era)
 
-Status: **FINAL (R3 PASS)** — hostile Codex review R1 (ultra) → repairs →
-confirmation R2 (FAIL, nine residual defects) → repairs → narrow
-confirmation R3 (**PASS**, all nine ruled APPLIED-CORRECTLY, numbering and
-review log consistent). See §6 review log.
-Author: Claude (Fable), from the proof program of
-`docs/PROOF_TSS_DEFENDER_ZONES.md`.
+Status: **LIVING DOC** (2026-07-16). This is a ground-up rewrite that
+**supersedes the FINAL (R3 PASS) plan of 2026-07-14**, whose anchor engine —
+the single-pass narrow DFS prover of branch `claude/tss-v2-build` — is no
+longer the normative solver. The superseded document remains readable (with a
+SUPERSEDED banner) at its old home in the `hexfield-eq-main-review` worktree;
+everything from it that is still true is carried forward here, and every
+U-item it defined is dispositioned in Part III.
+Author: Claude (Fable), under owner rulings of 2026-07-16.
 
-Normative sources:
-- **Proof document** `docs/PROOF_TSS_DEFENDER_ZONES.md` (T1–T8, L1–L10,
-  D9–D13, (Z1)(Z2)(Z4)(Z5), §10 ES layer, §11 domination). Theorem tags
-  below refer to it. Full derivations for P1–P3:
-  `docs/proof_parts/DOMINATION.md`; ES layer:
-  `docs/proof_parts/ES_POTENTIAL.md`.
-- **Survey** `docs/PLAN_TSS_MOVESET_ZONES.md` (§9 experiments, §10 adopted
-  generator, counterexample families G1/G2/G3).
-- **Solver as built** on branch `claude/tss-v2-build`:
-  `packages/hexfield_eq/rust/src/{tss_core,tss_solver,tss_verify,tss_reference}.rs`,
-  integration in `tree.rs`/`search.rs`, specs `docs/TSS_SOLVER_SPEC.md`,
-  `docs/TSS_SOLVER_OPT_SPEC.md`, `docs/TSS_SOLVER_PROOF.md`, profile
-  `docs/TSS_SOLVER_PROFILE.md`.
-- Measured set sizes (this worktree, scratch probe 2026-07-13, 200 random
-  midgame positions): full legal mean 302.8; r3 ∪ A-touched-window empties
-  145.1; + stale-area filter 135.5; + count≥2 threshold 114.1; closure
-  R(P,D) at D=1/2/3/4/5 → 98.4/99.3/104.5/120.7/158.2; hitting-only 2.1.
+## Mission (owner rulings 2026-07-16, binding)
 
-Soundness classes:
-- **[S]** proven — value-preserving by a theorem of the proof doc (with its
-  stated caveats).
+1. **Dramatically stronger solver on ALL axes**: real-position solving (human
+   corpus + self-play at fixed budget), deep offline certified solving (the
+   opening atlas), training-loop leaf strength, and beating idtt/dfpn/pdspn
+   everywhere. The solver must remain MCTS-leaf-integrable: useful at LOW
+   node counts, compute-efficient.
+2. Leaf-improvement axes: verdict rate at fixed cap; cheaper solves → wider
+   gating; the budget envelope (node_cap / park timeout / sample-16) is
+   re-tunable when data justifies. Direction: "deeper search and more elegant
+   design — dramatically improve."
+3. **Policy-side consumption bar: PROOF-BACKED SETS ONLY** (defender-side
+   certified zones and the like). Value consumption stays certificate-only
+   through the single-mint verifier gate. No heuristic hints ever enter
+   policy targets.
+4. Paper division of labor: the paper's subject is the deep df-pn corpus
+   solver and search-space reduction for the ideal solver; MCTS-leaf
+   integration is mostly out of the paper; theorems get light per-solver
+   notes. **This plan serves engineering** — it owns everything, including
+   what the paper omits.
+5. Deployment: improved leaf integration lands at the Phase-3 `main_3`
+   relaunch; flags / one-rung-per-relaunch discipline unchanged
+   (`docs/TSS_RUNBOOK.md`, this worktree, is the deployment instrument).
+6. `RZOP_SOLVER_OPTIMIZATION.md` §9's priority ranking supersedes the old
+   plan's defender phasing (U14→U13→U12→U15) — reconciled against the wide
+   engine in §I.7, because the corpus is already 14/14 via the wide engine
+   and several §9 premises describe the deleted narrow generator.
+
+## Normative sources
+
+- **Engine**: `WidePnSearch` in `packages/hexfield_eq/rust/src/tss_solver.rs`
+  on branch `claude/tss-vcf-width`, round-9b tip `ac3f455f`, gate-verified at
+  `dba6111d` (`.codex-round9b-gate/GATE.md`); Group-2 round-3 additions live
+  uncommitted in this worktree (see IN-FLIGHT register).
+- **Theory**: `docs/PROOF_TSS_DEFENDER_ZONES.md` (rounds 5–8 revision):
+  D9–D21, L9′, L10–L17, T3–T11, zones `Z_dir ∪ Z_seed ∪ Z_touch ∪ Z_virgin`
+  under (Z2)/(Z4)/(Z5′), §6a forcing-gate calculus, §12 open problems, §12a
+  tightness frontier. Domination P1–P3: `docs/proof_parts/DOMINATION.md`; ES
+  layer: `docs/proof_parts/ES_POTENTIAL.md` + `ES_GLOBAL_BOUNDARY.md`.
+- **Formalization**: `E:\tss-lean\` (LEDGER.md is the decl-by-decl status
+  map). T3/T4/T5/T9 and both dismissal corollaries are kernel-checked
+  (`TssZones.T3`, `TssZones.T3_soundDismissal`, `TssZones.T4`, `TssZones.T5`,
+  `TssZones.T9`, `TssZones.T9_soundDismissal`); T10 (DAG unfolding) is in
+  flight. The coming `TssZones/SolverInterface.lean` + `SOLVER_HANDOFF.md`
+  will be the **authoritative machine-auditable crosswalk** (Lean decl ↔ doc
+  item ↔ U-item); Part III's anchors are a preview and defer to it on
+  landing.
+- **Prior art / priorities**: `E:\hexo-bot\docs\paper\RZOP_SOLVER_OPTIMIZATION.md`
+  (§5 capstone spec, §9 ranking) and `RZOP_COMPARISON.md` (Wu & Lin 2010).
+- **Empirical grounding**: corpus frequencies
+  (`hunt/corpus-freq`, commit `3f66a410`, report
+  `HUNT_REPORT_CORPUS_FREQ.md`); radius sharpness + virgin absorption
+  (`hunt/r1b-r2`, `HUNT_REPORT_R1B_R2.md`); Group-2 progress files
+  (`.codex-group2/round{1,2,3}-progress.md`, this worktree).
+- **Deployment substrate**: `docs/TSS_RUNBOOK.md` (this worktree).
+
+## Soundness classes (carried forward unchanged)
+
+- **[S]** proven — value-preserving by a theorem of the proof doc, with its
+  stated caveats.
 - **[H]** heuristic — affects only *completeness* (which proofs are found
-  within budget), never soundness, because the verifier gate
-  (`hard_value_from_verified`, `tss_core.rs:159`) re-checks every claim.
-  Note (review R1): [H] items can still change *which* verified values get
-  minted and hence search/training trajectories — "heuristic" means no
+  within budget), never soundness, because the independent verifier re-checks
+  every claim before minting. [H] items still change which verified values
+  get minted and hence search/training trajectories — "heuristic" means no
   false value can be minted, not that behaviour is unchanged.
 - **[T]** tooling/measurement — no behavioural change.
 
-Design invariants (unchanged from the build spec; every upgrade must
-preserve them):
-1. **Single mint.** Values enter search/training only through
-   `hard_value_from_verified`. No upgrade may add a second path.
-2. **No silent caps.** The defender list is never truncated by count — the
-   `vcf.rs` failure mode. Restrictions must be *predicates* (set
-   definitions the verifier re-derives), never budgets.
+## Design invariants (every item below must preserve them)
+
+1. **Single mint.** Values enter search/training only through the verifier
+   gate (`hard_value_from_verified`). No second path, ever.
+2. **No silent caps.** Defender reply sets are never truncated by count.
+   Restrictions are *predicates* (set definitions the verifier re-derives
+   from the position alone), never budgets. Ranks order; they never cap.
 3. **Failure degrades to Unknown.** Any verify failure ⇒ Unknown + fatal
    counter, never a value.
-4. **Opening excluded.** λ¹ and every zone/theorem argument here is
-   post-opening; zone omission, dispatch, and futility arms must all reject
-   Opening-phase nodes (the verifier already does for dispatch,
-   `tss_verify.rs:403-405`).
+4. **Opening excluded.** Every zone/theorem argument here is post-opening.
+5. **Finder/verifier separation.** The verifier replays and re-derives every
+   set and every edge from the position; finder hints are inadmissible as
+   verification inputs. (Was implicit in the old plan; Group-2 round 3 made
+   it the explicit contract.)
+6. **Ladder discipline.** Every behavioral flag ships default-off and rides
+   shadow → verify → consume; certificate-mutation rejection suites are
+   mandatory before any consumption; flag-off narrow byte-identity is sacred.
 
----
+## IN-FLIGHT register (what will update this doc, and where)
 
-## 1. The solver as built (summary)
+This document must not rot the day these land. Each lane names the exact
+sections its landing updates.
 
-Single-pass, statically-ordered AND/OR depth-first proof constructor
-(`tss_solver.rs`; not df-pn — no live pn/dn counters, no iterative
-deepening). Fixed claimant (`prove_for`); OR nodes take threat-creating
-moves only (window-store-driven, `threat_creating_moves` :630 — already the
-T2-optimal generator, and its move *ordering* already uses WindowStore
-static features without child replay, correctness argument at
-`docs/TSS_SOLVER_PROOF.md:392-422`). AND nodes dispatch on λ¹:
-- `k == B` (`implicit_dispatch`, :450): explicit set = hitting universe;
-  omitted moves carry an implicit λ¹ refutation **re-checked per move by
-  the verifier** (`tss_verify.rs:372-397`: apply + analyze every omitted
-  legal move).
-- `k < B` or no threats: explicit set = **all legal moves** (:463).
-
-Certificates are strategy DAGs (`TssCertificate`, `tss_verify.rs:82`) with
-exact root binding, acyclicity + reachability checks, full engine replay;
-generic `Terminal`/`Lambda1` leaves only — no ply clock, no zone data, no
-named witness windows. Two-tier exact-key TT (solve-local `BoundedTt` +
-persistent `SharedProofCache` importing fragments directly into the arena,
-`tss_solver.rs:520-592`). Integration: leaf trigger (threats + hash
-subsample, node_cap 2000), root guard (`SolveGoal::Both` + forced-move
-override), interior λ¹ forced-move guard (default off). Profile: cost is
-move-gen/analyze-bound; the historical 91.4% hotspot (per-omitted-move λ¹
-staple sweep) was moved out of search by `implicit_dispatch` but **still
-exists inside the verifier**.
-
-What the proof program adds, in one line: the searched/omitted split at AND
-nodes stops being "hitting vs everything" and becomes a *certified zone*
-(T3/T4), the per-move staples become *set-membership dismissals* (the U3
-lemma), the budget knobs become a *ply clock* (D9), and the pair level of
-spare turns halves by a proven equivalence (P3) — with the verifier
-remaining the sole authority.
-
----
-
-## 2. Upgrade catalog
-
-### Tier A — high impact
-
-#### U1. Zone generator at `k < B` AND nodes — kill the full-legal sweep [H search-side; consumable only with U2]
-
-**Proof basis.** T3/T4 (zone soundness), D13/T7 (closure R(P,D) as
-candidate generator + certificate extras), T5 (static coverage), L10 (and
-its explicit failure boundary at the 4th future attacker placement).
-
-**Change.** In `prove_universal` (`tss_solver.rs:443`), replace the
-`write_legal_moves` explicit set at non-dispatch, post-opening nodes with
-the layered generator, ordered hitting-first as today:
-
-1. hitting(P) — empties of live opponent-threat windows (T1: ⊆ r2);
-2. 𝒜(P) — empties of A-touched alive windows (cnt_A ≥ 1, cnt_D = 0);
-3. ℬ(P, D) — empties of D-alive windows with cnt_D ≥ 6 − D (completion
-   guard), D from the ply clock (U4); **D ≥ 6 ⇒ full legal** (D13
-   fallback);
-4. core-so-far ∩ Legal and the (Z5) band, maintained by a **monotone
-   closure loop** (review R1): the current `prove_universal` fixes its move
-   vector before proving any child (:459-493), but core grows as children
-   are proven — a 4th-or-later future attacker setup cell can enter final
-   core while lying outside the 𝒜 term (L10's boundary). After building
-   children, union child cores, add newly required core∩Legal cells and
-   newly induced band cells, prove the added replies, and repeat until
-   stable. Compute the common-case band short-circuit
-   (Prot ⊆ Legal ∪ Stones ⇒ band empty) first. Note the exact (Z5) band is
-   a ball-of-radius-8·D computation around not-yet-legal protected cells —
-   a bounded geometric scan, not a window-store pass (R1 nitpick).
-5. optional trims, flag-gated, both **[H]**:
-   - *stale-area filter*: skip cells all of whose 18 incident windows have
-     ≥ 1 stone of each colour (two-coloured = dead by L4). **This is
-     deliberately NOT proof-doc P1** (review R1): a cell whose incident
-     windows are merely *empty* is not dead (it seeds 18 virgin windows and
-     extends the frontier — the (-4,-4) distance-8 example), and true P1
-     additionally requires a certificate-named substitute with a
-     frontier-inertness obligation. The all-windows-two-coloured version
-     used here never fires on virgin-window cells by construction, but it
-     ships as [H] regardless; a true P1 domination arm is future work
-     (§2 U11).
-   - *count≥2 threshold* on the 𝒜 term (passed 52/52 divergence probe;
-     unproven).
-
-**Consumption gate (review R1, phasing).** Until U2's zone verifier is
-complete, `k < B` nodes with omissions are **non-consumable**: the solver
-may search with the zone (finding proofs faster) but any certificate
-containing a non-dispatch Universal with omitted legal moves must be
-rejected by the verifier by construction — i.e. ship the generator behind
-the same flag as U2, or restrict its use to refutation-side work that never
-mints values.
-
-**Expected effect.** Attacks the documented UNKNOWN concentration
-(PLAN_TSS_DEEPENING §6): spare-budget nodes go from ~303 children to
-~98–160 (D ≤ 5); with U5 the b=2/b=1 spare turn drops ~4.4× in placement
-pairs.
-
-**Non-goals / honesty.** D ≥ 6 stays full legal by default (see §5 for the
-optional theorem-permitted refinement and why it's deferred). No count caps
-(invariant 2). Opening excluded (invariant 4).
-
-#### U2. Zone-carrying certificates + full D9 verification [S — the keystone, and the hardest item]
-
-**Proof basis.** T3's R4-ruled caveat verbatim: *proven for valid
-zone-carrying certificates obeying the D9 grammar and satisfying (Z1),
-(Z2), (Z4), (Z5), with exact D_N and the full defender-placement budget.*
-Review R1's central ruling: a verifier that checks only the set inclusions
-is **not** covered by T3 — the D9 grammar items are load-bearing, and
-omitting them admits a concrete exploit (a zero-edge `Universal` at a
-heavily blocked node where hitting, 𝒜, ℬ, core, and band are all empty
-passes every set inclusion vacuously and becomes a fake proof). The
-checklist below is therefore normative and complete; each item cites its
-D9/D11 clause.
-
-**Schema.** `CertNode` gains typed leaves and zone data (a real redesign,
-not a field bolt-on — current `Terminal`/`Lambda1` are generic,
-`tss_verify.rs:85-99`):
-- `Choice{mv, child}` unchanged; a Choice whose placement completes becomes
-  a typed **OR-COMPLETION leaf** naming its witness window and completion
-  ply (D9).
-- **WIN leaf**: names witness window(s), count/phase evidence (count-5 any
-  b; count-4 with b = 2), resolution ply.
-- **LOSS leaf**: names the witness family 𝒯 (window identities), with the
-  adaptive contract's declared resolution ply = leaf-ply + b + 2.
-- `Universal{edges, dispatch: bool, zone: Option<ZoneInfo>}` where
-  `ZoneInfo` carries the node's D value (recomputed by the verifier — never
-  trusted).
-- Window identities are stable geometric keys `{start_cell, axis}` with
-  validation, explicit caps, and D6 remapping support (the current
-  remapper handles only root and move coordinates, `tss_verify.rs:647-672`
-  — witness keys must be added to `d6_remap_certificate`).
-
-**Verifier obligations (complete list — review R1).** For every
-certificate containing any zone-omission node:
-1. Root binding equality AND **nonterminal root** (D9).
-2. Path-derived **ply clock** recomputed by the verifier; every resolution
-   label ≤ T; the verifier itself establishes T = max resolution ply over
-   the tree (never trusts a stored T).
-3. **Typed maximal nodes**: every leaf is one of the typed leaves; every
-   internal AND node has **S(N) ≠ ∅** (kills the zero-edge exploit); every
-   internal node's children are the exact D4-successors of its placements;
-   every placement legal at its node.
-4. **No defender-terminal edges** — explicit rejection, not just the
-   Terminal-winner side effect.
-5. **¬own_win_now for the defender at every AND node** and again at every
-   LOSS leaf (D9 requires it at both).
-6. **OR-COMPLETION leaves** (R2 fatal-defect repair — D9 line 195): the
-   leaf's mover is the claimant; the designated placement is **replayed**
-   and re-derived to complete: the named witness window contains the
-   placement cell and becomes claimant-complete in the replayed successor;
-   the recorded completion ply **equals** the path-derived ply of that
-   placement.
-7. WIN leaves: re-derive own_win_now from the replayed position and the
-   named window (count/phase match), with **exact derived resolution
-   semantics** (R2): count-5 witness ⇒ resolution = leaf-ply + 1; count-4
-   witness (requires b = 2) ⇒ resolution = leaf-ply + 2. Labels merely
-   "within T" are insufficient — the verifier recomputes and compares
-   equality.
-8. LOSS leaves: re-derive that every named 𝒯 member is a live
-   claimant-threat window at the replayed position; hitting number of the
-   *named family* > b (exhaustive, b ≤ 2); declared resolution **equals**
-   leaf-ply + b + 2 (exact, R2), and ≤ T. The contract itself is a theorem
-   given these checks (D9/T3 leaf transfer) — nothing further to
-   enumerate.
-9. **(Z1)** S(N) ⊇ hitting ∩ Legal; **(Z2)** S(N) ⊇ Prot(N) ∩ Legal with
-   core(𝒞, N) computed **bottom-up from the final reachable DAG** in a
-   post-order pass (this is what makes U1's partial-core-during-search
-   safe: any dismissal made against a smaller core than the final Prot(N)
-   fails here ⇒ Unknown); **(Z5)** the horizon-scaled band, with the
-   Prot ⊆ Legal ∪ Stones short-circuit; **(Z4)** every attacker placement
-   within distance 8 of an attacker/root stone of its predecessor — checked
-   directly, including the WIN/LOSS-leaf *continuation* placements (derive
-   from the named witness windows: their empties are within distance 2 of
-   attacker stones, L1/T1).
-10. **D ≥ 6 fallback**: a zone node whose recomputed D ≥ 6 must have
-    S(N) ⊇ Legal(P_N) — i.e. no omissions (the touched-window store cannot
-    enumerate qualifying all-empty windows; full-legal is the only
-    verifiable form of the guard there).
-11. **Opening**: any zone-omission node in Opening phase ⇒ reject
-    (invariant 4).
-12. Existing checks preserved: claimant binding, duplicate/illegal edge
-    rejection, acyclicity + full reachability (`tss_verify.rs:461-520`),
-    ReplayMemo semantics.
-
-**Verify the minimal obligation, not the search heuristic (review R1
-missed-opportunity, adopted).** The verifier checks T4's zone — hitting ∪
-Prot ∪ band — NOT the D13 𝒜-superset the *search* uses. Search may
-over-generate freely; certificates are judged against the smaller certified
-zone, so heuristic search sets can never cause spurious rejections.
-
-**Cost note.** Set checks are per-node window-store passes plus the bounded
-(Z5) geometry; certificate growth (typed leaves + window keys + D bytes)
-needs `SharedProofCache` admission re-measurement before fragment promotion
-re-enables for zone certificates (see U4 interaction — promotion of
-zone-bearing fragments stays **disabled** until U4's composition rule
-lands).
-
-#### U3. Staple-by-theorem at dispatch nodes — delete the per-omitted-move replay [S — ruled SOUND in R1]
-
-**Proof basis.** L3 (channel confinement), T1, T6, λ¹ definitions D5–D6.
-The lemma (wording per review R1):
-
-> At a post-opening AND node with verifier-checked ¬own_win_now and
-> min_hitting_set = b, let m be any omitted legal defender move outside the
-> hitting universe. Then the child after m is λ¹-lost for the defender,
-> with no engine replay needed:
-> (i) m is empty and non-hitting, so it lies in no live **attacker**-threat
-> window (else it would be one of that window's empties, hence in the
-> hitting union — exactly the set the code builds, `tss_verify.rs:415-426`,
-> `tss_solver.rs:793-805`); by L3/C2 every **attacker** threat mask — not
-> every window mask; defender windows may change — is unchanged, so the
-> child's hitting number is still b > b − 1 = child budget (b = 2), or the
-> child is the attacker to move with an intact count≥4 threat and budget 2
-> ⇒ own_win_now (b = 1).
-> (ii) No defender own_win_now at the child: at b = 2, ¬own_win_now bounds
-> every D-alive window at count ≤ 3; one placement reaches ≤ 4 < the
-> count-5 threshold at b' = 1. At b = 1 the mover flips to the attacker,
-> whose own_win_now is the proof. (Own-win precedence:
-> `threats_shared.rs:79-89`.)
-> (iii) m cannot complete a defender window: one-placement completion needs
-> a pre-move alive count-5 = own_win_now at any b — excluded. (Engine win
-> check precedes phase advance, `state.rs:309-337`; a count-5 window
-> containing a defender stone is two-coloured, not alive,
-> `tactics.rs:171-202`.)
-> (iv) Frontier changes (L3/C3) don't affect λ¹ verdicts (mask functions,
-> D5–D6); and the surviving threat's empties stay legal — within distance 2
-> of permanent attacker stones (T1).
-
-**Change.** In `verify_universal`'s omitted-move loop
-(`tss_verify.rs:372-397`): `omitted ∧ dispatch ∧ m ∉ hitting_universe ⇒
-accepted` by the lemma; node premises already checked by
-`dispatch_boundary` (:403-426). **Adopted R1 extension:** don't build the
-omitted complement at all — verify the node premises, require and replay
-every hitting cell explicitly, and theorem-dismiss *the rest of the legal
-set without enumerating it* (the only per-move work left is confirming
-explicit edges ⊆ legal, already done). Keep the old per-move staple behind
-a debug flag as a paired oracle (U10).
-
-**Expected effect.** The largest single verifier win: O(|legal|)
-apply+analyze per dispatch node (~300 engine replays — the direct
-descendant of the profiled 91.4% hotspot) becomes O(|hitting|) replays.
-Verification stops being the deep-solve bottleneck; `tss_solver_mode ≥ 2`
-consumes more proofs per second at the same CPU budget.
-
-#### U4. Path-derived ply clock + horizon semantics [S core; cache composition NEEDS the rule below — R1]
-
-**Proof basis.** D9 (path-derived clock), T3's horizon parameterization,
-L7. Two R1 corrections are normative here:
-- *Citation fix*: "Prot monotonicity" (D11) concerns descent at **fixed**
-  T. The statement actually used is elementary and separate: for a
-  **completed** subtree with fixed core, reducing T reduces every D_N, and
-  both the ℬ guard and the 8·D band are monotone in D_N — so
-  verify-with-exact-(smaller)-D succeeds whenever search-with-guessed-
-  (larger)-D generated the searched sets. Final core growth during the
-  closure loop (U1) can independently widen obligations; the verifier's
-  final-DAG recomputation (U2 item 9) adjudicates.
-- *Cache compositionality counterexample* (R1, verbatim keep): a cached
-  fragment rooted at defender SecondStone with a D-alive count-4 window,
-  proven quickly with local D_N = 1 (4 + 1 < 6 ⇒ empty omitted), imported
-  into a flattened certificate whose slower sibling raises global T so the
-  node's D_N = 2 (4 + 2 ≥ 6) — the omitted empty is now protected and the
-  flattened certificate is **invalid** under its global T. Semantic
-  monotonicity ("WIN by T₁ holds for horizon ≥ T₁") does not transfer to
-  the *syntactic* D9 object.
-
-**Change.**
-- Thread the absolute ply index through `prove` (root ply + depth); typed
-  leaves record resolution plies; `compact_certificate` computes a
-  candidate T; **the verifier establishes T** (U2 item 2).
-- Search guesses a target T (e.g. root ply + 2 × configured max turns) for
-  its ℬ/D terms; verification uses exact T. **Preflight vs fatal counter
-  (R2 defect-4 repair):** the horizon check on the solver's own candidate
-  certificate is a *solver-side preflight*, run before submission to the
-  minting verifier — a preflight failure triggers the **single** retry
-  (with T taken from the failed attempt, only on a diagnosed horizon-zone
-  failure, then stop) and increments a separate `horizon_retry` counter.
-  `deep_verify_failed` remains the post-submission fatal counter and must
-  stay 0 in steady state (invariant 3 unamended): a certificate that
-  reaches the minting verifier and fails there is a bug, not an expected
-  retry. `SolveCaps` (`tss_core.rs:97-103`) gains a semantic horizon field
-  — prerequisite for U9 as well.
-- **Cache rule (mandatory before zone-fragment promotion re-enables):**
-  store with each fragment both its `resolution_T` and the `zone_build_T`
-  its zone terms were generated against. **Composite stamps (R2 defect-3
-  repair):** for a fragment containing imported subfragments,
-  `resolution_T` = max over all contained resolutions and `zone_build_T` =
-  min over all zone-bearing components' admissible build horizons; and the
-  import condition — enclosing global T ≤ `zone_build_T` — must be
-  **re-checked against the final candidate global T** after every slower
-  sibling is added (the preflight recomputes it on the assembled
-  certificate), not only at online import time; otherwise the R1
-  slow-sibling failure recurs inside a promoted composite fragment.
-  Alternative designs — sealed, independently verified subcertificate
-  leaves with local deadlines, or re-closing imported fragments against
-  the enclosing T — are future work (§5); the two-stamp rule is the
-  minimal sound gate. Non-zone (dispatch-only) fragments are unaffected:
-  they carry no D-dependent omissions.
-
-### Tier B — medium impact
-
-#### U5. P3 same-turn commutation: pair-canonical generation + verifier arm [S under the full side-condition set — R1 conditions incorporated]
-
-**Proof basis.** P3 (`docs/proof_parts/DOMINATION.md:677-727`), including
-its metadata caveat: P3 equates *outcome* (winner/ply-count), not
-`PositionKey` identity — a joint-second-win pair (four stones in an alive
-window with two empties p, q: neither singleton wins, either order wins on
-the second placement) yields terminal states whose keys differ in the
-`SecondStone{first}` witness. The plan's earlier "same PositionKey" claim
-was false (R1); the dedup below never relies on key identity for terminal
-pairs.
-
-**Change (search).** At the b = 1 child of a post-opening b = 2 AND node
-reached via first placement d₁, with the parent nonterminal and d₁'s
-singleton successor nonterminal: generate second placements d₂ with
-ord(d₂) > ord(d₁) under a **strict total coordinate order frozen at the
-b = 2 parent** (do NOT recompute `canonical_frame` per SecondStone child —
-the frame includes the first-placement witness, `tss_solver.rs:812-844`),
-plus exactly the exception class: d₂ ≤ d₁ that were NOT legal at turn
-start (newly legalized by d₁). P3's premises exclude only
-**singleton-terminal prefixes** — covered because singleton-win prefixes
-never reach a Universal (`prove` strips own_win_now nodes, :384-395).
-**Joint-second-win pairs** (both orders win on the second placement, same
-winner and ply) are expressly *allowed* by P3 and may be
-outcome-canonicalized (R2 defect-5 correction); what they can NOT be is
-deduplicated by terminal `PositionKey`, whose `SecondStone{first}` witness
-differs between the orders — the dedup compares outcomes, never terminal
-keys. Attacker OR turns need nothing (existential).
-
-**Change (verifier).** Accept an omitted d₂ < d₁ at such a node iff ALL of
-(R1's condition list, adopted verbatim):
-- the b = 2 parent occurrence is nonterminal FirstStone, both cells legal
-  at the parent (replayed), both singleton successors nonterminal
-  (replayed);
-- the **mirror is state-bound**: the certificate contains, under the SAME
-  parent occurrence, the d₂-first Universal with an explicit d₁ edge,
-  independently verified (a global arena search for "some Universal with a
-  d₁ edge" is insufficient);
-- the mirror edge is materialized — a first move omitted by U1/U3 zones, or
-  a mid-turn node collapsed to a λ¹ leaf, cannot serve as the mirror;
-- commutation references participate in acyclicity, reachability, and
-  memory accounting;
-- circularity is excluded structurally: under the parent-frozen order,
-  d₂ < d₁ implies the mirrored branch needs its d₁ > d₂ edge explicit, so
-  that edge cannot itself be U5-omitted — well-founded by construction.
-
-**Expected effect.** ≈2× on the pair level of spare AND turns — scoped
-(R1) to turn-start-legal, nonterminal, materialized pair branches;
-multiplicative with U1. The `PositionKey` grandchild dedup already handles
-the subtrees; U5 removes the mid-turn enumeration overhead.
-
-#### U6. Interior forced-move guard: default-on with a proof; λ¹ policy mask [S for game-theoretic outcome; wording per R1]
-
-**Proof basis.** The U3 lemma (unconditional: every non-hitting reply at a
-¬own_win_now ∧ mhs = b node is lost — D9's adaptive LOSS argument + T6's
-count bound; R1 re-derived it independently and ruled no λ¹-to-game-theory
-gap). T1 (kept children ⊆ r2, complete).
-
-**Change.** `tss_interior_guard` (`tree.rs:1286-1327`, `:2114-2138`)
-currently ships default-off as a "risky prune". The lemma upgrades its
-claim to: **exact game-theoretic outcome preservation** — every dropped
-child is a proven loss, so no non-losing move is ever removed. It is NOT
-"value-exact for finite MCTS" (R1): dropping known-losing actions changes
-visit counts, Q averages, and possibly moves-left preferences; and when
-*all* moves lose, omitted moves may be policy-optimal under a loss-delay
-objective. Conditions to enforce before default-on (R1 list): reachable,
-nonterminal, post-opening states only; b ≤ 2; own-win precedence intact;
-the guard's kept set is the **full engine-legal hitting universe** — no
-crop, no widening omission, no count cap (at ¬own_win_now,
-`tactical_cells` is exactly the hitting universe — keep it that way under
-refactors). Run the shadow rung first per the runbook even with the proof
-in hand (R1 phasing).
-
-**Policy mask.** The same predicate feeds the Stage-2 policy-target lever
-as a **"non-losing-support safe"** mask (R1 wording): at fully-forced
-defender nodes, masking targets to the hitting universe provably never
-excludes a non-losing move. It is not an exact target distribution claim —
-loss-delay preferences among all-losing children are flattened; acceptable
-for the value head, a recorded caveat for the policy head.
-
-**Caveat to record.** The premise is verifier-grade only because `analyze`
-is exhaustive for k ≤ 2 = B; if B ever changes, re-audit
-(threats_shared.rs computes mhs ≤ 2 exactly).
-
-#### ~~U7. OR-node ordering without child replay~~ — ALREADY IMPLEMENTED (R1)
-
-Struck: review R1 established the branch already computes OR ordering from
-WindowStore static features without child replay
-(`tss_solver.rs:627-720`; correctness argument
-`docs/TSS_SOLVER_PROOF.md:392-422` — ordering can never affect soundness,
-only discovery-vs-Unknown under a cap; the profile's eager-ordering hotspot
-was the pre-optimization baseline). Retained residue → U10: add a DEEP_WIN
-ordering-regression telemetry bucket so future ordering changes are
-A/B-able. Two of the draft's wording errors are withdrawn with it (a
-"count-4→win" mislabel — at FirstStone a count-4 completion creates count 5
-and a same-turn λ¹ finish, not an immediate placement win — and a backwards
-acceptance inequality).
-
-### Tier C — narrow / optional
-
-#### U8. Trigger + regime detector [H — with R1's correctness-safety conditions]
-
-The leaf trigger (`tss_deep_leaf`, `tree.rs:949-991`) gates on
-`has_threats` + hash subsample. Add λ¹-informed gating: prioritize
-mover-side mhs = b (the forced regime — where the *dismissal complement*
-is provably cheap; R1 correction: mhs = b does NOT make the hitting
-children themselves cheap to prove), deprioritize D ≥ 6 no-forcing-
-structure roots; |hitting| + |𝒜| as a one-pass width predictor. R1
-correction adopted: this **does** have a value-affecting path — the trigger
-decides whether `tss_solve_verified` runs at all, so discovery, backups,
-play, and targets can change. It is correctness-safe iff: trigger
-quantities schedule budget and never mint values; skipped attempts take the
-existing neural/Unknown fallback; every consumed result still passes
-`hard_value_from_verified`; scheduling stays deterministic with existing
-caps.
-
-#### U9. ES-potential futility (Cor. 2 integer check) [S under the exact guard — R1 conditions]
-
-**Proof basis.** ES Theorem 2 + Corollary 2
-(`docs/proof_parts/ES_POTENTIAL.md:553-569`, `:907-924`), trust boundary
-(`:997-1011`).
-
-**Change.** Requires U4's semantic horizon in `SolveCaps` (the depth cap is
-not a horizon). Exact guard (R1, adopted verbatim): at a nonterminal
-universal node with
-
-  `current_player != claimant && phase == FirstStone &&
-   T − placements_made ≤ 4`
-
-and Corollary 2's strict integer test over **all** claimant-touched,
-opponent-free count-1…5 windows (a = n₁+3n₃+9n₅, b = n₂+3n₄; Φ < 1 ⇔
-b ≤ 8 ∧ a² < 3(9−b)², wide arithmetic), return internal `None` — "no
-claimant proof by this deadline". It must never mint Loss, draw, defender
-win, or any unbounded-horizon result (the source forbids it explicitly).
-Maintain Φ bins incrementally: ±18 window updates per placement (R1
-suggestion). A 6-ply variant (safety through the following defender pair —
-only the mover can complete a line) and Theorem 1/3/4 longer cutoffs are
-possible future extensions once their closure/reserve premises can be
-certified; out of scope now. Ship last; kill if < 1% of horizon-bounded
-leaves fire.
-
-#### U10. Adversarial fixtures + differential harness [T — gates redefined per R1]
-
-Port the proof program's adversaries to Rust golden tests, with R1's
-corrections to what each can actually assert:
-- **G1 junction** (capped 4-arm + single-window pin): the fixture is
-  *unrefuted at bounded depth*, not proven globally non-WIN — so the gate
-  is a **matched-horizon differential** against `tss_reference.rs`, not
-  "must never claim WIN". Also assert the junction cell is generated at
-  the critical node.
-- **G3 counterfork**: same matched-horizon contract; assert the fork cell
-  is generated.
-- **Verifier rejection tests are certificate mutations, not solver runs**
-  (R1): a negative-control *solver* finding no proof demonstrates nothing
-  about the gate. Supply explicitly malformed certificates and assert
-  rejection: zero-edge AND node; terminal root; AND-node defender
-  own_win_now; corrupt/nonlive witness family; **adaptive-LOSS resolution
-  corruption** — declared_resolution ≠ leaf-ply + b + 2, and separately a
-  resolution exceeding an externally supplied semantic horizon (R2: the
-  earlier "resolution > T" mutation was tautological, since the verifier
-  defines T as the max resolution label); **forged OR-COMPLETION leaf**
-  (placement doesn't complete / named window doesn't contain the placement
-  / completion ply ≠ path ply); **corrupted WIN witness** (count/phase
-  mismatch, wrong resolution arithmetic); late-core-growth dismissal (a
-  cell in final core dismissed at an ancestor); D ≥ 6 node with omissions
-  in a D-alive virgin window; dropped (Z5) band cell ((Z5) corridor
-  construction);
-  U5: singleton-win pair, joint-second-win pair, newly-legal second cell,
-  unfrozen-order mirror, absent mirror, circular mirror reference.
-- **Cache composition test**: the U4 quick-fragment/slow-sibling
-  counterexample as an executable case — import must be refused by the
-  two-stamp rule.
-- **Paired oracles**: U3 staple-by-theorem vs per-move staple on the full
-  corpus (0 divergences required); zone solver vs `tss_reference.rs` on
-  the random corpus at matched horizon. The differential is **one-sided**
-  (R2): every hard WIN/LOSS the optimized solver claims must agree with
-  the exhaustive reference at the same semantic horizon; the optimized
-  solver returning Unknown where the reference finds a value is
-  *legitimate* (restricted search trades completeness for speed) and is
-  tracked as a yield metric, not a failure. 0 one-sided divergences is
-  evidence, not the soundness gate; the mutation tests are the gate.
-- DEEP_WIN ordering-regression bucket (from struck U7).
-
-#### U11. True domination arms — P1/P2 in the verifier [S for P1/P2; sub-hitting item is [UNPROVEN]]
-
-R1 missed-opportunity, recorded as a real backlog item: implement proof-doc
-P1 (dead-cell dismissal with exact dead-mask check on all 18 incident
-windows + a certificate-named searched substitute *a* that **either wins
-immediately or** satisfies the frontier-inertness obligation
-B₈(a) ⊆ Λ(P) — both theorem branches, R2 defect-9) and P2 (dead-spoke
-interchangeable hitting cells) as verifier arms with certificate support.
-P2 is otherwise entirely unused by this plan.
-
-Separately, **[UNPROVEN]** (R2 defect-8 labelling): the sub-hitting
-dispatch refinement suggested in R1 — at a post-opening defender AND node
-with ¬own_win_now and mhs = b: at b = 1 only *common* hits of the threat
-family can survive, and at b = 2 only first-hits extendable to a two-cover
-need search, with hitting-set algebra stapling the rest. This is a
-conjecture with stated premises, not a theorem of the proof doc; derive it
-as a lemma and put it through the same hostile-review treatment before any
-implementation.
-
----
-
-## 3. Phasing (maps onto the TSS_RUNBOOK rung ladder; R1 phasing rulings incorporated)
-
-| Phase | Contents | Gate |
+| Lane | State at writing | Sections to update on landing |
 |---|---|---|
-| P0 | U4 clock plumbing (typed-leaf resolution semantics land WITH U2's schema, not before — R1); U10 fixture scaffolding | golden tests green |
-| P1 | U3 (staple-by-theorem + no-complement-enumeration) | paired-oracle differential, 0 divergences; verify-time budget on threat-dense buckets |
-| P2 | U2 (typed schema + full D9 verifier) then U1 (zone generator, consumable) | full certificate-mutation suite green; matched-horizon G1/G3 + reference differentials; UNKNOWN-rate at fixed node_cap on spare-node buckets |
-| P3 | U4 cache two-stamp rule (zone-fragment promotion stays OFF until then); U5 (P3 pairs incl. verifier arm + its six fixtures) | cache composition test; pair telemetry |
-| P4 | U6 (shadow rung first, then default-on + policy mask), U8, U9 | shadow counters; trigger yield; futility hit-rate |
+| **G2R3** (Group-2 round 3): quiet-turn OR edges + ranked unforced defender zones, shadow→verify→consume | **LANDED, all 4 steps GREEN, committed `bfd03ca9`** (headline witness `double_fork_compact` = WIN/409 nodes, strict verifier ACCEPTED, first rung 10k; step-4 shrink `seed_band_radius(d)=8·(d−1)` in production, all prior certs re-verify; post-shrink all-19 gate PASS failures=0 in 442.6 s, orchestrator-reverified) | §I.2 (round outcome), §I.7 (RZOP ranks 1–2 close-out), Part III rows U12, U13, U19, U20, U21; §II.3 A1's shadow-statistics gate (witness zone = 62/478 legal at the k<b node) — fold on next revision pass |
+| **T10 Lean** (DAG unfolding; `E:\tss-lean\`) | Structural/D9/D17-core projections kernel-checked; the full transport (roles, zones, T3/T9 conjunctions through the unfolding) unstated. Discovered semantics: **DAG labels are max-dominant bounds over path copies, NOT per-copy equalities** — this IS the U18/U22 merge-semantics spec | §I.4 (TT/DAG sharing design goes from spec to buildable), Part III rows U18, U22; §II.3 A4's soundness clause |
+| **Leaf-width measurement** (worktree `hunt-leaf-width`, branch `hunt/leaf-width`; report `HUNT_REPORT_LEAF_WIDTH.md`) | **LANDED** (N=1,500 human-corpus attacker nodes, 3 caps, 0 contradictions): wide-only WIN = 6.07% / 8.13% / 9.27% at caps 500/2k/10k — structural width, not budget (a `SolveGoal::Win` full-budget control finds nothing more); warm medians narrow ≈0.07 ms vs wide ≈0.16 ms, wide's cost = p95 tail on exactly the positions it wins; 122 width records (mechanism: count-2 pair-builds / quiet connectors + deep VCFs); ES Φ<1 screen fires 0.024% — does not pay at leaves. Recommendation: cap-500 leaf-width rung via count-2 pair-build widening of the narrow OR-generator, NOT a WidePnSearch port; persistent-solver reuse mandatory (fresh-solve TT-zeroing cliff ≈13 ms) | §II.2 (axis sizing), §II.3 A2 (feature value), §II.5 (budget-envelope retuning), Part III row U8 — fold on next revision pass |
+| **SolverInterface.lean / SOLVER_HANDOFF.md** (Lean campaign final passes) | Specified in `E:\tss-lean\CAMPAIGN.md`; not started | Part III's crosswalk column defers to it wholesale |
 
-Every phase keeps invariants 1–4; every flag ships default-off and rides
-the shadow → consume ladder; U1 omissions are non-consumable before U2
-(hard ordering, R1).
+---
 
-## 4. Measurement plan
+# Part I — The deep df-pn corpus solver
 
-- Re-run `TSS_SOLVER_PROFILE` buckets per phase: nodes/solve, solves/s,
-  verify µs/node, UNKNOWN rate at node_cap ∈ {2k, 10k, 50k}, proof-depth
-  distribution, SharedProofCache hit-rate + bytes (re-measure admission
-  constants after U2's fatter certificates).
-- New buckets: SPARE_WIN (k < B at root turn), DEEP_SPARE (spare node ≥ 4
-  plies deep) — cap-out concentration today, acceptance metric after P2;
-  DEEP_WIN ordering-regression (from struck U7).
-- Training-facing: consumption counters per mode tier;
-  `deep_verify_failed` must stay 0 in steady state (any nonzero = search
-  bug, by construction never a value error — horizon guesses are caught by
-  the solver-side preflight, not the minting verifier); `horizon_retry`
-  rate (U4 preflight-diagnosed horizon failures — expected nonzero, cheap).
+## I.1 The engine as built (round-9b, gate-verified)
 
-## 5. Risks, non-goals, deferred refinements
+The normative solver is **`WidePnSearch`** (`tss_solver.rs`, branch
+`claude/tss-vcf-width`): a single-level, certificate-grade, staged-deepening
+df-pn **arena** engine. It replaced the old narrow DFS prover as the
+normative solver over rounds 5–9b of the VCF-width campaign. Mechanisms, by
+their in-code names:
 
-- **G2 / D ≥ 6 honesty**: default fallback is full legal. The
-  theorem-permitted refinement (dismiss cells in no D-alive window AND
-  outside hitting/core/band even at D ≥ 6 — proof doc lines 262–270) is
-  real but deferred: it requires enumerating D-alive-window *absence* over
-  virgin windows, which the touched-window store cannot do; revisit only
-  with a dedicated legal-complement pass and its own fixtures.
-- **Sharpened budget (F + H_W) and band shrinking are OPEN** (proof doc
-  §12): U1/U2 use exact D_N and the full band. Any sharpening is a new
-  proof obligation.
-- **Sealed subcertificates** (branch-local deadlines solving cache
-  composition more elegantly than the two-stamp rule, and enabling tighter
-  per-branch zones) — designed future work, after P3.
-- **Certificate size**: zone data + typed leaves grow certificates;
-  re-measure `SharedProofCache` admission before re-enabling promotion.
-- **No defender-count caps, ever** (invariant 2).
-- **Lean formalization** of the U2 checker remains the long-term hardening
-  path (proof doc §12.4); the U10 mutation suite is the interim substitute.
+- **Persistent proof-number frontier.** The arena holds pn/dn per entry; the
+  retained PN frontier is the search arena, not the transposition table, so
+  memory-profile choices cannot alter frontier progress. Thresholded descent
+  makes local progress without re-descending from the root.
+- **Staged deepening.** An outer stage loop (`next_wide_stage_depth`,
+  `reopen_depth_cutoffs`) advances the depth horizon on selected cutoffs; a
+  staged depth cutoff is *unresolved, not a disproof* — cached dn=0 entries
+  are reopened per stage (`stage_refreshes` telemetry).
+- **Forcing-wide turn generation with stateless pair classification.**
+  `WideTurnGate::build/evaluate_pair` classifies complete two-placement
+  attacker turns statelessly; round-9b's stateless second-candidate
+  derivation removed the per-child replay (the 4.5x round).
+- **Canonical pair dedup.** Both legal orders of a placement pair are
+  deduplicated via `canonical_frame`/`canonical_coord_key`; P3 (same-turn
+  commutation) is thereby **structural in the TT** rather than a verifier
+  arm.
+- **Priors.** `pn_from_fork_degree` (attacker fork-degree ordering,
+  `MAX_TURN_FORK_DEGREE = 36`) initializes pn; `dn_from_tau` initializes dn
+  from the exact `min_hitting_set` (τ). A **root-only width-tier prior**
+  (`first_width_tier`, `prefer_width_tier_at_depth`) orders the root's newly
+  admitted width classes without perturbing established deep ordering.
+- **Commitment domains.** At Universals with fanned-out obligations
+  (latched once ≥4 distinct obligations are live —
+  `universal_commitment_active`, `has_commitment_fanout`), selection commits
+  to sequential obligation order so wide AND nodes drain one obligation at a
+  time instead of thrashing the frontier.
+- **`K_b` kernel at forced nodes.** The exact K2 kernel (T6) in canonical
+  defender order; `implicit_dispatch` (premise `min_hitting_set == b`)
+  carries the U3 staple-by-theorem dismissal of all non-hitting replies.
+- **L13 sparse LOSS witnesses.** `sparse_loss_witnesses` emits ≤3 windows at
+  b=1 and ≤5 at b=2 (caps improved from 3/6 to **3/5**; proof-doc R4b,
+  Lean `TssZones.L13_capThree`/`L13_capFive` PROVEN).
 
-## 6. Adversarial review log
+**Certified performance (provenance-pinned).** Official all-19 corpus gate:
+**PASS, `failures=0`**, single process, 436.8 s wall at the 2 GiB TT profile
+(`TSS_BACKWALK_TT_BYTES=2147483648`), commit `ac3f455f`, gate record
+`dba6111d` (`.codex-round9b-gate/GATE.md`; the G2R3 flags-off re-run
+reproduced PASS at 445.4 s). 14/14 WIN certified, 5/5 NO non-WIN, zero false
+wins. Cumulative vs the round-8b engine (round-9 progress notes,
+`.codex-round9/round9-progress.md`): 12-entry matrix ~8 min → 12.35 s
+(~40x); hard child @1M 1,272.8 s → 26.1 s (**48.7x**). The hardest entry
+`0l4291i_live` full solve: ~6,970 s (round-8b) → 794.3 s (round-9 gate
+`4daf1961`) → **177.7 s** (round-9b gate) — **faster than the reference
+pdspn's 264 s on its hardest position**, at certificate grade. The 512 MiB
+default TT was directly proven (round-8b telemetry, TT-saturation root
+cause) to stop indexing 0l's working set around ~1M nodes; 2 GiB is the
+official deep-solve test profile. That finding is why TT capacity/sharing is
+now a first-class bottleneck (§I.4).
 
-- **R1 (Codex ultra, 2026-07-13) — full-plan hostile review.** Verdicts:
-  U3, U7 SOUND (U7 additionally *already implemented* on the branch —
-  struck); U2 FLAWED-fatal (incomplete D9 checklist; zero-edge exploit) —
-  repaired with the full obligation list; U1 FLAWED (missing producer-side
-  monotone closure loop; the "P1" trim was not P1 — renamed stale-area
-  filter, downgraded [H]; Opening exclusion added); U4 FLAWED (cache
-  compositionality counterexample — two-stamp import rule added; wrong
-  monotonicity citation fixed; retry loop bounded + diagnosis-gated);
-  U5/U6/U8/U9/U10 NEEDS-CONDITION — all conditions adopted verbatim
-  (§2 items). Missed opportunities adopted: U3 no-complement-enumeration,
-  minimal-T4-zone verification, U11 (P1/P2 arms + sub-hitting dispatch
-  algebra), ES incremental maintenance + 6-ply variant (deferred), D ≥ 6
-  refinement (deferred), sealed subcertificates (deferred). Nitpicks
-  incorporated (Z5 is a geometric scan; WindowKey identities + D6
-  remapping; verifier establishes T; scoped U5 speedup claim).
-- **R2 (Codex, 2026-07-13) — confirmation pass, ruled FAIL with nine
-  residual defects; all repaired in place.** APPLIED-CORRECTLY: U1, U3,
-  U6, U7, U8, U9; APPLIED-BUT: U2 (fatal — OR-COMPLETION leaves were in
-  the schema but absent from the verifier obligations, admitting a forged
-  maximal leaf; now obligation 6, with exact derived resolution semantics
-  for all leaf types in obligations 7–8), U4 (composite two-stamp
-  aggregation + final-T recheck added; preflight/fatal-counter conflict
-  resolved via the solver-side `horizon_retry` preflight), U5
-  (joint-second-win pairs correctly stated as outcome-canonicalizable but
-  not terminal-PositionKey-deduplicable), U10 (tautological resolution>T
-  mutation replaced with exact-arithmetic corruptions; OR-COMPLETION and
-  WIN-witness mutations added; reference differential made explicitly
-  one-sided), U11 (sub-hitting refinement labelled [UNPROVEN] with
-  premises; P1's immediate-winning-substitute branch restored). Phasing
-  ruled correctly represented; no R1 verdict silently dropped.
-- **R3 (Codex, 2026-07-13) — narrow confirmation on the nine R2 repairs:
-  overall PASS.** All nine ruled APPLIED-CORRECTLY (OR-COMPLETION
-  obligation; exact leaf-resolution semantics; composite two-stamp rule;
-  preflight/fatal-counter separation; joint-second-win canonicalization;
-  certificate mutations; one-sided differential; [UNPROVEN] labelling;
-  P1 substitute branch), plus obligation numbering (1–12) and review-log
-  consistency confirmed. The document is final.
+**What is slated for deletion** (§I.3): the old narrow DFS prover and its
+narrow generator; the uncertified `WideRacer` oracle ("Fix A": built in
+round 9, A/B'd — 185,790 nodes and 97.9 s with racer on AND off, i.e. no
+benefit because certified search is already frontier-efficient — default OFF
+behind `cfg(test)`, recommended deletion); and the losing experimental
+scaffolds of rounds 5–8.
+
+## I.2 The Group-2 arc: closing the λ² structural gap
+
+Corpus frequencies (§I.6 provenance) made this the highest-value front:
+quiet-move share of real wins rises **8.7% → 87%** with distance-to-win, and
+**25.7%** of threatened defender nodes are unforced (`k < B`). The wide
+engine — forcing-complete and gate-perfect on the forcing corpus — was
+structurally blind here: at a `k < b` defender node `implicit_dispatch`'s
+premise fails and no quiet attacker continuation was ever generated.
+
+**Round 1** (`.codex-group2/round1-progress.md`, base `ac3f455f`): isolated
+the active witness. `double_fork_compact` (36-placement legal replay,
+attacker SecondStone root): the historical narrow finder proves WIN in 2,884
+nodes at absolute horizon 45; the normative wide engine dies **UNKNOWN in 2
+nodes** — the first defender node after root choice `(4,0)` has `b=2, k=1`,
+and the engine has no way to represent the hit-plus-spare defender turn or
+the quiet attacker continuation. Also proved: stock-`tss_reference`
+ground-truthing of this position is infeasible (structural lower bound
+≥ 804 × 399 × 398 ≈ **127.7M nonterminal attacker nodes** before a verdict —
+no TT, no pruning, by design).
+
+**Round 2** (base `b4ec2e73`): built the validated escape hatch — a
+test-only exact accelerator `tss_reference_fast` (independent legal
+reconstruction, exact keys, optional independent D6 canonicalization,
+bounded exact TT) that passed a **209/209 differential gate** against the
+stock recurrence, yet still could not close the 478-cell universal wall at
+depth 9. Outcome: two honest NO controls frozen in
+`rust/corpus/spare_corpus_moves.txt` (`compact_urgent_spare`,
+`strongloss_a_backoff_7`; UNKNOWN at every rung — the spare corpus has **no
+WIN_PENDING row and must not be used as a positive acceptance gate**), plus
+the round-3 design memo. Key consequence: for genuine λ² positions,
+**acceptance comes from the independent verifier, not an oracle** — a wide
+WIN whose certificate the strict verifier accepts is the deliverable.
+
+**Round 3** (base `1e082d40`, running in this worktree,
+`.codex-group2/round3-progress.md`) — THE ENGINE ROUND:
+
+- Two tri-state (Off/Shadow/Consume) flags: **`quiet_turn_or_edges`**
+  (complete two-placement attacker OR edges that may finish nonforcing,
+  fired only after the forcing path is exhausted/refuted at an OR node —
+  an OR *universe extension*, not a cap) and
+  **`ranked_unforced_defender_zone`** (at `k < b` AND nodes, the certified
+  T3/T4 union `Z_dir ∪ Z_seed ∪ Z_touch ∪ Z_virgin` under uniform wrappers as
+  the complete searched set; rank orders, never caps).
+- **Shadow** (green): zone derivation from completed certificates — D10 live
+  roles (designated attacker placements + WIN/LOSS leaf-entry witness
+  empties), D14 local budgets `B` computed bottom-up, four-part union
+  recorded. Witness coverage: ply-37 node `k/b = 1/2`, zone 62 vs 478 legal
+  (ratio 0.130; components dir/seed/touch/virgin = 19/0/50/0); ply-38 node
+  18 vs 479 (0.038). All-19 forcing corpus: **0 quiet fires, 0 `k<b` zone
+  nodes** — independent confirmation that the forcing corpus cannot exercise
+  this machinery (the capstone needs λ² positions, §I.5).
+- **Verify** (green): the verifier replaces the obsolete pre-round-3
+  contract (`Z1` hitting row, full-DAG cores, `8·d` seed band) with the
+  revised one — it independently replays the subtree, reconstructs D10
+  roles, derives D14 `B`, and re-derives the full four-part union plus D9's
+  deterministic nonempty fallback; zone nodes require `k<b`, exact stored
+  local `B`, and an exact build-horizon binding; quiet edges replay under
+  (Z4). Byte-for-byte finder/verifier zone agreement on every shadow node.
+  Seven-mutation rejection suite green (omitted mandatory `Z_touch` cell,
+  omitted defender edge, dropped quiet edge, wrong budget, wrong horizon,
+  forged leaf, out-of-zone substitution). Verifier module 11/0.
+- **Consume** (green): **`double_fork_compact` = WIN / 409 nodes / 24 ms at
+  the first (10k) rung, strict verifier ACCEPTED.** A first attempt
+  (WIN/409, verifier-REJECTED for a zone node carrying parent commutation
+  allowances) correctly stopped the ladder; the mixed contract was removed —
+  same-turn commutation is deliberately disabled on zone nodes (it is a
+  separate forced-dispatch contract). No-regression matrix green: all-19
+  gate PASS flags-off (445.4 s), spare NO controls unchanged, default suite
+  95/0, narrow byte-identity untouched.
+- **Step 4** (in progress): the R1b **seed-radius one-relay shrink**,
+  production `seed_band_radius(d) = 8·(d−1)` for `d ≥ 1` (0 at `d ≤ 1`) in
+  BOTH finder and verifier, justified by L9′'s `8(B−1)` bound and gated
+  separately (chain fixtures + mutation suite + full all-19 re-run; any
+  previously-verifying certificate that fails ⇒ STOP and revert — that would
+  itself be a finding).
+
+**Round 4 (likely shape).** Fold G2R3 (orchestrator gate + commit); then, in
+some order justified by data: (a) shadow statistics at scale — zone sizes,
+component splits, fire rates over corpus-sampled `k<b` nodes (feeds A1's
+gate, §II.3); (b) a second, structurally different λ² witness (the spare
+corpus still has no WIN row — a verifier-accepted quiet win from the human
+corpus's 25.7% pool would both diversify evidence and seed the capstone,
+§I.5); (c) exact per-role/per-window clocks behind a flag (U16) with the
+uniform-vs-exact zone-size delta measured; (d) the `Z_virgin`/R2 question at
+the definitional level, now that certificates carrying exposure labels
+exist (the R1b/R2 hunt's blocker was exactly the absence of certificate
+exposure labels).
+
+## I.3 Consolidation: the wide engine becomes THE solver
+
+Once G2R3 is folded and gate-green at the tip:
+
+- **C1 — delete the old narrow DFS prover and narrow generator.** The wide
+  engine strictly dominates it on the gate (14/14 at 4.3x round-9→9b wall
+  improvement and ~40x cumulative) and now covers the λ² regime the narrow
+  finder reached only heuristically. The historical finder's remaining use —
+  mining evidence (it found `double_fork_compact`'s WIN first) — is
+  discharged by the wide engine's own quiet mode. Keep `tss_reference.rs`
+  (stock, deliberately unoptimized) and `tss_reference_fast` (validated
+  209/209) as the two independent oracles; they are test-only.
+- **C2 — delete `WideRacer` (Fix A).** Measured useless (§I.1); uncertified
+  code adjacent to the certified path is pure hazard surface. Its one
+  residual idea — zone-cardinality-informed cross-leaf scheduling — moves to
+  U8 (Part II), consuming *verifier-derived* quantities only.
+- **C3 — delete losing experimental scaffolds** of rounds 5–8 (round-8's
+  losing TT variants etc.) and the round-2/3 harness dead ends that did not
+  freeze into corpora. Frozen corpora, gate records, and progress memos
+  stay.
+- **C4 — single profile, single ladder.** One documented TT profile story
+  (512 MiB default / 2 GiB deep-solve test profile / per-solve byte caps in
+  leaf mode); one rung ladder (`TSS_RUNBOOK.md`); the spare corpus keeps its
+  honest semantics (NO controls; WIN_PENDING only with an exhaustive-oracle
+  or verifier-accepted row).
+- **C5 — paper-quote hygiene.** Any number quoted into the paper re-derives
+  from a gate at the exact quoted commit (the round-9b gate at `ac3f455f`
+  discharged this for the current headline set; G2R3's fold must repeat it
+  at its tip).
+
+## I.4 The named next bottleneck: TT capacity and U18/U22 DAG sharing
+
+Round-8b proved the deep-solve regime is **TT-bound**: 512 MiB stops
+indexing the 0l working set around ~1M nodes; the fix so far is a bigger
+profile (2 GiB), which is a ceiling, not a design. The design answer has two
+coupled halves:
+
+- **U18 — certificate DAGs** (proof-doc D18/T10). Share repeated subproofs
+  in the certificate arena instead of duplicating them. The soundness
+  contract is now sharper than the old plan knew: T10's in-flight Lean
+  formalization discovered that **DAG labels are max-dominant bounds over
+  all path copies, not per-copy equalities** — a shared node's
+  budget/rank/exposure labels must dominate every incoming path's exact
+  recurrence, and obligations union over reachable descendants while
+  coupling histories stay path-local. That rank-inequality semantics IS the
+  merge-semantics spec for any TT/cache sharing of zone-bearing fragments.
+  Gated on T10's completion (IN-FLIGHT register).
+- **U22 — TT policy + ProvenFragment persistence** (new item; pairs with
+  A4, §II.3). Inside a single deep solve: replacement policy aware of proof
+  obligations (never evict entries pinned by the live frontier's proof
+  DAG); byte-accounted admission for zone-bearing fragments (they are
+  fatter — remeasure before promotion). Across solves: verified
+  sub-certificates minted inside UNKNOWN solves persist in memo/TT across
+  visits and moves, so later solves resume from proven frontiers. Round-6
+  cert-import scaffolding exists (`cfg(test)`) as the starting point. The
+  cross-path sharing half inherits U18's T10 semantics; the
+  within-lineage half (same path re-visited at a later move) needs only the
+  existing exact-key + build-horizon binding discipline (U4/U13).
+
+Sizing note: this is the only front whose payoff compounds with every other
+front — atlas solves, capstone runs, and leaf-mode cumulative search (A4)
+all hit the same wall.
+
+## I.5 Capstone measurement spec (RZOP §5, reconciled)
+
+The capstone measures **how close to minimal we search**, on positions that
+actually exercise the machinery. RZOP §5's items, corrected for the wide
+engine:
+
+1. **Corpus composition.** The 19-entry forcing corpus is structurally
+   dispatch-only (G2R3 shadow: 0 zone nodes, 0 quiet fires on all 19) — it
+   validates the forcing engine, not the zone machinery. The capstone set =
+   the 19 forcing entries **+** `double_fork_compact` (first
+   verifier-accepted λ² WIN) **+** 1–3 curated quiet-win positions from the
+   human corpus's 25.3%-VCF / 87%-quiet pools (§I.6), each either
+   oracle-ground-truthed or verifier-accepted **+** the two honest NO
+   controls **+** opening-atlas spot-checks (§I.6).
+2. **Minimality headline.** Per-AND-node and aggregate `|searched|/|Legal|`
+   (G2R3's witness already logs 0.130 and 0.038 at its two zone nodes; the
+   corpus-wide distribution is the deliverable).
+3. **Uniform vs exact clocks.** Recompute each zone under the uniform
+   `8(B−1)`-wrapper vs exact per-role `r_N` / per-window `E^D` (D15/D16,
+   U16) and publish the size delta — the quantified minimality gain that
+   RZOP's static zones structurally cannot produce.
+4. **λ-order proxy column.** Certificate-derived: count of `k < B` Universal
+   nodes + nonforcing OR edges + max spare-turn nesting — proves the tested
+   position needed the new machinery (guards against dispatch-only
+   capstones).
+5. **Robustness control.** Re-verify capstone certificates under an
+   outward-pushed legality frontier (more legal cells for both players) —
+   the Hexo analogue of RZOP's infinite-board recheck, stressing (Z4)/virgin
+   clauses. (Not the self-defeating "all cells strictly interior" phrasing;
+   virgin windows live at the frontier by construction.)
+6. **Cross-solver bar** (owner mission): matched-position wall/node
+   comparison vs idtt/dfpn/pdspn where reference implementations exist; the
+   0l-vs-pdspn 177.7 s vs 264 s datum is the template.
+
+## I.6 Opening atlas
+
+Corpus grounding (`hunt/corpus-freq`, `3f66a410`): the D6-canonical P2-reply
+family distribution is strongly concentrated — **top 2 families = 36.1% of
+all 6,902 games, top 5 = 50.0%, top 10 = 61.1%**. Solve order for the
+certified atlas = the ranked list: `{(-1,0),(0,1)}` (19.4%) →
+`{(-1,0),(-1,1)}` (36.1% cum.) → `{(-2,0),(-2,2)}` (43.7%) →
+`{(-3,0),(-1,1)}` (47.5%) → `{(-2,1),(0,-1)}` (50.0%) → … (full table in the
+hunt report).
+
+Atlas rungs (each a separate, gateable deliverable):
+
+1. **A-0**: per-family root solves at the deep profile (2 GiB, staged to
+   20M+ rungs as needed), WIN/LOSS/UNKNOWN with certificates archived;
+   honest UNKNOWN is an acceptable verdict — no bar-lowering.
+2. **A-1**: frontier expansion inside solved families (certified subtree
+   persistence is the A4/U22 consumer here — atlas work is exactly "many
+   deep solves sharing proven frontiers").
+3. **A-2**: atlas spot-checks feed the capstone (§I.5) and, Phase-3-side,
+   opening-book consumption by serve/eval (out of this doc's scope until an
+   owner ruling asks for it).
+
+Prerequisite honesty: atlas economics are TT-bound (§I.4) and quiet-width
+bound (§I.2). Do not schedule A-0 at scale before G2R3 folds and U22's
+within-lineage persistence exists; before that, atlas time is mostly re-paying
+the same subtrees.
+
+## I.7 RZOP §9 reconciliation (owner ruling 6)
+
+§9's ranking was written 2026-07-15 against the OLD narrow engine ("the
+corpus proves 0 of 14"; "single-pass DFS, no pn frontier"). The wide engine
+overtook several premises; the ranking's *spirit* — attacker width first —
+was vindicated by G2R3. Row-by-row:
+
+| RZOP §9 rank | Item | Status under the wide engine |
+|---:|---|---|
+| 1 | OR-generator width: count-2 pair-builds | **OVERTAKEN, then completed.** The wide engine's forcing-wide `WideTurnGate` already took the corpus to 14/14; the residual λ² blindness is closed by G2R3's `quiet_turn_or_edges` (U19). The specific `strength < 3` gate diagnosis described the deleted narrow generator. |
+| 2 | λ-order iterative deepening | **PARTIALLY REALIZED, differently.** The wide engine has staged *depth* deepening; the order axis is realized as forcing-first-then-quiet within `quiet_turn_or_edges` (quiet universe fires only on forcing exhaustion) plus the leaf horizon ladder. A literal order-outer-loop remains available as a scheduling refinement if G2R4 data shows quiet-fire thrash; not currently needed. |
+| 3 | T2 macromove defender collapse | **LIVE backlog** (U24, Part III) — still the one genuine defender fan-out collapse we lack; capped by frontier-inertness (distinct radius-8 balls), so honest impact medium/low. Needs a fresh Hexo lemma (hostile-reviewed) — RZS/Lemma 12 is template, not proof (locality breaks it). |
+| 4 | Null-defender discovery probe | **MOSTLY MOOT.** Its purpose was to amortize discovery for a DFS finder; the pn-frontier engine self-schedules and G2R3 finds the quiet witness in 409 nodes. Keep the monotonicity lemma note; build only if atlas-scale profiles show discovery cost dominating. |
+| 5 | Residual re-attack frontier on UNKNOWN | **LIVE** (U23) — now *more* valuable: with quiet width landed, the blocking-reply work-list is actionable, and it is exactly the routing signal A4/atlas resumption wants. |
+| 6 | RZS/Lemma 12 template for U11 sub-hitting | LIVE with U11/U24; `[UNPROVEN]` label stands. |
+| 7 | Frontier-inertness telemetry | Fold into capstone telemetry (§I.5). |
+| 8 | Incremental generator state along DFS path | **UNCLEAR — re-profile.** The claim targeted the old generator's per-node rebuild; the wide generator's cost profile differs (stateless pair classification). Re-measure before building; node-throughput only, converts no UNKNOWN. |
+| 9 | Racer + zone-cardinality PN into U8 | Racer: **delete** (C2). Zone-cardinality scheduling: folds into U8 (Part II), verifier-derived quantities only. |
+| 10 | Promotion-composable zone schema | Carried into U22's admission design. |
+| 11–13 | Capstone corpus / measurement / robustness | Adopted wholesale as §I.5. |
+| 14 | Paper framing bundle | Paper's business (owner ruling 4); out of this plan. |
+
+---
+
+# Part II — The MCTS-leaf Phase-3 program
+
+## II.1 Current integration reality (cite the RUNBOOK; do not duplicate it)
+
+`docs/TSS_RUNBOOK.md` (this worktree) is normative for flags, rung order,
+and health metrics. Summary of the substrate only: gated leaves (threat
+trigger + hash subsample `tss_solver_sample_16`, deterministic
+`tss_solver_node_cap` = 2000 default) ride a mode ladder
+(`tss_solver_mode` 0/1/2/3 = off/shadow/+LOSS/+WIN) with root guard, interior
+guard, async worker pool, and the park rung (wait-at-leaf first-touch
+consumption, `tss_solver_park_timeout_ms` liveness bail). `tss_zone` runs
+the **horizon ladder** per solve: a tight `+8`-deadline attempt on half the
+node budget first, then the flat `+12` solve only if the tight attempt is
+Unknown. `deep_verify_failed` MUST be 0; every consumption passes the single
+mint. Deployment is one flag per relaunch at epoch boundaries, and the
+Phase-3 `main_3` relaunch is the landing slot for everything below (owner
+ruling 5).
+
+## II.2 Improvement axes (owner ruling 2)
+
+1. **Verdict rate at fixed cap.** The wide engine's economics change the
+   leaf equation: G2R3's witness closed in 409 nodes/24 ms where the narrow
+   finder needed 2,884 — but wide turns also cost more per node on wide
+   frontiers. **Sized by the leaf-width measurement (IN-FLIGHT)**: narrow-
+   vs-wide miss rates at caps 500/2k/10k on the human corpus + wall-clock
+   economics decide which engine profile gates leaves at Phase-3 and at what
+   cap.
+2. **Cheaper solves → wider gating.** Every Part-I speedup converts directly
+   into more gated leaves per second at fixed CPU share (raise
+   `tss_solver_sample_16` coverage, or lower the trigger threshold) — the
+   preferred spend of Part-I wins, per the mission's "useful at LOW node
+   counts."
+3. **Budget envelope re-tuning** (§II.5) — data-gated, never speculative.
+4. **Sub-verdict yield** (§II.3) — the genuinely new axis: an UNKNOWN leaf
+   solve still proved things; stop discarding them.
+
+## II.3 The four sub-verdict artifacts (owner-endorsed 2026-07-16)
+
+Program bar, restated: **policy targets consume proof-backed sets only;
+values remain certificate-only through the single mint.** Each artifact
+below states its consumption path, soundness argument under that bar, its
+prerequisite, and an honest cost/benefit sketch.
+
+### A1 — Certified zone policy masks at unforced defender nodes [S]
+
+- **What/consumption.** At `k < B` defender nodes, the T3/T4 zone union is a
+  *proven-complete* defender reply set: every reply outside it is
+  certificate-dismissed (T3's contract). Consume exactly like
+  `tss_policy_target_sharpen` (Lever 1) — narrow the recorded π′ target
+  support to the zone — but at `k < B` nodes, which are **25.7% of
+  threatened defender nodes** (43.3% of start-of-turn B=2 defender nodes).
+- **Soundness.** Defender-side ONLY, and only where a verified certificate
+  for the attacking side names the zone. **Attacker-side masks are unsound
+  as priors**: quiet λ² moves are the exact residue outside any
+  threat-derived attacker set, and the corpus says 87% of long wins run
+  through them — masking the attacker would train the blindness G2R3 just
+  cured. Proof anchors: T3/T4 (Lean `TssZones.T4` PROVEN); the mask is a
+  non-losing-support claim, with the same loss-delay caveat U6 recorded
+  (flattening preferences among all-losing replies).
+- **Prerequisite.** G2R3 shadow statistics at scale (zone sizes, component
+  splits, fire rates on corpus-sampled `k<b` nodes). Witness datapoints so
+  far: zone/legal = 0.130 and 0.038 — if that ratio holds broadly, the mask
+  is a ~10–25x support sharpening on a quarter of threatened defense.
+- **Cost/benefit.** Cheap to consume (existing Lever-1 plumbing);
+  certificate availability is the binding constraint — zones exist only
+  where a gated leaf minted (or sub-minted, A4) a certificate covering the
+  node. Benefit compounds with A4 (more persistent certificates → more
+  masked nodes).
+
+### A2 — Solver scalars as NN input features [T→H]
+
+- **What/consumption.** Inputs, not targets — no soundness exposure: pn/dn
+  at the abandoned root, depth reached, hitting number `k`, live
+  threat-window counts, exact-surd Φ (the `A + B√3` form ports from
+  `gap_raw_hunt.rs`). Plumb into the board-input feature block behind a
+  flag.
+- **Soundness.** None required beyond determinism: features change function
+  inputs, not targets; the single mint is untouched. [H]-adjacent only in
+  that they steer search through the net.
+- **Prerequisite.** Leaf-width measurement sizes which scalars carry signal
+  at leaf caps (IN-FLIGHT); feature-diet lessons from the main_3 board-input
+  review apply (don't ship dead inputs).
+- **Cost/benefit.** Cheap plumbing; risk is feature bloat, mitigated by the
+  measurement gate. Φ's own corpus base-rate honesty: `Φ<1` occurs at 0.02%
+  of defender FirstStone nodes — Φ is a *gradient* feature, not a boundary
+  flag, at leaf scale.
+
+### A3 — Bounded no-win facts from the horizon ladder [S with an exhaustion guard]
+
+- **What/consumption.** The `tss_zone` ladder already runs a tight `+8`
+  deadline before the flat `+12`. A tight rung that **exhausts** (the staged
+  frontier completes with no proof at that deadline — dn=0 at the stage, not
+  a node-cap bail) is a proven fact: "no forced win within 8 plies from
+  here." Consume as an auxiliary value target (small regression head) or as
+  in-tree exploration shaping (damp the win-probability prior of the solved
+  horizon).
+- **Soundness.** The fact is exactly the staged-deepening semantics
+  ("a staged depth cutoff is unresolved, not a disproof" — so only
+  *exhaustion*, never a cutoff or cap-out, mints the bounded fact). It is a
+  bounded statement, never a Loss: the guard is structural, same shape as
+  U9's old "never mint from a bounded futility check" rule. Auxiliary-target
+  consumption does not enter the hard-value mint at all.
+- **Prerequisite.** Telemetry to separate exhausted-tight-rungs from
+  capped-tight-rungs (cheap counter); shadow histograms of how often the
+  fact fires at production caps.
+- **Cost/benefit.** Near-free at solve time (the rung already runs); the
+  open question is training value — gate on the shadow fire-rate before
+  building the head.
+
+### A4 — ProvenFragment persistence [S; the leaf-side face of U22]
+
+- **What/consumption.** Verified sub-certificates minted inside UNKNOWN
+  solves persist in memo/TT across visits **and across moves**; later solves
+  resume from proven frontiers. "Many shallow searches" become cumulative
+  deep search at unchanged per-leaf budget — the highest-leverage leaf idea
+  in this plan, because it converts the leaf regime's weakness (tiny caps)
+  into amortization.
+- **Soundness.** Within-lineage reuse (same game, later move): exact-key
+  binding + build-horizon binding, already the verified-`Done`-entry
+  discipline of the async memo (binding re-checked at every consumption).
+  **Cross-path sharing** (transpositions): the spec is T10's max-dominant-
+  label DAG semantics (U18) — labels at a shared node must dominate every
+  incoming path; do not ship cross-path sharing before T10 lands
+  (IN-FLIGHT register). Round-6 cert-import scaffolding (`cfg(test)`) is the
+  implementation seed.
+- **Prerequisite.** T10 (for the sharing half); U22's byte-accounted
+  admission (zone-bearing fragments are fatter); memory ceilings per the
+  runbook's solver-memory discipline (≤8192 memo entries, per-solve TT byte
+  caps — persistence must not break the earlyoom budget).
+- **Cost/benefit.** Implementation-heavy (the one genuinely hard leaf item),
+  but it multiplies A1 (certificate availability), the atlas (§I.6), and
+  verdict rate (axis 1) simultaneously.
+
+## II.4 Lever-2 (proof-value target swap) — status unchanged
+
+Runbook rung 9, **NOT YET BUILT** (build at its rung): value target :=
+`tss_proof` where nonzero at expand, proof-valid-under-truncation mask, both
+backends. Gate unchanged: the `tss.proof_disagreements` stream must show
+deep proofs disagreeing with outcomes often enough to matter. Both labels
+are already captured per row, so no data is lost while it waits. A3's
+auxiliary head is deliberately weaker than Lever-2 and does not pre-empt it.
+
+## II.5 Budget-envelope retuning — a data-gated rung
+
+`tss_solver_node_cap` (2000), `tss_solver_park_timeout_ms` (100),
+`tss_solver_sample_16` (16) were sized against the OLD engine's shadow
+histograms. The wide engine's node economics differ in both directions
+(§II.2 axis 1). Re-tune as ONE rung, after the leaf-width measurement
+lands, from: verdict-rate-vs-cap curves at 500/2k/10k, wall-clock per
+verdict, and park-bail rates at production thread counts. Until then the
+envelope stays frozen — no speculative retunes ride other rungs (ladder
+discipline, invariant 6).
+
+## II.6 Deployment map (Phase-3)
+
+Phase-3 relaunch order of the NEW items, after the runbook's existing rungs
+(each line = one rung, one relaunch, shadow-first where semantics allow):
+
+1. Wide-engine leaf profile swap (engine choice + envelope retune as sized
+   by §II.5) — shadow mode first (`tss_solver_mode=1` twin-run).
+2. A3 telemetry counters (pure shadow; no consumption).
+3. A1 shadow: record would-be-masked support vs actual π′ (the
+   `win_retained_mass_mean` analogue for zones) — consume only if mass
+   actually moves.
+4. A2 features behind a flag (needs a `target_regime`-style note only if
+   input schema versioning demands it).
+5. A4 within-lineage persistence; cross-path sharing strictly after T10.
+6. A3 consumption (aux head or shaping) if its shadow fire-rate justified
+   the head; Lever-2 at its own gate.
+
+Every rung keeps invariants 1–6 and the runbook's watch metrics;
+`deep_verify_failed` stays the hard-stop counter.
+
+---
+
+# Part III — U-item status ledger and crosswalk
+
+One row per item. STATUS ∈ {DONE, STRUCK, SUPERSEDED, LIVE, IN-FLIGHT,
+BLOCKED}; "where it lives" names the engine mechanism, campaign round, or
+Part of this plan that owns it now. Proof anchors cite the proof doc tag and
+the Lean decl where one exists (`TssZones.*`; status per
+`E:\tss-lean\LEDGER.md` at 2026-07-16 — the coming `SolverInterface.lean` /
+`SOLVER_HANDOFF.md` supersedes this column when it lands). Soundness
+classes are the original ones unless re-derived.
+
+**Tallies: 6 DONE, 2 STRUCK, 2 SUPERSEDED, 9 LIVE, 5 IN-FLIGHT (24 rows).**
+
+| # | Original intent | Class | STATUS | Where it lives now | Proof anchor |
+|---|---|---|---|---|---|
+| U1 | Zone generator at `k<B` AND nodes (hitting ∪ 𝒜 ∪ ℬ ∪ core ∪ band) | [H] | **SUPERSEDED** | Formula superseded by U12's ranked union (already amended in the old doc §7); the k<B generator itself now ships as G2R3's `ranked_unforced_defender_zone` | T3/T4 (via U12) |
+| U2 | Zone-carrying certificates + full D9 verifier checklist | [S] | **SUPERSEDED** | Checklist rows replaced by the revised contract (D10 roles, D14 budgets, four-part union, (Z2)/(Z4)/(Z5′)); shipped in G2R3's verifier rewrite. The D9 grammar obligations (typed leaves, nonempty S(N), no-defender-terminal, exact resolutions) survive verbatim inside the new contract | D9–D16, T3; Lean D9 grammar decls (STATED), `TssZones.T3` PROVEN |
+| U3 | Staple-by-theorem at dispatch nodes; no complement enumeration | [S] | **DONE** | Wide engine `implicit_dispatch` (premise `min_hitting_set == b`); the per-omitted-move replay is gone from the normative path | U3 lemma; T1/T6/L3; Lean λ¹ soundness (`lambdaOne_win_sound`/`loss_sound` PROVEN), T6 kernel calculus decls |
+| U4 | Path-derived ply clock, horizon semantics, two-stamp cache rule | [S] | **DONE** | Clock/horizon semantics in the wide engine; zone nodes carry an exact build-horizon binding (G2R3); the two-stamp fragment rule stands narrowed by U13's local budgets | D9, L7, L11; `TssZones.L7_*`, `L11_*` PROVEN |
+| U5 | P3 same-turn commutation: pair-canonical generation | [S] | **DONE** | Structural in the wide TT via canonical pair dedup (`canonical_frame`/`canonical_coord_key`); note: commutation deliberately disabled on G2R3 zone nodes (separate contract) | P3 (DOMINATION.md); Lean §9 P3 row UNSTATED — formalization backlog |
+| U6 | Interior forced-move guard default-on + λ¹ policy mask | [S] | **LIVE** | Part II / runbook rungs 2–3 (`tss_interior_guard`, `tss_policy_target_sharpen`); A1 extends the mask idea to `k<B` nodes | U3 lemma, T1, T6; loss-delay caveat recorded |
+| U7 | OR-node ordering without child replay | — | **STRUCK** | Already implemented pre-plan (old R1 finding); the wide engine's fork-degree/tau priors supersede the mechanism anyway; DEEP_WIN ordering-regression telemetry residue → capstone (§I.5) | — |
+| U8 | Trigger + regime detector (leaf gating) | [H] | **LIVE** | Part II axis 1–2; absorbs RZOP §6.3's fold (zone-cardinality scheduling from verifier-derived quantities; racer deleted instead of folded). **Gated on the leaf-width measurement (IN-FLIGHT)** | correctness-safety conditions carried from old plan verbatim |
+| U9 | ES-potential futility check (Cor. 2 integer test) | [S-bounded] | **STRUCK** | Struck 07-16: the ES *global* forever-blocking claim is greedy-refuted (`ES_GLOBAL_BOUNDARY` Thm 1; GAP-RAW open), removing the intended growth path; and corpus data pre-triggers the old kill criterion — `Φ<1` fires at 0.02% of defender FirstStone nodes (<1% bar). Honesty note: the bounded Thm-2 form (first five attacker placements safe) remains mathematically valid; Φ survives as an A2 *feature*, never a futility gate | ES_POTENTIAL Thm 2/Cor 2; refutation ES_GLOBAL_BOUNDARY Thm 1 |
+| U10 | Adversarial fixtures + differential harness; mutation suites are the gate | [T] | **DONE** (institutionalized) | Standard practice: G2R3's 7-mutation suite, round-2's 209/209 differential, hunt fixtures (`hunt_r1b_chain_sharpness` etc.), one-sided matched-horizon differentials. Every new consuming flag repeats it (invariant 6) | mutation testing is the gate; differentials are evidence |
+| U11 | True domination arms P1/P2; sub-hitting dispatch `[UNPROVEN]` | [S]/[UNPROVEN] | **LIVE** (backlog) | Part I backlog; extended by U24 (macromove). RZS/Lemma 12 is a case-split *template* only — its zone-irrelevance step does not survive radius-8; `[UNPROVEN]` label stands until a fresh Hexo lemma passes hostile review | P1/P2 (DOMINATION.md); frontier-inertness Lemma 7 |
+| U12 | Ranked zone generator + verifier (`Z_dir ∪ Z_seed ∪ Z_touch ∪ Z_virgin`, (Z2)/(Z4)/(Z5′)) | [S] | **IN-FLIGHT** (landed in G2R3, fold pending) | G2R3 `ranked_unforced_defender_zone`: shadow/verify/consume all green; verifier independently re-derives the union + D9 fallback; witness WIN verifier-accepted. Uniform wrappers this round; exact clocks = U16 | T3/T4/T7, D10–D16; `TssZones.T3`, `T4` PROVEN; `T5` PROVEN; zone-component decls STATED |
+| U13 | Local budget labelling (D14/L11); cache reuse via budget inequalities | [S core; cache needs-derivation] | **IN-FLIGHT** (core) / cache lane LIVE | Core landed in G2R3 (exact stored local `B`, bottom-up D14, verifier-checked). The online-cache-reuse derivation (replacing final-assembly recheck) remains open — final assembly still rechecks all inequalities; failure ⇒ Unknown | D14, L11; `TssZones.L11_*` PROVEN |
+| U14 | Sparse LOSS witnesses (≤3 at b=1, ≤6 at b=2) | [S] | **DONE** (improved) | Wide engine `sparse_loss_witnesses`; caps improved to **3/5** (R4b pinned relatively) | L13; `TssZones.L13_capThree`/`L13_capFive` PROVEN; sharpness fixtures STATED |
+| U15 | Kernel T6 at forced nodes (`K_b`) | [S] | **DONE** | Wide engine exact K2 kernel in canonical defender order, beside `implicit_dispatch`; `mhs>b` hard guard per T6 | T6; Lean `t6Kernel_*` calculus decls landed (full T6 region contract still being stated) |
+| U16 | Exact ranks and exposures (D15/D16 clocks) | [S when checks pass] | **LIVE** (backlog, promoted in value) | Behind a future flag with uniform-B as differential oracle; now also the capstone's uniform-vs-exact delta (§I.5 item 3) AND the only route to settling R2's full-union sharpness (blocked on D16 exposure labels only certificates supply — `hunt/r1b-r2` §3.3) | D15/D16, L11; ledger rows STATED |
+| U17 | Branch-indexed substitution envelopes (D17) | [S] | **LIVE** (backlog) | Unimplemented in engine; **proof basis upgraded**: T9 + both dismissal corollaries now kernel-checked. Still the largest verifier surface; both `+1` transition charges mandatory (R7 pinned); gate on profiles showing whole-subtree unions dominate zone width | D17/T9; `TssZones.T9`, `T9_soundDismissal` PROVEN |
+| U18 | Certificate DAGs (D18/T10) | [S] | **LIVE — PROMOTED to Tier A** | §I.4: TT capacity/sharing is now a first-class bottleneck (512 MiB ≈ 1M-node saturation, round-8b telemetry). Merge semantics spec = T10's max-dominant labels. **Sharing half BLOCKED on Lean T10** (IN-FLIGHT) | D18/T10; `unfoldDAG_*` core kernel-checked, T10 transport pending |
+| U19 | **NEW** — Quiet-turn OR edges (attacker width) | [H, verifier-gated] | **IN-FLIGHT** (landed in G2R3) | `quiet_turn_or_edges`: complete two-placement attacker turn universe, fired on forcing exhaustion at OR nodes; replayed under (Z4) by the verifier. The plan's first attacker-side item; closes the λ² structural gap (RZOP ranks 1–2 vindicated) | verifier gate is soundness; (Z4) replay; corpus λ² gradient 8.7%→87% |
+| U20 | **NEW** — Seed-radius one-relay shrink (`8·d` → `8·(d−1)`) | [S] | **IN-FLIGHT** (G2R3 step 4) | Production `seed_band_radius` in finder AND verifier; separately gated (chain fixtures keep binding seed at `8(B−1)`, shed at `8(B−2)`; full gate re-run; any previously-verifying cert failing ⇒ STOP+revert+writeup) | L9′ (`8(B−1)` bound; SHARP per `hunt/r1b-r2` §2 — attained in all 364 probe positions at B=2; absolute-pin attempt honestly BLOCKED); R1b OPEN as theory, shrink-evidence unconditional for the implementation |
+| U21 | **NEW** — `Z_virgin` finite test (formerly absorbed) | [S] | **IN-FLIGHT** (inside U12's landing) | The pre-round-3 shipped verifier ABSORBED `Z_virgin` entirely (full-legal fallback where theory licenses the finite `8(E^D−6)` inversion test — `hunt/r1b-r2` §3.1). G2R3's re-derived union computes it under uniform wrappers; the exact-`E^D` refinement belongs to U16 | D16, L12; `TssZones.zVirgin` + completeness under L11 premise STATED; fixed-window sharpness `L12_fixedWindowExposureSeven_sharp` PROVEN |
+| U22 | **NEW** — TT policy + ProvenFragment persistence | [S within-lineage; T10-gated cross-path] | **LIVE** | §I.4 (deep side) + A4 (leaf side); round-6 cert-import scaffolding (`cfg(test)`) is the seed; byte-accounted admission for fat zone fragments; obligation-pinned replacement | exact-key + build-horizon binding (U4/U13); cross-path = T10 |
+| U23 | **NEW** — Residual re-attack frontier | [T→H] | **LIVE** | On UNKNOWN, emit the blocking defender reply set as a routing-only field; re-solve only those at deeper caps next pass. Mints nothing. Payoff unlocked by U19 (quiet width now exists to exploit the routing) | none needed (routing only) |
+| U24 | **NEW** — Macromove / class-partition defender collapse | [UNPROVEN → needs fresh lemma] | **LIVE** (backlog) | Extends U11: merge distinct defenses sharing one winning continuation (RZOP T2 ancestry); sound only where absorbed fillers are frontier-inert, which caps the win (honest impact medium/low). Hostile-review the lemma before implementation | DOMINATION.md Lemma 7 (frontier-inertness); Wu & Lin Lemma 12 as architecture template only |
+
+**Carried-forward verbatim analyses.** The old plan's per-item soundness
+analyses that survive the engine change remain normative where this table
+cites them: the U3 lemma text, U5's side-condition list (order frozen at the
+b=2 parent; mirror state-bound and materialized; outcome- not key-dedup for
+joint-second-win pairs), U6's default-on condition list and loss-delay
+caveat, U8's correctness-safety conditions, U13's inequality-direction rule
+(`required_B_at_reuse ≤ zone_build_B`; reversing it recreates the
+omitted-fragment defect), U17's C2/C3 `+1` counterexamples, and U18's
+merge-consistency test list. Consult the superseded doc for their full text;
+they transfer to the wide engine unchanged because they are properties of
+the certificate contract, not of the search algorithm.
+
+**Deleted-not-dispositioned.** The old plan's §3 phasing table (P0–P3 rungs
+of the narrow engine) and §7 "recommended extension phasing" are void — the
+implemented-P0–P3 flags and stored zone certificates of the old engine are
+not promoted across the new verifier contract without re-verification (as
+the old doc itself required), and the old engine is slated for deletion
+(C1). RZOP §9 replaces them as the priority source (owner ruling 6; §I.7).
+
+---
+
+# Measured-number provenance table
+
+Every number in this doc, with its source of truth:
+
+| Number | Value | Provenance |
+|---|---|---|
+| All-19 gate | PASS, failures=0, 436.8 s (2 GiB profile) | `.codex-round9b-gate/GATE.md`, commit `ac3f455f`, gate record `dba6111d`; G2R3 flags-off re-run 445.4 s (`.codex-group2/round3-progress.md` C5) |
+| 0l full solve | 6,970 s → 794.3 s → 177.7 s (8b → 9 → 9b) | round-8b records; gate `4daf1961`; gate `dba6111d`. pdspn reference 264 s on its hardest position (owner-cited comparison) |
+| Matrix / hard-child speedups | ~40x / 48.7x cumulative vs 8b | `.codex-round9/round9-progress.md` headline table |
+| TT saturation | 512 MiB stops indexing 0l's working set (~1M nodes) | round-8b telemetry (`.codex-round8/round8-final.md`) |
+| Racer A/B | 185,790 nodes / 97.9 s racer-on AND racer-off (no benefit) | `.codex-round9/round9-progress.md` "Fix A racer — MEASURED, DEFAULT OFF" |
+| `double_fork_compact` | old finder WIN 2,884 n @ horizon 45; wide UNKNOWN/2 pre-R3; **WIN/409 n/24 ms verifier-accepted** post-R3 at 10k | `.codex-group2/round1-progress.md`, `round3-progress.md` C4 |
+| Stock-reference infeasibility | ≥127,676,808 nonterminal attacker nodes | `.codex-group2/round1-progress.md` C3 lower-bound audit |
+| Exact-oracle differential | 209/209 agreements | `.codex-group2/round2-progress.md` C1 |
+| Zone/legal ratios (witness) | 0.130 (62/478), 0.038 (18/479) | `.codex-group2/round3-progress.md` C1 coverage table |
+| Unforced `k<B` share | 25.7% of threatened defender nodes; 43.3% of B=2 start-of-turn | `HUNT_REPORT_CORPUS_FREQ.md` §1 (branch `hunt/corpus-freq`, `3f66a410`; 6,902 games, 431,495 nodes) |
+| VCF-exists / human conversion | 25.3% ± 1.9% (lower bound, 10k cap) / 64.2% | same, §2 (n=2000 fixed-seed sample) |
+| Quiet-move share of wins | 8.7% → 87.0% by distance-to-win | same, §3b |
+| `Φ<1` incidence | 0.024% of defender FirstStone nodes | same, §3c |
+| Opening families | top 2 = 36.1%, top 5 = 50.0%, top 10 = 61.1% | same, §4 |
+| Seed-band sharpness | `8(B−1)` attained in 364/364 positions at B=2; shipped `8·d` carries ≥1 removable relay; absolute pin BLOCKED | `HUNT_REPORT_R1B_R2.md` §2, §Absolute-pin (branch `hunt/r1b-r2`, base `dba6111d`) |
+| LOSS caps | 3 (b=1) / 5 (b=2) | proof doc R4a/R4b; Lean `L13_capThree`/`L13_capFive` |
+| Lean status | T3/T4/T5/T9 + dismissal corollaries PROVEN; T10 in flight | `E:\tss-lean\LEDGER.md` (2026-07-16) |
+
+# Known source conflicts (recorded, not hidden)
+
+1. **Corpus size**: auto-memory said 8,698 games; the dataset's own metadata
+   and the freq report say **6,902** (sha `54fae7ae…a5b7`). This doc uses
+   6,902. (Already flagged inside `HUNT_REPORT_CORPUS_FREQ.md` §0.)
+2. **RZOP_SOLVER_OPTIMIZATION.md** describes the deleted narrow engine in
+   its §0/§1/§6.3 premises (0/14 corpus; "no pn frontier"; stale line
+   numbers). Its §9 ranking is adopted per owner ruling 6 *as reconciled in
+   §I.7*; do not cite its engine claims as current.
+3. **Fix A lineage**: round-8's memo says "Fix A neither needed nor
+   implemented"; round 9 then built and A/B'd it. Both true in sequence;
+   current state = built, measured useless, `cfg(test)`-gated, delete (C2).
+4. **Shipped seed radius description**: the R1b hunt derives it as `8·d`
+   with `d` the budget to global T (`d ≥ B`); G2R3 describes its shadow
+   wrapper as `8·B` (local-budget form). Consistent — the round-3 zone
+   nodes carry local `B`, and step 4's shrink targets the one removable
+   relay in either formulation.
+5. **U9's mathematics vs its striking**: the bounded ES Theorem-2/Cor-2 test
+   is not refuted; the *strike* rests on the global-layer refutation plus
+   the 0.02% empirical fire rate. Recorded in the U9 row to keep the ledger
+   honest.
+
+# Change log
+
+- 2026-07-16: Ground-up rewrite for the wide-engine era (this document).
+  Supersedes FINAL (R3 PASS) 07-14. Old doc stubbed in place at
+  `hexfield-eq-main-review` worktree with a SUPERSEDED banner.
