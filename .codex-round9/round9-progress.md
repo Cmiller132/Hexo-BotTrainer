@@ -113,3 +113,35 @@ normalizer protocol); sig at .codex-round9/narrow-default.sig.
 - Official all-19 single-process gate (in flight — also discharges the
   round-8b pending replay, now feasible in well under an hour).
 - Instrumentation cleanup decision (GEN_PROFILE timers are cfg(test)-only).
+
+## OFFICIAL ALL-19 SINGLE-PROCESS GATE: PASS
+
+`CORPUS_DONE failures=0`, Rust test `ok`, wall **1,870.96s (~31 min)** in one
+process at the documented 2GiB test resource profile — the replay round 8b
+had to hand off because it projected >4 hours. Per-entry banked rungs:
+
+| Entry | Rung | Status | Nodes |
+|---|---:|---|---:|
+| 0hz3hty | 10k | WIN | 2,917 |
+| 0l4291i_live | **20M** | **WIN** | **1,831,556** |
+| 8is963b | 10k | LOSS (NO ok) | 1 |
+| 94gnnol | 1M | UNKNOWN (NO ok) | 1,000,000 |
+| acly7kb | 10k | WIN | 75 |
+| dy3dg99 | 10k | LOSS (NO ok) | 1 |
+| g2xx6wl | 10k | WIN | 4,149 |
+| hu01jk4 | 10k | WIN | 380 |
+| jh7yo7y | 10k | WIN | 2,041 |
+| jnzzmcm | 100k | WIN | 14,317 |
+| l9mxn59 | 1M | UNKNOWN (NO ok) | 225 |
+| lz60mfb | 1M | WIN | 109,460 |
+| mvp2lvc | 1M | UNKNOWN (NO ok) | 19,895 |
+| xsnfyll | 10k | WIN | 80 |
+| zrugh2x | 100k | WIN | 38,893 |
+| strongloss_a_prefix6 | 100k | WIN | 18,973 |
+| strongloss_b_prefix8 | 10k | WIN | 1,128 |
+| hayes_20260712_turn16 | 100k | WIN | 12,844 |
+| hayes_20260712_placement31 | 100k | WIN | 12,844 |
+
+14/14 WIN certified on the ladder; 5/5 NO non-WIN; full log
+`final-matrix-19-rewrite.log`. Round-8b's pending-official-replay section is
+discharged by this run.
