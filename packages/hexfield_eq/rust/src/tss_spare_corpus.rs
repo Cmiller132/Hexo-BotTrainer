@@ -8,6 +8,7 @@
 use hexo_engine::{apply_placement, HexCoord, HexoState, Placement};
 
 use crate::tss_core::{lambda1_status, DeepSolve, ProofStatus, SolveCaps};
+use crate::tss_reference_fast::{FastOrderingHint, FastReferenceConfig, FastReferenceResult};
 use crate::tss_solver::{TssSolver, WidthOptions};
 use crate::tss_verify::{certificate_horizon_preflight, d6_transform_coord, CertNode};
 
@@ -416,8 +417,8 @@ fn replay_d6(history: &[(i16, i16)], symmetry: u8) -> HexoState {
     let transformed = history
         .iter()
         .map(|&(q, r)| {
-            let coord = d6_transform_coord(HexCoord::new(q, r), symmetry)
-                .expect("valid D6 transform");
+            let coord =
+                d6_transform_coord(HexCoord::new(q, r), symmetry).expect("valid D6 transform");
             (coord.q, coord.r)
         })
         .collect::<Vec<_>>();
@@ -616,6 +617,449 @@ fn status_name(status: ProofStatus) -> &'static str {
     }
 }
 
+fn fast_reference_config() -> FastReferenceConfig {
+    let tt_bytes_cap = std::env::var("TSS_REFERENCE_FAST_TT_BYTES")
+        .ok()
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .expect("numeric TSS_REFERENCE_FAST_TT_BYTES")
+        })
+        .unwrap_or(512 << 20);
+    FastReferenceConfig {
+        tt_bytes_cap,
+        d6_canonical: std::env::var_os("TSS_REFERENCE_FAST_D6").is_some(),
+        ordering_hint: FastOrderingHint::None,
+    }
+}
+
+fn print_fast_result(id: &str, plies: u32, result: &FastReferenceResult) {
+    println!(
+        "SPARE_MINE id={id} profile=reference_fast status={} nodes={} tt_hits={} tt_entries={} tt_bytes={} tt_clears={} wall_ms={} plies={plies}",
+        status_name(result.status),
+        result.nodes,
+        result.tt_hits,
+        result.tt_entries,
+        result.tt_accounted_bytes,
+        result.tt_clears,
+        result.elapsed.as_millis(),
+    );
+}
+
+#[derive(Clone, Copy)]
+struct XorShift64(u64);
+
+impl XorShift64 {
+    fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+}
+
+fn random_legal_state(seed: u64, placements: usize) -> HexoState {
+    let mut rng = XorShift64(seed ^ 0xD1B5_4A32_D192_ED03);
+    let mut state = HexoState::new();
+    for _ in 0..placements {
+        let legal = crate::tss_reference::legal_moves(&state);
+        if legal.is_empty() {
+            break;
+        }
+        let coord = legal[(rng.next() as usize) % legal.len()];
+        let placed = apply_placement(&mut state, Placement { coord }).unwrap();
+        if placed.outcome.is_some() {
+            break;
+        }
+    }
+    state
+}
+
+fn randomized_four_line(seed: u64, claimant: hexo_engine::Player) -> HexoState {
+    use hexo_engine::Player;
+
+    let mut rng = XorShift64(seed ^ 0x94D0_49BB_1331_11EB);
+    let target_len = match claimant {
+        Player::Player0 => 11,
+        Player::Player1 => 9,
+    };
+    let mut state = HexoState::new();
+    let mut claimant_stones = 0usize;
+    while state.placements_made() < target_len {
+        let mover = state.current_player();
+        let forced = if mover == claimant {
+            let coord = match (claimant, claimant_stones) {
+                (Player::Player0, 0) => Some(HexCoord::ZERO),
+                (Player::Player0, 1..=3) => Some(HexCoord::new(claimant_stones as i16, 0)),
+                (Player::Player1, 0..=3) => Some(HexCoord::new(-(claimant_stones as i16) - 1, 0)),
+                _ => None,
+            };
+            claimant_stones += 1;
+            coord
+        } else {
+            None
+        };
+
+        let coord = forced.unwrap_or_else(|| {
+            if state.phase() == hexo_engine::TurnPhase::Opening {
+                return HexCoord::ZERO;
+            }
+            let candidates = crate::tss_reference::legal_moves(&state)
+                .into_iter()
+                .filter(|coord| coord.r != 0 || coord.q < -8 || coord.q > 8)
+                .collect::<Vec<_>>();
+            candidates[(rng.next() as usize) % candidates.len()]
+        });
+        let placed = apply_placement(&mut state, Placement { coord }).unwrap();
+        assert!(placed.outcome.is_none(), "random tactical setup won early");
+    }
+    assert_eq!(state.current_player(), claimant);
+    assert_eq!(state.phase(), hexo_engine::TurnPhase::FirstStone);
+    state
+}
+
+fn assert_fast_matches_stock(
+    id: &str,
+    state: &HexoState,
+    plies: u32,
+    counts: &mut [usize; 3],
+    movers: &mut [usize; 2],
+) {
+    let stock = crate::tss_reference::solve(state, plies);
+    let fast = crate::tss_reference_fast::solve(
+        state,
+        plies,
+        FastReferenceConfig {
+            tt_bytes_cap: 64 << 20,
+            d6_canonical: true,
+            ordering_hint: FastOrderingHint::None,
+        },
+    );
+    assert_eq!(
+        fast.status, stock.status,
+        "REFERENCE_DISAGREEMENT id={id} plies={plies} stock={stock:?} fast={fast:?}"
+    );
+    counts[match stock.status {
+        ProofStatus::Win => 0,
+        ProofStatus::Loss => 1,
+        ProofStatus::Unknown => 2,
+    }] += 1;
+    movers[state.current_player().index()] += 1;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SpareExpectation {
+    WinPending,
+    No,
+}
+
+struct SpareCorpusPosition {
+    id: String,
+    expect: SpareExpectation,
+    reference_plies: u32,
+    oracle: ProofStatus,
+    state: HexoState,
+}
+
+fn load_spare_corpus() -> Vec<SpareCorpusPosition> {
+    let text = include_str!("../corpus/spare_corpus_moves.txt");
+    let mut out = Vec::new();
+    let mut lines = text.lines();
+    while let Some(header) = lines.next() {
+        let header = header.trim();
+        if header.is_empty() || header.starts_with('#') {
+            continue;
+        }
+        assert!(header.starts_with("POS "), "bad spare header: {header}");
+        let mut id = String::new();
+        let mut expect = None;
+        let mut oracle = None;
+        let mut reference_plies = 0u32;
+        let mut attacker = 0usize;
+        let mut nstones = 0usize;
+        for field in header.split_whitespace().skip(1) {
+            let (key, value) = field.split_once('=').expect("spare k=v field");
+            match key {
+                "id" => id = value.to_string(),
+                "expect" => {
+                    expect = Some(match value {
+                        "WIN_PENDING" => SpareExpectation::WinPending,
+                        "NO" => SpareExpectation::No,
+                        _ => panic!("unknown spare expectation: {value}"),
+                    })
+                }
+                "oracle" => {
+                    oracle = Some(match value {
+                        "WIN" => ProofStatus::Win,
+                        "LOSS" => ProofStatus::Loss,
+                        "UNKNOWN" => ProofStatus::Unknown,
+                        _ => panic!("unknown spare oracle status: {value}"),
+                    })
+                }
+                "reference_plies" => reference_plies = value.parse().unwrap(),
+                "attacker" => attacker = value.parse().unwrap(),
+                "nstones" => nstones = value.parse().unwrap(),
+                _ => panic!("unknown spare header field: {key}"),
+            }
+        }
+        let mut state = HexoState::new();
+        for _ in 0..nstones {
+            let mut fields = lines.next().expect("spare stone").split_whitespace();
+            let q = fields.next().unwrap().parse().unwrap();
+            let r = fields.next().unwrap().parse().unwrap();
+            assert!(fields.next().is_none(), "extra spare stone field");
+            apply_placement(
+                &mut state,
+                Placement {
+                    coord: HexCoord::new(q, r),
+                },
+            )
+            .unwrap_or_else(|error| panic!("{id}: illegal replay at ({q},{r}): {error:?}"));
+        }
+        assert_eq!(lines.next().map(str::trim), Some("END"));
+        assert!(!state.is_terminal());
+        assert_eq!(state.current_player().index(), attacker);
+        out.push(SpareCorpusPosition {
+            id,
+            expect: expect.expect("spare expectation"),
+            reference_plies,
+            oracle: oracle.expect("spare oracle status"),
+            state,
+        });
+    }
+    out
+}
+
+#[test]
+#[ignore = "Group-2 spare-turn acceptance gate"]
+fn tss_spare_corpus_check() {
+    let cap = std::env::var("TSS_SPARE_CORPUS_CAP")
+        .ok()
+        .map(|value| value.parse::<u64>().expect("numeric TSS_SPARE_CORPUS_CAP"))
+        .unwrap_or(1_000_000);
+    let tt_bytes_cap = std::env::var("TSS_BACKWALK_TT_BYTES")
+        .ok()
+        .map(|value| value.parse::<usize>().expect("numeric TT bytes"))
+        .unwrap_or(512 << 20);
+    let selected = std::env::var("TSS_SPARE_CORPUS_ID").ok();
+    let mut ran = 0usize;
+    for position in load_spare_corpus() {
+        if selected
+            .as_ref()
+            .is_some_and(|wanted| !wanted.split(',').any(|id| id == position.id))
+        {
+            continue;
+        }
+        let started = std::time::Instant::now();
+        let mut solver = TssSolver::default();
+        solver.set_width_options(WidthOptions::vcf_pair_complete());
+        let result = solver.solve(
+            &position.state,
+            &SolveCaps {
+                node_cap: cap,
+                tt_bytes_cap,
+                semantic_horizon: position.state.placements_made() + position.reference_plies,
+            },
+        );
+        println!(
+            "SPARE_CORPUS id={} expect={:?} oracle={} horizon={} cap={} status={} nodes={} legal={} wall_ms={}",
+            position.id,
+            position.expect,
+            status_name(position.oracle),
+            position.state.placements_made() + position.reference_plies,
+            cap,
+            status_name(result.status),
+            result.stats.nodes,
+            position.state.legal_move_count(),
+            started.elapsed().as_millis(),
+        );
+        match position.expect {
+            SpareExpectation::WinPending => assert_ne!(
+                result.status,
+                ProofStatus::Loss,
+                "{}: certified LOSS on oracle WIN row",
+                position.id
+            ),
+            SpareExpectation::No => assert_ne!(
+                result.status,
+                ProofStatus::Win,
+                "{}: false WIN on stock-reference NO control",
+                position.id
+            ),
+        }
+        ran += 1;
+    }
+    assert!(ran > 0, "spare corpus selection matched no rows");
+}
+
+/// Mandatory gate before `tss_reference_fast` may supply corpus ground truth.
+#[test]
+#[ignore = "serialized exact-reference differential gate"]
+fn tss_reference_fast_differential() {
+    let mut counts = [0usize; 3];
+    let mut movers = [0usize; 2];
+
+    let round1 = [
+        (
+            "compact_urgent_spare",
+            mining_candidate("compact_urgent_spare"),
+            2,
+        ),
+        (
+            "strongloss_a_backoff_7",
+            forcing_prefix("strongloss_a_prefix6", 7),
+            2,
+        ),
+        (
+            "spare_tempo_prefix",
+            mining_candidate("spare_tempo_prefix"),
+            2,
+        ),
+    ];
+    for (id, state, plies) in &round1 {
+        assert_fast_matches_stock(id, state, *plies, &mut counts, &mut movers);
+    }
+
+    // Horizon semantics: identical positions at two distinct budgets.
+    for (id, state, _) in &round1 {
+        for plies in [0, 1] {
+            assert_fast_matches_stock(
+                &format!("{id}_h{plies}"),
+                state,
+                plies,
+                &mut counts,
+                &mut movers,
+            );
+        }
+    }
+
+    // 120 ordinary fixed-seed playout positions, distributed over both
+    // player identities and depth-zero/depth-one UNKNOWN leaves.
+    for seed in 1..=120u64 {
+        let placements = 1 + (seed as usize % 12);
+        let state = random_legal_state(seed, placements);
+        let plies = (seed % 2) as u32;
+        assert_fast_matches_stock(
+            &format!("random_{seed:03}"),
+            &state,
+            plies,
+            &mut counts,
+            &mut movers,
+        );
+    }
+
+    // 80 randomized tactical positions have a four-line for the mover. At
+    // depth one the result is UNKNOWN; at depth two it is WIN. Both players
+    // occur at both horizons, and filler choices are fixed by the seed.
+    for seed in 1..=40u64 {
+        for claimant in [hexo_engine::Player::Player0, hexo_engine::Player::Player1] {
+            let state = randomized_four_line(seed, claimant);
+            let plies = 1 + (seed % 2) as u32;
+            assert_fast_matches_stock(
+                &format!("tactical_{claimant:?}_{seed:02}"),
+                &state,
+                plies,
+                &mut counts,
+                &mut movers,
+            );
+        }
+    }
+
+    let total = counts.into_iter().sum::<usize>();
+    println!(
+        "REFERENCE_FAST_DIFFERENTIAL cases={total} win={} loss={} unknown={} mover_p0={} mover_p1={}",
+        counts[0], counts[1], counts[2], movers[0], movers[1]
+    );
+    assert!(total >= 200);
+    assert!(counts[0] > 0 && counts[2] > 0);
+    assert!(movers.into_iter().all(|count| count > 0));
+}
+
+/// Exact range decomposition of the compact witness's first Universal node.
+#[test]
+#[ignore = "serialized compact exact-oracle branch batch"]
+fn tss_reference_fast_compact_branch_batch() {
+    let start = std::env::var("TSS_SPARE_BRANCH_START")
+        .expect("set TSS_SPARE_BRANCH_START")
+        .parse::<usize>()
+        .expect("numeric branch start");
+    let end = std::env::var("TSS_SPARE_BRANCH_END")
+        .expect("set TSS_SPARE_BRANCH_END")
+        .parse::<usize>()
+        .expect("numeric branch end");
+    let mut root = mining_candidate("double_fork_compact");
+    let claimant = root.current_player();
+    let (placed, root_delta) = root
+        .apply_with_delta(Placement {
+            coord: HexCoord::new(4, 0),
+        })
+        .expect("compact exact root move is legal");
+    assert!(placed.outcome.is_none());
+    let legal = crate::tss_reference_fast::full_legal_moves(&root);
+    assert_eq!(
+        legal.len(),
+        478,
+        "frozen compact post-root defender frontier"
+    );
+    assert!(start < end && end <= legal.len());
+
+    let mut nodes = 0u64;
+    let mut hits = 0u64;
+    let mut wall_ms = 0u128;
+    for (index, &coord) in legal[start..end].iter().enumerate() {
+        let absolute_index = start + index;
+        let (reply, delta) = root
+            .apply_with_delta(Placement { coord })
+            .expect("independent compact defender move is legal");
+        let result = if reply.outcome.is_some() {
+            FastReferenceResult {
+                status: ProofStatus::Loss,
+                nodes: 1,
+                tt_hits: 0,
+                tt_entries: 0,
+                tt_accounted_bytes: 0,
+                tt_clears: 0,
+                elapsed: std::time::Duration::ZERO,
+            }
+        } else {
+            crate::tss_reference_fast::solve_for_player(
+                &root,
+                claimant,
+                7,
+                FastReferenceConfig {
+                    tt_bytes_cap: 256 << 20,
+                    d6_canonical: false,
+                    ordering_hint: FastOrderingHint::DoubleForkCompact,
+                },
+            )
+        };
+        root.undo(delta);
+        println!(
+            "SPARE_COMPACT_BRANCH index={absolute_index} move=({}, {}) status={} nodes={} tt_hits={} wall_ms={}",
+            coord.q,
+            coord.r,
+            status_name(result.status),
+            result.nodes,
+            result.tt_hits,
+            result.elapsed.as_millis(),
+        );
+        assert_eq!(
+            result.status,
+            ProofStatus::Win,
+            "compact exact branch refutes candidate at index={absolute_index} move={coord:?}"
+        );
+        nodes = nodes.saturating_add(result.nodes);
+        hits = hits.saturating_add(result.tt_hits);
+        wall_ms = wall_ms.saturating_add(result.elapsed.as_millis());
+    }
+    root.undo(root_delta);
+    println!(
+        "SPARE_COMPACT_BRANCH_BATCH start={start} end={end} status=WIN nodes={nodes} tt_hits={hits} summed_wall_ms={wall_ms}"
+    );
+}
+
 /// Candidate triage. This deliberately runs one selected solve at a time.
 /// It is a regeneration aid, not part of the acceptance gate.
 #[test]
@@ -720,6 +1164,17 @@ fn tss_spare_mine_candidate() {
         return;
     }
 
+    if let Ok(value) = std::env::var("TSS_SPARE_FAST_PLIES") {
+        let plies = value.parse::<u32>().expect("numeric TSS_SPARE_FAST_PLIES");
+        let mut config = fast_reference_config();
+        if id.starts_with("double_fork_compact") {
+            config.ordering_hint = FastOrderingHint::DoubleForkCompact;
+        }
+        let result = crate::tss_reference_fast::solve(&state, plies, config);
+        print_fast_result(&id, plies, &result);
+        return;
+    }
+
     let mut solver = TssSolver::default();
     let result = solver.solve(&state, &caps);
     let exact_t = result
@@ -737,6 +1192,31 @@ fn tss_spare_mine_candidate() {
         result.stats.nodes,
         state.placements_made(),
     );
+    if std::env::var_os("TSS_SPARE_SUMMARIZE_DEFAULT_CERT").is_some() {
+        let mut choices = std::collections::BTreeMap::<(i16, i16), usize>::new();
+        let mut universal_nodes = 0usize;
+        let mut universal_edges = 0usize;
+        if let Some(cert) = &result.cert {
+            for node in &cert.nodes {
+                match node {
+                    CertNode::Choice { mv, .. } | CertNode::OrCompletion { mv, .. } => {
+                        *choices.entry((mv.q, mv.r)).or_default() += 1;
+                    }
+                    CertNode::Universal { edges, .. } => {
+                        universal_nodes += 1;
+                        universal_edges += edges.len();
+                    }
+                    CertNode::Win { .. } | CertNode::Loss { .. } => {}
+                }
+            }
+        }
+        let mut choices = choices.into_iter().collect::<Vec<_>>();
+        choices.sort_by_key(|(coord, count)| (std::cmp::Reverse(*count), *coord));
+        println!(
+            "SPARE_DEFAULT_CERT_SUMMARY id={id} universal_nodes={universal_nodes} universal_edges={universal_edges} top_choices={:?}",
+            &choices[..choices.len().min(32)]
+        );
+    }
 
     let mut wide = TssSolver::default();
     wide.set_width_options(WidthOptions::vcf_pair_complete());

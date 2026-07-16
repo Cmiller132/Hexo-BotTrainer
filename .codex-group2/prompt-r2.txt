@@ -1,0 +1,92 @@
+Group-2, round 2: break the oracle feasibility wall and freeze the first spare-turn / lambda-2 corpus rows.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width at
+commit b4ec2e73 (round-9b engine + round-1 honest partial). Read
+.codex-group2/round1-progress.md IN FULL first — it is your predecessor's
+truthful state and its structural lower-bound audit is binding context. Then
+read .codex-group2/prompt-r1.txt for the original acceptance standards (RZOP
+section 5.1/5.4 witness columns, WIN_PENDING/NO test semantics) — those
+standards are unchanged.
+
+## Where round 1 stopped
+double_fork_compact is the active lambda-2 witness candidate (default finder
+WIN in 2,884 nodes at absolute horizon 45; normative vcf_pair_complete
+UNKNOWN in 2 nodes — the exact structural gap Group-2 targets). No WIN row
+was frozen because stock tss_reference provably needs >=127M nonterminal
+attacker nodes on it. The orchestrator has decided: BOTH of the following
+paths are authorized, and you should pursue them in this order.
+
+## Path A (primary): test-only exact reference accelerator
+Implement an independent exact oracle, tss_reference_fast, as a test-gated
+module. Soundness rules are strict and non-negotiable:
+- Same game recurrence SEMANTICS as tss_reference.rs: full legal move sets
+  for BOTH players, no width restriction, no defender caps, exact horizon
+  semantics keyed on (canonical position, plies remaining).
+- ONLY value-preserving techniques: transposition memoization (exact keys;
+  D6 canonicalization is allowed — it is proven sound and already used by
+  the engine's P3 machinery, but implement the canonical key independently),
+  exact win/loss short-circuit (stop scanning a node's children once the
+  mover has a winning child), and any move ordering. NOTHING heuristic: no
+  threat-based pruning, no zone logic, no futility, no code shared with
+  tss_solver.rs's wide machinery. Independence from the system under test is
+  the entire point.
+- Differential validation BEFORE any use as ground truth: byte-agreement
+  with stock tss_reference on (a) every position the stock oracle can reach
+  at matched horizons from round 1 (the NO controls, compact_urgent_spare,
+  the strongloss back-off), (b) >=200 randomized small positions with fixed
+  seeds spanning WIN/UNKNOWN outcomes and both players to move, (c) a
+  handful of positions at two different horizons each (horizon-semantics
+  check). Record every command. Any single disagreement = STOP, diagnose,
+  write it up; do not paper over.
+- Then run it on double_fork_compact (and double_fork_dense) at the horizon
+  the witness needs. Log nodes/TT-hits/wall. TT bounded (<= 2 GiB), one run
+  at a time.
+
+## Path B (fallback and complement): shrink the construction
+If the accelerated oracle still cannot close double_fork_compact exhaustively,
+do NOT lower the rigor bar. Instead construct a smaller-frontier lambda-2
+witness: the same double-fork mechanism (intended completion leaves k<B with
+a genuine spare; quiet connector joins two remote 3-line families) but built
+against board edges / pre-filled walls so the legal frontier after the root
+is tens of cells, not 403. The witness columns (k<B Universal nodes >= 1,
+nonthreat OR edge on the winning line, wide engine non-WIN at generous cap)
+must still hold. A small-frontier entry the stock oracle itself can verify
+is the strongest possible corpus row — if you get one, ALSO ground-truth it
+with stock tss_reference for a two-oracle agreement row.
+
+## Then finish round 1's remaining deliverables
+1. Freeze corpus rows in packages/hexfield_eq/rust/corpus/spare_corpus_moves.txt
+   (replay format mirroring the forcing corpus) with full provenance comments:
+   at least 1 WIN_PENDING row with oracle ground truth (target 3+ if Path B
+   generalizes: vary the fork geometry), plus the 2 honest NO controls from
+   round 1 and any new NOs.
+2. tss_spare_corpus_check acceptance test with the round-1 semantics:
+   WIN_PENDING fails only on a certified LOSS answer; NO fails on any WIN;
+   UNKNOWN records. Wire it to the frozen corpus file.
+3. Wide-engine baseline table (2 GiB TT, rungs 10k/100k/1M) over every frozen
+   row — expected UNKNOWN on WIN_PENDING rows; that is the capstone baseline.
+4. Diagnosis memo for round 3 (the engine round): where exactly the quiet
+   move dies in the wide universe (forcing gate at turn completion?), what
+   the post-quiet k<B AND node looks like (legal count vs what T3's
+   mandatoryZone = Z_dir ∪ Z_seed ∪ Z_touch ∪ Z_virgin would admit — estimate
+   by hand), and the minimal flag design for quiet-turn OR edges + certified
+   ranked-zone defender sets, shadow-first. Owner invariants binding:
+   finder/verifier separation, verifier re-derives everything, no defender
+   caps, flags default-off, shadow -> verify -> consume.
+5. Update .codex-group2/round2-progress.md continuously (checkpoint
+   boundaries, every regeneration command, honest dispositions). Full unit
+   suite must stay 95/0; you changed no engine code (state this after
+   checking the diff surface).
+
+## Operational rules, binding
+(1) You CANNOT git-commit — announce checkpoint boundaries in the progress
+file. (2) CARGO_TARGET_DIR=.target-codex inside this worktree; never C:.
+(3) No workspace-wide formatting; rustfmt --edition 2021 only on files you
+edit. (4) Work only in this worktree; sibling worktrees read-only. (5) RAM:
+a Lean lane and other sessions share this 31 GB host — check free RAM > 8 GB
+before builds/long solves (powershell "Get-CimInstance Win32_OperatingSystem
+| % { $_.FreePhysicalMemory/1MB }"), one build/solve at a time,
+--test-threads=1. (6) The reference recurrence is the oracle: any
+WIN-vs-LOSS disagreement between your accelerator, stock tss_reference, or
+the engines at matched semantics = STOP and write it up with full repro —
+that outranks every deliverable.

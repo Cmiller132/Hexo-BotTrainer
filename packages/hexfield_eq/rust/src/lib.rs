@@ -25,6 +25,8 @@ mod threats_shared;
 // docs/PLAN_TSS_DEEPENING.md §2).
 mod tss_core;
 mod tss_reference;
+#[cfg(test)]
+mod tss_reference_fast;
 mod tss_solver;
 mod tss_verify;
 
