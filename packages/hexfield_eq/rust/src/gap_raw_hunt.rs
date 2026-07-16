@@ -934,6 +934,121 @@ mod tests {
         list.iter().copied().collect()
     }
 
+    /// Exact graded potential excluding count-one stock:
+    /// `27 * Theta_2 = A + B*sqrt(3)`.
+    fn theta2_ab(pos: &Pos) -> (i128, i128) {
+        let n = pos.profile().n;
+        (
+            3 * n[2] as i128 + 9 * n[4] as i128 + 27 * n[6] as i128,
+            3 * n[3] as i128 + 9 * n[5] as i128,
+        )
+    }
+
+    fn theta2_ge_one(pos: &Pos) -> bool {
+        let (a, b) = theta2_ab(pos);
+        cmp_surd(a, b, 27, 0) != Ordering::Less
+    }
+
+    /// Exact minimum hitting-set size for the small variable-residual families
+    /// used by the regressions and break-line instrumentation.  Branching on a
+    /// shortest residual is complete: every hitting set contains at least one
+    /// of its cells.
+    fn min_hitting_set_exact(family: &[Vec<Cell>]) -> usize {
+        fn rec(
+            family: &[Vec<Cell>],
+            memo: &mut BTreeMap<Vec<Vec<Cell>>, usize>,
+        ) -> usize {
+            if family.is_empty() {
+                return 0;
+            }
+            if family.iter().any(Vec::is_empty) {
+                return usize::MAX;
+            }
+
+            let mut key = family.to_vec();
+            for residual in &mut key {
+                residual.sort();
+                residual.dedup();
+            }
+            key.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+            key.dedup();
+            if let Some(&cached) = memo.get(&key) {
+                return cached;
+            }
+            let pivot = key
+                .first()
+                .expect("nonempty canonical family")
+                .clone(); // sorted family puts singleton residuals first
+            let best = pivot
+                .iter()
+                .map(|&chosen| {
+                    let remainder: Vec<Vec<Cell>> = key
+                        .iter()
+                        .filter(|residual| !residual.contains(&chosen))
+                        .cloned()
+                        .collect();
+                    rec(&remainder, memo).saturating_add(1)
+                })
+                .min()
+                .expect("nonempty residual");
+            memo.insert(key, best);
+            best
+        }
+
+        rec(family, &mut BTreeMap::new())
+    }
+
+    /// A deterministic lexicographically-first witness of the exact minimum
+    /// hitting-set cardinality.  `None` means that the family contains an empty
+    /// residual and therefore has no hitting set.  The cardinality oracle above
+    /// supplies the exact target size; this companion enumerates all cell
+    /// subsets of that size until it finds a concrete cover.
+    fn min_hitting_set_witness_exact(family: &[Vec<Cell>]) -> Option<Vec<Cell>> {
+        fn find_cover(
+            family: &[Vec<Cell>],
+            candidates: &[Cell],
+            start: usize,
+            remaining: usize,
+            chosen: &mut Vec<Cell>,
+        ) -> bool {
+            if remaining == 0 {
+                return family
+                    .iter()
+                    .all(|residual| residual.iter().any(|cell| chosen.contains(cell)));
+            }
+            if candidates.len().saturating_sub(start) < remaining {
+                return false;
+            }
+            let last_start = candidates.len() - remaining;
+            for i in start..=last_start {
+                chosen.push(candidates[i]);
+                if find_cover(family, candidates, i + 1, remaining - 1, chosen) {
+                    return true;
+                }
+                chosen.pop();
+            }
+            false
+        }
+
+        let tau = min_hitting_set_exact(family);
+        if tau == usize::MAX {
+            return None;
+        }
+        let candidates: Vec<Cell> = family
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let mut witness = Vec::with_capacity(tau);
+        assert!(
+            find_cover(family, &candidates, 0, tau, &mut witness),
+            "exact hitting number must have a concrete witness"
+        );
+        Some(witness)
+    }
+
     // --- Phi validation on hand-computed positions --------------------------
 
     /// ES_GLOBAL_BOUNDARY Theorem 1 compact core: A={(0,0)}, D={(1,0)}.
@@ -1020,6 +1135,390 @@ mod tests {
         };
         assert_eq!(prof.ab(), (0, 18));
         assert!(!prof.phi_lt_one());
+    }
+
+    /// Hostile-review section 3: O1' is false on this exact reachable history.
+    ///
+    /// The exhaustive defense loop is quotient-exact for the focal objective:
+    /// a defender cell outside the three pairwise-disjoint focal unions kills
+    /// none of their ten labels, while a cell inside a union is enumerated
+    /// literally.  Thus the loop includes every potentially better two-spare
+    /// defense; the abstract class loop also checks that an arbitrary legal
+    /// pair (including off-union cells) leaves a whole gadget untouched.
+    #[test]
+    #[ignore = "round-2 hostile-review O1' regression; run serially"]
+    fn round2_o1_prime_three_gadget_refutation() {
+        let history: &[Cell] = &[
+            (0, 0),
+            (7, -3),
+            (6, -4),
+            (12, 0),
+            (13, 1),
+            (19, -3),
+            (18, -4),
+            (24, 0),
+            (25, 1),
+            (31, -3),
+            (30, -4),
+        ];
+        let state = replay(history).expect("the hostile-review history must be engine-legal");
+        assert!(!state.is_terminal(), "history must be nonterminal");
+        assert_eq!(state.current_player(), Player::Player0);
+        assert_eq!(state.phase(), TurnPhase::FirstStone);
+
+        let root = pos_from_state(&state);
+        assert_eq!(root.to_move, Side::Defender);
+        assert!(root.first_stone);
+        assert_eq!(root.profile().n, [0, 106, 0, 0, 0, 0, 0]);
+        assert_eq!(theta2_ab(&root), (0, 0));
+        assert!(imminent_empty_sets(&root).is_empty());
+
+        let centers = [(6, -3), (18, -3), (30, -3)];
+        let mut focal_keys: Vec<Vec<WinKey>> = Vec::new();
+        let mut focal_unions: Vec<BTreeSet<Cell>> = Vec::new();
+        for &(q, r) in &centers {
+            let mut keys = Vec::new();
+            // Five Q windows contain both (q+1,r) and the prospective center.
+            for k in 0..5i16 {
+                keys.push((0, q - k, r));
+            }
+            // Five R windows contain both (q,r-1) and the center.
+            for k in 1..=5i16 {
+                keys.push((1, q, r - k));
+            }
+            assert_eq!(keys.len(), 10);
+            for &key in &keys {
+                let (count, _) = window_status_at(&root, key).expect("focal label alive");
+                assert_eq!(count, 1, "every focal label starts at count one");
+            }
+            let union: BTreeSet<Cell> = keys
+                .iter()
+                .flat_map(|&key| win_key_cells(key))
+                .collect();
+            assert!(union.contains(&(q, r)));
+            focal_keys.push(keys);
+            focal_unions.push(union);
+        }
+        for i in 0..focal_unions.len() {
+            for j in (i + 1)..focal_unions.len() {
+                assert!(
+                    focal_unions[i].is_disjoint(&focal_unions[j]),
+                    "the three focal unions must be pairwise disjoint"
+                );
+            }
+        }
+
+        // Abstractly exhaust every pair of focal-union memberships.  `None`
+        // represents any legal off-union placement.  Each stone can meet at
+        // most one focal union, so two stones leave at least one untouched.
+        let classes = [None, Some(0usize), Some(1), Some(2)];
+        for first in classes {
+            for second in classes {
+                assert!((0..3).any(|i| first != Some(i) && second != Some(i)));
+            }
+        }
+
+        let root_legal: BTreeSet<Cell> = root.legal_moves().into_iter().collect();
+        for &center in &centers {
+            assert!(root_legal.contains(&center));
+        }
+        let relevant: Vec<Cell> = focal_unions
+            .iter()
+            .flat_map(|union| union.iter().copied())
+            .filter(|c| !root.occupied(*c))
+            .collect();
+        assert!(relevant.len() >= 6, "nontrivial defense enumeration");
+        assert!(relevant.iter().all(|c| root_legal.contains(c)));
+
+        let mut best_defense_value: Option<(i128, i128)> = None;
+        let mut enumerated = 0usize;
+        for &d1 in &relevant {
+            let after_d1 = root.apply(d1);
+            for &d2 in &relevant {
+                if d2 == d1 {
+                    continue;
+                }
+                // Every focal empty was already legal at the root; the first
+                // defender placement cannot make another such empty illegal.
+                assert!(!after_d1.occupied(d2));
+                let after_defense = after_d1.apply(d2);
+                assert_eq!(after_defense.to_move, Side::Attacker);
+                assert!(after_defense.first_stone);
+
+                let untouched: Vec<usize> = (0..3)
+                    .filter(|&i| {
+                        !focal_unions[i].contains(&d1) && !focal_unions[i].contains(&d2)
+                    })
+                    .collect();
+                assert!(!untouched.is_empty(), "two spares touched all three disjoint unions");
+
+                let mut attacker_best: Option<(i128, i128)> = None;
+                for i in untouched {
+                    let center = centers[i];
+                    assert!(!after_defense.occupied(center));
+                    let after_first_attack = after_defense.apply(center);
+                    for &key in &focal_keys[i] {
+                        let (count, _) = window_status_at(&after_first_attack, key)
+                            .expect("untouched focal window remains alive");
+                        assert_eq!(count, 2);
+                    }
+                    let value = theta2_ab(&after_first_attack);
+                    assert_eq!(value, (30, 0), "Theta2 must be exactly 10/9 here");
+                    assert!(cmp_surd(value.0, value.1, 27, 0) == Ordering::Greater);
+
+                    // Complete the legal attacker turn so the violating next
+                    // Defender-FirstStone epoch exists.  This safe second move
+                    // cannot decrease Theta2 and does not complete a six.
+                    assert!(!after_first_attack.occupied((0, 1)));
+                    assert!(after_first_attack.legal_moves().contains(&(0, 1)));
+                    let next_epoch = after_first_attack.apply((0, 1));
+                    assert_eq!(next_epoch.to_move, Side::Defender);
+                    assert!(next_epoch.first_stone);
+                    assert!(!next_epoch.attacker_has_six());
+                    assert!(theta2_ge_one(&next_epoch));
+
+                    match attacker_best {
+                        None => attacker_best = Some(value),
+                        Some(best)
+                            if cmp_surd(value.0, value.1, best.0, best.1)
+                                == Ordering::Greater =>
+                        {
+                            attacker_best = Some(value)
+                        }
+                        _ => {}
+                    }
+                }
+                let attacker_best = attacker_best.expect("an untouched response");
+                match best_defense_value {
+                    None => best_defense_value = Some(attacker_best),
+                    Some(best)
+                        if cmp_surd(
+                            attacker_best.0,
+                            attacker_best.1,
+                            best.0,
+                            best.1,
+                        ) == Ordering::Less =>
+                    {
+                        best_defense_value = Some(attacker_best)
+                    }
+                    _ => {}
+                }
+                enumerated += 1;
+            }
+        }
+        assert!(enumerated > 1_000, "defense enumeration unexpectedly small");
+        assert_eq!(
+            best_defense_value,
+            Some((30, 0)),
+            "even the best two-spare focal defense leaves Theta2=10/9"
+        );
+    }
+
+    /// Hostile-review section 4.1: one past placement creates a same-axis
+    /// heavy trigger cluster; a remote count-three label makes the full future
+    /// family have exact hitting number three.
+    #[test]
+    #[ignore = "round-2 hostile-review L8.3.2 same-axis regression"]
+    fn round2_l832_same_axis_counterexample() {
+        let q = Pos {
+            attackers: cells(&[
+                (-2, 0),
+                (-1, 0),
+                (1, 0), // the single past promotion p
+                (100, 20),
+                (102, 20),
+                (105, 20),
+            ]),
+            defenders: BTreeSet::new(),
+            to_move: Side::Attacker,
+            first_stone: true,
+        };
+        assert_eq!(q.profile().n[4..=6], [0, 0, 0]);
+        assert!(q.profile().n[3] > 0, "Q has pre-count-three stock");
+        for key in [(0, -4, 0), (0, -3, 0), (0, -2, 0), (0, 100, 20)] {
+            let (count, _) = window_status_at(&q, key).expect("pre-label alive");
+            assert_eq!(count, 3);
+        }
+
+        let mut before_p = q.clone();
+        before_p.attackers.remove(&(1, 0));
+        for start in [(-4, 0), (-3, 0), (-2, 0)] {
+            let (count, _) = window_status_at(&before_p, (0, start.0, start.1))
+                .expect("local label alive before p");
+            assert_eq!(count, 2, "before p every local focal label is count two");
+        }
+
+        let future = q.apply((0, 0)).apply((101, 20));
+        let keys = [
+            (0, -4, 0),
+            (0, -3, 0),
+            (0, -2, 0),
+            (0, 100, 20),
+        ];
+        let expected = [
+            vec![(-4, 0), (-3, 0)],
+            vec![(-3, 0), (2, 0)],
+            vec![(2, 0), (3, 0)],
+            vec![(103, 20), (104, 20)],
+        ];
+        let mut family = Vec::new();
+        for (key, expected_residual) in keys.into_iter().zip(expected) {
+            let (count, residual) = window_status_at(&future, key).expect("future label alive");
+            assert_eq!(count, 4);
+            assert_eq!(residual, expected_residual);
+            family.push(residual);
+        }
+        assert_eq!(min_hitting_set_exact(&family[..3]), 2);
+        assert_eq!(min_hitting_set_exact(&family), 3);
+        let full_imminent = imminent_empty_sets(&future);
+        assert!(
+            family.iter().all(|residual| full_imminent.contains(residual)),
+            "all four focal labels must belong to the actual imminent family"
+        );
+        assert!(min_hitting_set_exact(&full_imminent) >= 3);
+    }
+
+    /// Hostile-review section 4.2: the omitted mixed pre-count-two / pre-count-
+    /// three branch needs only one past placement, not two.
+    #[test]
+    #[ignore = "round-2 hostile-review L8.3.2 cross-axis regression"]
+    fn round2_l832_cross_axis_counterexample() {
+        let q = Pos {
+            attackers: cells(&[(-4, 0), (-3, 0), (0, 1), (0, 2), (0, 3)]),
+            defenders: BTreeSet::new(),
+            to_move: Side::Attacker,
+            first_stone: true,
+        };
+        assert_eq!(q.profile().n[4..=6], [0, 0, 0]);
+        assert!(q.profile().n[3] >= 3);
+        let (horizontal_count, _) =
+            window_status_at(&q, (0, -4, 0)).expect("horizontal pre-label alive");
+        assert_eq!(horizontal_count, 2);
+        for key in [(1, 0, 0), (1, 0, -1), (1, 0, -2)] {
+            let (count, _) = window_status_at(&q, key).expect("vertical pre-label alive");
+            assert_eq!(count, 3);
+        }
+
+        let mut before_p = q.clone();
+        before_p.attackers.remove(&(0, 3));
+        assert_eq!(before_p.profile().n[3..=6], [0, 0, 0, 0]);
+
+        let future = q.apply((0, 0)).apply((1, 0));
+        let keys = [(0, -4, 0), (1, 0, 0), (1, 0, -1), (1, 0, -2)];
+        let expected = [
+            vec![(-2, 0), (-1, 0)],
+            vec![(0, 4), (0, 5)],
+            vec![(0, -1), (0, 4)],
+            vec![(0, -2), (0, -1)],
+        ];
+        let mut family = Vec::new();
+        for (key, expected_residual) in keys.into_iter().zip(expected) {
+            let (count, residual) = window_status_at(&future, key).expect("future label alive");
+            assert_eq!(count, 4);
+            assert_eq!(residual, expected_residual);
+            family.push(residual);
+        }
+        assert_eq!(min_hitting_set_exact(&family), 3);
+        let full_imminent = imminent_empty_sets(&future);
+        assert!(
+            family.iter().all(|residual| full_imminent.contains(residual)),
+            "all four focal labels must belong to the actual imminent family"
+        );
+        assert!(min_hitting_set_exact(&full_imminent) >= 3);
+    }
+
+    /// Repair item 9: the straight-four residual family is covered by the
+    /// explicit cells {-1,4}; matching-number language is neither used nor
+    /// needed.  The straight-five check also gates singleton residuals.
+    #[test]
+    #[ignore = "round-2 straight-four exact cover regression"]
+    fn round2_straight_four_explicit_cover() {
+        let straight_four = defender_first_stone(&[(0, 0), (1, 0), (2, 0), (3, 0)], &[]);
+        let mut family = imminent_empty_sets(&straight_four);
+        for residual in &mut family {
+            residual.sort();
+        }
+        family.sort();
+        assert_eq!(
+            family,
+            vec![
+                vec![(-2, 0), (-1, 0)],
+                vec![(-1, 0), (4, 0)],
+                vec![(4, 0), (5, 0)],
+            ]
+        );
+        assert!(
+            family
+                .iter()
+                .all(|residual| residual.contains(&(-1, 0)) || residual.contains(&(4, 0)))
+        );
+        assert_eq!(min_hitting_set_exact(&family), 2);
+
+        let straight_five =
+            defender_first_stone(&[(0, 0), (1, 0), (2, 0), (3, 0), (4, 0)], &[]);
+        let family5 = imminent_empty_sets(&straight_five);
+        assert!(family5.contains(&vec![(-1, 0)]));
+        assert!(family5.contains(&vec![(5, 0)]));
+        assert_eq!(min_hitting_set_exact(&family5), 2);
+    }
+
+    /// Complete one-dimensional check for the pure all-count-two branch of
+    /// R7.4.  Normalize the two future triggers to 0 and d, d=1..=5.  Every
+    /// pre-count-two label that gains both triggers is one of the `6-d`
+    /// length-six intervals containing them.  Their union is `[d-5,5]`, so
+    /// enumerating all non-trigger subsets of that interval is complete.
+    /// We deliberately retain patterns that make other bare count-four/five
+    /// windows: those labels may be dead in the blanket position, while
+    /// blockers can only delete from the checked count-two family and hence
+    /// cannot increase tau.  Off-axis stones cannot change these line counts
+    /// or residuals.
+    #[test]
+    #[ignore = "round-2 complete 1-D all-count-two cluster check"]
+    fn round2_r74_collinear_all_count2_max_tau() {
+        let mut maxima = Vec::new();
+        let mut checked = Vec::new();
+        for d in 1..=5i16 {
+            let line_min = d - 5;
+            let line_max = 5i16;
+            let choices: Vec<i16> = (line_min..=line_max)
+                .filter(|&x| x != 0 && x != d)
+                .collect();
+            let mut max_tau = 0usize;
+            let mut nchecked = 0usize;
+            for mask in 0u32..(1u32 << choices.len()) {
+                let attackers: BTreeSet<Cell> = choices
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| mask & (1u32 << *i) != 0)
+                    .map(|(_, &q)| (q, 0))
+                    .collect();
+                let mut family = Vec::new();
+                for start in (d - 5)..=0i16 {
+                    let mut pre_count = 0usize;
+                    let mut residual = Vec::new();
+                    for q in start..(start + WIN_LEN) {
+                        if attackers.contains(&(q, 0)) {
+                            pre_count += 1;
+                        } else if q != 0 && q != d {
+                            residual.push((q, 0));
+                        }
+                    }
+                    if pre_count == 2 {
+                        assert_eq!(residual.len(), 2);
+                        family.push(residual);
+                    }
+                }
+                max_tau = max_tau.max(min_hitting_set_exact(&family));
+                nchecked += 1;
+            }
+            maxima.push(max_tau);
+            checked.push(nchecked);
+        }
+        assert_eq!(checked, vec![256, 128, 64, 32, 16]);
+        assert_eq!(maxima, vec![2, 2, 2, 1, 1]);
+        println!(
+            "R74_COLLINEAR_COMPLETE separations=1..5 max_tau={maxima:?} all_local_configs={checked:?}"
+        );
     }
 
     // --- Differential tests of independent primitives vs the engine ---------
@@ -1745,18 +2244,30 @@ mod tests {
         out
     }
 
-    /// Replay a fixed attacker LINE against completion-first at a given `tau`,
-    /// printing the endgame threat structure.  Distinguishes a genuine
-    /// unparryable fork (>= 3 distinct single-empty completion cells facing one
-    /// defender turn) from a mis-aim (defender lost with <= 2 such cells).
-    fn replay_trace(rname: &str, root: &Pos, line: &[Cell], tau: u32) {
+    /// Replay a fixed attacker line against completion-first at a given policy
+    /// threshold.  At every Defender-FirstStone epoch, compute the exact
+    /// variable-residual minimum hitting set; only a measured value >=3 is
+    /// called a break epoch or used to infer `Theta2>=1`.
+    fn replay_trace(
+        rname: &str,
+        root: &Pos,
+        line: &[Cell],
+        tau: u32,
+    ) -> (bool, bool, Vec<(usize, usize, (i128, i128))>) {
         let mut pos = root.clone();
         let mut it = line.iter();
         let mut ply = 0usize;
         let mut tail: Vec<String> = Vec::new();
+        let mut epoch_audits: Vec<String> = Vec::new();
+        let mut break_audits: Vec<String> = Vec::new();
+        let mut break_records: Vec<(usize, usize, (i128, i128))> = Vec::new();
+        let mut attacker_won = false;
+        let mut script_foiled = false;
+        let mut certified_break_epochs = 0usize;
         let outcome;
         loop {
             if pos.attacker_has_six() {
+                attacker_won = true;
                 outcome = format!("AttackerWon ply={ply}");
                 break;
             }
@@ -1770,10 +2281,56 @@ mod tests {
                         .map(|(_, v)| v[0])
                         .collect();
                     let twos = thr.iter().filter(|(e, _)| *e == 2).count();
+                    let epoch_audit = if pos.first_stone {
+                        let family: Vec<Vec<Cell>> =
+                            thr.iter().map(|(_, residual)| residual.clone()).collect();
+                        let tau_min = min_hitting_set_exact(&family);
+                        let min_set = min_hitting_set_witness_exact(&family)
+                            .expect("a nonterminal imminent family must have a hitting set");
+                        assert_eq!(
+                            min_set.len(),
+                            tau_min,
+                            "minimum-set witness cardinality must equal exact tau: root={rname} ply={ply}"
+                        );
+                        assert!(
+                            family.iter().all(|residual| residual
+                                .iter()
+                                .any(|cell| min_set.contains(cell))),
+                            "minimum-set witness must hit every residual: root={rname} ply={ply} family={family:?} witness={min_set:?}"
+                        );
+                        let theta = theta2_ab(&pos);
+                        epoch_audits.push(format!(
+                            "REPLAY_EPOCH root={rname} policy_tau={tau} ply={ply} actual_tau_min={tau_min} min_hitting_set={min_set:?} theta2_27={theta:?}"
+                        ));
+                        let inference = if tau_min >= 3 {
+                            // This is the only branch in which the trace calls
+                            // the state an I1-breaking epoch and infers the
+                            // graded lower bound.  The implication is gated by
+                            // the computed variable-residual hitting number.
+                            assert!(
+                                theta2_ge_one(&pos),
+                                "tau>=3 must force Theta2>=1: root={rname} ply={ply} tau={tau_min} theta={theta:?}"
+                            );
+                            break_audits.push(format!(
+                                "REPLAY_BREAK root={rname} policy_tau={tau} ply={ply} actual_tau_min={tau_min} min_hitting_set={min_set:?} theta2_27={theta:?} inference=Theta2>=1"
+                            ));
+                            break_records.push((ply, tau_min, theta));
+                            certified_break_epochs += 1;
+                            "Theta2>=1"
+                        } else {
+                            "none"
+                        };
+                        format!(
+                            " epoch_tau_min={tau_min} min_hitting_set={min_set:?} theta2_27={theta:?} inference={inference} certified_break={}",
+                            tau_min >= 3
+                        )
+                    } else {
+                        " second_stone_not_epoch".to_string()
+                    };
                     let c = completion_first_move(&pos, tau);
                     tail.push(format!(
-                        "  ply {ply}: D(t{tau}) plays {c:?} | imminent: 1-empty cells={:?} (n={}) 2-empty windows={}",
-                        ones, ones.len(), twos
+                        "  ply {ply}: D(t{tau}) plays {c:?} | imminent: 1-empty cells={:?} (n={}) 2-empty windows={}{}",
+                        ones, ones.len(), twos, epoch_audit
                     ));
                     pos = pos.apply(c);
                 }
@@ -1783,6 +2340,7 @@ mod tests {
                         break;
                     };
                     if pos.occupied(c) {
+                        script_foiled = true;
                         outcome = format!("ScriptFoiled ply={ply}");
                         break;
                     }
@@ -1801,6 +2359,18 @@ mod tests {
         for s in tail.iter().skip(n.saturating_sub(16)) {
             println!("{s}");
         }
+        for audit in &epoch_audits {
+            println!("{audit}");
+        }
+        for audit in &break_audits {
+            println!("{audit}");
+        }
+        assert_eq!(break_audits.len(), certified_break_epochs);
+        assert_eq!(break_records.len(), certified_break_epochs);
+        println!(
+            "REPLAY_AUDIT root={rname} policy_tau={tau} attacker_won={attacker_won} certified_break_epochs={certified_break_epochs}"
+        );
+        (attacker_won, script_foiled, break_records)
     }
 
     /// Instrumented replay of the R1b (tau=2) break lines from the broad sweep,
@@ -1808,7 +2378,7 @@ mod tests {
     /// whether a higher threshold closes it.
     #[test]
     #[ignore = "break-line trace; run with --nocapture"]
-    fn trace_r1b_breaks() {
+    fn round2_trace_r1b_breaks() {
         let l12: Vec<Cell> = vec![
             (0, 5), (0, 4), (0, 6), (0, 7), (-1, 7), (-3, 9), (3, 7), (2, 7), (2, 9), (2, 8),
             (2, 11), (2, 10), (3, 10), (1, 10), (5, 10), (4, 10), (4, 11), (4, 9), (4, 14),
@@ -1821,18 +2391,49 @@ mod tests {
             (5, -5), (8, -8), (8, -5), (7, -5), (7, -6), (8, -6), (5, -4), (9, -8), (7, -8),
             (7, -9), (11, -8), (10, -8),
         ];
-        let cases: Vec<(&str, Pos, Vec<Cell>)> = vec![
-            ("es_core", defender_first_stone(&[(0, 0)], &[(1, 0)]), l12.clone()),
+        let cases: Vec<(&str, Pos, Vec<Cell>, (i128, i128))> = vec![
+            (
+                "es_core",
+                defender_first_stone(&[(0, 0)], &[(1, 0)]),
+                l12.clone(),
+                (78, 15),
+            ),
             (
                 "blocker_1_-1",
                 defender_first_stone(&[(0, 0)], &[(1, -1)]),
                 l12.clone(),
+                (78, 15),
             ),
-            ("blocker_2_0", defender_first_stone(&[(0, 0)], &[(2, 0)]), l3.clone()),
+            (
+                "blocker_2_0",
+                defender_first_stone(&[(0, 0)], &[(2, 0)]),
+                l3.clone(),
+                (57, 39),
+            ),
         ];
-        for (rname, root, line) in &cases {
+        for (rname, root, line, expected_theta) in &cases {
             for tau in [2u32, 3] {
-                replay_trace(rname, root, line, tau);
+                let (attacker_won, script_foiled, break_records) =
+                    replay_trace(rname, root, line, tau);
+                if tau == 2 {
+                    assert!(
+                        attacker_won,
+                        "stored R1b line must remain an actual break: {rname}"
+                    );
+                    assert!(!script_foiled, "tau=2 line must end in the stored loss: {rname}");
+                    assert_eq!(
+                        break_records,
+                        vec![(56, 3, *expected_theta)],
+                        "stored R1b loss must retain its exact certified break epoch: {rname}"
+                    );
+                } else {
+                    assert!(!attacker_won, "tau=3 must foil the stored script: {rname}");
+                    assert!(script_foiled, "tau=3 must end by occupying the scripted move: {rname}");
+                    assert!(
+                        break_records.is_empty(),
+                        "tau=3 replay must not reach a certified break epoch: {rname}"
+                    );
+                }
             }
         }
     }
@@ -2193,14 +2794,15 @@ mod tests {
         );
     }
 
-    /// The full hunt.  All numbers regenerable from commit dba6111d with:
+    /// The full legacy hunt was originally recorded from historical source
+    /// commit dba6111d.  Reruns in this repair worktree use input 159c75f4:
     /// `CARGO_TARGET_DIR=.target-hunt cargo test -p hexfield_eq --lib --release \
     ///   gap_raw_hunt::tests::gap_raw_hunt_report -- --ignored --nocapture --test-threads=1`
     #[test]
     #[ignore = "hunt report; run explicitly with --nocapture"]
     fn gap_raw_hunt_report() {
         println!(
-            "GAPRAW_REPORT commit=dba6111d lambda=sqrt3 role=Player0=Defender,Player1=Attacker"
+            "GAPRAW_REPORT input_commit=159c75f4 historical_report_source=dba6111d lambda=sqrt3 role=Player0=Defender,Player1=Attacker"
         );
 
         let bat = battery();
@@ -2382,11 +2984,11 @@ mod tests {
     //
     // Item 1 — pure window-incidence geometry: how many count-k-or-better
     //   length-6 windows can n attacker stones share on the hex lattice?
-    //   These are ABSOLUTE ceilings on simultaneous near-mature threats after
-    //   n placements (no game tree, no defenders).  Enumerated exhaustively
-    //   over edge-connected polyhexes (validated complete against OEIS A000228
-    //   and cross-checked vs full-region brute force for small n); the optimum
-    //   is a single connected cluster (superadditivity, verified below).
+    //   Round 2 separates three scopes that round 1 incorrectly conflated: a
+    //   complete normalized L2 universe through six stones; exact maxima over
+    //   edge-connected free polyhexes through n=12; and an unrestricted
+    //   bounded-region cross-check through n=6.  Only the first scope is a
+    //   global L2 verification.
     // Item 2 — game-constrained maturation frontier from Phi<1 roots.
     // Item 3 — pileup forcibility (the >=3 count-4 fork = the R1b break).
     // =======================================================================
@@ -2420,10 +3022,22 @@ mod tests {
         cnt
     }
 
-    /// Exact profile `n[s]` = #windows with exactly `s` attacker stones (s=1..6).
-    fn geom_profile(stones: &BTreeSet<Cell>) -> [u64; 7] {
+    #[derive(Debug, Default)]
+    struct GeometrySummary {
+        /// `profile[s]` is the number of exact-count-s windows.
+        profile: [u64; 7],
+        /// Exact-count-four two-cell residuals (the round-1 fourth column).
+        count4_pairs: Vec<[Cell; 2]>,
+        /// Exact-count-four pairs plus exact-count-five singletons.
+        imminent: Vec<Vec<Cell>>,
+    }
+
+    /// One complete scan of every attacker-touched window needed by the
+    /// geometry checks.  Keeping the four columns and variable residuals in
+    /// one pass makes the unrestricted `[0,6]^2` sweep practical.
+    fn geometry_summary(stones: &BTreeSet<Cell>) -> GeometrySummary {
         let mut seen: BTreeSet<WinKey> = BTreeSet::new();
-        let mut n = [0u64; 7];
+        let mut out = GeometrySummary::default();
         for &a in stones {
             for (ax, &v) in AXES.iter().enumerate() {
                 for start in windows_through(a, v) {
@@ -2432,47 +3046,46 @@ mod tests {
                         continue;
                     }
                     let mut acnt = 0usize;
-                    for c in window_cells(start, v) {
-                        if stones.contains(&c) {
-                            acnt += 1;
-                        }
-                    }
-                    if acnt >= 1 {
-                        n[acnt] += 1;
-                    }
-                }
-            }
-        }
-        n
-    }
-
-    /// The 2-empty cell pairs of every EXACTLY-count-4 window at `stones`.
-    fn count4_empty_pairs(stones: &BTreeSet<Cell>) -> Vec<[Cell; 2]> {
-        let mut seen: BTreeSet<WinKey> = BTreeSet::new();
-        let mut out = Vec::new();
-        for &a in stones {
-            for (ax, &v) in AXES.iter().enumerate() {
-                for start in windows_through(a, v) {
-                    let key = (ax as u8, start.0, start.1);
-                    if !seen.insert(key) {
-                        continue;
-                    }
-                    let mut acnt = 0u32;
-                    let mut emp: Vec<Cell> = Vec::new();
+                    let mut residual = Vec::new();
                     for c in window_cells(start, v) {
                         if stones.contains(&c) {
                             acnt += 1;
                         } else {
-                            emp.push(c);
+                            residual.push(c);
                         }
                     }
+                    if acnt >= 1 {
+                        out.profile[acnt] += 1;
+                    }
                     if acnt == 4 {
-                        out.push([emp[0], emp[1]]);
+                        assert_eq!(residual.len(), 2);
+                        out.count4_pairs.push([residual[0], residual[1]]);
+                        out.imminent.push(residual);
+                    } else if acnt == 5 {
+                        assert_eq!(residual.len(), 1);
+                        out.imminent.push(residual);
                     }
                 }
             }
         }
         out
+    }
+
+    /// Exact profile `n[s]` = #windows with exactly `s` attacker stones (s=1..6).
+    fn geom_profile(stones: &BTreeSet<Cell>) -> [u64; 7] {
+        geometry_summary(stones).profile
+    }
+
+    /// The 2-empty cell pairs of every EXACTLY-count-4 window at `stones`.
+    fn count4_empty_pairs(stones: &BTreeSet<Cell>) -> Vec<[Cell; 2]> {
+        geometry_summary(stones).count4_pairs
+    }
+
+    /// Variable residuals of every nonterminal imminent geometry label:
+    /// exact count four contributes a pair; exact count five contributes a
+    /// singleton.  Count-six labels are terminal and deliberately excluded.
+    fn imminent_empty_sets_geom(stones: &BTreeSet<Cell>) -> Vec<Vec<Cell>> {
+        geometry_summary(stones).imminent
     }
 
     /// Min hitting-set size over a family of 2-empty pairs, capped at 3
@@ -2493,6 +3106,36 @@ mod tests {
             for j in (i + 1)..cv.len() {
                 let (a, b) = (cv[i], cv[j]);
                 if fam.iter().all(|s| s.contains(&a) || s.contains(&b)) {
+                    return 2;
+                }
+            }
+        }
+        3
+    }
+
+    /// Minimum hitting-set size over singleton/pair residuals, capped at three.
+    /// Unlike the round-1 check, this includes count-five singleton residuals.
+    fn min_hitting_var_cap3(fam: &[Vec<Cell>]) -> u32 {
+        if fam.is_empty() {
+            return 0;
+        }
+        if fam.iter().any(Vec::is_empty) {
+            return 3; // a completed (terminal) label is not coverable
+        }
+        let cells: BTreeSet<Cell> = fam.iter().flatten().copied().collect();
+        let cv: Vec<Cell> = cells.into_iter().collect();
+        for &c in &cv {
+            if fam.iter().all(|residual| residual.contains(&c)) {
+                return 1;
+            }
+        }
+        for i in 0..cv.len() {
+            for j in (i + 1)..cv.len() {
+                let (a, b) = (cv[i], cv[j]);
+                if fam
+                    .iter()
+                    .all(|residual| residual.contains(&a) || residual.contains(&b))
+                {
                     return 2;
                 }
             }
@@ -2597,9 +3240,8 @@ mod tests {
         level.into_iter().collect()
     }
 
-    /// Exhaustive max `windows_ge(thr)` over ALL `n`-subsets of the axial
-    /// rhombus `q,r in [0,l]` (NO connectivity assumption): the belt-and-braces
-    /// cross-check that the edge-connected optimum is the global optimum.
+    /// Exhaustive max `windows_ge(thr)` over all `n`-subsets of one finite
+    /// axial rhombus.  This is bounded evidence only, never a global bridge.
     fn brute_region_max(n: usize, l: i16, thr: u32) -> usize {
         let cells: Vec<Cell> = (0..=l)
             .flat_map(|q| (0..=l).map(move |r| (q, r)))
@@ -2630,20 +3272,169 @@ mod tests {
         }
     }
 
+    /// Unrestricted finite-region sweep for all four L3 columns plus the
+    /// repaired variable-residual fork predicate.  This universe deliberately
+    /// has no edge-connectivity assumption, so it contains edge-disconnected
+    /// but co-window-interacting sets such as `{(0,0),(2,0),(3,0),(4,0)}`.
+    fn brute_region_all_columns(
+        n: usize,
+        l: i16,
+    ) -> (usize, usize, usize, usize, bool, usize) {
+        let cells: Vec<Cell> = (0..=l)
+            .flat_map(|q| (0..=l).map(move |r| (q, r)))
+            .collect();
+        let m = cells.len();
+        let mut best4 = 0usize;
+        let mut best3 = 0usize;
+        let mut best5 = 0usize;
+        let mut best_disjoint4 = 0usize;
+        let mut fork_exists = false;
+        let mut checked = 0usize;
+        let mut idx: Vec<usize> = (0..n).collect();
+        loop {
+            let set: BTreeSet<Cell> = idx.iter().map(|&i| cells[i]).collect();
+            checked += 1;
+            let summary = geometry_summary(&set);
+            let ge3 = summary.profile[3..=6].iter().sum::<u64>() as usize;
+            let ge4 = summary.profile[4..=6].iter().sum::<u64>() as usize;
+            let ge5 = summary.profile[5..=6].iter().sum::<u64>() as usize;
+            best3 = best3.max(ge3);
+            best4 = best4.max(ge4);
+            best5 = best5.max(ge5);
+            best_disjoint4 =
+                best_disjoint4.max(max_disjoint_count4(&summary.count4_pairs));
+            fork_exists |= min_hitting_var_cap3(&summary.imminent) >= 3;
+
+            let mut i = n;
+            loop {
+                if i == 0 {
+                    return (
+                        best4,
+                        best3,
+                        best5,
+                        best_disjoint4,
+                        fork_exists,
+                        checked,
+                    );
+                }
+                i -= 1;
+                if idx[i] != i + m - n {
+                    break;
+                }
+            }
+            idx[i] += 1;
+            for j in (i + 1)..n {
+                idx[j] = idx[j - 1] + 1;
+            }
+        }
+    }
+
     /// Expected free-polyhex counts (OEIS A000228, n=1..12) — generator check.
     const A000228: [usize; 12] = [1, 1, 3, 7, 22, 82, 333, 1448, 6572, 30490, 143552, 683101];
 
-    /// ITEM 1: pure window-incidence geometry ceilings.
+    /// Complete normalized universe for the L2 <=6-stone fork floor.
+    ///
+    /// If a nonterminal imminent family exists, choose one label W.  Normalize
+    /// W to the Q window `0..=5`.  W has four or five attackers.  With at most
+    /// six attackers total, every other imminent label U shares at least two
+    /// attacker cells with W (`|A_W|+|A_U|-6 >= 2`).  Two cells of W determine
+    /// the Q axis, so U is on that same line.  Any such U starts in `[-5,5]`
+    /// and is contained in `[-5,10]`.  Stones off that line occur in no
+    /// imminent label and may be projected away.  The two bitmasks below are
+    /// therefore a complete universe, not a connectivity heuristic.
+    fn verify_l2_complete_six_stone_anchor() -> (usize, u32) {
+        let anchor_cells: Vec<Cell> = (0..=5i16).map(|q| (q, 0)).collect();
+        let outside: Vec<Cell> = (-5..=10i16)
+            .filter(|q| !(0..=5).contains(q))
+            .map(|q| (q, 0))
+            .collect();
+        assert_eq!(outside.len(), 10);
+
+        let mut checked = 0usize;
+        let mut max_tau = 0u32;
+        for anchor_mask in 0u16..(1u16 << anchor_cells.len()) {
+            let anchor_count = anchor_mask.count_ones() as usize;
+            if anchor_count != 4 && anchor_count != 5 {
+                continue;
+            }
+            for outside_mask in 0u16..(1u16 << outside.len()) {
+                let outside_count = outside_mask.count_ones() as usize;
+                if anchor_count + outside_count > 6 {
+                    continue;
+                }
+                let mut stones = BTreeSet::new();
+                for (i, &cell) in anchor_cells.iter().enumerate() {
+                    if anchor_mask & (1 << i) != 0 {
+                        stones.insert(cell);
+                    }
+                }
+                for (i, &cell) in outside.iter().enumerate() {
+                    if outside_mask & (1 << i) != 0 {
+                        stones.insert(cell);
+                    }
+                }
+                let summary = geometry_summary(&stones);
+                if summary.profile[6] > 0 {
+                    continue; // normative L2 is nonterminal
+                }
+                let tau = min_hitting_var_cap3(&summary.imminent);
+                assert!(
+                    tau <= 2,
+                    "complete <=6-stone anchor universe found tau={tau}: {stones:?}"
+                );
+                max_tau = max_tau.max(tau);
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 902, "complete <=6-stone anchor universe cardinality");
+        assert!(checked > 100, "anchor universe unexpectedly small");
+        assert_eq!(max_tau, 2, "straight four/five attain the service bound");
+        (checked, max_tau)
+    }
+
+    /// ITEM 1: complete L2 <=6 anchor universe, edge-connected L3 table, and
+    /// an unrestricted bounded L3 cross-check.  Only the L2 anchor universe is
+    /// globally complete; the n=4..12 table remains explicitly scoped to free
+    /// edge-connected polyhexes.
     #[test]
     #[ignore = "birth-ledger geometry; run with --nocapture --test-threads=1"]
-    fn birth_ledger_geometry() {
-        println!("BLGEOM commit=9b32db63 lambda=sqrt3 metric=max_#length6_windows_with_ge_k_stones");
-        // Generator completeness + single-cluster (superadditivity) evidence.
+    fn round2_birth_ledger_geometry_complete_and_scoped() {
+        println!("BLGEOM commit=159c75f4-round2 lambda=sqrt3 scope_a=complete_L2_le6_anchor scope_b=edge_connected_L3_n4_12 scope_c=unrestricted_region_0_6_n4_6");
+
+        let (l2_checked, l2_max_tau) = verify_l2_complete_six_stone_anchor();
+        println!(
+            "BLGEOM_L2_COMPLETE normalized_configs={l2_checked} max_tau={l2_max_tau} count5_singletons=true nonterminal=true"
+        );
+
+        // Gate the precise edge-disconnected/co-window-interacting attack from
+        // the hostile review.  It is absent from polyhex enumeration but is in
+        // the unrestricted region sweep below.
+        let disconnected = cells(&[(0, 0), (2, 0), (3, 0), (4, 0)]);
+        assert!(
+            HEX_NBRS
+                .iter()
+                .all(|&(dq, dr)| !disconnected.contains(&(dq, dr))),
+            "(0,0) must be edge-disconnected from the other component"
+        );
+        assert!(geometry_summary(&disconnected).profile[4] > 0);
+
+        // Edge-connected free-polyhex table.  These vectors are hard-gated but
+        // are no longer advertised as absolute maxima over arbitrary sets.
+        const EXPECTED4: [usize; 9] = [3, 4, 5, 6, 7, 9, 10, 12, 18];
+        const EXPECTED3: [usize; 9] = [5, 8, 12, 16, 24, 28, 33, 38, 41];
+        const EXPECTED5: [usize; 9] = [0, 2, 3, 4, 5, 6, 7, 8, 9];
+        const EXPECTED_DISJOINT4: [usize; 9] = [2, 2, 2, 4, 4, 6, 6, 8, 12];
+
         let mut fmax4: Vec<usize> = vec![0; 13]; // f4[n] = max windows_ge4 over n stones
         let mut fmax3: Vec<usize> = vec![0; 13];
         for n in 1..=12usize {
             let cfgs = gen_polyhexes(n);
             let gen_ok = cfgs.len() == A000228[n - 1];
+            assert_eq!(
+                cfgs.len(),
+                A000228[n - 1],
+                "free-polyhex generator count at n={n}"
+            );
             let mut best4 = 0usize;
             let mut cfg4: Vec<Cell> = Vec::new();
             let mut best3 = 0usize;
@@ -2654,13 +3445,13 @@ mod tests {
             let mut cfg_disj: Vec<Cell> = Vec::new();
             let mut fork_exists = false;
             let mut fork_cfg: Vec<Cell> = Vec::new();
-            let mut fork_ncount4 = 0usize;
+            let mut fork_nimminent = 0usize;
             for cfg in &cfgs {
                 let set: BTreeSet<Cell> = cfg.iter().copied().collect();
-                let w4 = windows_ge(&set, 4);
-                let w3 = windows_ge(&set, 3);
-                let w5 = windows_ge(&set, 5);
-                let prof = geom_profile(&set);
+                let summary = geometry_summary(&set);
+                let w3 = summary.profile[3..=6].iter().sum::<u64>() as usize;
+                let w4 = summary.profile[4..=6].iter().sum::<u64>() as usize;
+                let w5 = summary.profile[5..=6].iter().sum::<u64>() as usize;
                 if w4 > best4 {
                     best4 = w4;
                     cfg4 = cfg.clone();
@@ -2670,26 +3461,40 @@ mod tests {
                     cfg3 = cfg.clone();
                 }
                 best5 = best5.max(w5);
-                best_e4 = best_e4.max(prof[4] as usize);
-                let fam = count4_empty_pairs(&set);
-                let disj = max_disjoint_count4(&fam);
+                best_e4 = best_e4.max(summary.profile[4] as usize);
+                let disj = max_disjoint_count4(&summary.count4_pairs);
                 if disj > max_disj {
                     max_disj = disj;
                     cfg_disj = cfg.clone();
                 }
-                if !fork_exists && min_hitting_set_cap3(&fam) >= 3 {
+                if !fork_exists && min_hitting_var_cap3(&summary.imminent) >= 3 {
                     fork_exists = true;
                     fork_cfg = cfg.clone();
-                    fork_ncount4 = fam.len();
+                    fork_nimminent = summary.imminent.len();
                 }
             }
             fmax4[n] = best4;
             fmax3[n] = best3;
+            if n >= 4 {
+                let i = n - 4;
+                assert_eq!(best4, EXPECTED4[i], "edge-connected count4+ n={n}");
+                assert_eq!(best3, EXPECTED3[i], "edge-connected count3+ n={n}");
+                assert_eq!(best5, EXPECTED5[i], "edge-connected count5+ n={n}");
+                assert_eq!(
+                    max_disj, EXPECTED_DISJOINT4[i],
+                    "edge-connected disjoint exact-count4 n={n}"
+                );
+                assert_eq!(
+                    fork_exists,
+                    n >= 7,
+                    "edge-connected variable-residual fork flag n={n}"
+                );
+            }
             let prof4 = geom_profile(&cfg4.iter().copied().collect());
             println!(
-                "BLGEOM n={n} polyhexes={} gen_ok={gen_ok} max_wge4={best4} max_wge3={best3} \
+                "BLGEOM_EDGE_CONNECTED n={n} polyhexes={} gen_ok={gen_ok} max_wge4={best4} max_wge3={best3} \
                  max_wge5={best5} max_exactly4={best_e4} max_disjoint_c4={max_disj} \
-                 unblockable_fork={fork_exists}",
+                 variable_residual_fork={fork_exists}",
                 cfgs.len()
             );
             println!("BLGEOM_CFG n={n} thr4 config={cfg4:?} exact_profile(n1..n6)={prof4:?}");
@@ -2701,12 +3506,12 @@ mod tests {
             }
             if fork_exists {
                 println!(
-                    "BLGEOM_FORK n={n} first_unblockable_fork ncount4={fork_ncount4} config={fork_cfg:?}"
+                    "BLGEOM_FORK n={n} first_unblockable_fork nimminent={fork_nimminent} config={fork_cfg:?}"
                 );
             }
         }
-        // Superadditivity check (justifies "single cluster is optimal"): for all
-        // a+b=n, f4(n) >= f4(a)+f4(b).  If it holds, splitting stones never wins.
+        // Retain the old numerical superadditivity observation, now correctly
+        // scoped: it does NOT prove an arbitrary optimum is edge-connected.
         let mut superadd = true;
         for n in 2..=12usize {
             for a in 1..n {
@@ -2716,19 +3521,28 @@ mod tests {
                 }
             }
         }
-        println!("BLGEOM_SUPERADD holds={superadd} (single connected cluster is optimal)");
-        // Brute-force cross-check (no connectivity assumption) for small n over
-        // the rhombus q,r in [0,6].  Confirms edge-connected optimum == global.
+        assert!(superadd, "edge-connected maximum vector lost superadditivity");
+        println!("BLGEOM_SUPERADD holds={superadd} scope=edge_connected_values_only no_global_inference=true");
+
+        // No-connectivity brute force over the exact bounded universe [0,6]^2.
+        // All four columns and the count4/count5 residual predicate are gated.
+        let expected_region = [
+            (3usize, 5usize, 0usize, 2usize, false, 211_876usize),
+            (4, 8, 2, 2, false, 1_906_884),
+            (5, 12, 3, 2, false, 13_983_816),
+        ];
         for n in 4..=6usize {
-            let bf4 = brute_region_max(n, 6, 4);
-            let bf3 = brute_region_max(n, 6, 3);
+            let got = brute_region_all_columns(n, 6);
+            assert_eq!(got, expected_region[n - 4], "unrestricted [0,6]^2 n={n}");
             println!(
-                "BLGEOM_BRUTE n={n} region=[0,6]^2 brute_wge4={bf4} gen_wge4={} match4={} \
-                 brute_wge3={bf3} gen_wge3={} match3={}",
-                fmax4[n],
-                bf4 == fmax4[n],
-                fmax3[n],
-                bf3 == fmax3[n]
+                "BLGEOM_BRUTE_ALL n={n} region=[0,6]^2 configs={} max_wge4={} max_wge3={} max_wge5={} max_disjoint_c4={} variable_residual_fork={} edge_connected_rows_match={}",
+                got.5,
+                got.0,
+                got.1,
+                got.2,
+                got.3,
+                got.4,
+                got.0 == fmax4[n] && got.1 == fmax3[n]
             );
         }
     }
@@ -2774,29 +3588,6 @@ mod tests {
             }
         }
         out
-    }
-
-    /// Min hitting set (cap 3) over variable-size empty sets.
-    fn min_hitting_var_cap3(fam: &[Vec<Cell>]) -> u32 {
-        if fam.is_empty() {
-            return 0;
-        }
-        let cells: BTreeSet<Cell> = fam.iter().flatten().copied().collect();
-        let cv: Vec<Cell> = cells.into_iter().collect();
-        for &c in &cv {
-            if fam.iter().all(|s| s.contains(&c)) {
-                return 1;
-            }
-        }
-        for i in 0..cv.len() {
-            for j in (i + 1)..cv.len() {
-                let (a, b) = (cv[i], cv[j]);
-                if fam.iter().all(|s| s.contains(&a) || s.contains(&b)) {
-                    return 2;
-                }
-            }
-        }
-        3
     }
 
     /// At a Defender-to-move (first_stone) node: the two defender placements this
@@ -2921,7 +3712,7 @@ mod tests {
     #[test]
     #[ignore = "birth-ledger maturation frontier; run with --nocapture --test-threads=1"]
     fn birth_ledger_maturation() {
-        println!("BLMAT commit=9b32db63 lambda=sqrt3 role=Player0=Defender,Player1=Attacker");
+        println!("BLMAT input_commit=159c75f4 lambda=sqrt3 role=Player0=Defender,Player1=Attacker");
         // Sparse near-threshold roots (1 attacker stone) + denser 2-stone roots.
         let mut roots: Vec<(String, Pos)> = vec![
             ("es_core".into(), defender_first_stone(&[(0, 0)], &[(1, 0)])),
@@ -3153,7 +3944,7 @@ mod tests {
     #[test]
     #[ignore = "birth-ledger pileup forcibility; run with --nocapture --test-threads=1"]
     fn birth_ledger_pileup() {
-        println!("BLPILE commit=9b32db63 lambda=sqrt3 predicate=min_hitting_set(<=2empty windows)>=3");
+        println!("BLPILE input_commit=159c75f4 lambda=sqrt3 predicate=min_hitting_set(<=2empty windows)>=3");
         let mut roots: Vec<(String, Pos)> = vec![
             ("es_core".into(), defender_first_stone(&[(0, 0)], &[(1, 0)])),
             ("blocker_1_-1".into(), defender_first_stone(&[(0, 0)], &[(1, -1)])),

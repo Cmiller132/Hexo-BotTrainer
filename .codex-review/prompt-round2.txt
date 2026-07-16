@@ -1,0 +1,81 @@
+GAP-RAW proof round 2 — REPAIR ROUND. Execute the hostile review's
+12-item repair list and produce the revised document. The round-1 draft
+was REJECTED for real defects; your job is to rebuild what is buildable,
+withdraw what is refuted, and leave the residue sharply stated. Honest
+shrinkage is success: if the reduction becomes weaker but TRUE, that is
+the deliverable. Statement fidelity is the campaign's prime directive.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+at commit 159c75f4. You CANNOT git-commit. Write the revised document to
+GAP_RAW_PROOF_ROUND2.md in the worktree root — a COMPLETE standalone
+revision (not a patch), written incrementally (skeleton with statuses
+first, update after every section).
+
+## Inputs (read in this order)
+1. GAP_RAW_REVIEW_ROUND1.md — the review. Its §10 repair list (12 items)
+   is your work order, verbatim and in priority order. Its §3 three-gadget
+   O1' refutation and §4 L8.3.2 counterexamples must appear in your
+   round-2 document as adopted regressions (machine-checked — see below).
+   Its §11 independent judgment frames what to attempt vs state-as-open.
+2. GAP_RAW_PROOF_ROUND1.md — the rejected draft. K1 and L5b SURVIVED
+   hostile review: carry them forward (with any review-noted statement
+   tightenings). Reuse everything salvageable.
+3. The evidence base as before (hunt reports in this worktree +
+   E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-birth-ledger\HUNT_REPORT_BIRTH_LEDGER.md;
+   normative gap statements in
+   E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hexfield-eq-main-review-65bd3a\docs\proof_parts\ES_GLOBAL_BOUNDARY.md).
+
+## Key repair guidance (the review's own priorities, restated)
+- Repairs 1-2: fix the domain definitions and Theorem A's quantifier
+  structure FIRST — everything else stands on them. A's right-hand side
+  must quantify one strategy whose actual legal two-cell reply services
+  I(P) at every reached epoch against every attacker continuation.
+- Repair 3: O1' is DEAD as stated. Its successor must quantify over
+  histories reachable from an original Φ<1 root under the named strategy,
+  and the graded account must include count-1 latent promotion capacity
+  (the n1(c)/9 term the review identified). If no sound renewal claim is
+  provable this round, state the open obligation precisely with the
+  three-gadget construction as its boundary.
+- Repair 4: replace W3' + O1' with ONE joint obligation J binding a
+  single strategy's cover/spare choice, unripeness handoff, and account
+  renewal on every J-reachable history. Theorem D's successor proves
+  GAP-RAW from J alone.
+- Repair 6/W3': the review judges the narrow pairwise-intersecting case
+  provable by finite geometry + the <1 mass budget — ATTEMPT IT. Handle
+  or explicitly exclude the A—B—C path/cycle intersection structures
+  (matching number 2, not a clique) it names as the sharpest attack.
+- Repairs 8-10 are machine work: (8) re-verify L2/L3 over the complete
+  configuration universe the review specifies (edge-disconnected but
+  co-window-interacting configurations, count-5 singleton residuals, all
+  four L3 columns, hard assertions) — if the complete universe exceeds
+  the run budget, verify the largest sound sub-universe, RELABEL
+  accordingly, and record exactly what remains; (9) fix the straight-four
+  cover step (explicit two-cell cover, exact named roots); (10)
+  instrument R1b break epochs with the actual minimum hitting set and
+  assert tau>=3 before inferring Theta2>=1.
+- Repairs 5, 7, 11, 12 are statement surgery — do them exactly as
+  written.
+
+## Machine checks
+Add/extend test-gated #[ignore] tests in gap_raw_hunt.rs. MANDATORY new
+checks: the three-gadget O1' refutation as a regression (exact history
+replay, assert Theta2 crosses 1 after the attacker's reply against a
+best two-spare defense enumeration) and the two L8.3.2 counterexamples.
+CARGO_TARGET_DIR=.target-hunt, one cargo process, --test-threads=1, any
+single run <=10 min (downscope + document if it will not fit), free RAM
+>9 GB before cargo (powershell "Get-CimInstance Win32_OperatingSystem |
+% { $_.FreePhysicalMemory/1MB }").
+
+## Deliverable
+GAP_RAW_PROOF_ROUND2.md: complete revised document; per-claim labels
+(PROVEN / VERIFIED / CONJECTURED / OPEN / WITHDRAWN — withdrawn claims
+listed with their refutations, not silently deleted); a repair-list
+compliance table (item 1-12 -> what you did -> where); a revised status
+table; an attack-surface section for the round-2 review. Final message:
+compliance summary, what strengthened vs shrank vs opened, tallies,
+files, regen commands.
+
+## Rules
+No commits. No workspace-wide formatting. Work only in this worktree;
+siblings read-only. Truthfulness outranks completeness — run out of
+budget by saying exactly what is unfinished, never by softening a label.
