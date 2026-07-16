@@ -39,6 +39,9 @@ mod tss_bench;
 #[cfg(test)]
 mod tss_corpus;
 
+#[cfg(test)]
+mod tss_hunt;
+
 #[cfg(feature = "python")]
 mod cache;
 #[cfg(feature = "python")]

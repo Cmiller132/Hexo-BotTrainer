@@ -4978,7 +4978,7 @@ fn arena_core(arena: &[CertNode], root: CertNodeId, out: &mut Vec<HexCoord>) -> 
     Some(())
 }
 
-fn zone_certificate_extras(
+pub(crate) fn zone_certificate_extras(
     state: &RustHexoState,
     claimant: Player,
     d: u32,
