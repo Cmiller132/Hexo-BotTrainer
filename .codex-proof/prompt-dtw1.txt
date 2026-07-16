@@ -1,0 +1,85 @@
+DTW census-bound PROOF ROUND 1 — turn the validated census two-gap
+distance bound into a complete, hostile-review-ready proof. This lemma is
+a production consumer (the h=8 leaf-gate skip = certified bounded-no-win
+artifact), so soundness is everything: a weaker true theorem beats a
+strong gapped one. Statement fidelity is the campaign's prime directive.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-dtw-bounds
+at commit bd3c842f. You CANNOT git-commit. Write the proof document to
+PROOF_DTW_CENSUS_BOUND.md in the worktree root — standalone, written
+incrementally (skeleton with per-claim statuses first, update after every
+section).
+
+## Inputs (read in this order)
+1. HUNT_REPORT_DTW_BOUNDS.md — the validated candidate, the exact lemma
+   statement and proof skeleton (its "Lemma statement (ready for the
+   proof round)" section), the two exhaustively verified 1D claims
+   (Claim A: 6,182,998 configs, worst distinct-empties = 2; Claim B:
+   4,953,489 configs, worst hitting set = 2), and the three open
+   obligations (a) (b) (c).
+2. packages/hexfield_eq/rust/src/dtw_bounds_hunt.rs — the harness:
+   exact census definition, ply_of_mth maps, the dtw_line_lemma
+   exhaustive checks (these are your machine-fact anchors).
+3. For turn-structure and window primitives if needed:
+   packages/hexfield_eq/rust/src/tss_core.rs (read-only).
+
+## The theorem to prove
+Census two-gap distance bound, exactly as stated in the hunt report:
+attacker to move (FirstStone), no six on board, c = max attacker count
+over defender-free length-6 windows; m(c) = 6-c for c>=4,
+min(6-c+1, 6) for c<=3; then no attacker strategy completes six within
+ply_of_mth(m(c)) - 1 plies against every defense.
+
+Prove every step of the skeleton rigorously, closing the three open
+obligations:
+(a) Sub-family monotonicity in step (iv): when the defender's first-turn
+    stones land before the attacker's second pair, the surviving
+    defender-free count-5 family is a SUBSET of the stone-free family
+    Claim A quantifies over, and its empty-cell union is a subset —
+    state and prove this monotonicity precisely (it is where a hostile
+    reviewer will attack; the ternary universe of the exhaustive check
+    is your friend — argue the check's universe already contains every
+    defender-stone configuration, or strengthen the check).
+(b) The c<=1 bookkeeping when defender turn-1 stones already hit the
+    line W lies on: show the case split is exhaustive and each branch
+    still yields <=2 completion cells or an earlier kill.
+(c) The SecondStone variant: restate with ply_of_mth = 1,4,5,8,9,12 and
+    prove it — identify exactly which steps change (the defender's
+    servicing turns arrive EARLIER for SecondStone; check whether the
+    m(c) increment survives or must weaken at any c; if it must weaken,
+    state the weaker SecondStone theorem honestly).
+Also make the defender-legality step airtight: every serviced cell must
+be a legal defender placement at the moment it is played (within
+distance 5 of an existing stone, cell empty) — the skeleton asserts
+this; prove it or add the hypothesis the theorem needs.
+
+## Machine checks
+Extend dtw_bounds_hunt.rs with test-gated #[ignore] checks ONLY where a
+proof step benefits: mandatory = (a)'s monotonicity as an exhaustive 1D
+check over the ternary universe with defender stones injected between
+the pairs (if the argument reduces to the existing ternary check, write
+the reduction in the doc and add an assertion-level spot check), and a
+SecondStone-map regression on the 245 resolved oracle rows in
+DTW_RESOLVED.jsonl reinterpreted under the SecondStone ply map where
+applicable. CARGO_TARGET_DIR=.target-hunt, one cargo process,
+--test-threads=1, any single run <=10 min, free RAM >9 GB before every
+cargo (powershell "Get-CimInstance Win32_OperatingSystem | % {
+$_.FreePhysicalMemory/1MB }") — THREE other proof/build sessions share
+this 31 GB host; if below, wait and re-check.
+
+## Deliverable
+PROOF_DTW_CENSUS_BOUND.md: full proof with numbered lemmas; per-claim
+labels (PROVEN / VERIFIED-EXHAUSTIVE / OPEN — never soften a label);
+the FirstStone theorem, the SecondStone theorem (or its honest weaker
+form), and the defender-legality hypothesis stated exactly as a solver
+implementer must check them; a consumer contract section (exact
+predicate the leaf gate may implement, in terms of engine-visible
+quantities); an attack-surface section for the hostile review round.
+Final message: what is fully proven vs open, tallies, files, regen
+commands.
+
+## Rules
+No commits. Work only in this worktree; siblings read-only. rustfmt
+--edition 2021 only on files you edit. Truthfulness outranks
+completeness — run out of budget by saying exactly what is unfinished,
+never by softening a label.

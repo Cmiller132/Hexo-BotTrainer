@@ -29,6 +29,13 @@
 //!   * `dtw_firerate`            — >=2000 sampled leaf FirstStone nodes: fire
 //!                                  rate LB>h for h in {2,4,6,8,12,16} plies +
 //!                                  eval cost (us/node warm).
+//!   * `dtw_line_lemma`          — exhaustive ternary one-line Claims A/B,
+//!                                  frozen tallies, and defender-injection
+//!                                  monotonicity spot check.
+//!   * `dtw_secondstone_regression` — all 245 exact FirstStone rows remapped
+//!                                  by attacker-placement ordinal to the
+//!                                  SecondStone schedule, plus the reachable
+//!                                  c=3 sharpness witness.
 //!
 //! Corpus: HuggingFace `timmyburn/hexo-bootstrap-corpus`, local jsonl (verbatim
 //! loader from tss_leaf_width_hunt.rs).  Replay: P0 opens at (0,0), then
@@ -291,10 +298,19 @@ fn load_forcing_corpus() -> Vec<ForcingPos> {
             let mut it = line.split_whitespace();
             let q: i16 = it.next().unwrap().parse().unwrap();
             let r: i16 = it.next().unwrap().parse().unwrap();
-            apply_placement(&mut state, Placement { coord: HexCoord { q, r } })
-                .unwrap_or_else(|e| panic!("{id}: illegal replay at ({q},{r}): {e:?}"));
+            apply_placement(
+                &mut state,
+                Placement {
+                    coord: HexCoord { q, r },
+                },
+            )
+            .unwrap_or_else(|e| panic!("{id}: illegal replay at ({q},{r}): {e:?}"));
         }
-        assert_eq!(lines.next().map(str::trim), Some("END"), "{id}: missing END");
+        assert_eq!(
+            lines.next().map(str::trim),
+            Some("END"),
+            "{id}: missing END"
+        );
         out.push(ForcingPos {
             id,
             expect_win: expect == "WIN",
@@ -348,7 +364,13 @@ struct AliveWindow {
     empties: Vec<Cell>,
 }
 
-fn stones_of(state: &HexoState, me: Player) -> (std::collections::BTreeSet<Cell>, std::collections::BTreeSet<Cell>) {
+fn stones_of(
+    state: &HexoState,
+    me: Player,
+) -> (
+    std::collections::BTreeSet<Cell>,
+    std::collections::BTreeSet<Cell>,
+) {
     use std::collections::BTreeSet;
     let mut mine: BTreeSet<Cell> = BTreeSet::new();
     let mut opp: BTreeSet<Cell> = BTreeSet::new();
@@ -368,7 +390,10 @@ fn stones_of(state: &HexoState, me: Player) -> (std::collections::BTreeSet<Cell>
 
 /// Every alive (opp-free) length-6 window with >=1 me stone.  Deduped by
 /// (axis, start).  `empties` are the window cells with no stone at all.
-fn alive_windows(mine: &std::collections::BTreeSet<Cell>, opp: &std::collections::BTreeSet<Cell>) -> Vec<AliveWindow> {
+fn alive_windows(
+    mine: &std::collections::BTreeSet<Cell>,
+    opp: &std::collections::BTreeSet<Cell>,
+) -> Vec<AliveWindow> {
     use std::collections::BTreeSet;
     let mut seen: BTreeSet<(u8, i16, i16)> = BTreeSet::new();
     let mut out = Vec::new();
@@ -602,6 +627,7 @@ fn dtw_line_lemma() {
     // matching the real maxcnt definition).  Families range over defender-free
     // windows containing both 0 and d.
     for (k_cap, claim) in [(3u32, "A_count5_empties<=2"), (2u32, "B_count4_hitset<=2")] {
+        let mut raw_configs = 0u64;
         let mut configs_checked = 0u64;
         let mut fams_seen = 0u64;
         let mut worst_empties = 0usize;
@@ -610,11 +636,12 @@ fn dtw_line_lemma() {
             let lo = -5i32;
             let hi = d + 5; // inclusive
             let ncells = (hi - lo + 1) as usize; // d+11 <= 16
-            // free cells = span minus {0, d} (those must be empty pre-move).
+                                                 // free cells = span minus {0, d} (those must be empty pre-move).
             let free: Vec<i32> = (lo..=hi).filter(|&c| c != 0 && c != d).collect();
             let nfree = free.len();
             assert!(nfree <= 14, "span too large");
             let total: u64 = 3u64.pow(nfree as u32);
+            raw_configs += total;
             for code in 0..total {
                 // ternary decode
                 let mut cell = vec![0u8; ncells]; // 0 empty / 1 att / 2 def
@@ -680,8 +707,7 @@ fn dtw_line_lemma() {
                 fams_seen += 1;
                 if k_cap == 3 {
                     // Claim A: distinct empties across all count-5s <= 2.
-                    let mut distinct: Vec<i32> =
-                        fam_empties.iter().flatten().copied().collect();
+                    let mut distinct: Vec<i32> = fam_empties.iter().flatten().copied().collect();
                     distinct.sort_unstable();
                     distinct.dedup();
                     worst_empties = worst_empties.max(distinct.len());
@@ -700,11 +726,24 @@ fn dtw_line_lemma() {
                             .all(|es| es.contains(&a) || es.contains(&b))
                     };
                     let mut hs = 3;
-                    'outer: for i in 0..cells.len() {
-                        for j in i..cells.len() {
+                    // Compute the actual minimum in {1,2}: check every
+                    // singleton before accepting a two-cell hit.  The earlier
+                    // first-pair search established existence <=2 but could
+                    // label a later singleton family as size 2.
+                    for &cell in &cells {
+                        if hits(cell, cell) {
+                            hs = 1;
+                            break;
+                        }
+                    }
+                    'pairs: for i in 0..cells.len() {
+                        if hs == 1 {
+                            break;
+                        }
+                        for j in i + 1..cells.len() {
                             if hits(cells[i], cells[j]) {
-                                hs = if i == j { 1 } else { 2 };
-                                break 'outer;
+                                hs = 2;
+                                break 'pairs;
                             }
                         }
                     }
@@ -716,10 +755,68 @@ fn dtw_line_lemma() {
                 }
             }
         }
+        assert_eq!(raw_configs, 7_144_929, "raw ternary-universe tally drift");
+        match k_cap {
+            3 => {
+                assert_eq!(configs_checked, 6_182_998, "Claim A cap tally drift");
+                assert_eq!(fams_seen, 214_439, "Claim A family tally drift");
+                assert_eq!(worst_empties, 2, "Claim A worst-case drift");
+                assert_eq!(worst_hitset, 0);
+            }
+            2 => {
+                assert_eq!(configs_checked, 4_953_489, "Claim B cap tally drift");
+                assert_eq!(fams_seen, 261_705, "Claim B family tally drift");
+                assert_eq!(worst_empties, 0);
+                assert_eq!(worst_hitset, 2, "Claim B worst-case drift");
+            }
+            _ => unreachable!(),
+        }
         println!(
-            "LINE_LEMMA claim={claim} configs_checked={configs_checked} families_seen={fams_seen} worst_empties={worst_empties} worst_hitset={worst_hitset} verdict=EXHAUSTIVELY-VERIFIED"
+            "LINE_LEMMA claim={claim} raw_configs={raw_configs} configs_checked={configs_checked} families_seen={fams_seen} worst_empties={worst_empties} worst_hitset={worst_hitset} verdict=EXHAUSTIVELY-VERIFIED"
         );
     }
+
+    // Obligation (a), assertion-level injection spot check.  Attacker stones
+    // {2,3,4} satisfy the pre-pair cap 3; the later pair is {0,1}.  Before
+    // injecting the intervening defender turn, the post-pair count-5 family
+    // has starts {-1,0} and completion union {-1,5}.  Defender stones {-1,6}
+    // delete the first member and leave start {0}, union {5}: both are strict
+    // subsets.  The exhaustive loop above already covers the injected ternary
+    // assignment; this concrete assertion guards the formal reduction.
+    let attacker: std::collections::BTreeSet<i32> = [0, 1, 2, 3, 4].into_iter().collect();
+    let family = |defender: &std::collections::BTreeSet<i32>| {
+        let mut starts = std::collections::BTreeSet::new();
+        let mut empty_union = std::collections::BTreeSet::new();
+        for start in -4..=0 {
+            let cells: Vec<i32> = (start..start + 6).collect();
+            if cells.iter().any(|cell| defender.contains(cell)) {
+                continue;
+            }
+            if cells.iter().filter(|cell| attacker.contains(cell)).count() != 5 {
+                continue;
+            }
+            starts.insert(start);
+            empty_union.extend(
+                cells
+                    .into_iter()
+                    .filter(|cell| !attacker.contains(cell) && !defender.contains(cell)),
+            );
+        }
+        (starts, empty_union)
+    };
+    let no_injection = std::collections::BTreeSet::new();
+    let injected: std::collections::BTreeSet<i32> = [-1, 6].into_iter().collect();
+    let (before_family, before_union) = family(&no_injection);
+    let (after_family, after_union) = family(&injected);
+    assert_eq!(before_family, [-1, 0].into_iter().collect());
+    assert_eq!(before_union, [-1, 5].into_iter().collect());
+    assert_eq!(after_family, [0].into_iter().collect());
+    assert_eq!(after_union, [5].into_iter().collect());
+    assert!(after_family.is_subset(&before_family));
+    assert!(after_union.is_subset(&before_union));
+    println!(
+        "LINE_MONOTONICITY_SPOT before_family={before_family:?} after_family={after_family:?} before_union={before_union:?} after_union={after_union:?} verdict=ASSERTED"
+    );
     println!("LINE_LEMMA_DONE");
 }
 
@@ -733,7 +830,13 @@ fn replay(moves: &[(i16, i16)]) -> Option<HexoState> {
         if state.is_terminal() {
             return None;
         }
-        apply_placement(&mut state, Placement { coord: HexCoord::new(q, r) }).ok()?;
+        apply_placement(
+            &mut state,
+            Placement {
+                coord: HexCoord::new(q, r),
+            },
+        )
+        .ok()?;
     }
     if state.is_terminal() {
         return None;
@@ -775,7 +878,13 @@ fn dtw_pilot() {
     // opening is Player0 at (0,0); build a small deep-ish position.
     let mut st = s;
     for &(q, r) in &[(0, 0), (3, 0), (0, 1), (3, 1), (0, 2)] {
-        apply_placement(&mut st, Placement { coord: HexCoord::new(q, r) }).unwrap();
+        apply_placement(
+            &mut st,
+            Placement {
+                coord: HexCoord::new(q, r),
+            },
+        )
+        .unwrap();
     }
     println!(
         "PILOT phase={:?} cp={:?} ply1@FirstStone maps: m1={} m2={} m3={} m6={}",
@@ -787,17 +896,28 @@ fn dtw_pilot() {
         ply_of_mth(Player::Player0, TurnPhase::FirstStone, Player::Player0, 6),
     );
     // Expected: m1=1 m2=2 m3=5 m6=10 (FirstStone attacker).
-    assert_eq!(ply_of_mth(Player::Player0, TurnPhase::FirstStone, Player::Player0, 3), 5);
-    assert_eq!(ply_of_mth(Player::Player0, TurnPhase::FirstStone, Player::Player0, 6), 10);
+    assert_eq!(
+        ply_of_mth(Player::Player0, TurnPhase::FirstStone, Player::Player0, 3),
+        5
+    );
+    assert_eq!(
+        ply_of_mth(Player::Player0, TurnPhase::FirstStone, Player::Player0, 6),
+        10
+    );
     // SecondStone attacker: m6 -> ply 12.
-    let sec = TurnPhase::SecondStone { first: HexCoord::new(0, 0) };
+    let sec = TurnPhase::SecondStone {
+        first: HexCoord::new(0, 0),
+    };
     assert_eq!(ply_of_mth(Player::Player0, sec, Player::Player0, 6), 12);
     assert_eq!(ply_of_mth(Player::Player0, sec, Player::Player0, 1), 1);
     assert_eq!(ply_of_mth(Player::Player0, sec, Player::Player0, 2), 4);
 
     // Forcing corpus: oracle + LB on the WIN entries (small hmax pilot).
     let forcing = load_forcing_corpus();
-    let hmax: u32 = std::env::var("DTW_PILOT_HMAX").ok().and_then(|v| v.parse().ok()).unwrap_or(18);
+    let hmax: u32 = std::env::var("DTW_PILOT_HMAX")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(18);
     let mut shown = 0;
     for pos in &forcing {
         if !pos.expect_win {
@@ -830,6 +950,209 @@ fn dtw_pilot() {
 }
 
 // ==========================================================================
+// SECONDSTONE REGRESSION — schedule reinterpretation + c=3 sharp witness.
+// ==========================================================================
+
+#[test]
+#[ignore = "SecondStone map/row regression and c=3 witness; --nocapture"]
+fn dtw_secondstone_regression() {
+    let firststone_map = [1u32, 2, 5, 6, 9, 10];
+    let secondstone_map = [1u32, 4, 5, 8, 9, 12];
+    let p0 = Player::Player0;
+    let second = TurnPhase::SecondStone {
+        first: HexCoord::new(17, -9),
+    };
+    for m in 1..=6u32 {
+        assert_eq!(
+            ply_of_mth(p0, TurnPhase::FirstStone, p0, m),
+            firststone_map[(m - 1) as usize]
+        );
+        assert_eq!(
+            ply_of_mth(p0, second, p0, m),
+            secondstone_map[(m - 1) as usize]
+        );
+    }
+
+    // DTW_RESOLVED rows are exact FirstStone oracle rows.  Their compact
+    // schema has no replay prefix and therefore cannot create a SecondStone
+    // oracle.  This check only inverts each FirstStone ply to the attacker's
+    // placement ordinal and re-applies the SecondStone schedule.
+    let resolved_path = std::env::var("DTW_RESOLVED_IN")
+        .unwrap_or_else(|_| format!("{}/../../DTW_RESOLVED.jsonl", env!("CARGO_MANIFEST_DIR")));
+    let resolved = std::fs::read_to_string(&resolved_path)
+        .unwrap_or_else(|e| panic!("read {resolved_path}: {e}"));
+    let field_u32 = |line: &str, key: &str| -> u32 {
+        let marker = format!("\"{key}\":");
+        let start = line
+            .find(&marker)
+            .unwrap_or_else(|| panic!("missing {key} in {line}"))
+            + marker.len();
+        let tail = &line[start..];
+        let len = tail.chars().take_while(char::is_ascii_digit).count();
+        tail[..len]
+            .parse()
+            .unwrap_or_else(|_| panic!("bad {key} in {line}"))
+    };
+    let placement_of_ply = |ply: u32, map: &[u32; 6]| -> u32 {
+        map.iter()
+            .position(|&mapped| mapped == ply)
+            .map(|index| index as u32 + 1)
+            .unwrap_or_else(|| panic!("ply {ply} is not an attacker placement in {map:?}"))
+    };
+
+    let mut rows = 0u64;
+    let mut leafwidth_rows = 0u64;
+    let mut fresh_rows = 0u64;
+    let mut c_hist = [0u64; 6];
+    let mut transformed: std::collections::BTreeMap<(u32, u32, u32), u64> =
+        std::collections::BTreeMap::new();
+    for line in resolved.lines().filter(|line| !line.trim().is_empty()) {
+        rows += 1;
+        assert!(line.contains("\"exact\":true"), "non-exact row: {line}");
+        if line.contains("\"source\":\"leafwidth\"") {
+            leafwidth_rows += 1;
+        } else if line.contains("\"source\":\"fresh\"") {
+            fresh_rows += 1;
+        } else {
+            panic!("row is not from FirstStone provenance: {line}");
+        }
+        let tag_marker = "\"tag\":\"";
+        let tag_tail = &line[line.find(tag_marker).expect("tag") + tag_marker.len()..];
+        let tag = &tag_tail[..tag_tail.find('"').expect("tag terminator")];
+        let root_ply: u32 = tag
+            .rsplit_once('@')
+            .expect("tag@ply")
+            .1
+            .parse()
+            .expect("numeric tag ply");
+        assert_eq!(root_ply % 2, 1, "row is not a FirstStone root: {line}");
+
+        let dtw_fs = field_u32(line, "dtw_h");
+        let lb0_fs = field_u32(line, "lb0");
+        let winning_m = placement_of_ply(dtw_fs, &firststone_map);
+        let floor_m = placement_of_ply(lb0_fs, &firststone_map);
+        let c = 6 - floor_m;
+        assert!(c <= 5);
+        c_hist[c as usize] += 1;
+
+        let bound_m_ss = if c >= 3 { 6 - c } else { (7 - c).min(6) };
+        assert!(
+            bound_m_ss <= winning_m,
+            "SecondStone placement bound exceeds exact row ordinal: {line}"
+        );
+        let dtw_ss = secondstone_map[(winning_m - 1) as usize];
+        let bound_ss = secondstone_map[(bound_m_ss - 1) as usize];
+        assert!(bound_ss <= dtw_ss);
+        *transformed
+            .entry((dtw_ss, bound_ss, dtw_ss - bound_ss))
+            .or_default() += 1;
+    }
+    assert_eq!(rows, 245);
+    assert_eq!(leafwidth_rows, 39);
+    assert_eq!(fresh_rows, 206);
+    assert_eq!(c_hist, [0, 0, 18, 149, 78, 0]);
+    assert_eq!(transformed.get(&(4, 4, 0)), Some(&78));
+    assert_eq!(transformed.get(&(8, 5, 3)), Some(&84));
+    assert_eq!(transformed.get(&(12, 5, 7)), Some(&65));
+    assert_eq!(transformed.get(&(12, 9, 3)), Some(&18));
+    assert_eq!(transformed.values().sum::<u64>(), 245);
+    println!(
+        "SECONDSTONE_ROWS rows={rows} sources=leafwidth:{leafwidth_rows},fresh:{fresh_rows} c_hist={c_hist:?} transformed={transformed:?} verdict=MAP-REGRESSION-PASS"
+    );
+
+    // Reachable sharpness witness for the c=3 weakening.  The test anchors
+    // reachability/census and the three disjoint post-a1 gap pairs; Section 7
+    // supplies the universal two-defender-stone argument.
+    let prefix: [Cell; 18] = [
+        (0, 0),
+        (2, 1),
+        (3, 1),
+        (-1, 0),
+        (0, -1),
+        (4, 1),
+        (1, 2),
+        (-1, 1),
+        (1, -1),
+        (1, 3),
+        (1, 4),
+        (-2, 0),
+        (0, -2),
+        (2, 0),
+        (3, -1),
+        (-2, 1),
+        (-1, -2),
+        (4, -2),
+    ];
+    let mut witness = replay(&prefix).expect("legal nonterminal witness replay");
+    assert_eq!(witness.current_player(), Player::Player1);
+    assert_eq!(
+        witness.phase(),
+        TurnPhase::SecondStone {
+            first: HexCoord::new(4, -2)
+        }
+    );
+    let attacker = witness.current_player();
+    let (mine, opp) = stones_of(&witness, attacker);
+    assert_eq!(max_cnt(&alive_windows(&mine, &opp)), 3);
+    let (defender, attacker_stones) = stones_of(&witness, attacker.other());
+    assert!(max_cnt(&alive_windows(&defender, &attacker_stones)) <= 3);
+
+    let placed = apply_placement(
+        &mut witness,
+        Placement {
+            coord: HexCoord::new(1, 1),
+        },
+    )
+    .expect("witness a1 is legal");
+    assert!(placed.outcome.is_none());
+    let (mine, opp) = stones_of(&witness, attacker);
+    let post_a1 = alive_windows(&mine, &opp);
+    let expected_gaps: Vec<std::collections::BTreeSet<Cell>> = vec![
+        [(5, 1), (6, 1)].into_iter().collect(),
+        [(1, 5), (1, 6)].into_iter().collect(),
+        [(5, -3), (6, -4)].into_iter().collect(),
+    ];
+    for gaps in &expected_gaps {
+        assert!(post_a1.iter().any(|window| {
+            window.cnt == 4
+                && window
+                    .empties
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    == *gaps
+        }));
+    }
+    for i in 0..expected_gaps.len() {
+        for j in i + 1..expected_gaps.len() {
+            assert!(expected_gaps[i].is_disjoint(&expected_gaps[j]));
+        }
+    }
+    let all_gaps: Vec<Cell> = expected_gaps.iter().flatten().copied().collect();
+    assert_eq!(all_gaps.len(), 6);
+    for mask in 0u32..(1u32 << all_gaps.len()) {
+        if mask.count_ones() > 2 {
+            continue;
+        }
+        let hits: std::collections::BTreeSet<Cell> = all_gaps
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| mask & (1 << index) != 0)
+            .map(|(_, &cell)| cell)
+            .collect();
+        assert!(
+            expected_gaps.iter().any(|gaps| gaps.is_disjoint(&hits)),
+            "two defender hits covered three disjoint pairs: {hits:?}"
+        );
+    }
+    println!(
+        "SECONDSTONE_C3_WITNESS phase={:?} attacker={attacker:?} c=3 gaps={expected_gaps:?} verdict=OVERSTRONG-C3-REFUTED",
+        witness.phase()
+    );
+    println!("SECONDSTONE_REGRESSION_DONE");
+}
+
+// ==========================================================================
 // SOUNDNESS — every solved WIN vs every candidate LB.
 // ==========================================================================
 
@@ -846,11 +1169,26 @@ fn dtw_soundness() {
     // Every candidate LB is <= 12 plies (it maps m<=6 through ply_of_mth), so a
     // violation requires dtw < 12.  Laddering to hmax=14 catches every possible
     // violation; positions unresolved by then have dtw>14 and are auto-safe.
-    let hmax: u32 = std::env::var("DTW_HMAX").ok().and_then(|v| v.parse().ok()).unwrap_or(14);
-    let fresh_n: usize = std::env::var("DTW_FRESH_N").ok().and_then(|v| v.parse().ok()).unwrap_or(250);
-    let fresh_cap: u64 = std::env::var("DTW_FRESH_CAP").ok().and_then(|v| v.parse().ok()).unwrap_or(30_000);
-    let fresh_tried_cap: usize = std::env::var("DTW_FRESH_TRIED_CAP").ok().and_then(|v| v.parse().ok()).unwrap_or(9000);
-    let seed: u64 = std::env::var("DTW_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(0x51ED_C0DE_2026_0716);
+    let hmax: u32 = std::env::var("DTW_HMAX")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(14);
+    let fresh_n: usize = std::env::var("DTW_FRESH_N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(250);
+    let fresh_cap: u64 = std::env::var("DTW_FRESH_CAP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30_000);
+    let fresh_tried_cap: usize = std::env::var("DTW_FRESH_TRIED_CAP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(9000);
+    let seed: u64 = std::env::var("DTW_SEED")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0x51ED_C0DE_2026_0716);
     let out_path = std::env::var("DTW_SOUNDNESS_OUT").unwrap_or_else(|_| {
         "E:/Hexo-BotTrainer-hexgt/.claude/worktrees/hunt-dtw-bounds/DTW_SOUNDNESS.jsonl".to_string()
     });
@@ -900,7 +1238,13 @@ fn dtw_soundness() {
             if matches!(state.phase(), TurnPhase::FirstStone) {
                 cands_nodes.push((gi as u32, i as u32));
             }
-            apply_placement(&mut state, Placement { coord: HexCoord::new(q, r) }).expect("legal");
+            apply_placement(
+                &mut state,
+                Placement {
+                    coord: HexCoord::new(q, r),
+                },
+            )
+            .expect("legal");
         }
     }
     let mut idx: Vec<usize> = (0..cands_nodes.len()).collect();
@@ -917,12 +1261,17 @@ fn dtw_soundness() {
         }
         fresh_tried += 1;
         if fresh_tried % 500 == 0 {
-            eprintln!("DTW_FRESH scan tried={fresh_tried} found={fresh_found} ram={:.1}", free_ram_gb());
+            eprintln!(
+                "DTW_FRESH scan tried={fresh_tried} found={fresh_found} ram={:.1}",
+                free_ram_gb()
+            );
         }
         let (gi, pl) = cands_nodes[k];
         let g = &games[gi as usize];
         let moves: Vec<(i16, i16)> = g.moves[..pl as usize].to_vec();
-        let Some(state) = replay(&moves) else { continue };
+        let Some(state) = replay(&moves) else {
+            continue;
+        };
         // quick screen: solve for mover WIN at fresh_cap; horizon base+hmax so
         // we only keep shallow wins (dtw<=hmax) — exactly the tight tests.
         let caps = SolveCaps {
@@ -955,7 +1304,13 @@ fn dtw_soundness() {
         violations: u64,
         min_slack: i64, // min (oracle - lb); negative => violation
     }
-    let mut stats: Vec<CStat> = vec![CStat { min_slack: i64::MAX, ..Default::default() }; cands.len()];
+    let mut stats: Vec<CStat> = vec![
+        CStat {
+            min_slack: i64::MAX,
+            ..Default::default()
+        };
+        cands.len()
+    ];
     let mut viol_records: Vec<String> = Vec::new();
     let mut done = 0usize;
     // Resolved-dtw records (for the distribution table in the report).
@@ -965,7 +1320,10 @@ fn dtw_soundness() {
     for s in &samples {
         if done % 25 == 0 {
             let ram = free_ram_gb();
-            eprintln!("DTW_ORACLE progress={done}/{} resolved={resolved} ram={ram:.1}", samples.len());
+            eprintln!(
+                "DTW_ORACLE progress={done}/{} resolved={resolved} ram={ram:.1}",
+                samples.len()
+            );
             while free_ram_gb() < 9.0 {
                 eprintln!("DTW_WAIT low RAM (<9GB), sleeping 60s");
                 std::thread::sleep(std::time::Duration::from_secs(60));
@@ -1044,12 +1402,23 @@ fn dtw_soundness() {
         );
     }
     let body = viol_records.join("\n");
-    std::fs::write(&out_path, if body.is_empty() { String::from("") } else { format!("{body}\n") })
-        .unwrap_or_else(|e| panic!("write {out_path}: {e}"));
+    std::fs::write(
+        &out_path,
+        if body.is_empty() {
+            String::from("")
+        } else {
+            format!("{body}\n")
+        },
+    )
+    .unwrap_or_else(|e| panic!("write {out_path}: {e}"));
     let dtw_path = out_path.replace("DTW_SOUNDNESS.jsonl", "DTW_RESOLVED.jsonl");
     std::fs::write(&dtw_path, format!("{}\n", dtw_records.join("\n")))
         .unwrap_or_else(|e| panic!("write {dtw_path}: {e}"));
-    println!("DTW_SND_RECORDS violations_written={} path={out_path} resolved_records={} path={dtw_path}", viol_records.len(), dtw_records.len());
+    println!(
+        "DTW_SND_RECORDS violations_written={} path={out_path} resolved_records={} path={dtw_path}",
+        viol_records.len(),
+        dtw_records.len()
+    );
     println!("DTW_SND_DONE");
 
     // Hard assert: a PROVEN candidate must never violate.
@@ -1072,8 +1441,14 @@ const FIRE_HS: [u32; 6] = [2, 4, 6, 8, 12, 16];
 #[test]
 #[ignore = "dtw fire-rate x cost; --test-threads=1 --nocapture"]
 fn dtw_firerate() {
-    let want: usize = std::env::var("DTW_FIRE_N").ok().and_then(|v| v.parse().ok()).unwrap_or(4000);
-    let seed: u64 = std::env::var("DTW_FIRE_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(0x9E37_79B9_7F4A_7C15);
+    let want: usize = std::env::var("DTW_FIRE_N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4000);
+    let seed: u64 = std::env::var("DTW_FIRE_SEED")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0x9E37_79B9_7F4A_7C15);
     let out_path = std::env::var("DTW_FIRE_OUT").unwrap_or_else(|_| {
         "E:/Hexo-BotTrainer-hexgt/.claude/worktrees/hunt-dtw-bounds/DTW_FIRERATE.json".to_string()
     });
@@ -1090,7 +1465,13 @@ fn dtw_firerate() {
         maxcnt: u8,
     }
     let band_of = |ply: u32| -> u8 {
-        if ply <= 12 { 0 } else if ply <= 40 { 1 } else { 2 }
+        if ply <= 12 {
+            0
+        } else if ply <= 40 {
+            1
+        } else {
+            2
+        }
     };
     let mut nodes: Vec<Node> = Vec::new();
     for (gi, g) in games.iter().enumerate() {
@@ -1110,7 +1491,13 @@ fn dtw_firerate() {
                     maxcnt: mc,
                 });
             }
-            apply_placement(&mut state, Placement { coord: HexCoord::new(q, r) }).expect("legal");
+            apply_placement(
+                &mut state,
+                Placement {
+                    coord: HexCoord::new(q, r),
+                },
+            )
+            .expect("legal");
         }
     }
     // Deterministic shuffle, take `want`.
@@ -1141,7 +1528,9 @@ fn dtw_firerate() {
             eprintln!("DTW_FIRE progress={si}/{n} ram={:.1}", free_ram_gb());
         }
         let g = &games[node.gi as usize];
-        let Some(state) = replay(&g.moves[..node.pl as usize]) else { continue };
+        let Some(state) = replay(&g.moves[..node.pl as usize]) else {
+            continue;
+        };
         let me = state.current_player();
         band_n[node.band as usize] += 1;
         maxcnt_hist[(node.maxcnt as usize).min(7)] += 1;
@@ -1168,21 +1557,39 @@ fn dtw_firerate() {
     }
 
     let total: u64 = band_n.iter().sum();
-    let frac = |num: u64, den: u64| if den == 0 { 0.0 } else { num as f64 / den as f64 };
+    let frac = |num: u64, den: u64| {
+        if den == 0 {
+            0.0
+        } else {
+            num as f64 / den as f64
+        }
+    };
     let med = |v: &mut Vec<u64>| {
-        if v.is_empty() { return 0; }
+        if v.is_empty() {
+            return 0;
+        }
         v.sort_unstable();
         v[v.len() / 2]
     };
 
     println!("=== DTW FIRE RATE x COST ===");
-    println!("DTW_FIRE_META sample={total} bands=[{},{},{}] hs={:?}", band_n[0], band_n[1], band_n[2], FIRE_HS);
+    println!(
+        "DTW_FIRE_META sample={total} bands=[{},{},{}] hs={:?}",
+        band_n[0], band_n[1], band_n[2], FIRE_HS
+    );
     println!(
         "DTW_FIRE_MAXCNT hist(maxcnt=0..7)=[{}]",
-        maxcnt_hist.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",")
+        maxcnt_hist
+            .iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
     );
     let mut json = String::from("{\n");
-    json.push_str(&format!("  \"sample\": {total},\n  \"hs\": {:?},\n  \"candidates\": {{\n", FIRE_HS));
+    json.push_str(&format!(
+        "  \"sample\": {total},\n  \"hs\": {:?},\n  \"candidates\": {{\n",
+        FIRE_HS
+    ));
     for (ci, (name, proven, _)) in cands.iter().enumerate() {
         let med_ns = med(&mut eval_ns[ci]);
         let rates: Vec<String> = FIRE_HS
@@ -1201,9 +1608,15 @@ fn dtw_firerate() {
                 .enumerate()
                 .map(|(hi, h)| format!("h{}={:.4}", h, frac(fire_band[ci][b][hi], band_n[b])))
                 .collect();
-            println!("DTW_FIRE_BAND candidate={name} band={b} n={} [{}]", band_n[b], brates.join(" "));
+            println!(
+                "DTW_FIRE_BAND candidate={name} band={b} n={} [{}]",
+                band_n[b],
+                brates.join(" ")
+            );
         }
-        json.push_str(&format!("    \"{name}\": {{ \"proven\": {proven}, \"eval_med_ns\": {med_ns}, \"rates\": {{ "));
+        json.push_str(&format!(
+            "    \"{name}\": {{ \"proven\": {proven}, \"eval_med_ns\": {med_ns}, \"rates\": {{ "
+        ));
         let jr: Vec<String> = FIRE_HS
             .iter()
             .enumerate()
