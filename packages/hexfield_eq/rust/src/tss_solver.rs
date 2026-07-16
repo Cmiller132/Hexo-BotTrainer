@@ -656,7 +656,7 @@ fn sparse_loss_witnesses(
     let mut family = state
         .board()
         .windows()
-        .threats()
+        .live_threat_entries()
         .filter_map(|(owner, entry)| (owner == winner).then(|| (entry.key(), entry.empty_cells())))
         .collect::<Vec<_>>();
     family.sort_by_key(|(key, _)| window_key_order(*key));
@@ -708,7 +708,7 @@ fn typed_lambda_leaf(
             let mut witnesses = state
                 .board()
                 .windows()
-                .threats()
+                .live_threat_entries()
                 .filter_map(|(owner, entry)| (owner == winner).then_some(entry.key()))
                 .collect::<Vec<_>>();
             witnesses.sort_by_key(|key| window_key_order(*key));
@@ -756,6 +756,12 @@ static WIDE_GEN_PAIR_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::At
 static WIDE_GEN_DEFENDER_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(test)]
 static WIDE_GEN_PRIOR_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+static WIDE_EXPAND_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+static WIDE_REFRESH_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+static WIDE_INSERT_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Temporary hot-path attribution for the corpus harness: accumulated wall
 /// nanos of the wide generators/priors, read via `wide_gen_profile`.
@@ -784,13 +790,17 @@ impl Drop for WideGenTimer<'_> {
     }
 }
 
-/// (pair_gen_ms, defender_gen_ms, prior_ms) accumulated since process start.
+/// (pair_gen_ms, defender_gen_ms, regen_ms, expand_ms, refresh_ms, insert_ms)
+/// accumulated since process start.
 #[cfg(test)]
-pub(crate) fn wide_gen_profile() -> (u64, u64, u64) {
+pub(crate) fn wide_gen_profile() -> (u64, u64, u64, u64, u64, u64) {
     (
         WIDE_GEN_PAIR_NANOS.load(std::sync::atomic::Ordering::Relaxed) / 1_000_000,
         WIDE_GEN_DEFENDER_NANOS.load(std::sync::atomic::Ordering::Relaxed) / 1_000_000,
         WIDE_GEN_PRIOR_NANOS.load(std::sync::atomic::Ordering::Relaxed) / 1_000_000,
+        WIDE_EXPAND_NANOS.load(std::sync::atomic::Ordering::Relaxed) / 1_000_000,
+        WIDE_REFRESH_NANOS.load(std::sync::atomic::Ordering::Relaxed) / 1_000_000,
+        WIDE_INSERT_NANOS.load(std::sync::atomic::Ordering::Relaxed) / 1_000_000,
     )
 }
 /// Small conjunctions can exploit ordinary PN re-selection and shared TT work
@@ -1018,6 +1028,52 @@ impl WidePositionKey {
     fn heap_bytes(&self) -> usize {
         self.bytes.len()
     }
+
+    /// The key of the NONTERMINAL claimant FirstStone position reached after
+    /// two extra defender placements on `state`, built without touching the
+    /// engine. Caller contract (asserted by the defender pair plan before
+    /// use): `state` is a forced defender FirstStone node with no live
+    /// defender >=4 window, so the pair cannot complete six and the child is
+    /// exactly (claimant to move, FirstStone, non-terminal).
+    fn for_defender_pair(state: &RustHexoState, claimant: Player, extra: &[HexCoord]) -> Self {
+        let mut stones = state
+            .board()
+            .occupied_cells()
+            .iter()
+            .map(|&coord| {
+                (
+                    coord.q,
+                    coord.r,
+                    player_code(state.board().get(coord).expect("occupied cell has owner")),
+                )
+            })
+            .collect::<Vec<_>>();
+        let defender = claimant.other();
+        for &coord in extra {
+            stones.push((coord.q, coord.r, player_code(defender)));
+        }
+        stones.sort_unstable();
+        let mut encoded = Vec::with_capacity(stones.len().saturating_mul(3).saturating_add(12));
+        encoded.push(player_code(claimant));
+        push_wide_varint(
+            &mut encoded,
+            state
+                .placements_made()
+                .saturating_add(u32::try_from(extra.len()).unwrap_or(0)),
+        );
+        encoded.push(1); // TurnPhase::FirstStone
+        encoded.push(0); // non-terminal
+        for (q, r, owner) in stones {
+            push_wide_varint(
+                &mut encoded,
+                zigzag_i16(q).saturating_mul(2) | u32::from(owner),
+            );
+            push_wide_varint(&mut encoded, zigzag_i16(r));
+        }
+        Self {
+            bytes: encoded.into_boxed_slice(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1083,6 +1139,12 @@ fn forced_defender_pair_plan(
     }
     let kernel_set = kernel.iter().copied().collect::<HashSet<_>>();
 
+    // One fork scan per plan: a defender pair perturbs the claimant window
+    // structure only by two-colouring hit windows, so the plan-root fork
+    // degree is a faithful child prior (validated by node-count A/B against
+    // the historical per-pair exact scan).
+    let shared_fork_pn = pn_from_fork_degree(attacker_fork_degree(state, claimant));
+
     // Apply/undo on the caller's state instead of cloning the full engine
     // (board + window store) once per kernel cell. Every exit path restores
     // the exact turn-start state.
@@ -1115,8 +1177,10 @@ fn forced_defender_pair_plan(
             analysis.b,
             WidthOptions::vcf_pair_complete(),
         );
-        let second_frame = canonical_frame(state);
-        seconds.sort_by_key(|coord| canonical_coord_key(second_frame, *coord));
+        // The plan-root frame is itself D6-covariant, so reusing it keeps the
+        // rotation-invariance property while skipping a 12-symmetry stone
+        // canonicalization per kernel cell.
+        seconds.sort_by_key(|coord| canonical_coord_key(root_frame, *coord));
         seconds.dedup();
         if seconds.is_empty() {
             state.undo(first_delta);
@@ -1128,27 +1192,18 @@ fn forced_defender_pair_plan(
                 state.undo(first_delta);
                 return None;
             }
-            let Ok((second_result, second_delta)) =
-                state.apply_with_delta(Placement { coord: second })
-            else {
-                state.undo(first_delta);
-                return None;
-            };
-            if second_result.outcome.is_some()
-                || state.current_player() != claimant
-                || !matches!(state.phase(), TurnPhase::FirstStone)
-            {
-                state.undo(second_delta);
-                state.undo(first_delta);
-                return None;
-            }
-            let final_key = WidePositionKey::from_state(state);
-            let retained_prior =
-                (raw_coord_key(first) < raw_coord_key(second)).then(|| WidePnPrior {
-                    pn: pn_from_fork_degree(attacker_fork_degree(state, claimant)),
+            // No live defender >=4 window exists at the plan root (checked
+            // above via own_win_now), so the pair cannot complete six: the
+            // child is exactly (claimant, FirstStone, non-terminal) and its
+            // key is constructible without touching the engine. `second` is a
+            // kernel threat-window empty, hence always a legal placement.
+            let final_key = WidePositionKey::for_defender_pair(state, claimant, &[second]);
+            let retained_prior = (raw_coord_key(first) < raw_coord_key(second)).then(|| {
+                WidePnPrior {
+                    pn: shared_fork_pn,
                     dn: 1,
-                });
-            state.undo(second_delta);
+                }
+            });
             directed.push(WideDirectedDefenderPair {
                 first,
                 second,
@@ -1317,6 +1372,8 @@ impl WidePnSearch {
     }
 
     fn insert_position(&mut self, key: WidePositionKey, depth: usize, prior: WidePnPrior) -> usize {
+        #[cfg(test)]
+        let _timer = WideGenTimer::start(&WIDE_INSERT_NANOS);
         if let Some(&id) = self.by_position.get(&key) {
             self.tt_hits = self.tt_hits.saturating_add(1);
             return id;
@@ -1495,6 +1552,8 @@ impl WidePnSearch {
     }
 
     fn refresh_all_bottom_up(&mut self) {
+        #[cfg(test)]
+        let _timer = WideGenTimer::start(&WIDE_REFRESH_NANOS);
         #[cfg(test)]
         {
             self.stage_refreshes = self.stage_refreshes.saturating_add(1);
@@ -2283,6 +2342,8 @@ impl WidePnSearch {
     }
 
     fn expand(&mut self, state: &mut RustHexoState, id: usize) -> WidePnStepOutcome {
+        #[cfg(test)]
+        let _timer = WideGenTimer::start(&WIDE_EXPAND_NANOS);
         if self.expansions >= self.node_cap {
             return WidePnStepOutcome::Stalled;
         }
@@ -2418,7 +2479,7 @@ impl WidePnSearch {
         gate.evaluate_pair(first, second, self.semantic_horizon)
     }
 
-    fn attack_pair_children(&self, state: &mut RustHexoState, depth: usize) -> Vec<WidePnChild> {
+    fn attack_pair_children(&self, state: &mut RustHexoState, _depth: usize) -> Vec<WidePnChild> {
         #[cfg(test)]
         let _gen_timer = WideGenTimer::start(&WIDE_GEN_PAIR_NANOS);
         let gate = WideTurnGate::build(state, self.claimant);
@@ -2433,43 +2494,25 @@ impl WidePnSearch {
         let defender_blocks = turn_start_defender_blocks(&first_candidates);
         let mut children = Vec::new();
         let mut seen_pairs = HashSet::new();
-        for first_candidate in first_candidates {
-            let first_width_tier = wide_candidate_width_tier(&first_candidate);
+        // No claimant >=4 window exists here (win-now nodes leaf before
+        // generation), so a lone first stone can never complete six: the
+        // whole double loop is stateless — zero engine applies.
+        let mut second_coords: Vec<HexCoord> = Vec::new();
+        let mut second_seen: HashSet<HexCoord> = HashSet::new();
+        for first_candidate in &first_candidates {
+            let first_width_tier = wide_candidate_width_tier(first_candidate);
             let first = first_candidate.coord;
-            let Ok((first_result, first_delta)) =
-                state.apply_with_delta(Placement { coord: first })
-            else {
-                continue;
-            };
-            let first_completion_ply = self.root_ply.saturating_add(depth as u32).saturating_add(1);
-            if let Some(outcome) = first_result.outcome {
-                if outcome.winner == self.claimant && first_completion_ply <= self.semantic_horizon
-                {
-                    let mv = WidePnMove::One(first);
-                    children.push(WidePnChild {
-                        mv,
-                        result: WidePnChildResult::ClaimantCompletion,
-                        entry: None,
-                        prior: WidePnPrior::UNIFORM,
-                        urgent_block: wide_move_contains_defender_block(mv, &defender_blocks),
-                        first_width_tier: 0,
-                    });
-                }
-                state.undo(first_delta);
-                continue;
-            }
-
-            let second_candidates = {
+            {
                 #[cfg(test)]
                 let _regen_timer = WideGenTimer::start(&WIDE_GEN_PRIOR_NANOS);
-                ordered_threat_creating_moves_with_width(
-                    state,
-                    self.claimant,
-                    WidthOptions::vcf_pair_complete(),
-                )
-            };
-            for second_candidate in second_candidates {
-                let second = second_candidate.coord;
+                gate.second_candidates(
+                    first,
+                    &first_candidates,
+                    &mut second_coords,
+                    &mut second_seen,
+                );
+            }
+            for &second in &second_coords {
                 // Stateless classification from the turn-start window
                 // snapshot: no engine applies in the pair double loop.
                 let evaluated = self.evaluate_wide_pair_at_gate(&gate, first, second);
@@ -2500,7 +2543,6 @@ impl WidePnSearch {
                     });
                 }
             }
-            state.undo(first_delta);
         }
         children
     }
@@ -4097,6 +4139,11 @@ struct WidePairWindow {
 struct WideTurnGate {
     /// For each empty cell: the claimant-pure count>=2 windows holding it.
     windows_by_cell: HashMap<HexCoord, Vec<WidePairWindow>>,
+    /// For each empty cell: the claimant-pure count-1 windows holding it.
+    /// After a first stone in such a window its other empties join the
+    /// count>=2 second-ply universe; stored separately so pair evaluation
+    /// never scans them.
+    weak_windows_by_cell: HashMap<HexCoord, Vec<WidePairWindow>>,
     /// Empties of every live defender >=4 window (the hit/block sets).
     defender_threats: Vec<Vec<HexCoord>>,
     /// `placements_made` at turn start.
@@ -4106,6 +4153,7 @@ struct WideTurnGate {
 impl WideTurnGate {
     fn build(state: &RustHexoState, claimant: Player) -> Self {
         let mut windows_by_cell: HashMap<HexCoord, Vec<WidePairWindow>> = HashMap::new();
+        let mut weak_windows_by_cell: HashMap<HexCoord, Vec<WidePairWindow>> = HashMap::new();
         let mut defender_threats = Vec::new();
         for entry in state.board().windows().entries() {
             let Some(owner) = entry.active_player() else {
@@ -4113,18 +4161,20 @@ impl WideTurnGate {
             };
             let count = entry.count(owner);
             if owner == claimant {
-                if count >= 2 {
+                if count >= 1 {
                     let empties = entry.empty_cells();
                     let window = WidePairWindow {
                         key: entry.key(),
                         strength: count,
                         empties: empties.clone(),
                     };
+                    let sink = if count >= 2 {
+                        &mut windows_by_cell
+                    } else {
+                        &mut weak_windows_by_cell
+                    };
                     for &cell in &empties {
-                        windows_by_cell
-                            .entry(cell)
-                            .or_default()
-                            .push(window.clone());
+                        sink.entry(cell).or_default().push(window.clone());
                     }
                 }
             } else if count >= 4 {
@@ -4133,8 +4183,69 @@ impl WideTurnGate {
         }
         Self {
             windows_by_cell,
+            weak_windows_by_cell,
             defender_threats,
             start_placements: state.placements_made(),
+        }
+    }
+
+    /// The second-ply candidate coordinates after the claimant plays `first`,
+    /// derived without touching the engine: the strongest continuations are
+    /// the other empties of the count>=2 windows through `first` (they join
+    /// the tight forcing tier — the round-2 width-sorter property), then the
+    /// turn-start candidate list, then the empties of count-1 windows through
+    /// `first` (which reach the count-2 build tier only via `first`). This is
+    /// a slight SUPERSET of the historical post-apply regeneration (cells
+    /// whose defender-block status died with `first` are retained); wider is
+    /// WIN-sound and the forcing gate discards non-forcing pairs anyway.
+    fn second_candidates(
+        &self,
+        first: HexCoord,
+        turn_start: &[Candidate],
+        out: &mut Vec<HexCoord>,
+        seen: &mut HashSet<HexCoord>,
+    ) {
+        out.clear();
+        seen.clear();
+        seen.insert(first);
+        if let Some(list) = self.windows_by_cell.get(&first) {
+            let mut promoted: Vec<(u8, HexCoord)> = Vec::new();
+            for window in list {
+                for &cell in &window.empties {
+                    if cell != first {
+                        promoted.push((window.strength, cell));
+                    }
+                }
+            }
+            // Strongest promotions first; deterministic within a strength
+            // class by raw coordinate order.
+            promoted.sort_by_key(|&(strength, cell)| (Reverse(strength), raw_coord_key(cell)));
+            for (_, cell) in promoted {
+                if seen.insert(cell) {
+                    out.push(cell);
+                }
+            }
+        }
+        for candidate in turn_start {
+            if seen.insert(candidate.coord) {
+                out.push(candidate.coord);
+            }
+        }
+        if let Some(list) = self.weak_windows_by_cell.get(&first) {
+            let mut fresh: Vec<HexCoord> = Vec::new();
+            for window in list {
+                for &cell in &window.empties {
+                    if !seen.contains(&cell) {
+                        fresh.push(cell);
+                    }
+                }
+            }
+            fresh.sort_by_key(|&cell| raw_coord_key(cell));
+            for cell in fresh {
+                if seen.insert(cell) {
+                    out.push(cell);
+                }
+            }
         }
     }
 
@@ -4670,7 +4781,7 @@ fn min_hitting_set_at_most_two(
 /// the L1 hitting-cell universe, not a selected minimal hitting set.
 fn hitting_universe(state: &RustHexoState, claimant: Player) -> Vec<HexCoord> {
     let mut cells = Vec::new();
-    for (owner, entry) in state.board().windows().threats() {
+    for (owner, entry) in state.board().windows().live_threat_entries() {
         if owner == claimant {
             cells.extend(entry.empty_cells());
         }
@@ -4705,7 +4816,7 @@ fn extendable_hit_kernel(state: &RustHexoState, claimant: Player, budget: u8) ->
     let family = state
         .board()
         .windows()
-        .threats()
+        .live_threat_entries()
         .filter_map(|(owner, entry)| (owner == claimant).then(|| entry.empty_cells()))
         .collect::<Vec<_>>();
     extendable_hit_kernel_for_family(&family, budget)
@@ -4931,6 +5042,18 @@ fn zone_certificate_extras(
 /// raw-position equality.
 fn canonical_frame(state: &RustHexoState) -> u8 {
     let stone_count = state.board().occupied_cells().len();
+    // One owner lookup per stone, not one per stone per symmetry.
+    let stones: Vec<(HexCoord, u8)> = state
+        .board()
+        .occupied_cells()
+        .iter()
+        .map(|&coord| {
+            (
+                coord,
+                player_code(state.board().get(coord).expect("occupied cell has owner")),
+            )
+        })
+        .collect();
     let mut best_phase: Option<(u8, i32, i32)> = None;
     let mut best_stones = Vec::with_capacity(stone_count);
     let mut candidate_stones = Vec::with_capacity(stone_count);
@@ -4945,10 +5068,9 @@ fn canonical_frame(state: &RustHexoState) -> u8 {
             }
         };
         candidate_stones.clear();
-        candidate_stones.extend(state.board().occupied_cells().iter().map(|&coord| {
+        candidate_stones.extend(stones.iter().map(|&(coord, owner)| {
             let (q, r) = d6_coord_i32(coord, symmetry);
-            let owner = state.board().get(coord).expect("occupied cell has owner");
-            (q, r, player_code(owner))
+            (q, r, owner)
         }));
         candidate_stones.sort_unstable();
         if best_phase

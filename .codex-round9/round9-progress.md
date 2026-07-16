@@ -145,3 +145,40 @@ had to hand off because it projected >4 hours. Per-entry banked rungs:
 14/14 WIN certified on the ladder; 5/5 NO non-WIN; full log
 `final-matrix-19-rewrite.log`. Round-8b's pending-official-replay section is
 discharged by this run.
+
+## Round-9b: second profile-driven wave (same session)
+
+Profile said: C2 regeneration per first stone = 55-57% of solve time, then
+the defender pair plan, then canonical_frame (hidden: 12 full stone
+transform+sorts per call, with a board hash lookup per stone per symmetry).
+
+Landed:
+1. Stateless second candidates (`WideTurnGate::second_candidates` + weak
+   count-1 window index): the ENTIRE pair generation now runs zero engine
+   applies — promoted-tier ordering preserved (count>=2 windows through the
+   first stone lead), slight WIN-sound superset of the historical post-apply
+   universe.
+2. Defender plan: one fork scan per plan (was one per directed pair),
+   `WidePositionKey::for_defender_pair` builds child keys from parts (was
+   apply+apply+from_state+undo+undo per pair; provably safe — no defender
+   >=4 window exists at plan time), plan-root frame reused for inner kernel
+   sorts (D6-covariance preserved).
+3. `canonical_frame`: stone owners collected once, not once per symmetry.
+4. Remaining order-insensitive `.threats()` scans (sparse witnesses, narrow
+   loss leaf, hitting universe, hit kernel) swapped to `live_threat_entries`.
+
+Ledger (cumulative vs round-8b):
+
+| Position | 8b | wave-1 | wave-2 | cumulative |
+|---|---|---|---|---|
+| spot set | 20.2s | 3.6s | 0.88s | ~23x |
+| 12-entry matrix | ~8 min | ~44s | **12.35s** | ~40x |
+| hard child @1M | 1,272.8s | 97.9s | **26.1s** | **48.7x** |
+| lz60mfb 1M rung | 192.1s | 32.5s | **8.7s** | **22x** |
+| full 0l @4M/2GiB | 6,969.6s | 788.1s | **177.0s** | **39.4x** |
+
+Full 0l now beats the reference pdspn (264s) on its hardest position.
+Node counts drifted modestly (0l 1.83M -> 1.88M; hard child 186k -> 233k;
+jnzzmcm IMPROVED to a 10k-rung win at 9,798) — wall dominates. Full unit
+suite 95/0; narrow byte-identity vs round-5 sig EXACT again after every
+change (101 rows, 0 differing).

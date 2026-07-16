@@ -240,9 +240,10 @@ fn tss_corpus_check() {
                 tt_bytes_cap,
                 result.stats.peak_tt_bytes,
             );
-            let (pair_ms, defender_ms, prior_ms) = crate::tss_solver::wide_gen_profile();
+            let (pair_ms, defender_ms, regen_ms, expand_ms, refresh_ms, insert_ms) =
+                crate::tss_solver::wide_gen_profile();
             println!(
-                "GEN_PROFILE pair_ms={pair_ms} defender_ms={defender_ms} prior_ms={prior_ms}"
+                "GEN_PROFILE pair_ms={pair_ms} defender_ms={defender_ms} regen_ms={regen_ms} expand_ms={expand_ms} refresh_ms={refresh_ms} insert_ms={insert_ms}"
             );
             final_status = result.status;
             if result.status != ProofStatus::Unknown || i == ladder.len() - 1 {
