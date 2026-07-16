@@ -1,0 +1,10 @@
+LEAFW_CAP cap=500 n=1500 narrow_win=99 (0.0660) wide_win=190 (0.1267) narrowgoalwin=99 (0.0660) both_unknown=1267 (0.8447) wide_only_win=91 (0.0607) narrow_only_win=0 (0.0000) narrow_loss=43 wide_loss=31 contradiction=0
+LEAFW_TIME cap=500 narrow_med_us=684 narrow_p95_us=12223 wide_med_us=162 wide_p95_us=48147 narrowgoal_med_us=78 narrowgoal_p95_us=12854 ratio_wide/narrow_med=0.24 ratio_p95=3.94
+LEAFW_NODES cap=500 narrow_med=35 narrow_p95=500 narrow_max=500 wide_med=2 wide_p95=500 wide_max=500
+LEAFW_CAP cap=2000 n=1500 narrow_win=101 (0.0673) wide_win=223 (0.1487) narrowgoalwin=102 (0.0680) both_unknown=1234 (0.8227) wide_only_win=122 (0.0813) narrow_only_win=0 (0.0000) narrow_loss=43 wide_loss=31 contradiction=0
+LEAFW_TIME cap=2000 narrow_med_us=613 narrow_p95_us=50802 wide_med_us=156 wide_p95_us=168567 narrowgoal_med_us=73 narrowgoal_p95_us=48045 ratio_wide/narrow_med=0.25 ratio_p95=3.32
+LEAFW_NODES cap=2000 narrow_med=35 narrow_p95=2000 narrow_max=2000 wide_med=2 wide_p95=2000 wide_max=2000
+LEAFW_CAP cap=10000 n=1500 narrow_win=102 (0.0680) wide_win=240 (0.1600) narrowgoalwin=102 (0.0680) both_unknown=1214 (0.8093) wide_only_win=138 (0.0920) narrow_only_win=0 (0.0000) narrow_loss=46 wide_loss=31 contradiction=0
+LEAFW_TIME cap=10000 narrow_med_us=604 narrow_p95_us=257543 wide_med_us=158 wide_p95_us=281482 narrowgoal_med_us=85 narrowgoal_p95_us=234917 ratio_wide/narrow_med=0.26 ratio_p95=1.09
+LEAFW_NODES cap=10000 narrow_med=35 narrow_p95=6378 narrow_max=10000 wide_med=2 wide_p95=3084 wide_max=10000
+LEAFW_ALARM none (no WIN/LOSS contradiction across all cells)

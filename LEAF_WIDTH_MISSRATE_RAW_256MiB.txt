@@ -1,0 +1,25 @@
+test tss_leaf_width_hunt::leaf_width_miss_rate ... LEAFW_CORPUS path=E:/Hexo-BotTrainer-hexgt/data/hexo-bootstrap-corpus/hexo_human_corpus.jsonl games=6902
+LEAFW_SETUP pool_total=212356 pool_bands=[41412,83457,87487] per_band=500 sample=1500 caps=[500, 2000, 10000] tt_bytes=268435456 horizon_slack=50 seed=11400714819323198485
+LEAFW_META sample=1500 per_band=500 caps=[500, 2000, 10000] tt_bytes=268435456 horizon=ply+50 seed=11400714819323198485
+LEAFW_CELL cap=500 band=ply<=12 n=500 narrow_win=0 (0.0000) wide_win=9 (0.0180) narrowgoalwin=0 (0.0000) both_unknown=491 (0.9820) wide_only_win=9 (0.0180) narrow_only_win=0 (0.0000) narrow_loss=0 wide_loss=0 contradiction=0
+LEAFW_CELL cap=500 band=ply13-40 n=500 narrow_win=37 (0.0740) wide_win=87 (0.1740) narrowgoalwin=37 (0.0740) both_unknown=396 (0.7920) wide_only_win=50 (0.1000) narrow_only_win=0 (0.0000) narrow_loss=17 wide_loss=13 contradiction=0
+LEAFW_CELL cap=500 band=ply>40 n=500 narrow_win=62 (0.1240) wide_win=94 (0.1880) narrowgoalwin=62 (0.1240) both_unknown=380 (0.7600) wide_only_win=32 (0.0640) narrow_only_win=0 (0.0000) narrow_loss=26 wide_loss=18 contradiction=0
+LEAFW_CAP cap=500 n=1500 narrow_win=99 (0.0660) wide_win=190 (0.1267) narrowgoalwin=99 (0.0660) both_unknown=1267 (0.8447) wide_only_win=91 (0.0607) narrow_only_win=0 (0.0000) narrow_loss=43 wide_loss=31 contradiction=0
+LEAFW_TIME cap=500 narrow_med_us=13683 narrow_p95_us=25077 wide_med_us=233 wide_p95_us=47739 narrowgoal_med_us=7996 narrowgoal_p95_us=20584 ratio_wide/narrow_med=0.02 ratio_p95=1.90
+LEAFW_NODES cap=500 narrow_med=35 narrow_p95=500 narrow_max=500 wide_med=2 wide_p95=500 wide_max=500
+LEAFW_CELL cap=2000 band=ply<=12 n=500 narrow_win=0 (0.0000) wide_win=20 (0.0400) narrowgoalwin=0 (0.0000) both_unknown=480 (0.9600) wide_only_win=20 (0.0400) narrow_only_win=0 (0.0000) narrow_loss=0 wide_loss=0 contradiction=0
+LEAFW_CELL cap=2000 band=ply13-40 n=500 narrow_win=37 (0.0740) wide_win=98 (0.1960) narrowgoalwin=37 (0.0740) both_unknown=385 (0.7700) wide_only_win=61 (0.1220) narrow_only_win=0 (0.0000) narrow_loss=17 wide_loss=13 contradiction=0
+LEAFW_CELL cap=2000 band=ply>40 n=500 narrow_win=64 (0.1280) wide_win=105 (0.2100) narrowgoalwin=65 (0.1300) both_unknown=369 (0.7380) wide_only_win=41 (0.0820) narrow_only_win=0 (0.0000) narrow_loss=26 wide_loss=18 contradiction=0
+LEAFW_CAP cap=2000 n=1500 narrow_win=101 (0.0673) wide_win=223 (0.1487) narrowgoalwin=102 (0.0680) both_unknown=1234 (0.8227) wide_only_win=122 (0.0813) narrow_only_win=0 (0.0000) narrow_loss=43 wide_loss=31 contradiction=0
+LEAFW_TIME cap=2000 narrow_med_us=13624 narrow_p95_us=63718 wide_med_us=221 wide_p95_us=166083 narrowgoal_med_us=7995 narrowgoal_p95_us=55630 ratio_wide/narrow_med=0.02 ratio_p95=2.61
+LEAFW_NODES cap=2000 narrow_med=35 narrow_p95=2000 narrow_max=2000 wide_med=2 wide_p95=2000 wide_max=2000
+LEAFW_CELL cap=10000 band=ply<=12 n=500 narrow_win=0 (0.0000) wide_win=20 (0.0400) narrowgoalwin=0 (0.0000) both_unknown=480 (0.9600) wide_only_win=20 (0.0400) narrow_only_win=0 (0.0000) narrow_loss=0 wide_loss=0 contradiction=0
+LEAFW_CELL cap=10000 band=ply13-40 n=500 narrow_win=37 (0.0740) wide_win=104 (0.2080) narrowgoalwin=37 (0.0740) both_unknown=377 (0.7540) wide_only_win=67 (0.1340) narrow_only_win=0 (0.0000) narrow_loss=19 wide_loss=13 contradiction=0
+LEAFW_CELL cap=10000 band=ply>40 n=500 narrow_win=65 (0.1300) wide_win=117 (0.2340) narrowgoalwin=65 (0.1300) both_unknown=356 (0.7120) wide_only_win=52 (0.1040) narrow_only_win=0 (0.0000) narrow_loss=27 wide_loss=18 contradiction=0
+LEAFW_CAP cap=10000 n=1500 narrow_win=102 (0.0680) wide_win=241 (0.1607) narrowgoalwin=102 (0.0680) both_unknown=1213 (0.8087) wide_only_win=139 (0.0927) narrow_only_win=0 (0.0000) narrow_loss=46 wide_loss=31 contradiction=0
+LEAFW_TIME cap=10000 narrow_med_us=13681 narrow_p95_us=273321 wide_med_us=218 wide_p95_us=278818 narrowgoal_med_us=7998 narrowgoal_p95_us=242472 ratio_wide/narrow_med=0.02 ratio_p95=1.02
+LEAFW_NODES cap=10000 narrow_med=35 narrow_p95=6378 narrow_max=10000 wide_med=2 wide_p95=3084 wide_max=10000
+LEAFW_RECORDS wide_only_win(cap=2000)=122 narrow_only_win(cap=2000)=0 path=E:/Hexo-BotTrainer-hexgt/.claude/worktrees/hunt-leaf-width/LEAF_WIDTH_RECORDS.jsonl
+LEAFW_ALARM none (no WIN/LOSS contradiction across all cells)
+LEAFW_DONE
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 107 filtered out; finished in 416.29s
