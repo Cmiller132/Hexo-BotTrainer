@@ -5,6 +5,9 @@
 **Disposition:** REPAIR ROUND COMPLETE — GAP-RAW remains **OPEN**.  
 **Prime directive:** statement fidelity. GAP-RAW remains **OPEN** unless every quantifier in the normative blanket-game claim is discharged.
 
+**Round-2 review disposition:** **ACCEPT-WITH-EDITS** — 30/30 claims confirmed,
+0 broken; required edits applied. See `GAP_RAW_REVIEW_ROUND2.md`.
+
 ## 0. Executive result and target
 
 The round-1 reduction to `W3′+O1′` is **WITHDRAWN**. O1′ is false on the exact
@@ -614,9 +617,10 @@ same cover to satisfy its renewal transition.
 ### 5.2 A complete one-axis lemma
 
 **Lemma R7.4₂ (no all-count-two ripe core) [PROVEN].**
-At a handoff with `I=∅`, no one- or two-cell trigger set—even when legality is
-dropped for a finite over-approximation—can turn a family of pre-count-two
-labels alone into an imminent residual family of hitting number three. One
+At any finite nonterminal position with `I=∅`, independent of side or phase, no
+one- or two-cell trigger set—even when legality is dropped for a finite
+over-approximation—can turn a family of pre-count-two labels alone into an
+imminent residual family of hitting number three. One
 trigger cannot promote count two to count four. For two triggers at separation
 `d=1,2,3,4,5` on their common axis, the exact maximum hitting numbers are
 respectively
@@ -716,10 +720,12 @@ L₁,L₂ contain both empty triggers. Choose one trigger for y. It kills both l
 labels. Every at-least-three-label subset of this four-label universe contains
 a low label, so y hits every critical core.
 
-In every case y is empty, belongs to a touched alive window, is legal by L6₂,
-and differs from x because its core labels survived D@x. Count-three labels
-were allowed to contain one or both triggers; the inventory argument made no
-contrary assumption. Hence `(x,y)` is a servicing, unripe handoff. ∎
+In the no-core branch, L1.2's max-q construction makes y empty, legal, and
+distinct from x. When a core exists, y is empty, belongs to a touched alive
+window, is legal by L6₂, and differs from x because its core labels survived
+D@x. Count-three labels were allowed to contain one or both triggers; the
+inventory argument made no contrary assumption. Hence `(x,y)` is a servicing,
+unripe handoff. ∎
 
 This proves more than the review-requested pairwise-intersecting K2 case; no
 pairwise-intersection premise is needed.
@@ -761,6 +767,9 @@ entire graph is the exact path `A—B—C`, choose one label from `A∩B` and on
 four-vertex path, use labels on its first and last edges. A path on at least
 five vertices has three independent vertices and contradicts the matching-
 number-two bound.
+
+The one- and two-vertex exact-path cases close immediately: kill any label of a
+single minimal core, or kill one shared label of the two adjacent cores.
 
 Triangles are hit by labels from any two edges; a four-cycle is hit by labels
 from two opposite edges. An induced five-cycle is impossible under the mass
@@ -1026,7 +1035,7 @@ of imminent windows alone, never licenses the inference.
 | D0.2's `(A,D)`-only domain and remote-virgin “alive” use | **WITHDRAWN** | Omitted finiteness, nonemptiness, terminal status, blanket semantics, and phase; remote virgin cells need not be legal. Replaced in §1. |
 | L1.1 without nonterminal Attacker-`FirstStone` premises | **WITHDRAWN** | False at `SecondStone` for a two-empty window and ill-defined on a completed label. Replaced by L1.1 in §2. |
 | L1.2's unquantified “survives iff” and infinite-board spare proof | **WITHDRAWN** | Existence of a servicing reply must be distinguished from the actual reply; finiteness/nonemptiness supply fillers. Replaced by L1.2. |
-| Theorem A as originally written | **WITHDRAWN** | Its RHS constrained epoch debt but not S's actual pair. Replaced by A₂/A₂′ in §2. |
+| Theorem A/A′ as originally written | **WITHDRAWN** | Its RHS constrained epoch debt but not S's actual pair. Replaced by A₂/A₂′ in §2. |
 | Global L2 verification by edge-connected polyhexes and superadditivity | **WITHDRAWN** | Edge-disconnected co-window interactions invalidate that bridge. The repaired complete `≤6` anchor reduction is separately reported in §8. |
 | L3 table as absolute global maxima | **WITHDRAWN** | No complete arbitrary-configuration run for `n=7..12`; only the exact restricted universes in §8 remain VERIFIED. |
 | L4 “densest-root” classification and matching-number service inference | **WITHDRAWN** | The report covered six named roots, and matching number is not hitting number. §3 gives the exact scope and explicit `{-1,4}` cover. |
@@ -1164,9 +1173,11 @@ Strike these points first:
 
 ## 13. Regeneration commands and provenance
 
-**Input worktree commit:**
-`159c75f46db0090aca87ab8306dc0e3001541a50`. No commit was created in this
-repair round.
+**Round-2 input/base commit:** `159c75f46db0090aca87ab8306dc0e3001541a50`.
+**Reviewed round-2 artifact commit:** `74026b7c75b9228c03e73f4d372cccbd3c01a6b3`.
+**Round-2.1 edit pass:** applied in worktree `hunt-gap-raw` at
+`e63aa6b2595411d34d374e2a3781eee8d6db4c12`; no commit was created by this edit
+pass.
 
 **Edited harness:** `packages/hexfield_eq/rust/src/gap_raw_hunt.rs` (test-gated;
 production rules untouched).

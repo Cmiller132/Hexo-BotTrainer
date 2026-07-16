@@ -1,0 +1,35 @@
+GAP-RAW round 2.1 — EDIT PASS ONLY. The round-2 document was
+ACCEPT-WITH-EDITS (30/30 claims confirmed, 0 broken). Apply the
+review's required edits to GAP_RAW_PROOF_ROUND2.md, exactly and
+minimally. NO new claims, NO status changes, NO restructuring.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+at commit e63aa6b2. You CANNOT git-commit.
+
+## Work order (from GAP_RAW_REVIEW_ROUND2.md — read §§1,3 in full first)
+1. (Medium) R7.4_2: widen the stated phase hypothesis to match its
+   phase-free over-approximate regression and its K2/K3 uses. State
+   exactly what the regression proves; keep the label PROVEN only if
+   the widened statement is what the proof + regression establish.
+2. (Medium) K2: the "in every case" touched-window sentence is FALSE
+   (review's no-core filler example). Split the justification per the
+   review's finding so each case cites its true reason. K2's status is
+   unchanged; only the wording lied.
+3. (Low) Exact path proof: add the trivial one- and two-vertex path
+   cases with the review's own one-line closures.
+4. (Low) Provenance: §13 must name the artifact commit 74026b7c (input
+   base 159c75f4) and this edit pass; the §9 withdrawal ledger must
+   name old A' explicitly alongside old Theorem A.
+5. Add a short "Round-2 review disposition" note near the top: verdict,
+   30/30 confirmed, edits applied, pointer to GAP_RAW_REVIEW_ROUND2.md.
+
+Do not touch the Rust harness. Do not edit the review file. Keep every
+other sentence byte-identical — the document is review-accepted; edits
+beyond the list void the acceptance.
+
+## Rules
+No commits. Work only in this worktree. If any edit cannot be made
+without changing a claim's meaning beyond the review's instruction,
+STOP on that item and write the conflict into a short note at the end
+of the document instead. Final message: list of edits applied with
+line references.
