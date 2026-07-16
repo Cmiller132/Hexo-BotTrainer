@@ -531,6 +531,242 @@ fn cohort_greedy_move(pos: &Pos, cohort: &[WinKey]) -> Cell {
         .unwrap_or_else(|| filler(pos))
 }
 
+// ===========================================================================
+// ADAPTIVE defender rules (the GAP-RAW witness candidates).
+//
+// The greedy dilemma (HUNT_REPORT_GAP_RAW.md) shows neither fixed greedy wins:
+//   * dynamic touched-window greedy is COMPLETION-BLIND — a dense count-4 birth
+//     cluster out-scores a single count-5 completion cell, so the attacker
+//     completes a starved window (loses to the ES cohort-target line);
+//   * fixed-cohort greedy holds the frozen cohort forever (ES_GLOBAL_BOUNDARY
+//     Thm 1-3) but never scores births (loses to a fresh 6-line).
+// A witness must be ADAPTIVE.  Each rule below is a PURE, memoryless function of
+// the current position (plus the frozen root cohort, which is fixed context),
+// so it is legal to run inside a tree search and stateable as a one-paragraph
+// positional invariant.
+// ===========================================================================
+
+/// `(attacker_count, empties)` of window `k` at `pos`, or `None` if the window
+/// is dead (holds a defender) or all-empty (not attacker-alive).
+fn window_status_at(pos: &Pos, k: WinKey) -> Option<(u32, Vec<Cell>)> {
+    let cells = win_key_cells(k);
+    let mut acnt = 0u32;
+    let mut empties = Vec::new();
+    for c in cells {
+        if pos.defenders.contains(&c) {
+            return None;
+        }
+        if pos.attackers.contains(&c) {
+            acnt += 1;
+        } else {
+            empties.push(c);
+        }
+    }
+    if acnt == 0 {
+        None
+    } else {
+        Some((acnt, empties))
+    }
+}
+
+/// Exact danger map over `family`: for each empty cell, the summed
+/// `27*lambda^{-e}` of the attacker-alive `family` windows it is an empty of.
+fn danger_map(pos: &Pos, family: &[WinKey]) -> BTreeMap<Cell, (i128, i128)> {
+    let mut danger: BTreeMap<Cell, (i128, i128)> = BTreeMap::new();
+    for &k in family {
+        if let Some((acnt, empties)) = window_status_at(pos, k) {
+            let w = window_weight27(acnt);
+            for c in empties {
+                let e = danger.entry(c).or_insert((0, 0));
+                e.0 += w.0;
+                e.1 += w.1;
+            }
+        }
+    }
+    danger
+}
+
+/// Argmax of a danger map (max exact surd; tie: min `(q, r)`).
+fn argmax_danger(danger: &BTreeMap<Cell, (i128, i128)>) -> Option<(Cell, (i128, i128))> {
+    let mut best: Option<(Cell, (i128, i128))> = None;
+    for (&c, &val) in danger {
+        match &best {
+            None => best = Some((c, val)),
+            Some((bc, bv)) => {
+                let ord = cmp_surd(val.0, val.1, bv.0, bv.1);
+                if ord == Ordering::Greater || (ord == Ordering::Equal && c < *bc) {
+                    best = Some((c, val));
+                }
+            }
+        }
+    }
+    best
+}
+
+/// Minimum empty-count over all attacker-alive windows at `pos` (the imminence
+/// of the closest completion threat).  `u32::MAX` if no window is alive.
+fn min_empties(pos: &Pos, alive: &[WinKey]) -> u32 {
+    let mut m = u32::MAX;
+    for &k in alive {
+        if let Some((_, emp)) = window_status_at(pos, k) {
+            m = m.min(emp.len() as u32);
+        }
+    }
+    m
+}
+
+/// Among all alive windows whose empty-count equals `tier`, pick the empty cell
+/// that blocks the MOST such windows (tie: max danger over `alive`; tie: lex).
+/// This is the "aimed block": one stone kills the maximal imminent cluster.
+fn best_tier_block(pos: &Pos, alive: &[WinKey], tier: u32) -> Option<Cell> {
+    let mut cover: BTreeMap<Cell, u32> = BTreeMap::new();
+    for &k in alive {
+        if let Some((_, emp)) = window_status_at(pos, k) {
+            if emp.len() as u32 == tier {
+                for c in emp {
+                    *cover.entry(c).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    if cover.is_empty() {
+        return None;
+    }
+    let danger = danger_map(pos, alive);
+    let mut best: Option<(Cell, u32, (i128, i128))> = None;
+    for (&c, &cov) in &cover {
+        let d = *danger.get(&c).unwrap_or(&(0, 0));
+        let better = match &best {
+            None => true,
+            Some((bc, bcov, bd)) => {
+                if cov != *bcov {
+                    cov > *bcov
+                } else {
+                    let ord = cmp_surd(d.0, d.1, bd.0, bd.1);
+                    ord == Ordering::Greater || (ord == Ordering::Equal && c < *bc)
+                }
+            }
+        };
+        if better {
+            best = Some((c, cov, d));
+        }
+    }
+    best.map(|(c, _, _)| c)
+}
+
+/// RULE R1 — Completion-First Greedy (parameter `tau`).
+/// If the closest completion threat has `<= tau` empties, block the empty that
+/// covers the most windows at that closest tier; otherwise play dynamic
+/// touched-window danger-greedy.  Invariant target: never let ANY window
+/// (cohort or birth) reach the attacker's turn with a lethal number of empties.
+fn completion_first_move(pos: &Pos, tau: u32) -> Cell {
+    let alive = alive_windows(pos);
+    let m = min_empties(pos, &alive);
+    if m <= tau {
+        if let Some(c) = best_tier_block(pos, &alive, m) {
+            return c;
+        }
+    }
+    dynamic_greedy_move(pos)
+}
+
+/// RULE R4 — Guarded F-greedy (parameter `tau`).  Proof-aligned (Thm 3 shape):
+/// hold the FROZEN cohort with F-greedy, but pre-empt any imminent window
+/// (cohort or birth) with `<= tau` empties via an aimed block.  Differs from R1
+/// only in the fallback: cohort-F-greedy (ignores non-imminent births) rather
+/// than dynamic greedy (chases them).
+fn guarded_f_greedy_move(pos: &Pos, cohort: &[WinKey], tau: u32) -> Cell {
+    let alive = alive_windows(pos);
+    let m = min_empties(pos, &alive);
+    if m <= tau {
+        if let Some(c) = best_tier_block(pos, &alive, m) {
+            return c;
+        }
+    }
+    cohort_greedy_move(pos, cohort)
+}
+
+/// RULE R2 — Cohort-Priority Greedy (parameters `boost`, `tau`).
+/// Completion override at tier `<= tau`; otherwise dynamic danger-greedy but
+/// with cohort-family windows weighted `x boost` (biases the defender toward
+/// initial-cohort targets without a hard commitment).
+fn cohort_priority_move(pos: &Pos, cohort_set: &BTreeSet<WinKey>, boost: i128, tau: u32) -> Cell {
+    let alive = alive_windows(pos);
+    let m = min_empties(pos, &alive);
+    if m <= tau {
+        if let Some(c) = best_tier_block(pos, &alive, m) {
+            return c;
+        }
+    }
+    let mut danger: BTreeMap<Cell, (i128, i128)> = BTreeMap::new();
+    for &k in &alive {
+        if let Some((acnt, empties)) = window_status_at(pos, k) {
+            let w = window_weight27(acnt);
+            let mult = if cohort_set.contains(&k) { boost } else { 1 };
+            for c in empties {
+                let e = danger.entry(c).or_insert((0, 0));
+                e.0 += w.0 * mult;
+                e.1 += w.1 * mult;
+            }
+        }
+    }
+    argmax_danger(&danger)
+        .map(|(c, _)| c)
+        .unwrap_or_else(|| filler(pos))
+}
+
+/// RULE R3 — Starved-Target-Lock (parameter `k`), the task's lexicographic
+/// hybrid.  If some alive COHORT window is completable-soon (`<= k` empties) AND
+/// starved (the plain dynamic-greedy pick is not one of its empties, so pure
+/// danger-greedy would never service it), lock the most urgent such target by
+/// placing on its highest-danger empty; otherwise dynamic danger-greedy.  Note:
+/// this protects only the FROZEN cohort's completions, not births' completions.
+fn starved_target_lock_move(pos: &Pos, cohort_set: &BTreeSet<WinKey>, k: u32) -> Cell {
+    let alive = alive_windows(pos);
+    let danger_all = danger_map(pos, &alive);
+    let greedy_cell = argmax_danger(&danger_all).map(|(c, _)| c);
+    let mut candidates: Vec<(u32, Cell)> = Vec::new();
+    for &kw in &alive {
+        if !cohort_set.contains(&kw) {
+            continue;
+        }
+        if let Some((_, emp)) = window_status_at(pos, kw) {
+            let e = emp.len() as u32;
+            if e > k {
+                continue;
+            }
+            let starved = match greedy_cell {
+                Some(g) => !emp.contains(&g),
+                None => true,
+            };
+            if !starved {
+                continue;
+            }
+            // Lock cell = highest-danger empty of this window (tie: lex).
+            let mut best: Option<(Cell, (i128, i128))> = None;
+            for &c in &emp {
+                let d = *danger_all.get(&c).unwrap_or(&(0, 0));
+                let better = match &best {
+                    None => true,
+                    Some((bc, bd)) => {
+                        let o = cmp_surd(d.0, d.1, bd.0, bd.1);
+                        o == Ordering::Greater || (o == Ordering::Equal && c < *bc)
+                    }
+                };
+                if better {
+                    best = Some((c, d));
+                }
+            }
+            candidates.push((e, best.unwrap().0));
+        }
+    }
+    if !candidates.is_empty() {
+        candidates.sort_by_key(|&(e, c)| (e, c.0, c.1));
+        return candidates[0].1;
+    }
+    dynamic_greedy_move(pos)
+}
+
 /// Outcome of replaying a FIXED attacker script against a Defender policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ScriptOutcome {
@@ -1073,6 +1309,742 @@ mod tests {
             ),
             "fixed-cohort greedy must BLOCK the script that beats dynamic greedy, got {out:?}"
         );
+    }
+
+    // =======================================================================
+    // Diagnostic: trace a defender policy against a fixed attacker script.
+    // =======================================================================
+
+    /// Exact attacker-count and liveness of the named Q-line target window
+    /// W={(-5,0)..(0,0)} at `pos` (for tracing the ES refutation).
+    fn window_status(pos: &Pos, start: Cell, v: (i16, i16)) -> (u32, bool, Vec<Cell>) {
+        let cells = window_cells(start, v);
+        let mut acnt = 0u32;
+        let mut has_def = false;
+        let mut empties = Vec::new();
+        for c in cells {
+            if pos.defenders.contains(&c) {
+                has_def = true;
+            } else if pos.attackers.contains(&c) {
+                acnt += 1;
+            } else {
+                empties.push(c);
+            }
+        }
+        (acnt, has_def, empties)
+    }
+
+    /// Trace a defender `policy` (FnMut) against a fixed attacker `script`,
+    /// printing each defender placement with its dynamic-greedy danger and the
+    /// status of the ES target window W.
+    #[test]
+    #[ignore = "diagnostic trace; run with --nocapture"]
+    fn trace_dynamic_vs_es() {
+        let core = defender_first_stone(&[(0, 0)], &[(1, 0)]);
+        let w_start = (-5i16, 0i16);
+        let w_v = (1i16, 0i16);
+        let mut pos = core.clone();
+        let mut script = ES_SCRIPT.iter();
+        let mut ply = 0usize;
+        println!("TRACE dynamic_greedy vs ES_SCRIPT {ES_SCRIPT:?}");
+        for _ in 0..40 {
+            if pos.attacker_has_six() {
+                println!("  ply {ply}: ATTACKER SIX");
+                break;
+            }
+            match pos.to_move {
+                Side::Defender => {
+                    let fam = alive_windows(&pos);
+                    let pick = greedy_pick(&pos, &fam);
+                    let c = pick.map(|(c, _)| c).unwrap_or_else(|| filler(&pos));
+                    let dv = pick.map(|(_, v)| v).unwrap_or((0, 0));
+                    let (wc, wdef, wemp) = window_status(&pos, w_start, w_v);
+                    println!(
+                        "  ply {ply}: D plays {c:?} danger=(A{},B{}) | W count={wc} dead={wdef} empties={wemp:?} | nalive={}",
+                        dv.0, dv.1, fam.len()
+                    );
+                    pos = pos.apply(c);
+                }
+                Side::Attacker => {
+                    let Some(&c) = script.next() else { break };
+                    if pos.occupied(c) {
+                        println!("  ply {ply}: A wants {c:?} but OCCUPIED -> ScriptFoiled");
+                        break;
+                    }
+                    println!("  ply {ply}: A plays {c:?}");
+                    pos = pos.apply(c);
+                }
+            }
+            ply += 1;
+        }
+    }
+
+    // =======================================================================
+    // ADAPTIVE-RULE STRESS BATTERY.
+    // =======================================================================
+
+    fn hex_dist(a: Cell, b: Cell) -> i32 {
+        let dq = (a.0 - b.0) as i32;
+        let dr = (a.1 - b.1) as i32;
+        (dq.abs() + dr.abs() + (dq + dr).abs()) / 2
+    }
+
+    /// Total attacker danger of the windows through `c` that would be
+    /// attacker-alive if the attacker placed at `c` (attacker move heuristic).
+    fn attacker_threat_gain(pos: &Pos, c: Cell) -> (i128, i128) {
+        let mut sum = (0i128, 0i128);
+        let mut seen: BTreeSet<WinKey> = BTreeSet::new();
+        for (axis_ix, &v) in AXES.iter().enumerate() {
+            for start in windows_through(c, v) {
+                let key = (axis_ix as u8, start.0, start.1);
+                if !seen.insert(key) {
+                    continue;
+                }
+                let cells = window_cells(start, v);
+                let mut acnt = 0u32;
+                let mut has_def = false;
+                for cc in cells {
+                    if pos.defenders.contains(&cc) {
+                        has_def = true;
+                        break;
+                    }
+                    if pos.attackers.contains(&cc) || cc == c {
+                        acnt += 1;
+                    }
+                }
+                if has_def || acnt == 0 {
+                    continue;
+                }
+                let w = window_weight27(acnt);
+                sum.0 += w.0;
+                sum.1 += w.1;
+            }
+        }
+        sum
+    }
+
+    /// A strong randomized attacker move: complete a six if possible; else with
+    /// `birth_bias_pct` seed a fresh far line; else maximise threat-gain with a
+    /// randomized tie-break.
+    fn attacker_greedy_choice(pos: &Pos, rng: &mut XorShift, birth_bias_pct: u64) -> Cell {
+        for &k in &alive_windows(pos) {
+            if let Some((_, emp)) = window_status_at(pos, k) {
+                if emp.len() == 1 && !pos.occupied(emp[0]) {
+                    return emp[0];
+                }
+            }
+        }
+        let legal = pos.legal_moves();
+        if legal.is_empty() {
+            return filler(pos);
+        }
+        if birth_bias_pct > 0 && rng.next() % 100 < birth_bias_pct {
+            let mut best = legal[0];
+            let mut bestd = -1i32;
+            for &c in &legal {
+                let mut md = i32::MAX;
+                for &a in &pos.attackers {
+                    md = md.min(hex_dist(a, c));
+                }
+                if pos.attackers.is_empty() {
+                    md = 0;
+                }
+                if md > bestd || (md == bestd && rng.next() % 2 == 0) {
+                    bestd = md;
+                    best = c;
+                }
+            }
+            return best;
+        }
+        let mut best = legal[0];
+        let mut bestv = (i128::MIN, 0i128);
+        for &c in &legal {
+            let v = attacker_threat_gain(pos, c);
+            if bestv.0 == i128::MIN {
+                bestv = v;
+                best = c;
+                continue;
+            }
+            let ord = cmp_surd(v.0, v.1, bestv.0, bestv.1);
+            if ord == Ordering::Greater || (ord == Ordering::Equal && rng.next() % 2 == 0) {
+                bestv = v;
+                best = c;
+            }
+        }
+        best
+    }
+
+    /// Play a randomized attacker against a fixed defender policy.  Returns
+    /// `Some((win_ply, attacker_line))` if the attacker completes six.
+    fn random_attack_episode<F: Fn(&Pos) -> Cell>(
+        root: &Pos,
+        policy: &F,
+        seed: u64,
+        birth_bias_pct: u64,
+        max_placements: usize,
+    ) -> Option<(usize, Vec<Cell>)> {
+        let mut rng = XorShift(seed | 1);
+        let mut pos = root.clone();
+        let mut atk_line: Vec<Cell> = Vec::new();
+        for ply in 0..max_placements {
+            if pos.attacker_has_six() {
+                return Some((ply, atk_line));
+            }
+            match pos.to_move {
+                Side::Defender => {
+                    let c = policy(&pos);
+                    if pos.occupied(c) {
+                        // A well-formed policy never does this; guard anyway.
+                        return None;
+                    }
+                    pos = pos.apply(c);
+                }
+                Side::Attacker => {
+                    let c = attacker_greedy_choice(&pos, &mut rng, birth_bias_pct);
+                    if pos.occupied(c) {
+                        return None;
+                    }
+                    atk_line.push(c);
+                    pos = pos.apply(c);
+                }
+            }
+        }
+        if pos.attacker_has_six() {
+            Some((max_placements, atk_line))
+        } else {
+            None
+        }
+    }
+
+    /// The fixed adversarial scripts (each a full attacker cell sequence).
+    fn adversarial_scripts() -> Vec<(String, Vec<Cell>)> {
+        let mut out: Vec<(String, Vec<Cell>)> = Vec::new();
+        // S1: the canonical ES cohort-target line (beats dynamic greedy).
+        out.push(("es".into(), ES_SCRIPT.to_vec()));
+        // S2/S3: D6 images of it.
+        out.push(("es_translated".into(), translate(ES_SCRIPT, (12, -5))));
+        out.push(("es_reflected".into(), reflect_qr(ES_SCRIPT)));
+        // S4: a fresh 6-line far from the core (beats fixed-cohort greedy).
+        out.push((
+            "fresh_birth".into(),
+            vec![(8, 0), (8, 1), (8, 2), (8, 3), (8, 4), (8, 5)],
+        ));
+        // S5: birth danger-magnet + delayed completion far away.  A 4-in-a-row
+        // (15..18,0) magnet plus anchor (20,0), completing W'={(15,0)..(20,0)}
+        // at (19,0).  This replays the ES completion-blindness on a BIRTH line
+        // (no cohort membership) -- the key test for cohort-only defences.
+        out.push((
+            "birth_magnet".into(),
+            vec![(20, 0), (15, 0), (16, 0), (17, 0), (18, 0), (19, 0)],
+        ));
+        // S6: the ES script translated far AND self-anchored (pure birth replay
+        // of the exact ES mechanism, with its own spray births).
+        let mut s6 = vec![(20, 0)];
+        s6.extend(translate(ES_SCRIPT, (20, 0)));
+        out.push(("birth_es_far".into(), s6));
+        // S7: two far 6-lines built in parallel (a 2-front birth attack).
+        out.push((
+            "double_birth".into(),
+            vec![
+                (8, 0),
+                (-8, 0),
+                (8, 1),
+                (-8, -1),
+                (8, 2),
+                (-8, -2),
+                (8, 3),
+                (-8, -3),
+                (8, 4),
+                (-8, -4),
+                (8, 5),
+                (-8, -5),
+            ],
+        ));
+        // S8: interleave the ES cohort-target line with a birth (alternating),
+        // to stress rules that switch context.
+        out.push((
+            "interleave_es_birth".into(),
+            vec![
+                (2, -4),
+                (8, 0),
+                (2, 2),
+                (8, 1),
+                (-5, 0),
+                (8, 2),
+                (-4, 0),
+                (8, 3),
+                (-3, 0),
+                (8, 4),
+                (-2, 0),
+                (8, 5),
+                (-1, 0),
+            ],
+        ));
+        // S9: a compact fork attempt -- an attacker "plus"/cluster aiming for
+        // multiple simultaneous count-5 completions on one turn.
+        out.push((
+            "fork_attempt".into(),
+            vec![
+                (5, 0),
+                (6, 0),
+                (7, 0),
+                (5, 1),
+                (5, 2),
+                (5, 3),
+                (5, -1),
+                (4, 0),
+                (5, 4),
+                (8, 0),
+            ],
+        ));
+        // S10: the line the randomized attacker used to BEAT R1(tau=1) and
+        // R2 on blocker_3_0 -- a birth "cross fork": a Q-line 4-in-a-row
+        // (11..14,0) plus an R-column (12,*) crossing it, forcing two
+        // count-5 completions at (12,0)'s neighbourhood on one turn.  tau=1
+        // (block only count-5) reacts too late; tau=2 pre-empts it.
+        out.push((
+            "birth_cross_fork".into(),
+            vec![
+                (-3, 0),
+                (-2, 0),
+                (11, 0),
+                (12, 0),
+                (13, 0),
+                (14, 0),
+                (23, -1),
+                (12, -1),
+                (12, 2),
+                (12, 1),
+                (12, 4),
+                (12, 3),
+            ],
+        ));
+        // S11: an L-shaped double-four aimed at a shared completion cell --
+        // two count-4 windows meeting at one empty, so a single block cannot
+        // save both if they mature together.
+        out.push((
+            "L_double_four".into(),
+            vec![
+                (10, 0),
+                (11, 0),
+                (12, 0),
+                (13, 0),
+                (10, 1),
+                (10, 2),
+                (10, 3),
+                (10, 4),
+                (10, -1),
+                (14, 0),
+            ],
+        ));
+        // S12: a "T" cross fork -- a horizontal 5 and a vertical stub sharing a
+        // cell, engineered so completing either needs one of two disjoint cells.
+        out.push((
+            "T_cross_fork".into(),
+            vec![
+                (10, 0),
+                (11, 0),
+                (12, 0),
+                (13, 0),
+                (14, 0),
+                (12, 1),
+                (12, 2),
+                (12, 3),
+                (12, -1),
+                (12, -2),
+            ],
+        ));
+        out
+    }
+
+    /// Run the stress battery for one named defender policy from `root`.
+    /// Prints machine-readable `ADAPT_*` rows.  `episodes_per_bias` random
+    /// episodes are run at each of four birth-biases; `exh_plies` gives the
+    /// bounded-exhaustive best-play-attacker horizons; `print_all_breaks`
+    /// dumps every distinct random-break line (for deep survivor analysis).
+    fn stress_rule<F: Fn(&Pos) -> Cell>(
+        rule: &str,
+        root: &Pos,
+        policy: &F,
+        episodes_per_bias: u64,
+        exh_plies: &[u32],
+        exh_cap: u64,
+        print_all_breaks: bool,
+    ) {
+        // --- scripted attacks (full depth, deterministic) ------------------
+        for (sname, script) in adversarial_scripts() {
+            let out = play_scripted_attack(root, &script, policy);
+            let tag = match out {
+                ScriptOutcome::AttackerWon(p) => format!("BREAK ply={p}"),
+                ScriptOutcome::ScriptFoiled(p) => format!("foiled ply={p}"),
+                ScriptOutcome::Survived => "survived".into(),
+            };
+            println!("ADAPT_SCRIPT rule={rule} script={sname} outcome={tag}");
+        }
+        // --- randomized/greedy attacker (full depth, many seeds) -----------
+        let mut breaks = 0u32;
+        let mut first_break: Option<(u64, u64, usize, Vec<Cell>)> = None;
+        let mut shown = 0u32;
+        for &bias in &[0u64, 15, 40, 70] {
+            for seed in 0..episodes_per_bias {
+                let s = seed
+                    .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    .wrapping_add(bias.wrapping_mul(0xD1B5_4A32_D192_ED03))
+                    .wrapping_add(1);
+                if let Some((wp, line)) = random_attack_episode(root, policy, s, bias, 60) {
+                    breaks += 1;
+                    if first_break.is_none() {
+                        first_break = Some((bias, s, wp, line.clone()));
+                    }
+                    if print_all_breaks && shown < 6 {
+                        println!(
+                            "ADAPT_RANDOM_BREAK rule={rule} bias={bias} seed={s} win_ply={wp} line={line:?}"
+                        );
+                        shown += 1;
+                    }
+                }
+            }
+        }
+        let total = episodes_per_bias * 4;
+        println!("ADAPT_RANDOM rule={rule} episodes={total} breaks={breaks}");
+        if !print_all_breaks {
+            if let Some((bias, s, wp, line)) = first_break {
+                println!(
+                    "ADAPT_RANDOM_BREAK rule={rule} bias={bias} seed={s} win_ply={wp} line={line:?}"
+                );
+            }
+        }
+        // --- bounded exhaustive best-play attacker (sound AttackerWin) ------
+        for &plies in exh_plies {
+            let mut budget = MbBudget {
+                nodes: 0,
+                cap: exh_cap,
+            };
+            let out = attacker_win_vs_policy(root, plies, policy, &mut budget);
+            println!(
+                "ADAPT_EXH rule={rule} plies={plies} outcome={:?} nodes={} completed={} break={}",
+                out,
+                budget.nodes,
+                budget.nodes < exh_cap,
+                out == MbOutcome::AttackerWin
+            );
+        }
+    }
+
+    /// Alive windows at `pos` with `<= 2` empties (within one attacker turn of
+    /// completion), returned as `(empties_count, empties)`.
+    fn imminent_threats(pos: &Pos) -> Vec<(u32, Vec<Cell>)> {
+        let mut out = Vec::new();
+        for k in alive_windows(pos) {
+            if let Some((_, emp)) = window_status_at(pos, k) {
+                if emp.len() <= 2 {
+                    out.push((emp.len() as u32, emp));
+                }
+            }
+        }
+        out
+    }
+
+    /// Replay a fixed attacker LINE against completion-first at a given `tau`,
+    /// printing the endgame threat structure.  Distinguishes a genuine
+    /// unparryable fork (>= 3 distinct single-empty completion cells facing one
+    /// defender turn) from a mis-aim (defender lost with <= 2 such cells).
+    fn replay_trace(rname: &str, root: &Pos, line: &[Cell], tau: u32) {
+        let mut pos = root.clone();
+        let mut it = line.iter();
+        let mut ply = 0usize;
+        let mut tail: Vec<String> = Vec::new();
+        let outcome;
+        loop {
+            if pos.attacker_has_six() {
+                outcome = format!("AttackerWon ply={ply}");
+                break;
+            }
+            match pos.to_move {
+                Side::Defender => {
+                    // Snapshot imminent threats the defender faces now.
+                    let thr = imminent_threats(&pos);
+                    let ones: BTreeSet<Cell> = thr
+                        .iter()
+                        .filter(|(e, _)| *e == 1)
+                        .map(|(_, v)| v[0])
+                        .collect();
+                    let twos = thr.iter().filter(|(e, _)| *e == 2).count();
+                    let c = completion_first_move(&pos, tau);
+                    tail.push(format!(
+                        "  ply {ply}: D(t{tau}) plays {c:?} | imminent: 1-empty cells={:?} (n={}) 2-empty windows={}",
+                        ones, ones.len(), twos
+                    ));
+                    pos = pos.apply(c);
+                }
+                Side::Attacker => {
+                    let Some(&c) = it.next() else {
+                        outcome = format!("ScriptExhausted ply={ply}");
+                        break;
+                    };
+                    if pos.occupied(c) {
+                        outcome = format!("ScriptFoiled ply={ply}");
+                        break;
+                    }
+                    tail.push(format!("  ply {ply}: A plays {c:?}"));
+                    pos = pos.apply(c);
+                }
+            }
+            ply += 1;
+            if ply > 200 {
+                outcome = "Overrun".into();
+                break;
+            }
+        }
+        println!("REPLAY root={rname} tau={tau} outcome={outcome}");
+        let n = tail.len();
+        for s in tail.iter().skip(n.saturating_sub(16)) {
+            println!("{s}");
+        }
+    }
+
+    /// Instrumented replay of the R1b (tau=2) break lines from the broad sweep,
+    /// against tau=2 and tau=3, to classify each loss (fork vs mis-aim) and see
+    /// whether a higher threshold closes it.
+    #[test]
+    #[ignore = "break-line trace; run with --nocapture"]
+    fn trace_r1b_breaks() {
+        let l12: Vec<Cell> = vec![
+            (0, 5), (0, 4), (0, 6), (0, 7), (-1, 7), (-3, 9), (3, 7), (2, 7), (2, 9), (2, 8),
+            (2, 11), (2, 10), (3, 10), (1, 10), (5, 10), (4, 10), (4, 11), (4, 9), (4, 14),
+            (4, 13), (5, 13), (7, 11), (7, 13), (6, 13), (7, 12), (7, 15), (7, 8), (6, 9),
+            (2, 13), (3, 12),
+        ];
+        let l3: Vec<Cell> = vec![
+            (-4, 0), (-3, 0), (-5, 0), (-2, 0), (-2, -3), (10, 0), (1, -3), (-5, -3), (3, -5),
+            (2, -4), (6, -8), (5, -7), (6, -7), (3, -7), (8, -7), (7, -7), (6, -5), (6, -6),
+            (5, -5), (8, -8), (8, -5), (7, -5), (7, -6), (8, -6), (5, -4), (9, -8), (7, -8),
+            (7, -9), (11, -8), (10, -8),
+        ];
+        let cases: Vec<(&str, Pos, Vec<Cell>)> = vec![
+            ("es_core", defender_first_stone(&[(0, 0)], &[(1, 0)]), l12.clone()),
+            (
+                "blocker_1_-1",
+                defender_first_stone(&[(0, 0)], &[(1, -1)]),
+                l12.clone(),
+            ),
+            ("blocker_2_0", defender_first_stone(&[(0, 0)], &[(2, 0)]), l3.clone()),
+        ];
+        for (rname, root, line) in &cases {
+            for tau in [2u32, 3] {
+                replay_trace(rname, root, line, tau);
+            }
+        }
+    }
+
+    /// The `Phi < 1` Defender-FirstStone roots under test (near-threshold
+    /// heavy).  Any non-`Phi<1` construction is skipped, never asserted.
+    fn phi_lt1_roots() -> Vec<(String, Pos)> {
+        let mut roots: Vec<(String, Pos)> = Vec::new();
+        let named: &[(&str, &[Cell], &[Cell])] = &[
+            ("es_core", &[(0, 0)], &[(1, 0)]),
+            ("blocker_1_-1", &[(0, 0)], &[(1, -1)]),
+            ("blocker_2_0", &[(0, 0)], &[(2, 0)]),
+            ("blocker_3_0", &[(0, 0)], &[(3, 0)]),
+        ];
+        for &(name, att, def) in named {
+            let pos = defender_first_stone(att, def);
+            if pos.profile().phi_lt_one() {
+                roots.push((name.into(), pos));
+            }
+        }
+        // Programmatic near-threshold two-blocker constructions (Phi in
+        // [0.9,1)): one attacker at origin, two blockers within radius 3.
+        let mut cand: Vec<Cell> = Vec::new();
+        for q in -3..=3i16 {
+            for r in -3..=3i16 {
+                if (q, r) != (0, 0) {
+                    cand.push((q, r));
+                }
+            }
+        }
+        let mut seen: BTreeSet<[u64; 7]> = BTreeSet::new();
+        let mut added = 0;
+        'outer: for i in 0..cand.len() {
+            for j in (i + 1)..cand.len() {
+                let pos = defender_first_stone(&[(0, 0)], &[cand[i], cand[j]]);
+                let p = pos.profile();
+                if p.phi_lt_one() && p.phi_f64() >= 0.9 && seen.insert(p.n) {
+                    roots.push((
+                        format!(
+                            "near2_{}_{}__{}_{}",
+                            cand[i].0, cand[i].1, cand[j].0, cand[j].1
+                        ),
+                        pos,
+                    ));
+                    added += 1;
+                    if added >= 2 {
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        roots
+    }
+
+    /// Broad sweep: every candidate rule against the full battery from several
+    /// `Phi < 1` roots.  Modest random budget for speed; the survivor is
+    /// hardened separately in `adaptive_survivor_deep`.
+    #[test]
+    #[ignore = "adaptive broad sweep; run with --nocapture"]
+    fn adaptive_broad_sweep() {
+        println!("ADAPT_REPORT phase=broad lambda=sqrt3 role=Player0=Defender,Player1=Attacker");
+        for (rname, root) in &phi_lt1_roots() {
+            let cohort_vec = alive_windows(root);
+            let cohort_set: BTreeSet<WinKey> = cohort_vec.iter().copied().collect();
+            println!(
+                "=== ROOT {rname} phi={:.6} cohort={} ===",
+                root.profile().phi_f64(),
+                cohort_vec.len()
+            );
+            let eps = 120u64;
+            let exh = [4u32, 6];
+            let cap = 2_000_000u64;
+            stress_rule(
+                "dynamic_greedy",
+                root,
+                &(|p: &Pos| dynamic_greedy_move(p)),
+                eps,
+                &exh,
+                cap,
+                false,
+            );
+            stress_rule(
+                "cohort_greedy",
+                root,
+                &(|p: &Pos| cohort_greedy_move(p, &cohort_vec)),
+                eps,
+                &exh,
+                cap,
+                false,
+            );
+            stress_rule(
+                "R1_completion_first_t1",
+                root,
+                &(|p: &Pos| completion_first_move(p, 1)),
+                eps,
+                &exh,
+                cap,
+                false,
+            );
+            stress_rule(
+                "R1b_completion_first_t2",
+                root,
+                &(|p: &Pos| completion_first_move(p, 2)),
+                eps,
+                &exh,
+                cap,
+                false,
+            );
+            stress_rule(
+                "R4_guarded_fgreedy_t1",
+                root,
+                &(|p: &Pos| guarded_f_greedy_move(p, &cohort_vec, 1)),
+                eps,
+                &exh,
+                cap,
+                false,
+            );
+            stress_rule(
+                "R4b_guarded_fgreedy_t2",
+                root,
+                &(|p: &Pos| guarded_f_greedy_move(p, &cohort_vec, 2)),
+                eps,
+                &exh,
+                cap,
+                false,
+            );
+            stress_rule(
+                "R2_cohort_priority_b3_t1",
+                root,
+                &(|p: &Pos| cohort_priority_move(p, &cohort_set, 3, 1)),
+                eps,
+                &exh,
+                cap,
+                false,
+            );
+            stress_rule(
+                "R3_starved_lock_k3",
+                root,
+                &(|p: &Pos| starved_target_lock_move(p, &cohort_set, 3)),
+                eps,
+                &exh,
+                cap,
+                false,
+            );
+        }
+    }
+
+    /// Deep hardening of the leading survivor(s): completion-first at tau=2 and
+    /// tau=3 (with tau=1 for contrast), heavy randomized budget, deeper
+    /// exhaustion, on several roots plus perturbations.
+    #[test]
+    #[ignore = "adaptive survivor deep stress; run with --nocapture"]
+    fn adaptive_survivor_deep() {
+        println!("ADAPT_REPORT phase=deep lambda=sqrt3");
+        // Base roots + perturbations (translate/reflect/extra stray stone).
+        let mut roots: Vec<(String, Pos)> = vec![
+            ("es_core".into(), defender_first_stone(&[(0, 0)], &[(1, 0)])),
+            ("blocker_2_0".into(), defender_first_stone(&[(0, 0)], &[(2, 0)])),
+            ("blocker_3_0".into(), defender_first_stone(&[(0, 0)], &[(3, 0)])),
+        ];
+        // Perturbation: es_core reflected, and a stray far attacker stone added
+        // to es_core (still a legal blanket position; changes the birth field).
+        roots.push((
+            "es_core_reflected".into(),
+            defender_first_stone(&reflect_qr(&[(0, 0)]), &reflect_qr(&[(1, 0)])),
+        ));
+        {
+            let mut p = defender_first_stone(&[(0, 0)], &[(1, 0)]);
+            p.attackers.insert((7, -3));
+            if p.profile().phi_lt_one() {
+                roots.push(("es_core_plus_stray".into(), p));
+            }
+        }
+        for (rname, root) in &roots {
+            let _cohort_vec = alive_windows(root);
+            println!(
+                "=== DEEP ROOT {rname} phi={:.6} phi_lt1={} cohort={} ===",
+                root.profile().phi_f64(),
+                root.profile().phi_lt_one(),
+                _cohort_vec.len()
+            );
+            let eps = 750u64; // 3000 episodes/rule
+            let exh = [4u32, 6];
+            let cap = 4_000_000u64;
+            stress_rule(
+                "R1_completion_first_t1",
+                root,
+                &(|p: &Pos| completion_first_move(p, 1)),
+                eps,
+                &exh,
+                cap,
+                true,
+            );
+            stress_rule(
+                "R1b_completion_first_t2",
+                root,
+                &(|p: &Pos| completion_first_move(p, 2)),
+                eps,
+                &exh,
+                cap,
+                true,
+            );
+            stress_rule(
+                "R1c_completion_first_t3",
+                root,
+                &(|p: &Pos| completion_first_move(p, 3)),
+                eps,
+                &exh,
+                cap,
+                true,
+            );
+        }
     }
 
     // =======================================================================
