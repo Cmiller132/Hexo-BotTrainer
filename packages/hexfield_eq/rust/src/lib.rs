@@ -39,6 +39,11 @@ mod tss_bench;
 #[cfg(test)]
 mod tss_corpus;
 
+// GAP-RAW empirical hunt harness (open problem §12 item 7). Test-gated: it
+// compiles only under `cargo test` and never touches production paths.
+#[cfg(test)]
+mod gap_raw_hunt;
+
 #[cfg(feature = "python")]
 mod cache;
 #[cfg(feature = "python")]
