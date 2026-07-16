@@ -115,10 +115,11 @@ sections its landing updates.
 The normative **offline** solver is **`WidePnSearch`** (`tss_solver.rs`): a
 single-level, certificate-grade, staged-deepening df-pn **arena** engine. It
 replaced the narrow DFS prover for corpus/deep root solving over rounds 5–9b
-of the VCF-width campaign. The trainer's production leaf/root-guard/async
-surface still intentionally constructs `TssSolver::default()`, whose
-byte-identity contract selects the narrow DFS and count>=3 generator; that
-separate live dependency is recorded in §I.3. Offline mechanisms, by their
+of the VCF-width campaign, and since C1's completion (G2R6 `3c180c66`) it is
+the ONLY engine: the trainer's production leaf/root-guard/async surface still
+constructs `TssSolver::default()`, but that default now dispatches through
+`WidePnSearch::prove_narrow_compat`, which hosts the byte-identical narrow
+DFS scheduler (identity proven — §I.3 C1). Offline mechanisms, by their
 in-code names:
 
 - **Persistent proof-number frontier.** The arena holds pn/dn per entry; the
@@ -268,16 +269,20 @@ exposure labels).
 
 Once G2R3 is folded and gate-green at the tip:
 
-- **C1 — partially executable; production dependency blocks deletion.** The
-  wide engine strictly dominates the narrow prover as the offline corpus/root
-  solver, but `tree.rs`, `search.rs`, and `tss_async.rs` all construct
-  `TssSolver::default()` for trainer leaf, root-guard, and worker solves. That
-  default selects the narrow DFS, count>=3 generator, and split local/shared
-  TT. The path therefore stays byte-identical. Completing C1 requires a
-  wide-engine-with-narrow-options implementation plus golden-digest and
-  narrow certificate/node-count identity proof. Keep `tss_reference.rs`
-  (stock, deliberately unoptimized) and `tss_reference_fast` (validated
-  209/209) as the two independent test-only oracles.
+- **C1 — DONE (owner-approved, G2R5 `ace1f5b2` + G2R6 `3c180c66`).** The
+  narrow prover now lives inside the wide engine:
+  `WidePnSearch::prove_narrow_compat` hosts the byte-identical narrow DFS
+  scheduler (exact status/node-count/certificate/TT-layout identity proven
+  by the 512-position round-5 harness across fixtures, caps, TT profiles,
+  and cache-warm behavior); `TssSolver::default()`/`prove_for` dispatch
+  through it; the legacy `SearchContext` route, duplicate
+  `prove_for_at_depth`, and historical count>=3 wrapper are deleted
+  (−107 lines). No caller cap/dispatch change (trainer leaf, root guard,
+  async workers audited). Full gate battery green at `3c180c66` including
+  orchestrator-rerun all-19. The identity harness survives as an absolute
+  regression test. Keep `tss_reference.rs` (stock, deliberately
+  unoptimized) and `tss_reference_fast` (validated 209/209) as the two
+  independent test-only oracles.
 - **C2 — DONE: `WideRacer` (Fix A) deleted.** The racer field, probe branch,
   memo/Zobrist implementation, constants, and `TSS_WIDE_AB_RACER` test hook
   are gone. Its one residual idea — zone-cardinality-informed cross-leaf
