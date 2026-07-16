@@ -1,0 +1,55 @@
+Group-2, round 6 — THE C1 MIGRATION, step 2 of 2 (OWNER-APPROVED): flip
+the default narrow dispatch to the compatibility route, delete the legacy
+prover, and prove nothing changed. Execute the round-5 checklist exactly.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width.
+Confirm HEAD first (expected ace1f5b2 = round-5 narrow-compat + identity
+harness). Read .codex-group2/round5-progress.md IN FULL — its "Round-6
+flip/deletion checklist" is your work order verbatim:
+
+1. Re-run the complete round-5 identity harness at the current tip
+   (before touching anything).
+2. Flip TssSolver::default()/prove_for narrow dispatch to the
+   compatibility route in a minimal, reviewable change; do NOT alter
+   caller caps or the TT split.
+3. Run the complete identity harness a second time after the flip.
+4. Delete the legacy SearchContext alias/route and the historical
+   threat_creating_moves count>=3 wrapper; retain the generalized
+   threshold-3 generator used by narrow-compat.
+5. Re-run identity after deletion, then: default release suite, Stage-0
+   WSL golden digest, verifier mutation gate, double_fork_compact consume
+   witness (expect WIN/409 verified), and the official serialized all-19
+   gate at the 2 GiB profile (expect PASS failures=0). All regen commands
+   are in round5-progress.md (use --target x86_64-pc-windows-msvc for
+   native runs per its ops note; Stage-0 via the documented WSL command).
+6. Audit TssSolverSlot (tree.rs), the payload root guard (search.rs), and
+   the async persistent-worker + panic-reset construction sites
+   (tss_async.rs): confirm no caller-specific dispatch or cap change
+   accompanied the flip.
+
+## Hard rules
+- ANY identity mismatch at ANY step: STOP immediately, revert nothing,
+  write up the exact mismatch (position replay, dimension, both values)
+  in the progress file — a mismatch is a semantics finding, not a test
+  to weaken. Do not proceed to deletion past a red identity run.
+- The round-3 quiet/zone consume paths and round-5 harness must still
+  compile and pass — deletion must not orphan them (the consume path
+  routes through the same prove_for seam; verify its witness test after
+  deletion).
+- Grep-clean finish: no dangling SearchContext alias, no dead
+  threat_creating_moves wrapper, no unreferenced cfg(test) hooks left
+  from the deletion.
+- Write .codex-group2/round6-progress.md continuously: per-checklist-item
+  evidence, every regen command, the caller audit table, and a final
+  headline table (identity x3, suite, digest, mutations, witness, all-19).
+
+## Operational rules, binding
+(1) You CANNOT git-commit — checkpoint boundaries in the progress file.
+(2) CARGO_TARGET_DIR=.target-codex; never C:. (3) rustfmt --edition 2021
+only on files you edit. (4) Work only in this worktree; siblings
+read-only. (5) RAM: three other sessions share this host (Lean priority +
+two ultra proof sessions): check free RAM > 10 GB before EVERY
+build/long run (powershell "Get-CimInstance Win32_OperatingSystem | % {
+$_.FreePhysicalMemory/1MB }"); if below, wait and re-check; one
+build/solve at a time; --test-threads=1. (6) Any WIN-vs-LOSS
+disagreement = STOP and write up. (7) Long solves: chunk <= 2h per exec.

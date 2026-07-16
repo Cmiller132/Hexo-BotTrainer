@@ -71,10 +71,6 @@ pub(crate) struct WidthOptions {
     vcf_pair_complete: bool,
     quiet_turn_or_edges: Round3Flag,
     ranked_unforced_defender_zone: Round3Flag,
-    /// Default-off C1 migration seam.  When enabled, the historical narrow
-    /// DFS semantics run through `WidePnSearch`'s compatibility entry point.
-    /// No production caller enables this in round 5.
-    narrow_engine_migration: bool,
 }
 
 impl WidthOptions {
@@ -83,15 +79,6 @@ impl WidthOptions {
             vcf_pair_complete: true,
             quiet_turn_or_edges: Round3Flag::Off,
             ranked_unforced_defender_zone: Round3Flag::Off,
-            narrow_engine_migration: false,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn narrow_compat() -> Self {
-        Self {
-            narrow_engine_migration: true,
-            ..Self::default()
         }
     }
 
@@ -101,7 +88,6 @@ impl WidthOptions {
             vcf_pair_complete: true,
             quiet_turn_or_edges: Round3Flag::Shadow,
             ranked_unforced_defender_zone: Round3Flag::Shadow,
-            narrow_engine_migration: false,
         }
     }
 
@@ -110,7 +96,6 @@ impl WidthOptions {
             vcf_pair_complete: true,
             quiet_turn_or_edges: Round3Flag::Consume,
             ranked_unforced_defender_zone: Round3Flag::Consume,
-            narrow_engine_migration: false,
         }
     }
 
@@ -351,20 +336,6 @@ impl TssSolver {
         zone: ZoneSearchCaps,
         width: WidthOptions,
     ) -> AttemptResult {
-        if width.narrow_engine_migration {
-            return WidePnSearch::prove_narrow_compat(
-                state,
-                claimant,
-                node_cap,
-                local_tt_cap,
-                self.hash_mask,
-                &mut self.shared_tt,
-                semantic_horizon,
-                zone,
-                width,
-                MAX_SEARCH_DEPTH,
-            );
-        }
         if !width.vcf_pair_complete
             || (width.consumes_quiet_turns() && width.consumes_ranked_zone())
         {
@@ -378,11 +349,13 @@ impl TssSolver {
             } else {
                 zone
             };
-            return self.prove_for_at_depth(
+            return WidePnSearch::prove_narrow_compat(
                 state,
                 claimant,
                 node_cap,
                 local_tt_cap,
+                self.hash_mask,
+                &mut self.shared_tt,
                 semantic_horizon,
                 zone,
                 width,
@@ -489,71 +462,6 @@ impl TssSolver {
             stats,
             #[cfg(test)]
             tt_signature: None,
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn prove_for_at_depth(
-        &mut self,
-        state: &RustHexoState,
-        claimant: Player,
-        node_cap: u64,
-        local_tt_cap: usize,
-        semantic_horizon: u32,
-        zone: ZoneSearchCaps,
-        width: WidthOptions,
-        depth_cap: usize,
-    ) -> AttemptResult {
-        let mut work = state.clone();
-        let entry_key = PositionKey::from_state(&work);
-        let root_ply = state.placements_made();
-        let mut context = SearchContext::with_shared(
-            node_cap,
-            local_tt_cap,
-            self.hash_mask,
-            &mut self.shared_tt,
-            root_ply,
-            semantic_horizon,
-            zone,
-            width,
-            depth_cap,
-        );
-        let proof = context.prove(&mut work, claimant, root_ply, None);
-
-        // Every recursive path uses LIFO make/unmake, including cap exits.
-        debug_assert_eq!(entry_key, PositionKey::from_state(&work));
-
-        let stats = SolveStats {
-            nodes: context.nodes,
-            tt_hits: context.tt_hits,
-            peak_tt_bytes: context.peak_tt_bytes as u64,
-        };
-        let cert = proof.and_then(|root| {
-            let (nodes, root_node) = compact_certificate(&context.arena, root)?;
-            if context.can_admit_compact(&entry_key, &nodes) {
-                if let Some(cached) = CachedProof::from_compact(nodes.clone(), root_node) {
-                    context.insert_shared(entry_key.clone(), claimant, cached);
-                }
-            }
-            let mut cert = TssCertificate {
-                root: RootBinding::from_state(state),
-                claimant,
-                root_node,
-                nodes,
-                semantic_horizon,
-            };
-            rebase_zone_distances(&mut cert, state)?;
-            Some(cert)
-        });
-        let stats = SolveStats {
-            peak_tt_bytes: context.peak_tt_bytes as u64,
-            ..stats
-        };
-        AttemptResult {
-            cert,
-            stats,
-            #[cfg(test)]
-            tt_signature: Some(context.tt_behavior_signature()),
         }
     }
 }
@@ -1457,8 +1365,10 @@ impl WidePnSearch {
         width: WidthOptions,
         depth_cap: usize,
     ) -> AttemptResult {
-        debug_assert!(width.narrow_engine_migration);
-        debug_assert!(!width.vcf_pair_complete);
+        debug_assert!(
+            !width.vcf_pair_complete
+                || (width.consumes_quiet_turns() && width.consumes_ranked_zone())
+        );
 
         let mut work = state.clone();
         let entry_key = PositionKey::from_state(&work);
@@ -3327,9 +3237,8 @@ fn wide_completion_node(
     })
 }
 
-/// Historical narrow DFS state, retained byte-for-byte as the compatibility
-/// backend selected by `WidePnSearch::prove_narrow_compat`.  The legacy
-/// dispatcher uses the alias below until the separately gated round-6 flip.
+/// Narrow DFS state retained byte-for-byte as the compatibility backend
+/// selected by `WidePnSearch::prove_narrow_compat`.
 struct NarrowCompatSearch<'a> {
     node_cap: u64,
     nodes: u64,
@@ -3349,10 +3258,6 @@ struct NarrowCompatSearch<'a> {
     width: WidthOptions,
     depth_cap: usize,
 }
-
-/// Round-5 legacy name.  The default-off dispatcher continues to name this
-/// alias, making the round-6 removal boundary explicit and reviewable.
-type SearchContext<'a> = NarrowCompatSearch<'a>;
 
 #[derive(Clone, Debug)]
 struct PairContext {
@@ -4147,13 +4052,6 @@ struct CandidateBatch {
     defender_threats: Vec<Vec<HexCoord>>,
 }
 
-/// Exact OR restriction: every returned placement changes an active claimant
-/// length-six window with at least three stones into a >=4 threat (or a win).
-/// Omitting all other claimant moves can only miss a winning proof.
-fn threat_creating_moves(state: &RustHexoState, claimant: Player) -> CandidateBatch {
-    threat_creating_moves_with_threshold(state, claimant, 3)
-}
-
 fn threat_creating_moves_with_threshold(
     state: &RustHexoState,
     claimant: Player,
@@ -4267,12 +4165,8 @@ fn ordered_threat_creating_moves_with_width(
         defender_threats,
     } = if width.vcf_pair_complete {
         threat_creating_moves_with_threshold(state, claimant, 2)
-    } else if width.narrow_engine_migration {
-        // The migrated engine names the generalized generator directly.  The
-        // legacy wrapper remains live in the default-off branch until round 6.
-        threat_creating_moves_with_threshold(state, claimant, 3)
     } else {
-        threat_creating_moves(state, claimant)
+        threat_creating_moves_with_threshold(state, claimant, 3)
     };
     // Hoisted once per generation: the claimant stone list only depends on the
     // position, not on the candidate being ranked.
@@ -8092,7 +7986,7 @@ mod tests {
                 coord: HexCoord::new(2, -3),
             })
             .unwrap();
-        let mut context = SearchContext::new(500_000, 8 << 20, u64::MAX);
+        let mut context = NarrowCompatSearch::new(500_000, 8 << 20, u64::MAX);
         let child = context
             .prove(&mut work, Player::Player0, 1, None)
             .expect("validated forcing branch must prove");
@@ -8861,7 +8755,7 @@ mod tests {
             cache.insert(key.clone(), Player::Player0, proof);
         }
         let proof = cache.lookup_cloned(&key, Player::Player0).unwrap();
-        let mut context = SearchContext::new(4, 0, u64::MAX);
+        let mut context = NarrowCompatSearch::new(4, 0, u64::MAX);
         assert_eq!(context.import_cached_proof(proof, 0), Some(0));
         assert!(matches!(context.arena.as_slice(), [CertNode::Win { .. }]));
     }
@@ -8888,7 +8782,7 @@ mod tests {
         solver.shared_tt.reconfigure(shared_cap, u64::MAX);
         let reply = {
             let mut work = descendant_root.clone();
-            let mut context = SearchContext::with_shared(
+            let mut context = NarrowCompatSearch::with_shared(
                 generous.node_cap,
                 local_cap,
                 u64::MAX,
@@ -8917,7 +8811,7 @@ mod tests {
                 .mv
         };
 
-        // Re-root one level below the SearchContext root.  This key was
+        // Re-root one level below the narrow compatibility root. This key was
         // promoted while proving an internal universal edge, so an exact-root
         // result memo cannot satisfy the lookup.
         let mut descendant = descendant_root.clone();
@@ -9083,13 +8977,13 @@ mod tests {
         )
         .unwrap();
 
-        let mut depth_context = SearchContext::new(4, 0, u64::MAX);
+        let mut depth_context = NarrowCompatSearch::new(4, 0, u64::MAX);
         assert!(depth_context
             .import_cached_proof(chain.clone(), MAX_SEARCH_DEPTH - 1)
             .is_none());
         assert!(depth_context.arena.is_empty());
 
-        let mut node_context = SearchContext::new(4, 0, u64::MAX);
+        let mut node_context = NarrowCompatSearch::new(4, 0, u64::MAX);
         node_context.arena = vec![cache_test_leaf(); MAX_CERT_NODES - 2];
         let before_nodes = node_context.arena.len();
         assert!(node_context.import_cached_proof(chain, 0).is_none());
@@ -9111,7 +9005,7 @@ mod tests {
             1,
         )
         .unwrap();
-        let mut edge_context = SearchContext::new(4, 0, u64::MAX);
+        let mut edge_context = NarrowCompatSearch::new(4, 0, u64::MAX);
         edge_context.edge_count = MAX_CERT_EDGES;
         assert!(edge_context.import_cached_proof(edge_proof, 0).is_none());
         assert!(edge_context.arena.is_empty());
@@ -9168,12 +9062,12 @@ mod tests {
         assert_eq!(composite.resolution_t, 8);
         assert_eq!(composite.zone_build_t, Some(6));
 
-        let mut rejected = SearchContext::new(32, 0, u64::MAX);
+        let mut rejected = NarrowCompatSearch::new(32, 0, u64::MAX);
         rejected.semantic_horizon = 8;
         assert!(rejected.import_cached_proof(composite.clone(), 0).is_none());
         assert!(rejected.arena.is_empty(), "import preflight must be atomic");
 
-        let mut accepted = SearchContext::new(32, 0, u64::MAX);
+        let mut accepted = NarrowCompatSearch::new(32, 0, u64::MAX);
         accepted.semantic_horizon = 6;
         // Resolution 8 is independently too late, so a containing proof can
         // never smuggle this malformed composite through at either horizon.
@@ -9290,7 +9184,7 @@ mod tests {
         for cap in [2, 500_000] {
             let mut work = original.clone();
             let before = work.clone();
-            let mut context = SearchContext::new(cap, 64 << 10, u64::MAX);
+            let mut context = NarrowCompatSearch::new(cap, 64 << 10, u64::MAX);
             let _ = context.prove(&mut work, Player::Player0, 0, None);
             assert_exact_state(&work, &before);
         }
@@ -9400,7 +9294,6 @@ mod tests {
         let mut migrated = TssSolver::with_hash_mask(hash_mask);
         legacy.set_zone_options(zone);
         migrated.set_zone_options(zone);
-        migrated.set_width_options(WidthOptions::narrow_compat());
         (legacy, migrated)
     }
 
