@@ -566,7 +566,7 @@ fn forcing_prefix(source_id: &str, nstones: usize) -> HexoState {
     panic!("unknown forcing source id: {source_id}")
 }
 
-fn mining_candidate(id: &str) -> HexoState {
+pub(crate) fn mining_candidate(id: &str) -> HexoState {
     if let Some(encoded) = id.strip_prefix("forcing_prefix:") {
         let (source_id, nstones) = encoded
             .rsplit_once(':')
