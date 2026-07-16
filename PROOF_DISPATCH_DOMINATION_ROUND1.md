@@ -1,6 +1,13 @@
 # Dispatch domination, round 1
 
-> **Final dispatch, commit `6b853c0e`.** This file was written in
+> **Final dispatch.** Authored against worktree base `6b853c0e` (the U11
+> hunt landing); this document itself is committed as `7e240388`, the
+> commit reviewed by `REVIEW_DISPATCH_DOMINATION_ROUND1.md`
+> (ACCEPT-WITH-EDITS: all five theorem regimes CONFIRMED; its 7-item
+> repair list is binding on the b=2 experiment round — repairs 2–6 amend
+> §7's protocol before any grind, and its analytic baseline
+> `O_0=O_1=O_2=Unknown` for covered b=2 candidates makes the d=1,2 core
+> a smoke test, not discriminatory evidence). This file was written in
 > statement-first order; the controlling statements, full proofs, evidence
 > audit, future experiment, and attack surface now appear below.
 > The imported rule model and domination notation are from
@@ -884,18 +891,26 @@ so it was not rerun under this round's ten-minute-per-run rule.
    non-coverers; DRQ used one narrow-referee pair per node.  The status table
    relies on pencil proofs, not on treating either sample as exhaustive
    `VERIFIED` evidence.
-6. **Shipped-behavior scope is b=1 only.** `implicit_dispatch` also has a
-   b=2 `mhs=b=2` path.  L-DISPATCH-B1 certifies the b=1 intersection kernel,
-   not the entire production predicate.  Section 7 primarily studies the
-   different b=2 spare case `mhs=1<b=2`.
+6. **Shipped-behavior scope is b=1 only — enforceable fence.** `implicit_dispatch`
+   also has a b=2 `mhs=b=2` path.  L-DISPATCH-B1 certifies the b=1
+   intersection kernel, not the entire production predicate.  Section 7
+   primarily studies the different b=2 spare case `mhs=1<b=2`.  A consumer
+   MUST branch on the computed `mhs`/budget pair and take the certified
+   prune only on the exact b=1 branch; wiring the prune upstream of that
+   branch (where a b=2 case could reach it) is outside every theorem in
+   this document.
 7. **DRQ is rule equivalence, not representation equivalence.** Ordered
    history, learned features, cache keys, and certificate serialization may
    distinguish the two successors.  A consumer may prune a formal-game move
    only at a layer where P1's strategy transfer is an accepted certificate;
    it may not merge arbitrary byte states.
-8. **Coordinate carrier qualification.** The pencil rules use `Z^2`.  The
-   Rust corollaries have the ordinary no-`i16`-overflow precondition already
-   stated in `DOMINATION.md`'s source concordance.
+8. **Coordinate carrier qualification — enforceable at the boundary.** The
+   pencil rules use `Z^2`.  The Rust corollaries have the ordinary
+   no-`i16`-overflow precondition already stated in `DOMINATION.md`'s
+   source concordance.  A production consumer enforces it with the same
+   cheap check the DTW consumer contract names (all candidate cells and
+   their six-window spans within `i16` range of the occupied bounding
+   box); reject-not-certify on failure.
 9. **The future oracle's weakest assurance is `Loss`.** Its 209-case
    differential had no `Loss` coverage.  Section 7 therefore gates all
    attacker-`Loss` conclusions on new stock-reference differentials and

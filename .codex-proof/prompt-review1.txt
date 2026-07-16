@@ -1,0 +1,80 @@
+Dispatch-domination HOSTILE REVIEW, round 1. You are the adversarial
+referee for PROOF_DISPATCH_DOMINATION_ROUND1.md, which claims two
+PROVEN pencil theorems (L-DISPATCH-B1, L-DRQ) destined for SOLVER
+CONSUMPTION (move pruning in the production dispatch arm). A wrong
+PROVEN here prunes a winning move in production — maximum hostility is
+the job. Try to construct explicit counterexample positions.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-domination
+at commit 7e240388. You CANNOT git-commit. Write the review to
+REVIEW_DISPATCH_DOMINATION_ROUND1.md in the worktree root — written
+incrementally (verdict skeleton first).
+
+## Inputs (read in this order)
+1. PROOF_DISPATCH_DOMINATION_ROUND1.md — under review. Its §9 attack
+   surface is your starting list, not your limit.
+2. HUNT_REPORT_DOMINATION.md — the machine evidence (20,495 comparisons)
+   and, critically, the REFUTED coverer-interchange claim with corpus
+   witness d7e1b56c925b7f32:20 — verify the proof document nowhere
+   implies interchange, including transitively through its "dominated by
+   every legal reply" strengthening.
+3. DOMINATION.md (source concordance) and the game rules as implemented:
+   packages/hexfield_eq/rust/src/tss_core.rs + the legality radius in
+   the engine (read the actual placement-legality code). The proof
+   asserts window empties are "at distance at most 5 from an old
+   attacker stone... below the legality radius 8" — VERIFY the engine's
+   exact legality rule (radius value, from which stones, both players?).
+   The sibling DTW hunt report asserts legality = within distance 5.
+   These cannot both be the exact rule; establish the true one and check
+   every legality step in both proofs of this document against it.
+
+## Named attack surfaces (mandatory, plus your own)
+A. L-DISPATCH-B1 short horizons: the n=0 and n=1 cases (§3.3 step 6) —
+   is "after a full-coverer the attacker cannot win in one placement"
+   true when the attacker has OTHER count-5 windows the coverer did not
+   block (a full-coverer covers the named unhit W... or every count-4/5
+   window? Check the DB1 hypothesis definitions precisely).
+B. The horizon-2 strengthening "dominated by EVERY legal defender
+   reply": does the two-consecutive-placement win really survive every
+   defender reply, including a reply that creates a defender count-5
+   threat (defender win-in-1 next turn)? The !own_win_now gate excludes
+   defender wins NOW — what excludes a defender FORCED win created by
+   the reply c' being compared? Recall domination is about c (the
+   non-coverer) being WORSE; the attack is on claims about a arbitrary.
+C. Turn structure: verify the two-consecutive-placement argument against
+   the exact SecondStone/FirstStone alternation used by the engine
+   (ply_of_mth maps in the DTW report; DB1's defender SecondStone
+   scope). Off-by-one at turn boundaries is the classic defect.
+D. L-DRQ: Lemma 7 (frontier-inertness from deadness) — construct a
+   position where an empty dead cell is dead for six-in-a-row purposes
+   but its placement CHANGES the legal-move frontier (radius!) in a way
+   that differs between the two dead cells. The proof claims symmetric
+   transfer; legality-frontier asymmetry is the sharpest attack.
+E. Value convention: rho_D ordering, Unknown vs Loss semantics at
+   stopped horizons — confirm Lemma 3 of DOMINATION.md is applied
+   within its stated preconditions.
+F. Scope honesty: b=1-only claim vs implicit_dispatch's b=2 path;
+   confirm no consumption note lets B1 leak into b=2.
+
+## Machine work allowed
+Small adversarial checks in a new [ignore]-gated test module are
+allowed if a counterexample candidate is machine-checkable
+(CARGO_TARGET_DIR=.target-hunt, one cargo, --test-threads=1, single
+run <=10 min, free RAM >9 GB before cargo via powershell
+"Get-CimInstance Win32_OperatingSystem | % { $_.FreePhysicalMemory/1MB }";
+THREE other sessions share this host — if below, wait and re-check).
+
+## Deliverable
+REVIEW_DISPATCH_DOMINATION_ROUND1.md: overall verdict (ACCEPT /
+ACCEPT-WITH-EDITS / REJECT); per-theorem verdict (CONFIRMED /
+BROKEN-with-counterexample) for L-DISPATCH-B1 (each horizon regime
+separately: n=0, n=1, n>=2, and the every-legal-reply strengthening)
+and L-DRQ; findings by severity; numbered repair list if not ACCEPT;
+an independent judgment on whether the b=2 experiment design would
+actually falsify the pre-registered subclaims. Final message: verdict,
+tallies, sharpest findings, files.
+
+## Rules
+No commits. Work only in this worktree; siblings read-only. Do not edit
+the proof document — findings go in the review. Truthfulness outranks
+completeness.
