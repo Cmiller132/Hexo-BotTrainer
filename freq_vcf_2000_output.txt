@@ -1,0 +1,16 @@
+
+running 1 test
+test tss_freq_hunt::freq_vcf ... === FREQ_VCF results ===
+FREQ_VCF_INCIDENCE sample=2000 pool=143336 win_exists=506 unknown=1422 loss=72 win_rate=0.2530
+FREQ_VCF_HUMAN win_with_testable_next=506 human_kept_win=325 human_found_rate=0.6423
+--- lambda^2 signature: mover eventually WON, by plies-to-end ---
+FREQ_L2 bucket=1-6 won_nodes=196 vcf_forcing=179 quiet_required(no_vcf)=17 quiet_frac=0.0867
+FREQ_L2 bucket=7-12 won_nodes=79 vcf_forcing=42 quiet_required(no_vcf)=37 quiet_frac=0.4684
+FREQ_L2 bucket=13-20 won_nodes=148 vcf_forcing=64 quiet_required(no_vcf)=84 quiet_frac=0.5676
+FREQ_L2 bucket=21-40 won_nodes=258 vcf_forcing=52 quiet_required(no_vcf)=206 quiet_frac=0.7984
+FREQ_L2 bucket=41+ won_nodes=391 vcf_forcing=51 quiet_required(no_vcf)=340 quiet_frac=0.8696
+FREQ_VCF_DONE
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 100 filtered out; finished in 218.85s
+

@@ -1,0 +1,66 @@
+test tss_freq_hunt::freq_cheap ... === FREQ_CHEAP corpus summary ===
+FREQ_NODES total_move_slots=431495 nonterminal_decision_nodes=431495 opener_not_origin=0
+FREQ_THREATENED all(opp>=1)=85502 of_which_own_win_now=6516 genuine_defender=78986
+FREQ_DEF_B split B2(FirstStone)=46902 B1(SecondStone)=32084
+--- defender width: k vs B (genuine defender nodes) ---
+FREQ_KB B=2  k<B(unforced,k=1)=20307 k=B(forced-exact,k=2)=22357 k>B(forced-loss)=4238
+FREQ_KB B=1  k<B(impossible)=0 k=B(forced-exact,k=1)=27091 k>B(forced-loss)=4993
+FREQ_UNFORCED unforced(k<B)=20307 / genuine_defender=78986 = 0.2571  | over_B2_only = 0.4330
+FREQ_UNFORCED_INTERP forced_exact_frac(all)=0.6260 forced_loss_frac(all)=0.1169
+--- |Legal| distribution at genuine defender nodes ---
+FREQ_LEGAL n=78986 min=272 p10=370 p50=503 p90=839 max=3871 mean=575.7
+--- opponent threat-window count at genuine defender nodes ---
+FREQ_THREATN opp_windows=1 count=40293 frac=0.5101
+FREQ_THREATN opp_windows=2 count=11367 frac=0.1439
+FREQ_THREATN opp_windows=3 count=20904 frac=0.2647
+FREQ_THREATN opp_windows=4 count=4550 frac=0.0576
+FREQ_THREATN opp_windows=5 count=892 frac=0.0113
+FREQ_THREATN opp_windows=6 count=737 frac=0.0093
+FREQ_THREATN opp_windows=7 count=152 frac=0.0019
+FREQ_THREATN opp_windows=8 count=29 frac=0.0004
+FREQ_THREATN opp_windows=9 count=43 frac=0.0005
+FREQ_THREATN opp_windows=10 count=4 frac=0.0001
+FREQ_THREATN opp_windows=11 count=10 frac=0.0001
+FREQ_THREATN opp_windows=12 count=1 frac=0.0000
+FREQ_THREATN opp_windows=13 count=2 frac=0.0000
+FREQ_THREATN opp_windows=16 count=2 frac=0.0000
+--- pileup (>=3 simultaneous opponent >=4 windows) ---
+FREQ_PILEUP b2_firststone=24526 any_defnode=27326 games_with_pileup=6355/6902 pileup_frac_of_B2def=0.5229 pileup_frac_of_genuinedef=0.34596
+FREQ_PILEUP_K single-hit(k=1)=215 two-target(k=2,B2)=20125 forced-loss=6986 hard(k>=2 or loss)=27111 hard_frac_of_pileup=0.9921
+--- ES Phi at Defender(Player0)-FirstStone nodes ---
+FREQ_PHI def_fs_nodes=104452 phi_lt1=25 frac=0.0002 | dev(>=6 atk stones): nodes=90648 phi_lt1=5 frac=0.0001
+--- opening families (D6-canonical) ---
+FREQ_FAM_COUNT distinct_P2_reply=262 distinct_two_turn=2556
+FREQ_FAM_P2 rank=1 count=1337 frac=0.1937 stones=((-1, 0), (0, 1))
+FREQ_FAM_P2 rank=2 count=1157 frac=0.1676 stones=((-1, 0), (-1, 1))
+FREQ_FAM_P2 rank=3 count=523 frac=0.0758 stones=((-2, 0), (-2, 2))
+FREQ_FAM_P2 rank=4 count=258 frac=0.0374 stones=((-3, 0), (-1, 1))
+FREQ_FAM_P2 rank=5 count=175 frac=0.0254 stones=((-2, 1), (0, -1))
+FREQ_FAM_P2 rank=6 count=169 frac=0.0245 stones=((-2, 0), (0, 2))
+FREQ_FAM_P2 rank=7 count=165 frac=0.0239 stones=((-9, 1), (-8, 0))
+FREQ_FAM_P2 rank=8 count=149 frac=0.0216 stones=((-2, 1), (-1, 0))
+FREQ_FAM_P2 rank=9 count=146 frac=0.0212 stones=((-2, 0), (0, 1))
+FREQ_FAM_P2 rank=10 count=133 frac=0.0193 stones=((-2, 0), (-1, 1))
+FREQ_FAM_P2 rank=11 count=122 frac=0.0177 stones=((-5, 2), (-5, 3))
+FREQ_FAM_P2 rank=12 count=116 frac=0.0168 stones=((-1, 0), (1, 0))
+FREQ_FAM_P2 rank=13 count=113 frac=0.0164 stones=((-8, 0), (-8, 1))
+FREQ_FAM_P2 rank=14 count=112 frac=0.0162 stones=((-9, 0), (-1, 0))
+FREQ_FAM_P2 rank=15 count=104 frac=0.0151 stones=((-2, 0), (-1, 0))
+FREQ_FAM_P2 rank=16 count=98 frac=0.0142 stones=((-3, 0), (-3, 3))
+FREQ_FAM_P2 rank=17 count=94 frac=0.0136 stones=((-2, 0), (-2, 1))
+FREQ_FAM_P2 rank=18 count=91 frac=0.0132 stones=((-2, 1), (2, -1))
+FREQ_FAM_P2 rank=19 count=89 frac=0.0129 stones=((-3, 1), (0, 1))
+FREQ_FAM_P2 rank=20 count=84 frac=0.0122 stones=((-2, 1), (1, -1))
+FREQ_FAM_TWO rank=1 count=417 frac=0.0604 P2=((-1, 0), (-1, 1)) P1=((-1, -1), (0, -1))
+FREQ_FAM_TWO rank=2 count=231 frac=0.0335 P2=((-1, 0), (0, 1)) P1=((-2, 2), (-1, 1))
+FREQ_FAM_TWO rank=3 count=194 frac=0.0281 P2=((-1, 0), (0, 1)) P1=((-1, 1), (1, -1))
+FREQ_FAM_TWO rank=4 count=98 frac=0.0142 P2=((-2, 0), (-2, 2)) P1=((-2, 1), (-1, 0))
+FREQ_FAM_TWO rank=5 count=88 frac=0.0127 P2=((-1, 0), (-1, 1)) P1=((-1, -1), (-1, 2))
+FREQ_FAM_TWO rank=6 count=85 frac=0.0123 P2=((-2, 0), (-2, 2)) P1=((-2, 1), (0, -1))
+FREQ_FAM_TWO rank=7 count=74 frac=0.0107 P2=((-1, 0), (0, 1)) P1=((-1, 1), (0, -1))
+FREQ_FAM_TWO rank=8 count=67 frac=0.0097 P2=((-1, 0), (-1, 1)) P1=((0, -1), (0, 1))
+FREQ_FAM_TWO rank=9 count=57 frac=0.0083 P2=((-1, 0), (-1, 1)) P1=((-2, 1), (-1, -1))
+FREQ_FAM_TWO rank=10 count=56 frac=0.0081 P2=((-2, 1), (0, -1)) P1=((-2, 0), (-1, 0))
+FREQ_FAM_TWO rank=11 count=52 frac=0.0075 P2=((-1, 0), (0, 1)) P1=((0, -1), (1, -1))
+FREQ_FAM_TWO rank=12 count=52 frac=0.0075 P2=((-1, 0), (0, 1)) P1=((1, -1), (2, -2))
+FREQ_CHEAP_DONE
