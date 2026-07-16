@@ -1,0 +1,97 @@
+Domination proof round 1 — turn the two hunt survivors into full pencil
+proofs in the house style, with hypotheses sharp enough to survive a
+hostile review.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-domination
+at commit 6b853c0e. You CANNOT git-commit. Write your proofs to
+PROOF_DISPATCH_DOMINATION_ROUND1.md in the worktree root, incrementally
+(statements + skeleton first, then proofs — the file must be useful at
+every point in time).
+
+## The two targets (statements + proof-shape sketches + all evidence in
+HUNT_REPORT_DOMINATION.md, this worktree — read it in full first)
+
+1. **L-DISPATCH-B1.** At a defender node where the attacker threat family
+   forces (b=1 remaining defender placement in the turn against count>=4
+   windows), any reply that fails to hit ALL alive attacker count>=4
+   windows is dominated by any reply hitting all of them (full-coverer).
+   Survived 20,495 adversarial pairs including the G3 counterfork
+   adversary; fires at 85.3% of defensive SecondStone nodes. This is the
+   theorem form of the engine's implicit_dispatch premise — proving it
+   retroactively certifies a shipped behavior and unlocks the sub-hitting
+   dispatch arm of U11.
+2. **L-DRQ.** Any two dead + frontier-inert cells are mutually
+   outcome-equivalent (symmetrized P1 via the frontier-inertness Lemma 7).
+   0/288 referee mismatches. This is the sound core of U24's
+   macromove/class-partition collapse.
+
+## The proven machinery you build on (read before proving)
+- E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hexfield-eq-main-review-65bd3a\docs\proof_parts\DOMINATION.md
+  — P1-P3 + dead-cell frontier inertness (Lemma 7). Use its definitions
+  and cite its lemmas by tag; do not re-prove what it already has.
+- The same worktree's docs\PROOF_TSS_DEFENDER_ZONES.md ONLY for shared
+  conventions (windows, alive, budgets, legality radius 8) — definition
+  lookups, not machinery import.
+- The counterexample corpus in THIS worktree
+  (dom_hunt_counterexamples.jsonl + HUNT_REPORT_DOMINATION.md §2): the
+  REFUTED naive coverer-interchange (two minimum hitting cells of the
+  same count-4 window with OPPOSITE proven outcomes — blocking into a
+  defender counterfork) marks the exact boundary your hypotheses must
+  respect. Every hypothesis you add must be justified against a concrete
+  counterexample that shows it is needed, or explicitly marked as
+  possibly-droppable.
+
+## Proof obligations, stated hostilely (a reviewer will attack these)
+- L-DISPATCH-B1: the domination argument is presumably a strategy-
+  simulation (the full-coverer branch simulates any non-coverer branch's
+  future). Handle: the non-coverer's placement may have OTHER value
+  (killing count<=3 windows, building defender structure, legalizing
+  cells) — why does the full-coverer's follow-up compensate in EVERY
+  continuation? Handle multiple distinct full-coverers (the refuted
+  interchange says they are NOT mutually equivalent — your claim must
+  only be non-coverer <= SOME/ANY coverer; get the quantifier exactly
+  right and consistent with the hunt's tested form: it tested "dominated
+  by any full-coverer" — verify that strong form or weaken honestly).
+  Handle the b=1 scoping precisely: what exactly is fixed about the turn
+  state (first placement already made? SecondStone parity?). Handle
+  legality drift: the two compared placements legalize different radius-8
+  neighborhoods.
+- L-DRQ: symmetrizing P1 needs both directions of simulation; Lemma 7
+  gives frontier inertness — the residual obligation is that dead+inert
+  cells never gain relevance later (window rebirth is impossible — dead
+  windows stay dead — but legalization relevance must be argued: a stone
+  on a dead+inert cell still extends the legality frontier. Either prove
+  the legalization effect is outcome-irrelevant under the inertness
+  hypothesis or add the needed hypothesis and measure how much fire-rate
+  it costs — the harness can answer that).
+- Machine checks: you may add test-gated #[ignore] tests to
+  tss_domination_hunt.rs (CARGO_TARGET_DIR=.target-hunt, one cargo
+  process, --test-threads=1, any single run <=10 min, free RAM >8 GB
+  first: powershell "Get-CimInstance Win32_OperatingSystem | % {
+  $_.FreePhysicalMemory/1MB }"). Use them to test candidate hypothesis
+  boundaries (e.g., the L-DRQ legalization question) before proving.
+- Labels: PROVEN only for pencil-complete arguments; VERIFIED for
+  machine-checked exhaustive facts; CONJECTURED for anything else. The
+  status table is the contract.
+
+## Also in scope (design section, not execution)
+§ "b=2 sub-algebra: the exact-oracle experiment." The hunt left the
+b=2 spare-stone case UNDECIDED because its WIN-only referee cannot
+separate successful quiet defenses. Specify precisely the experiment a
+future round should run against tss_reference_fast (the validated
+209/209 exact test-only oracle, available at this HEAD): position
+families, depths, what disagreement pattern would refute/confirm which
+sub-claims, estimated cost. Design only — do not run oracle grinds.
+
+## Deliverable
+PROOF_DISPATCH_DOMINATION_ROUND1.md: full statements with every
+hypothesis named and justified-by-counterexample; the proofs; a status
+table; an "attack surface" section naming your weakest steps; the b=2
+experiment spec; regen commands for any machine checks you added. Final
+message: per-target verdict (PROVEN/PARTIAL + what remains), hypothesis
+changes vs the hunt's statements, files written.
+
+## Rules
+No commits. No workspace-wide formatting (rustfmt --edition 2021 only on
+files you edit). Work only in this worktree; siblings read-only. Other
+sessions share the host — obey the RAM gate.
