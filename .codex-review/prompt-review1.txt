@@ -1,0 +1,85 @@
+GAP-RAW proof round 1 — HOSTILE REVIEW. You are the adversarial reviewer.
+Your job is to BREAK this proof document, in the tradition of the T3 zone
+reviews (which found fatal holes in rounds 1-2 that the authors believed
+sound). Every lemma, every proof step, every label is a target. A review
+that finds no defects must have EARNED that verdict by exhibiting the
+attacks it ran and why they failed.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+at commit 07560f85. The target document is GAP_RAW_PROOF_ROUND1.md (321
+lines). You CANNOT git-commit; write your review to
+GAP_RAW_REVIEW_ROUND1.md in the worktree root.
+
+## Context you must load before attacking
+1. GAP_RAW_PROOF_ROUND1.md in full — the target. Its §5 status table is
+   its own claim inventory; hold it to exactly those strengths.
+2. The normative gap statements it claims to reduce:
+   E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hexfield-eq-main-review-65bd3a\docs\proof_parts\ES_GLOBAL_BOUNDARY.md
+   (GAP-RAW, GAP-GLOBAL-RENEWAL, GAP-AMORTIZED-ABANDONMENT, Theorem 2,
+   Cor-2). FIDELITY CHECK IS MANDATORY: does Theorem A attack the SAME
+   claim the boundary doc names GAP-RAW (same quantifiers, same parity
+   convention, same Φ definition), and do W3'/O1' genuinely subsume the
+   two named gaps, or has the document quietly substituted easier
+   statements? This is attack #0 — a perfect proof of the wrong statement
+   is worthless.
+3. The evidence base it cites: HUNT_REPORT_GAP_RAW.md and
+   HUNT_REPORT_ADAPTIVE.md (this worktree), and
+   E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-birth-ledger\HUNT_REPORT_BIRTH_LEDGER.md.
+   Check every VERIFIED citation actually says what the proof doc uses it
+   for (scope, per-root vs universal, exhaustive vs sampled).
+
+## Attack orders (its own §4 strike order, plus mine)
+- §4's named weak points first: the W3' overlap hole (is the "cornered
+  into one local covering hole" claim itself sound — i.e., are K2/K3
+  really reduced to W3', or are there OTHER unhandled cases?); the
+  collinear T1 floor conjecture; L8.3.2 same-axis exclusion.
+- Theorem A/A' quantifier structure: strategy-vs-line reasoning, the
+  hidden determinacy/König assumptions if any (infinite game, finite
+  branching per turn? legality makes the move set finite but unbounded
+  over time — does the (⇒) direction need more care?).
+- L1.2 legality claims: every empty of an I(P) window legal (distance
+  argument), spare placements always available, the "colour-blind
+  legality" note — construct edge cases (first stones, isolated windows).
+- The Θ₂ graded account (L8): the exact-zero clean-escape injection claim;
+  whether count-1 windows escaping the account can matter later (mass can
+  GROW from below the grade — is the account closed under the operations
+  the proof performs on it?); whether "Cor-2 does not apply" is proven or
+  just plausible.
+- K1's mass arithmetic (Theorem B): re-derive it independently. Check the
+  cover-existence argument handles ALL count-4/count-5 mixtures and the
+  τ=2 geometry (two disjoint windows vs overlapping family).
+- Theorem C's dependence chain: "PROVEN on VERIFIED fork floor" — is the
+  pencil part actually complete for EVERY servicing strategy, including
+  ones that waste placements?
+- Theorem D assembly: do W3' + O1' + the proven parts actually compose
+  into GAP-RAW with no gap (epoch induction sound, base case, the
+  interleaving of forced covers and suppression moves)?
+- Label audit: every PROVEN claim must be pencil-complete with no hidden
+  VERIFIED/CONJECTURED dependencies beyond those it declares.
+
+## Machine checks
+You may run the harness (CARGO_TARGET_DIR=.target-hunt, commands in the
+target's §6; keep any single run <=10 min; check free RAM >8 GB first via
+powershell "Get-CimInstance Win32_OperatingSystem | % {
+$_.FreePhysicalMemory/1MB }"; one cargo process; --test-threads=1). If an
+attack needs a small NEW machine check (e.g., a counterexample search for
+W3' overlap configurations or the same-axis exclusion), you may add
+test-gated #[ignore] tests to gap_raw_hunt.rs — deterministic, seeds
+logged. Constructing a concrete counterexample to any PROVEN claim is the
+highest-value outcome of this review.
+
+## Verdict format (GAP_RAW_REVIEW_ROUND1.md)
+Per claim (follow the target's §5 inventory): CONFIRMED (attack ran, held
+— say which attacks) / REPAIR-NEEDED (defect + exact minimal repair) /
+REFUTED (counterexample or broken step, fully exhibited). Then an overall
+disposition: INSTALLABLE-AS-IS / INSTALLABLE-WITH-REPAIRS (list) /
+REJECTED. End with a priority-ordered repair list the next round can
+execute verbatim, and your independent judgment of whether W3' and O1'
+are provable, refutable, or likely-independent — with the sharpest attack
+you can state on each.
+
+## Rules
+No commits. No workspace-wide formatting. Work only in this worktree
+(siblings read-only). Truthfulness outranks completeness: if you run out
+of budget, say exactly which claims got which attacks and which are
+unexamined.
