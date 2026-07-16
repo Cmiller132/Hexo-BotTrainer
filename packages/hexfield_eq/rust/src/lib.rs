@@ -41,6 +41,10 @@ mod tss_bench;
 #[cfg(test)]
 mod tss_corpus;
 
+// NQ1 distance-to-win lower-bound hunt (test-gated, uncommitted).
+#[cfg(test)]
+mod dtw_bounds_hunt;
+
 #[cfg(test)]
 mod tss_spare_corpus;
 
