@@ -20,6 +20,21 @@ use hexo_engine::{apply_placement, HexCoord, HexoState, Placement, Player, TurnP
 use crate::tss_core::{DeepSolve, ProofStatus, SolveCaps, SolveGoal};
 use crate::tss_solver::{TssSolver, WidthOptions};
 
+const DEFAULT_TSS_TEST_TT_BYTES: usize = 512 << 20;
+
+/// Test-harness resource override shared by both ignored corpus helpers.
+/// Production callers and the default 512 MiB test profile are unchanged.
+fn test_tt_bytes_cap() -> usize {
+    std::env::var("TSS_BACKWALK_TT_BYTES")
+        .ok()
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .expect("numeric TSS_BACKWALK_TT_BYTES")
+        })
+        .unwrap_or(DEFAULT_TSS_TEST_TT_BYTES)
+}
+
 fn status_name(status: ProofStatus) -> &'static str {
     match status {
         ProofStatus::Win => "WIN",
@@ -160,6 +175,7 @@ fn load_forcing_lines() -> Vec<ForcingLine> {
 #[ignore = "acceptance gate; run explicitly in --release"]
 fn tss_corpus_check() {
     let corpus = load_corpus();
+    let tt_bytes_cap = test_tt_bytes_cap();
     let selected_ids = std::env::var("TSS_CORPUS_ID").ok().map(|value| {
         let mut ids = value
             .split(',')
@@ -208,19 +224,21 @@ fn tss_corpus_check() {
             solver.set_width_options(WidthOptions::vcf_pair_complete());
             let caps = SolveCaps {
                 node_cap: *cap,
-                tt_bytes_cap: 512 << 20,
+                tt_bytes_cap,
                 semantic_horizon: u32::MAX,
             };
             let t0 = Instant::now();
             let result = solver.solve(&pos.state, &caps);
             let ms = t0.elapsed().as_secs_f64() * 1e3;
             println!(
-                "CORPUS id={} cap={cap} status={} expect={} nodes={} tt_hits={} ms={ms:.1}",
+                "CORPUS id={} cap={cap} status={} expect={} nodes={} tt_hits={} tt_bytes_cap={} peak_tt_bytes={} ms={ms:.1}",
                 pos.id,
                 status_name(result.status),
                 if pos.expect_win { "WIN" } else { "NO" },
                 result.stats.nodes,
                 result.stats.tt_hits,
+                tt_bytes_cap,
+                result.stats.peak_tt_bytes,
             );
             final_status = result.status;
             if result.status != ProofStatus::Unknown || i == ladder.len() - 1 {
@@ -263,6 +281,7 @@ fn tss_corpus_check() {
 #[test]
 #[ignore = "reference-line debugging helper; run explicitly in --release"]
 fn tss_corpus_backward_walk() {
+    let tt_bytes_cap = test_tt_bytes_cap();
     let selected =
         std::env::var("TSS_CORPUS_ID").expect("set TSS_CORPUS_ID to one of the 14 WIN positions");
     let corpus = load_corpus();
@@ -330,16 +349,18 @@ fn tss_corpus_backward_walk() {
             &exact_state,
             &SolveCaps {
                 node_cap,
-                tt_bytes_cap: 512 << 20,
+                tt_bytes_cap,
                 semantic_horizon: u32::MAX,
             },
             goal,
         );
         println!(
-            "BACKWALK_EXACT id={selected} prefix={requested} status={} nodes={} tt_hits={}",
+            "BACKWALK_EXACT id={selected} prefix={requested} status={} nodes={} tt_hits={} tt_bytes_cap={} peak_tt_bytes={}",
             status_name(result.status),
             result.stats.nodes,
             result.stats.tt_hits,
+            tt_bytes_cap,
+            result.stats.peak_tt_bytes,
         );
         let expected = if goal == SolveGoal::Win {
             ProofStatus::Win
@@ -363,17 +384,19 @@ fn tss_corpus_backward_walk() {
         solver.set_width_options(WidthOptions::vcf_pair_complete());
         let caps = SolveCaps {
             node_cap: 10_000,
-            tt_bytes_cap: 512 << 20,
+            tt_bytes_cap,
             semantic_horizon: u32::MAX,
         };
         let t0 = Instant::now();
         let result = solver.solve(&state, &caps);
         let ms = t0.elapsed().as_secs_f64() * 1e3;
         println!(
-            "BACKWALK id={selected} prefix={prefix} status={} nodes={} tt_hits={} ms={ms:.1}",
+            "BACKWALK id={selected} prefix={prefix} status={} nodes={} tt_hits={} tt_bytes_cap={} peak_tt_bytes={} ms={ms:.1}",
             status_name(result.status),
             result.stats.nodes,
             result.stats.tt_hits,
+            tt_bytes_cap,
+            result.stats.peak_tt_bytes,
         );
         if result.status != ProofStatus::Win {
             // Probe the four individual placements leading to the already-
@@ -397,11 +420,13 @@ fn tss_corpus_backward_walk() {
                 probe_solver.set_width_options(WidthOptions::vcf_pair_complete());
                 let probe = probe_solver.solve_goal(probe_state, &caps, goal);
                 println!(
-                    "BACKWALK_PROBE id={selected} prefix={probe_prefix} status={} expected={} nodes={} tt_hits={}",
+                    "BACKWALK_PROBE id={selected} prefix={probe_prefix} status={} expected={} nodes={} tt_hits={} tt_bytes_cap={} peak_tt_bytes={}",
                     status_name(probe.status),
                     status_name(expected),
                     probe.stats.nodes,
                     probe.stats.tt_hits,
+                    tt_bytes_cap,
+                    probe.stats.peak_tt_bytes,
                 );
             }
             panic!("{selected}: first failing backward checkpoint is prefix {prefix}");

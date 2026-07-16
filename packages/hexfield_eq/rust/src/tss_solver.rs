@@ -49,12 +49,6 @@ const TARGET_BYTES_PER_SHARED_TT_SLOT: usize = 512;
 /// successful attempt root is offered regardless of these two tuning limits.
 const MAX_PROMOTED_FRAGMENT_NODES: usize = 128;
 const MAX_PROMOTED_FRAGMENT_EDGES: usize = 512;
-/// Test-only bounded leaf probes are consumed immediately by the live solve,
-/// so they must not inherit the much smaller persistent-cache promotion cap.
-#[cfg(test)]
-const MAX_EPHEMERAL_FRAGMENT_NODES: usize = 2_048;
-#[cfg(test)]
-const MAX_EPHEMERAL_FRAGMENT_EDGES: usize = 8_192;
 /// Solve-local TT sentinel for a fully explored restricted position with no
 /// proof in the current wide/depth-bounded attempt. Certificate IDs can never
 /// approach this value (`MAX_CERT_NODES` is 100k).
@@ -299,37 +293,7 @@ impl TssSolver {
                 MAX_SEARCH_DEPTH,
             );
         }
-        #[cfg(test)]
-        if std::env::var_os("TSS_WIDE_LEGACY").is_some() {
-            let depth_cap = std::env::var("TSS_WIDTH_DEPTH_CAP")
-                .ok()
-                .map(|value| value.parse::<usize>().expect("numeric TSS width depth"))
-                .unwrap_or(MAX_SEARCH_DEPTH);
-            return self.prove_for_at_depth(
-                state,
-                claimant,
-                node_cap,
-                local_tt_cap,
-                semantic_horizon,
-                zone,
-                width,
-                depth_cap,
-            );
-        }
         let depth_cap = wide_search_final_depth(state.placements_made(), semantic_horizon);
-        // The explicit test probe has final precedence over the production
-        // semantic/certificate bound so depth-specific regressions stay possible.
-        #[cfg(test)]
-        let depth_cap = if let Ok(value) = std::env::var("TSS_WIDTH_DEPTH_CAP") {
-            let requested = value.parse::<usize>().expect("numeric TSS_WIDTH_DEPTH_CAP");
-            assert!(
-                requested <= MAX_SEARCH_DEPTH,
-                "TSS width depth exceeds certificate cap"
-            );
-            requested
-        } else {
-            depth_cap
-        };
 
         self.prove_for_wide_pn(
             state,
@@ -371,11 +335,14 @@ impl TssSolver {
                 search.entries.len(),
             );
             eprintln!(
-                "WIDTH_PN_FRONTIER attempts={} proofs={} large_proofs={} probe_expansions={}",
-                search.frontier_probe_attempts,
-                search.frontier_probe_proofs,
-                search.frontier_probe_large_proofs,
-                search.frontier_probe_expansions,
+                "WIDTH_PN_TT indexed_entries={} retained_entries={} tt_bytes={} tt_bytes_cap={} index_rejections={} first_rejection={:?} stage_refreshes={}",
+                search.by_position.len(),
+                search.entries.len(),
+                search.current_bytes,
+                search.tt_bytes_cap,
+                search.tt_index_rejections,
+                search.tt_first_rejection,
+                search.stage_refreshes,
             );
             if let WidePnNode::Branch { children, .. } = &search.entries[root].node {
                 for (rank, child) in children.iter().take(32).enumerate() {
@@ -864,14 +831,6 @@ enum WidePnStepOutcome {
     Stalled,
 }
 
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WideMacroDfsResult {
-    Proven,
-    Exhausted,
-    Cutoff,
-}
-
 #[derive(Clone, Debug)]
 struct WidePnChild {
     mv: WidePnMove,
@@ -912,10 +871,6 @@ fn wide_choice_has_urgent_block(children: &[WidePnChild]) -> bool {
 enum WidePnNode {
     Unexpanded,
     ProvenLeaf(CertNode),
-    /// A complete positive proof produced by the bounded frontier probe. The
-    /// fragment contains only ordinary verifier nodes; it is not a new leaf
-    /// theorem and a failed probe never creates this variant.
-    ProvenFragment(CachedProof),
     /// This restricted horizon did not reach a proof. Unlike a genuine
     /// refutation, the node is reopened when the retained search deepens.
     DepthCutoff,
@@ -931,7 +886,6 @@ fn wide_pn_node_tag(node: &WidePnNode) -> &'static str {
     match node {
         WidePnNode::Unexpanded => "unexpanded",
         WidePnNode::ProvenLeaf(_) => "proven_leaf",
-        WidePnNode::ProvenFragment(_) => "proven_fragment",
         WidePnNode::DepthCutoff => "depth_cutoff",
         WidePnNode::Refuted => "refuted",
         WidePnNode::Branch {
@@ -960,399 +914,6 @@ struct WidePnEntry {
     /// proves or refutes. This does not participate in PN/DN recomputation or
     /// certificate materialization.
     universal_obligation: Option<usize>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WideUniversalPnProfile {
-    Tree,
-    Graph,
-    Dag,
-}
-
-impl WideUniversalPnProfile {
-    fn from_test_environment() -> Self {
-        if cfg!(test) && std::env::var_os("TSS_WIDE_AB_DAG_PN").is_some() {
-            Self::Dag
-        } else if cfg!(test) && std::env::var_os("TSS_WIDE_AB_GRAPH_PN").is_some() {
-            Self::Graph
-        } else {
-            Self::Tree
-        }
-    }
-}
-
-/// Flattens a defender turn into its unique linked proof obligations. A
-/// consecutive Universal entry is another defender placement in that same
-/// turn; a non-Universal entry is the resulting obligation. Exact linked
-/// entries are counted once, while unlinked lazy children have no identity yet
-/// and therefore remain distinct.
-fn graph_universal_pn(entries: &[WidePnEntry], children: &[WidePnChild]) -> u32 {
-    fn add_obligation(total: &mut u32, pn: u32) -> bool {
-        if pn == 0 {
-            return false;
-        }
-        *total = total.saturating_add(pn).min(PN_INFINITY);
-        *total < PN_INFINITY
-    }
-
-    fn visit_child(
-        entries: &[WidePnEntry],
-        child: &WidePnChild,
-        active_universal: &mut HashSet<usize>,
-        finished_linked: &mut HashSet<usize>,
-        total: &mut u32,
-    ) -> bool {
-        match child.result {
-            WidePnChildResult::ClaimantCompletion | WidePnChildResult::ClaimantTactical => true,
-            WidePnChildResult::Refuted => false,
-            WidePnChildResult::Pending => {
-                let Some(id) = child.entry else {
-                    return add_obligation(total, child.prior.pn);
-                };
-                if active_universal.contains(&id) {
-                    return false;
-                }
-                if finished_linked.contains(&id) {
-                    return true;
-                }
-                let Some(entry) = entries.get(id) else {
-                    return false;
-                };
-                match &entry.node {
-                    WidePnNode::ProvenLeaf(_) | WidePnNode::ProvenFragment(_) => {
-                        finished_linked.insert(id);
-                        true
-                    }
-                    WidePnNode::DepthCutoff | WidePnNode::Refuted => false,
-                    WidePnNode::Branch {
-                        kind: WidePnKind::Universal { .. },
-                        children,
-                    } => {
-                        if children.is_empty() || !active_universal.insert(id) {
-                            return false;
-                        }
-                        let valid = children.iter().all(|child| {
-                            visit_child(entries, child, active_universal, finished_linked, total)
-                        });
-                        active_universal.remove(&id);
-                        if valid {
-                            finished_linked.insert(id);
-                        }
-                        valid
-                    }
-                    WidePnNode::Unexpanded => {
-                        if entry.pn == 0 {
-                            return false;
-                        }
-                        let valid = add_obligation(total, entry.pn);
-                        if valid {
-                            finished_linked.insert(id);
-                        }
-                        valid
-                    }
-                    WidePnNode::Branch {
-                        kind: WidePnKind::Choice,
-                        ..
-                    } => {
-                        // A linked Choice with pn=0 is a completed proof. An
-                        // Unexpanded entry cannot claim that state because all
-                        // valid initialization priors are strictly positive.
-                        let valid = if entry.pn == 0 {
-                            true
-                        } else {
-                            add_obligation(total, entry.pn)
-                        };
-                        if valid {
-                            finished_linked.insert(id);
-                        }
-                        valid
-                    }
-                }
-            }
-        }
-    }
-
-    if children.is_empty() {
-        return PN_INFINITY;
-    }
-
-    let mut active_universal = HashSet::new();
-    let mut finished_linked = HashSet::new();
-    let mut total = 0u32;
-    if children.iter().all(|child| {
-        visit_child(
-            entries,
-            child,
-            &mut active_universal,
-            &mut finished_linked,
-            &mut total,
-        )
-    }) {
-        total
-    } else {
-        PN_INFINITY
-    }
-}
-
-const DAG_ORDER_BEAM: usize = 16;
-const DAG_ORDER_VISIT_LIMIT: usize = 4096;
-const DAG_ORDER_FRONTIER_LIMIT: usize = 512;
-const DAG_ORDER_UNION_LIMIT: usize = 65_536;
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct DagProofFrontier {
-    ids: Vec<usize>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum DagFrontierEval {
-    Known(Vec<DagProofFrontier>),
-    Impossible,
-    Unknown,
-}
-
-struct DagFrontierEvaluator<'a> {
-    entries: &'a [WidePnEntry],
-    memo: HashMap<usize, DagFrontierEval>,
-    active: HashSet<usize>,
-    visits: usize,
-    unions: usize,
-}
-
-impl<'a> DagFrontierEvaluator<'a> {
-    fn new(entries: &'a [WidePnEntry]) -> Self {
-        Self {
-            entries,
-            memo: HashMap::new(),
-            active: HashSet::new(),
-            visits: 0,
-            unions: 0,
-        }
-    }
-
-    fn frontier_pn(&self, frontier: &DagProofFrontier) -> Option<u32> {
-        frontier.ids.iter().try_fold(0u32, |sum, &id| {
-            let pn = self.entries.get(id)?.pn;
-            (pn > 0 && pn < PN_INFINITY).then(|| sum.saturating_add(pn).min(PN_INFINITY))
-        })
-    }
-
-    fn is_subset(left: &[usize], right: &[usize]) -> bool {
-        let mut i = 0usize;
-        let mut j = 0usize;
-        while i < left.len() && j < right.len() {
-            match left[i].cmp(&right[j]) {
-                std::cmp::Ordering::Less => return false,
-                std::cmp::Ordering::Equal => {
-                    i += 1;
-                    j += 1;
-                }
-                std::cmp::Ordering::Greater => j += 1,
-            }
-        }
-        i == left.len()
-    }
-
-    fn normalize(&self, mut family: Vec<DagProofFrontier>) -> Vec<DagProofFrontier> {
-        for frontier in &mut family {
-            frontier.ids.sort_unstable();
-            frontier.ids.dedup();
-        }
-        family.retain(|frontier| {
-            frontier.ids.len() <= DAG_ORDER_FRONTIER_LIMIT && self.frontier_pn(frontier).is_some()
-        });
-        family.sort_by(|left, right| {
-            self.frontier_pn(left)
-                .cmp(&self.frontier_pn(right))
-                .then_with(|| left.ids.len().cmp(&right.ids.len()))
-                .then_with(|| left.ids.cmp(&right.ids))
-        });
-        let mut kept: Vec<DagProofFrontier> = Vec::new();
-        for candidate in family {
-            if kept
-                .iter()
-                .any(|existing| Self::is_subset(&existing.ids, &candidate.ids))
-            {
-                continue;
-            }
-            kept.retain(|existing| !Self::is_subset(&candidate.ids, &existing.ids));
-            kept.push(candidate);
-            if kept.len() >= DAG_ORDER_BEAM {
-                break;
-            }
-        }
-        kept
-    }
-
-    fn merge_frontiers(
-        &mut self,
-        left: &DagProofFrontier,
-        right: &DagProofFrontier,
-    ) -> Option<DagProofFrontier> {
-        self.unions = self.unions.checked_add(1)?;
-        if self.unions > DAG_ORDER_UNION_LIMIT {
-            return None;
-        }
-        let mut ids = Vec::with_capacity(left.ids.len().saturating_add(right.ids.len()));
-        let mut i = 0usize;
-        let mut j = 0usize;
-        while i < left.ids.len() || j < right.ids.len() {
-            let id = match (left.ids.get(i), right.ids.get(j)) {
-                (Some(&a), Some(&b)) if a < b => {
-                    i += 1;
-                    a
-                }
-                (Some(&a), Some(&b)) if b < a => {
-                    j += 1;
-                    b
-                }
-                (Some(&a), Some(_)) => {
-                    i += 1;
-                    j += 1;
-                    a
-                }
-                (Some(&a), None) => {
-                    i += 1;
-                    a
-                }
-                (None, Some(&b)) => {
-                    j += 1;
-                    b
-                }
-                (None, None) => break,
-            };
-            ids.push(id);
-            if ids.len() > DAG_ORDER_FRONTIER_LIMIT {
-                return None;
-            }
-        }
-        Some(DagProofFrontier { ids })
-    }
-
-    fn child(&mut self, child: &WidePnChild) -> DagFrontierEval {
-        match child.result {
-            WidePnChildResult::ClaimantCompletion | WidePnChildResult::ClaimantTactical => {
-                DagFrontierEval::Known(vec![DagProofFrontier::default()])
-            }
-            WidePnChildResult::Refuted => DagFrontierEval::Impossible,
-            WidePnChildResult::Pending => child
-                .entry
-                .map(|id| self.entry(id))
-                .unwrap_or(DagFrontierEval::Unknown),
-        }
-    }
-
-    fn entry(&mut self, id: usize) -> DagFrontierEval {
-        if let Some(cached) = self.memo.get(&id) {
-            return cached.clone();
-        }
-        if self.visits >= DAG_ORDER_VISIT_LIMIT || !self.active.insert(id) {
-            return DagFrontierEval::Unknown;
-        }
-        self.visits += 1;
-        let Some(entry) = self.entries.get(id) else {
-            self.active.remove(&id);
-            return DagFrontierEval::Unknown;
-        };
-        let result = match &entry.node {
-            WidePnNode::ProvenLeaf(_) | WidePnNode::ProvenFragment(_) => {
-                DagFrontierEval::Known(vec![DagProofFrontier::default()])
-            }
-            WidePnNode::Refuted => DagFrontierEval::Impossible,
-            WidePnNode::DepthCutoff => DagFrontierEval::Unknown,
-            WidePnNode::Unexpanded if entry.pn > 0 && entry.pn < PN_INFINITY => {
-                DagFrontierEval::Known(vec![DagProofFrontier { ids: vec![id] }])
-            }
-            WidePnNode::Unexpanded => DagFrontierEval::Unknown,
-            WidePnNode::Branch {
-                kind: WidePnKind::Choice,
-                children,
-            } => {
-                let mut family = Vec::new();
-                let mut saw_unknown = false;
-                for child in children {
-                    match self.child(child) {
-                        DagFrontierEval::Known(frontiers) => family.extend(frontiers),
-                        DagFrontierEval::Impossible => {}
-                        DagFrontierEval::Unknown => saw_unknown = true,
-                    }
-                }
-                let family = self.normalize(family);
-                if !family.is_empty() {
-                    DagFrontierEval::Known(family)
-                } else if saw_unknown {
-                    DagFrontierEval::Unknown
-                } else {
-                    DagFrontierEval::Impossible
-                }
-            }
-            WidePnNode::Branch {
-                kind: WidePnKind::Universal { .. },
-                children,
-            } => {
-                if children.is_empty() {
-                    DagFrontierEval::Impossible
-                } else {
-                    let mut family = vec![DagProofFrontier::default()];
-                    let mut terminal: Option<DagFrontierEval> = None;
-                    for child in children {
-                        let child_family = match self.child(child) {
-                            DagFrontierEval::Known(frontiers) => frontiers,
-                            DagFrontierEval::Impossible => {
-                                terminal = Some(DagFrontierEval::Impossible);
-                                break;
-                            }
-                            DagFrontierEval::Unknown => {
-                                terminal = Some(DagFrontierEval::Unknown);
-                                break;
-                            }
-                        };
-                        let mut merged = Vec::new();
-                        for left in &family {
-                            for right in &child_family {
-                                let Some(frontier) = self.merge_frontiers(left, right) else {
-                                    terminal = Some(DagFrontierEval::Unknown);
-                                    break;
-                                };
-                                merged.push(frontier);
-                            }
-                            if terminal.is_some() {
-                                break;
-                            }
-                        }
-                        if terminal.is_some() {
-                            break;
-                        }
-                        family = self.normalize(merged);
-                        if family.is_empty() {
-                            terminal = Some(DagFrontierEval::Unknown);
-                            break;
-                        }
-                    }
-                    terminal.unwrap_or(DagFrontierEval::Known(family))
-                }
-            }
-        };
-        self.active.remove(&id);
-        self.memo.insert(id, result.clone());
-        result
-    }
-}
-
-/// Ordering-only estimate of alternative proof frontiers below a linked DAG
-/// child. Universal products union exact entry identities, while Choice nodes
-/// retain a small nondominated family so a locally costlier alternative that
-/// shares work with a sibling remains visible. Every incomplete/cyclic/capped
-/// evaluation falls back to the caller's ordinary tree PN.
-fn dag_choice_order_pn(entries: &[WidePnEntry], child: &WidePnChild) -> Option<u32> {
-    let mut evaluator = DagFrontierEvaluator::new(entries);
-    match evaluator.child(child) {
-        DagFrontierEval::Known(frontiers) => frontiers
-            .iter()
-            .filter_map(|frontier| evaluator.frontier_pn(frontier))
-            .min(),
-        DagFrontierEval::Impossible | DagFrontierEval::Unknown => None,
-    }
 }
 
 /// Exact, compact key used only by the wide proof-number frontier. Coordinates
@@ -1628,33 +1189,12 @@ struct WidePnSearch {
     tt_hits: u64,
     current_bytes: usize,
     peak_bytes: usize,
-    universal_pn_profile: WideUniversalPnProfile,
     #[cfg(test)]
-    root_width_tier: bool,
+    tt_index_rejections: u64,
     #[cfg(test)]
-    frontier_probe_nodes: u64,
+    tt_first_rejection: Option<(u64, usize)>,
     #[cfg(test)]
-    frontier_probe_depth: usize,
-    #[cfg(test)]
-    frontier_probe_min_depth: usize,
-    #[cfg(test)]
-    frontier_probe_pn: bool,
-    #[cfg(test)]
-    frontier_probe_attempts: u64,
-    #[cfg(test)]
-    frontier_probe_proofs: u64,
-    #[cfg(test)]
-    frontier_probe_large_proofs: u64,
-    #[cfg(test)]
-    frontier_probe_expansions: u64,
-    #[cfg(test)]
-    trace_suppressed: bool,
-    #[cfg(test)]
-    sequential_small_choice: Option<usize>,
-    #[cfg(test)]
-    sequential_small_choice_max_depth: usize,
-    #[cfg(test)]
-    sequential_small_choice_rank: usize,
+    stage_refreshes: u64,
     entries: Vec<WidePnEntry>,
     by_position: HashMap<WidePositionKey, usize>,
 }
@@ -1679,79 +1219,12 @@ impl WidePnSearch {
             tt_hits: 0,
             current_bytes: 0,
             peak_bytes: 0,
-            universal_pn_profile: WideUniversalPnProfile::from_test_environment(),
             #[cfg(test)]
-            root_width_tier: std::env::var_os("TSS_WIDE_AB_DISABLE_ROOT_TIER").is_none(),
+            tt_index_rejections: 0,
             #[cfg(test)]
-            frontier_probe_nodes: std::env::var("TSS_WIDE_AB_FRONTIER_NODES")
-                .ok()
-                .map(|value| {
-                    value
-                        .parse::<u64>()
-                        .expect("numeric TSS_WIDE_AB_FRONTIER_NODES")
-                })
-                .unwrap_or(0),
+            tt_first_rejection: None,
             #[cfg(test)]
-            frontier_probe_depth: std::env::var("TSS_WIDE_AB_FRONTIER_DEPTH")
-                .ok()
-                .map(|value| {
-                    value
-                        .parse::<usize>()
-                        .expect("numeric TSS_WIDE_AB_FRONTIER_DEPTH")
-                })
-                .unwrap_or(4)
-                .min(MAX_SEARCH_DEPTH),
-            #[cfg(test)]
-            frontier_probe_min_depth: std::env::var("TSS_WIDE_AB_FRONTIER_MIN_DEPTH")
-                .ok()
-                .map(|value| {
-                    value
-                        .parse::<usize>()
-                        .expect("numeric TSS_WIDE_AB_FRONTIER_MIN_DEPTH")
-                })
-                .unwrap_or(0)
-                .min(MAX_SEARCH_DEPTH),
-            #[cfg(test)]
-            frontier_probe_pn: std::env::var_os("TSS_WIDE_AB_FRONTIER_PN").is_some(),
-            #[cfg(test)]
-            frontier_probe_attempts: 0,
-            #[cfg(test)]
-            frontier_probe_proofs: 0,
-            #[cfg(test)]
-            frontier_probe_large_proofs: 0,
-            #[cfg(test)]
-            frontier_probe_expansions: 0,
-            #[cfg(test)]
-            trace_suppressed: false,
-            #[cfg(test)]
-            sequential_small_choice: std::env::var("TSS_WIDE_AB_SEQUENTIAL_SMALL_CHOICE")
-                .ok()
-                .map(|value| {
-                    value
-                        .parse::<usize>()
-                        .expect("numeric TSS_WIDE_AB_SEQUENTIAL_SMALL_CHOICE")
-                })
-                .filter(|&limit| limit > 0),
-            #[cfg(test)]
-            sequential_small_choice_max_depth: std::env::var(
-                "TSS_WIDE_AB_SEQUENTIAL_SMALL_MAX_DEPTH",
-            )
-            .ok()
-            .map(|value| {
-                value
-                    .parse::<usize>()
-                    .expect("numeric TSS_WIDE_AB_SEQUENTIAL_SMALL_MAX_DEPTH")
-            })
-            .unwrap_or(MAX_SEARCH_DEPTH),
-            #[cfg(test)]
-            sequential_small_choice_rank: std::env::var("TSS_WIDE_AB_SEQUENTIAL_SMALL_RANK")
-                .ok()
-                .map(|value| {
-                    value
-                        .parse::<usize>()
-                        .expect("numeric TSS_WIDE_AB_SEQUENTIAL_SMALL_RANK")
-                })
-                .unwrap_or(0),
+            stage_refreshes: 0,
             entries: Vec::new(),
             by_position: HashMap::new(),
         }
@@ -1787,6 +1260,13 @@ impl WidePnSearch {
             self.by_position.insert(key, id);
             self.current_bytes = self.current_bytes.saturating_add(added);
             self.peak_bytes = self.peak_bytes.max(self.current_bytes);
+        } else {
+            #[cfg(test)]
+            if self.tt_bytes_cap > 0 {
+                self.tt_index_rejections = self.tt_index_rejections.saturating_add(1);
+                self.tt_first_rejection
+                    .get_or_insert((self.expansions, self.entries.len()));
+            }
         }
         id
     }
@@ -1806,117 +1286,11 @@ impl WidePnSearch {
         }
     }
 
-    #[cfg(test)]
-    fn try_frontier_fragment(
-        &mut self,
-        state: &mut RustHexoState,
-        entry_depth: usize,
-    ) -> Option<CachedProof> {
-        let available = self.node_cap.saturating_sub(self.expansions);
-        let probe_cap = available.min(self.frontier_probe_nodes);
-        let probe_depth = self
-            .frontier_probe_depth
-            .min(MAX_SEARCH_DEPTH.saturating_sub(entry_depth));
-        if entry_depth < self.frontier_probe_min_depth || probe_cap == 0 || probe_depth == 0 {
-            return None;
-        }
-
-        self.frontier_probe_attempts = self.frontier_probe_attempts.saturating_add(1);
-        let before = PositionKey::from_state(state);
-        let root_ply = state.placements_made();
-        let (proof, probe_nodes, probe_tt_hits, probe_peak_bytes) = if self.frontier_probe_pn {
-            let transient_tt_cap = self
-                .tt_bytes_cap
-                .saturating_sub(self.current_bytes)
-                .min(1 << 20);
-            let mut probe = WidePnSearch::new(
-                self.claimant,
-                root_ply,
-                probe_cap,
-                transient_tt_cap,
-                self.semantic_horizon,
-                probe_depth,
-            );
-            probe.frontier_probe_nodes = 0;
-            probe.root_width_tier = false;
-            probe.trace_suppressed = true;
-            let root = probe.insert_root(state);
-            let probe_nodes = if std::env::var_os("TSS_WIDE_AB_FRONTIER_DFS").is_some() {
-                probe.run_macro_dfs(state, root, probe_cap)
-            } else {
-                // A frontier solve is already at its requested tactical
-                // horizon. Starting another 0->h staging ladder spends the
-                // tiny local quota rediscovering that horizon rather than
-                // saturating it.
-                let _ = probe.run_until(state, root, probe_cap, false);
-                probe.refresh_all_bottom_up();
-                probe.expansions
-            };
-            let proof = probe.materialize(state, root).and_then(|(arena, root)| {
-                CachedProof::from_arena_limited(
-                    &arena,
-                    root,
-                    MAX_EPHEMERAL_FRAGMENT_NODES,
-                    MAX_EPHEMERAL_FRAGMENT_EDGES,
-                )
-            });
-            (proof, probe_nodes, probe.tt_hits, probe.peak_bytes)
-        } else {
-            let mut probe = SearchContext::new(probe_cap, 0, u64::MAX);
-            probe.root_ply = root_ply;
-            probe.semantic_horizon = self.semantic_horizon;
-            probe.clock_is_absolute = true;
-            probe.width = WidthOptions::vcf_pair_complete();
-            probe.depth_cap = probe_depth;
-            let root = probe.prove(state, self.claimant, root_ply, None);
-            let proof = root.and_then(|root| {
-                CachedProof::from_arena_limited(
-                    &probe.arena,
-                    root,
-                    MAX_EPHEMERAL_FRAGMENT_NODES,
-                    MAX_EPHEMERAL_FRAGMENT_EDGES,
-                )
-            });
-            (proof, probe.nodes, probe.tt_hits, probe.peak_tt_bytes)
-        };
-        debug_assert_eq!(before, PositionKey::from_state(state));
-
-        self.expansions = self.expansions.saturating_add(probe_nodes);
-        self.tt_hits = self.tt_hits.saturating_add(probe_tt_hits);
-        self.frontier_probe_expansions = self.frontier_probe_expansions.saturating_add(probe_nodes);
-        self.peak_bytes = self
-            .peak_bytes
-            .max(self.current_bytes.saturating_add(probe_peak_bytes));
-        let proof = proof?;
-        if proof.nodes.len() > MAX_PROMOTED_FRAGMENT_NODES
-            || proof.explicit_edges > MAX_PROMOTED_FRAGMENT_EDGES
-        {
-            self.frontier_probe_large_proofs = self.frontier_probe_large_proofs.saturating_add(1);
-        }
-        entry_depth
-            .checked_add(proof.height)
-            .filter(|&height| height <= MAX_SEARCH_DEPTH)?;
-        self.frontier_probe_proofs = self.frontier_probe_proofs.saturating_add(1);
-        Some(proof)
-    }
-
     /// The immutable first-placement width class is a root bootstrap only.
     /// Persisting it below depth zero regresses otherwise closed positions by
-    /// overriding accumulated proof-number evidence.  The test-only opt-out
-    /// exists solely for whole-position A/B runs; production always enables
-    /// this root policy in wide mode.
+    /// overriding accumulated proof-number evidence.
     fn prefer_width_tier_at_depth(&self, depth: usize) -> bool {
-        if depth != 0 {
-            return false;
-        }
-        #[cfg(test)]
-        {
-            self.root_width_tier
-        }
-        #[cfg(not(test))]
-        {
-            true
-        }
+        depth == 0
     }
 
     fn completed_turn_prior(&self, state: &RustHexoState) -> WidePnPrior {
@@ -2011,185 +1385,6 @@ impl WidePnSearch {
         None
     }
 
-    /// Test-only fixed-horizon leaf discriminator. It walks the already-sound
-    /// atomic wide graph depth first and memoizes only fully exhausted local
-    /// misses. Cutoffs never become a refutation and only a materializable
-    /// positive proof can escape the transient search.
-    #[cfg(test)]
-    fn run_macro_dfs(&mut self, root_state: &RustHexoState, root: usize, work_cap: u64) -> u64 {
-        let mut state = root_state.clone();
-        let mut remaining = work_cap;
-        let mut memo = HashMap::new();
-        let _ = self.macro_dfs_entry(&mut state, root, &mut remaining, &mut memo);
-        debug_assert_eq!(
-            WidePositionKey::from_state(&state),
-            WidePositionKey::from_state(root_state)
-        );
-        self.refresh_all_bottom_up();
-        work_cap.saturating_sub(remaining)
-    }
-
-    #[cfg(test)]
-    fn macro_dfs_entry(
-        &mut self,
-        state: &mut RustHexoState,
-        id: usize,
-        remaining: &mut u64,
-        memo: &mut HashMap<usize, WideMacroDfsResult>,
-    ) -> WideMacroDfsResult {
-        if *remaining == 0 {
-            return WideMacroDfsResult::Cutoff;
-        }
-        *remaining -= 1;
-        if let Some(&cached) = memo.get(&id) {
-            return cached;
-        }
-
-        self.recompute(id);
-        let result = loop {
-            match self.entries[id].node.clone() {
-                WidePnNode::ProvenLeaf(_) | WidePnNode::ProvenFragment(_) => {
-                    break WideMacroDfsResult::Proven;
-                }
-                WidePnNode::Refuted => break WideMacroDfsResult::Exhausted,
-                WidePnNode::DepthCutoff => break WideMacroDfsResult::Cutoff,
-                WidePnNode::Unexpanded => {
-                    match self.expand(state, id) {
-                        WidePnStepOutcome::DepthCutoff { .. } => {
-                            break WideMacroDfsResult::Cutoff;
-                        }
-                        WidePnStepOutcome::Stalled
-                            if matches!(self.entries[id].node, WidePnNode::Unexpanded) =>
-                        {
-                            break WideMacroDfsResult::Cutoff;
-                        }
-                        WidePnStepOutcome::Progress | WidePnStepOutcome::Stalled => {}
-                    }
-                    self.recompute(id);
-                }
-                WidePnNode::Branch { kind, children } => {
-                    let mut saw_cutoff = false;
-                    match kind {
-                        WidePnKind::Choice => {
-                            let mut proven = false;
-                            for (rank, child) in children.iter().enumerate() {
-                                match self.macro_dfs_child(state, id, rank, child, remaining, memo)
-                                {
-                                    WideMacroDfsResult::Proven => {
-                                        proven = true;
-                                        break;
-                                    }
-                                    WideMacroDfsResult::Exhausted => {}
-                                    WideMacroDfsResult::Cutoff => saw_cutoff = true,
-                                }
-                            }
-                            self.recompute(id);
-                            break if proven && self.entries[id].pn == 0 {
-                                WideMacroDfsResult::Proven
-                            } else if saw_cutoff {
-                                WideMacroDfsResult::Cutoff
-                            } else {
-                                WideMacroDfsResult::Exhausted
-                            };
-                        }
-                        WidePnKind::Universal { .. } => {
-                            let mut exhausted = false;
-                            for (rank, child) in children.iter().enumerate() {
-                                match self.macro_dfs_child(state, id, rank, child, remaining, memo)
-                                {
-                                    WideMacroDfsResult::Proven => {}
-                                    WideMacroDfsResult::Exhausted => {
-                                        exhausted = true;
-                                        break;
-                                    }
-                                    WideMacroDfsResult::Cutoff => saw_cutoff = true,
-                                }
-                            }
-                            self.recompute(id);
-                            break if exhausted {
-                                WideMacroDfsResult::Exhausted
-                            } else if saw_cutoff {
-                                WideMacroDfsResult::Cutoff
-                            } else if self.entries[id].pn == 0 {
-                                WideMacroDfsResult::Proven
-                            } else {
-                                WideMacroDfsResult::Cutoff
-                            };
-                        }
-                    }
-                }
-            }
-        };
-        if result != WideMacroDfsResult::Cutoff {
-            memo.insert(id, result);
-        }
-        result
-    }
-
-    #[cfg(test)]
-    fn macro_dfs_child(
-        &mut self,
-        state: &mut RustHexoState,
-        parent: usize,
-        rank: usize,
-        child: &WidePnChild,
-        remaining: &mut u64,
-        memo: &mut HashMap<usize, WideMacroDfsResult>,
-    ) -> WideMacroDfsResult {
-        match child.result {
-            WidePnChildResult::ClaimantCompletion | WidePnChildResult::ClaimantTactical => {
-                return WideMacroDfsResult::Proven;
-            }
-            WidePnChildResult::Refuted => return WideMacroDfsResult::Exhausted,
-            WidePnChildResult::Pending => {}
-        }
-
-        match child.mv {
-            WidePnMove::One(coord) => {
-                let Ok((_result, delta)) = state.apply_with_delta(Placement { coord }) else {
-                    self.set_child_refuted(parent, rank);
-                    return WideMacroDfsResult::Exhausted;
-                };
-                let child_id = child.entry.unwrap_or_else(|| {
-                    let depth =
-                        usize::try_from(state.placements_made().saturating_sub(self.root_ply))
-                            .unwrap_or(usize::MAX);
-                    self.insert_position(WidePositionKey::from_state(state), depth, child.prior)
-                });
-                self.set_child_entry(parent, rank, child_id);
-                let result = self.macro_dfs_entry(state, child_id, remaining, memo);
-                state.undo(delta);
-                result
-            }
-            WidePnMove::Pair(first, second) | WidePnMove::DefenderPair(first, second) => {
-                let Ok((_first_result, first_delta)) =
-                    state.apply_with_delta(Placement { coord: first })
-                else {
-                    self.set_child_refuted(parent, rank);
-                    return WideMacroDfsResult::Exhausted;
-                };
-                let Ok((_second_result, second_delta)) =
-                    state.apply_with_delta(Placement { coord: second })
-                else {
-                    state.undo(first_delta);
-                    self.set_child_refuted(parent, rank);
-                    return WideMacroDfsResult::Exhausted;
-                };
-                let child_id = child.entry.unwrap_or_else(|| {
-                    let depth =
-                        usize::try_from(state.placements_made().saturating_sub(self.root_ply))
-                            .unwrap_or(usize::MAX);
-                    self.insert_position(WidePositionKey::from_state(state), depth, child.prior)
-                });
-                self.set_child_entry(parent, rank, child_id);
-                let result = self.macro_dfs_entry(state, child_id, remaining, memo);
-                state.undo(second_delta);
-                state.undo(first_delta);
-                result
-            }
-        }
-    }
-
     fn reopen_depth_cutoffs(&mut self, depth_cap: usize) {
         let reopened = self
             .entries
@@ -2217,6 +1412,10 @@ impl WidePnSearch {
     }
 
     fn refresh_all_bottom_up(&mut self) {
+        #[cfg(test)]
+        {
+            self.stage_refreshes = self.stage_refreshes.saturating_add(1);
+        }
         let mut ids = (0..self.entries.len()).collect::<Vec<_>>();
         ids.sort_unstable_by_key(|&id| std::cmp::Reverse(self.entries[id].depth));
         for id in ids {
@@ -2256,28 +1455,12 @@ impl WidePnSearch {
                     children,
                 } if wide_choice_has_urgent_block(children)
             );
-        #[cfg(test)]
-        let sequential_small_choice = self.sequential_small_choice.is_some_and(|limit| {
-            self.entries[id].depth > 0
-                && self.entries[id].depth <= self.sequential_small_choice_max_depth
-                && matches!(
-                    &self.entries[id].node,
-                    WidePnNode::Branch {
-                        kind: WidePnKind::Choice,
-                        children,
-                    } if children.len() > 1 && children.len() <= limit
-                )
-        });
-        #[cfg(not(test))]
-        let sequential_small_choice = false;
         // Sequential probing is a root bootstrap for the two corpus shapes
         // that enter mid-turn or under an urgent block.  Applying it at every
         // descendant discards the proof-number evidence and degenerates into
         // depth-first search inside each forcing branch.
-        let sequential_root_probe = (self.entries[id].depth == 0
-            && (finish_partial_turn || urgent_pair))
-            || cfg!(test) && std::env::var_os("TSS_WIDE_SEQUENTIAL_CHOICE").is_some()
-            || cfg!(test) && sequential_small_choice;
+        let sequential_root_probe =
+            self.entries[id].depth == 0 && (finish_partial_turn || urgent_pair);
         let prefer_width_tier = self.prefer_width_tier_at_depth(self.entries[id].depth);
         let commitment_domain = inherited_commitment
             || match &self.entries[id].node {
@@ -2290,26 +1473,6 @@ impl WidePnSearch {
         let mut yielded_universal_children = Vec::new();
         loop {
             let parent_before = (self.entries[id].pn, self.entries[id].dn);
-            #[cfg(test)]
-            let forced_small_choice = sequential_small_choice
-                .then_some(self.sequential_small_choice_rank)
-                .filter(|&rank| match &self.entries[id].node {
-                    WidePnNode::Branch { children, .. } => children
-                        .get(rank)
-                        .is_some_and(|child| !self.child_is_genuinely_refuted(child)),
-                    _ => false,
-                });
-            #[cfg(test)]
-            let selected = forced_small_choice.or_else(|| {
-                self.select_step_child_index_with_commitment(
-                    id,
-                    sequential_root_probe,
-                    prefer_width_tier,
-                    &yielded_universal_children,
-                    commitment_domain,
-                )
-            });
-            #[cfg(not(test))]
             let selected = self.select_step_child_index_with_commitment(
                 id,
                 sequential_root_probe,
@@ -2320,7 +1483,7 @@ impl WidePnSearch {
             let Some(child_index) = selected else {
                 return WidePnStepOutcome::Stalled;
             };
-            let (kind, child, root_children_unlinked) = {
+            let (kind, child, _root_children_unlinked) = {
                 let WidePnNode::Branch { kind, children } = &self.entries[id].node else {
                     return WidePnStepOutcome::Stalled;
                 };
@@ -2331,7 +1494,7 @@ impl WidePnSearch {
                 )
             };
             #[cfg(test)]
-            if self.entries[id].depth == 0 && root_children_unlinked && self.trace_enabled() {
+            if self.entries[id].depth == 0 && _root_children_unlinked && self.trace_enabled() {
                 eprintln!(
                     "WIDTH_PN_ROOT_SELECT sequential={sequential_root_probe} prefer_tier={prefer_width_tier} rank={child_index} mv={:?} first_tier={} prior_pn={} urgent={}",
                     child.mv,
@@ -2468,29 +1631,7 @@ impl WidePnSearch {
         }
     }
 
-    /// Search-order estimate for an attacker choice. Canonical PN/DN values
-    /// retain the immediate-child tree recurrence; the graph profile only
-    /// discounts exact obligations shared by consecutive defender replies.
     fn choice_order_pn(&self, child: &WidePnChild) -> u32 {
-        if self.universal_pn_profile == WideUniversalPnProfile::Dag
-            && child.result == WidePnChildResult::Pending
-        {
-            return dag_choice_order_pn(&self.entries, child)
-                .unwrap_or_else(|| self.child_numbers(child).0);
-        }
-        if self.universal_pn_profile == WideUniversalPnProfile::Graph
-            && child.result == WidePnChildResult::Pending
-        {
-            if let Some(entry) = child.entry.and_then(|id| self.entries.get(id)) {
-                if let WidePnNode::Branch {
-                    kind: WidePnKind::Universal { .. },
-                    children,
-                } = &entry.node
-                {
-                    return graph_universal_pn(&self.entries, children);
-                }
-            }
-        }
         self.child_numbers(child).0
     }
 
@@ -2501,7 +1642,7 @@ impl WidePnSearch {
 
     #[cfg(test)]
     fn trace_enabled(&self) -> bool {
-        !self.trace_suppressed && Self::trace_pn_enabled()
+        Self::trace_pn_enabled()
     }
 
     #[cfg(test)]
@@ -2575,8 +1716,7 @@ impl WidePnSearch {
             let urgent_pair = matches!(state.phase(), TurnPhase::FirstStone)
                 && *kind == WidePnKind::Choice
                 && wide_choice_has_urgent_block(children);
-            let sequential_root_probe = (entry.depth == 0 && (finish_partial_turn || urgent_pair))
-                || std::env::var_os("TSS_WIDE_SEQUENTIAL_CHOICE").is_some();
+            let sequential_root_probe = entry.depth == 0 && (finish_partial_turn || urgent_pair);
             let commitment_domain = inherited_commitment
                 || matches!(kind, WidePnKind::Universal { .. })
                     && self.universal_commitment_active(entry_id, children);
@@ -2891,7 +2031,7 @@ impl WidePnSearch {
                 let prior = self.entries[id].prior;
                 (prior.pn, prior.dn)
             }
-            WidePnNode::ProvenLeaf(_) | WidePnNode::ProvenFragment(_) => (0, PN_INFINITY),
+            WidePnNode::ProvenLeaf(_) => (0, PN_INFINITY),
             WidePnNode::DepthCutoff | WidePnNode::Refuted => (PN_INFINITY, 0),
             WidePnNode::Branch { kind, children } => match kind {
                 WidePnKind::Choice => {
@@ -2982,18 +2122,6 @@ impl WidePnSearch {
             }
         }
 
-        #[cfg(test)]
-        if self.frontier_probe_nodes > 0 {
-            if let Some(proof) = self.try_frontier_fragment(state, depth) {
-                self.entries[id].node = WidePnNode::ProvenFragment(proof);
-                self.refresh(id);
-                return WidePnStepOutcome::Progress;
-            }
-            if self.expansions >= self.node_cap {
-                return WidePnStepOutcome::Stalled;
-            }
-        }
-
         let (kind, mut children) = if state.current_player() == self.claimant {
             (WidePnKind::Choice, self.attack_children(state, depth))
         } else {
@@ -3022,13 +2150,7 @@ impl WidePnSearch {
 
     fn attack_children(&self, state: &mut RustHexoState, depth: usize) -> Vec<WidePnChild> {
         match state.phase() {
-            TurnPhase::FirstStone => {
-                #[cfg(test)]
-                if std::env::var_os("TSS_WIDE_PLACEMENT_PN").is_some() {
-                    return self.attack_single_children(state, depth, None);
-                }
-                self.attack_pair_children(state, depth)
-            }
+            TurnPhase::FirstStone => self.attack_pair_children(state, depth),
             TurnPhase::SecondStone { first } => {
                 self.attack_single_children(state, depth, Some(first))
             }
@@ -3352,7 +2474,6 @@ impl<'a> WideProofMaterializer<'a> {
         }
         let node = match entry.node.clone() {
             WidePnNode::ProvenLeaf(leaf) => self.alloc(leaf, 0)?,
-            WidePnNode::ProvenFragment(proof) => self.import_fragment(proof, entry.depth)?,
             WidePnNode::Branch {
                 kind: WidePnKind::Choice,
                 children,
@@ -3371,44 +2492,6 @@ impl<'a> WideProofMaterializer<'a> {
         };
         self.memo.insert(key, node);
         Some(node)
-    }
-
-    fn import_fragment(
-        &mut self,
-        mut proof: CachedProof,
-        entry_depth: usize,
-    ) -> Option<CertNodeId> {
-        proof.validate()?;
-        let added_commutations = proof.nodes.iter().try_fold(0usize, |sum, node| {
-            let added = match node {
-                CertNode::Universal { commutations, .. } => commutations.len(),
-                _ => 0,
-            };
-            sum.checked_add(added)
-        })?;
-        if proof.resolution_t > self.search.semantic_horizon
-            || proof
-                .zone_build_t
-                .is_some_and(|build_t| self.search.semantic_horizon > build_t)
-            || entry_depth.checked_add(proof.height)? > MAX_SEARCH_DEPTH
-            || self.arena.len().checked_add(proof.nodes.len())? > MAX_CERT_NODES
-            || self.edge_count.checked_add(proof.explicit_edges)? > MAX_CERT_EDGES
-            || self.commutation_count.checked_add(added_commutations)? > MAX_CERT_COMMUTATIONS
-        {
-            return None;
-        }
-
-        let base = self.arena.len();
-        let final_len = base.checked_add(proof.nodes.len())?;
-        u32::try_from(final_len).ok()?;
-        for node in &mut proof.nodes {
-            remap_node_ids_with_offset(node, base, final_len)?;
-        }
-        let root = offset_node_id(proof.root_node, base, final_len)?;
-        self.arena.append(&mut proof.nodes);
-        self.edge_count += proof.explicit_edges;
-        self.commutation_count += added_commutations;
-        Some(root)
     }
 
     fn build_choice(
@@ -4503,79 +3586,6 @@ fn turn_forces_small_defender_reply(state: &RustHexoState, claimant: Player) -> 
             && analysis.opp_threat_count > 0
             && !analysis.own_win_now
             && analysis.min_hitting_set == Some(analysis.b))
-}
-
-#[cfg(test)]
-pub(crate) fn debug_wide_pair_ranks(
-    state: &RustHexoState,
-    reference_first: HexCoord,
-    reference_second: HexCoord,
-) -> String {
-    use std::fmt::Write as _;
-
-    let claimant = state.current_player();
-    let width = WidthOptions::vcf_pair_complete();
-    let mut work = state.clone();
-    let first_candidates = ordered_threat_creating_moves_with_width(&work, claimant, width);
-    let mut out = String::new();
-    for (first_rank, first_candidate) in first_candidates.iter().enumerate() {
-        let Ok((first_result, first_delta)) = work.apply_with_delta(Placement {
-            coord: first_candidate.coord,
-        }) else {
-            continue;
-        };
-        let mut forcing_second = None;
-        let mut reference_second_rank = None;
-        if first_result.outcome.is_none() {
-            let second_candidates =
-                ordered_threat_creating_moves_with_width(&work, claimant, width);
-            for (second_rank, second_candidate) in second_candidates.iter().enumerate() {
-                if second_candidate.coord == reference_second {
-                    reference_second_rank = Some((
-                        second_rank,
-                        second_candidate.priority_class,
-                        second_candidate.child_threats,
-                        second_candidate.strength,
-                    ));
-                }
-                let Ok((second_result, second_delta)) = work.apply_with_delta(Placement {
-                    coord: second_candidate.coord,
-                }) else {
-                    continue;
-                };
-                let forcing = second_result
-                    .outcome
-                    .is_some_and(|outcome| outcome.winner == claimant)
-                    || (turn_created_claimant_threat(
-                        &work,
-                        claimant,
-                        first_candidate.coord,
-                        second_candidate.coord,
-                    ) && turn_forces_small_defender_reply(&work, claimant));
-                work.undo(second_delta);
-                if forcing && forcing_second.is_none() {
-                    forcing_second = Some((
-                        second_rank,
-                        second_candidate.coord,
-                        second_candidate.priority_class,
-                        second_candidate.child_threats,
-                        second_candidate.strength,
-                    ));
-                }
-            }
-        }
-        work.undo(first_delta);
-        let _ = writeln!(
-            out,
-            "first#{first_rank} ({},{}) s={} child={} ref={} best2={forcing_second:?} ref2={reference_second_rank:?}",
-            first_candidate.coord.q,
-            first_candidate.coord.r,
-            first_candidate.strength,
-            first_candidate.child_threats,
-            first_candidate.coord == reference_first,
-        );
-    }
-    out
 }
 
 #[derive(Clone)]
@@ -6028,18 +5038,7 @@ mod tests {
         }
     }
 
-    fn graph_pn_test_child(q: i16, entry: Option<usize>, pn: u32) -> WidePnChild {
-        WidePnChild {
-            mv: WidePnMove::One(HexCoord::new(q, 0)),
-            result: WidePnChildResult::Pending,
-            entry,
-            prior: WidePnPrior { pn, dn: 1 },
-            urgent_block: false,
-            first_width_tier: 0,
-        }
-    }
-
-    fn graph_pn_test_entry(pn: u32, node: WidePnNode, depth: usize) -> WidePnEntry {
+    fn wide_pn_test_entry(pn: u32, node: WidePnNode, depth: usize) -> WidePnEntry {
         WidePnEntry {
             pn,
             dn: 1,
@@ -6048,17 +5047,6 @@ mod tests {
             depth,
             universal_obligation: None,
         }
-    }
-
-    fn graph_pn_test_choice(pn: u32, q: i16, depth: usize) -> WidePnEntry {
-        graph_pn_test_entry(
-            pn,
-            WidePnNode::Branch {
-                kind: WidePnKind::Choice,
-                children: vec![graph_pn_test_child(q, None, pn)],
-            },
-            depth,
-        )
     }
 
     /// Geometry-only scaffold for the proof program's adversarial positions.
@@ -6495,11 +5483,11 @@ mod tests {
         let tier_zero_entry = search.entries.len();
         search
             .entries
-            .push(graph_pn_test_entry(50, WidePnNode::Unexpanded, 2));
+            .push(wide_pn_test_entry(50, WidePnNode::Unexpanded, 2));
         let tier_one_entry = search.entries.len();
         search
             .entries
-            .push(graph_pn_test_entry(3, WidePnNode::Unexpanded, 2));
+            .push(wide_pn_test_entry(3, WidePnNode::Unexpanded, 2));
         let pair_child = |first_q, entry, first_width_tier| WidePnChild {
             mv: WidePnMove::Pair(HexCoord::new(first_q, 0), HexCoord::new(first_q + 1, 0)),
             result: WidePnChildResult::Pending,
@@ -6649,19 +5637,19 @@ mod tests {
         let first = search.entries.len();
         search
             .entries
-            .push(graph_pn_test_entry(1, WidePnNode::Unexpanded, 1));
+            .push(wide_pn_test_entry(1, WidePnNode::Unexpanded, 1));
         let second = search.entries.len();
         search
             .entries
-            .push(graph_pn_test_entry(1, WidePnNode::Unexpanded, 1));
+            .push(wide_pn_test_entry(1, WidePnNode::Unexpanded, 1));
         let third = search.entries.len();
         search
             .entries
-            .push(graph_pn_test_entry(1, WidePnNode::Unexpanded, 1));
+            .push(wide_pn_test_entry(1, WidePnNode::Unexpanded, 1));
         let fourth = search.entries.len();
         search
             .entries
-            .push(graph_pn_test_entry(1, WidePnNode::Unexpanded, 1));
+            .push(wide_pn_test_entry(1, WidePnNode::Unexpanded, 1));
         search.entries[first].dn = 2;
         search.entries[second].dn = 5;
         search.entries[third].dn = 7;
@@ -6742,11 +5730,11 @@ mod tests {
         let first = search.entries.len();
         search
             .entries
-            .push(graph_pn_test_entry(1, WidePnNode::Unexpanded, 1));
+            .push(wide_pn_test_entry(1, WidePnNode::Unexpanded, 1));
         let second = search.entries.len();
         search
             .entries
-            .push(graph_pn_test_entry(1, WidePnNode::Unexpanded, 1));
+            .push(wide_pn_test_entry(1, WidePnNode::Unexpanded, 1));
         search.entries[first].dn = 2;
         search.entries[second].dn = 5;
         let child = |q, entry| WidePnChild {
@@ -6807,7 +5795,7 @@ mod tests {
                 let entry = search.entries.len();
                 search
                     .entries
-                    .push(graph_pn_test_entry(1, WidePnNode::Unexpanded, 1));
+                    .push(wide_pn_test_entry(1, WidePnNode::Unexpanded, 1));
                 entry
             })
             .collect::<Vec<_>>();
@@ -6852,326 +5840,6 @@ mod tests {
             "all-stalled obligations terminate instead of cycling"
         );
         assert_eq!(search.entries[root].universal_obligation, None);
-    }
-
-    #[test]
-    fn wide_graph_pn_counts_order_converged_choice_once() {
-        let mut search = WidePnSearch::new(Player::Player0, 0, 10, 0, 100, 10);
-        let converged = search.entries.len();
-        search.entries.push(graph_pn_test_choice(7, 9, 2));
-
-        let after_first = search.entries.len();
-        search.entries.push(graph_pn_test_entry(
-            7,
-            WidePnNode::Branch {
-                kind: WidePnKind::Universal {
-                    implicit_dispatch: true,
-                },
-                children: vec![graph_pn_test_child(2, Some(converged), 99)],
-            },
-            1,
-        ));
-        let after_second = search.entries.len();
-        search.entries.push(graph_pn_test_entry(
-            7,
-            WidePnNode::Branch {
-                kind: WidePnKind::Universal {
-                    implicit_dispatch: true,
-                },
-                children: vec![graph_pn_test_child(1, Some(converged), 99)],
-            },
-            1,
-        ));
-        let ordered_paths = [
-            graph_pn_test_child(1, Some(after_first), 99),
-            graph_pn_test_child(2, Some(after_second), 99),
-        ];
-
-        let legacy = ordered_paths.iter().fold(0u32, |sum, child| {
-            sum.saturating_add(search.child_numbers(child).0)
-                .min(PN_INFINITY)
-        });
-        assert_eq!(legacy, 14, "tree PN counts both defender orders");
-        assert_eq!(
-            graph_universal_pn(&search.entries, &ordered_paths),
-            7,
-            "the exact converged Choice entry is one proof obligation"
-        );
-    }
-
-    #[test]
-    fn wide_graph_pn_changes_choice_order_without_changing_stored_numbers() {
-        let mut search = WidePnSearch::new(Player::Player0, 0, 10, 0, 100, 10);
-
-        let converged = search.entries.len();
-        search.entries.push(graph_pn_test_choice(7, 9, 3));
-        let order_a = search.entries.len();
-        search.entries.push(graph_pn_test_entry(
-            7,
-            WidePnNode::Branch {
-                kind: WidePnKind::Universal {
-                    implicit_dispatch: true,
-                },
-                children: vec![graph_pn_test_child(2, Some(converged), 99)],
-            },
-            2,
-        ));
-        let order_b = search.entries.len();
-        search.entries.push(graph_pn_test_entry(
-            7,
-            WidePnNode::Branch {
-                kind: WidePnKind::Universal {
-                    implicit_dispatch: true,
-                },
-                children: vec![graph_pn_test_child(1, Some(converged), 99)],
-            },
-            2,
-        ));
-        let shared_turn = search.entries.len();
-        search.entries.push(graph_pn_test_entry(
-            14,
-            WidePnNode::Branch {
-                kind: WidePnKind::Universal {
-                    implicit_dispatch: true,
-                },
-                children: vec![
-                    graph_pn_test_child(1, Some(order_a), 99),
-                    graph_pn_test_child(2, Some(order_b), 99),
-                ],
-            },
-            1,
-        ));
-
-        let distinct = search.entries.len();
-        search.entries.push(graph_pn_test_choice(10, 8, 2));
-        let distinct_turn = search.entries.len();
-        search.entries.push(graph_pn_test_entry(
-            10,
-            WidePnNode::Branch {
-                kind: WidePnKind::Universal {
-                    implicit_dispatch: true,
-                },
-                children: vec![graph_pn_test_child(3, Some(distinct), 99)],
-            },
-            1,
-        ));
-
-        let choices = [
-            graph_pn_test_child(4, Some(shared_turn), 99),
-            graph_pn_test_child(5, Some(distinct_turn), 99),
-        ];
-        let stored = [
-            (
-                search.entries[shared_turn].pn,
-                search.entries[shared_turn].dn,
-            ),
-            (
-                search.entries[distinct_turn].pn,
-                search.entries[distinct_turn].dn,
-            ),
-        ];
-        assert_eq!(stored, [(14, 1), (10, 1)]);
-
-        search.universal_pn_profile = WideUniversalPnProfile::Tree;
-        assert_eq!(search.choice_order_pn(&choices[0]), 14);
-        assert_eq!(search.choice_order_pn(&choices[1]), 10);
-        assert_eq!(
-            search.select_child_index(WidePnKind::Choice, &choices, false),
-            Some(1),
-            "tree PN prefers the distinct cost-10 defender turn"
-        );
-
-        search.universal_pn_profile = WideUniversalPnProfile::Graph;
-        assert_eq!(search.choice_order_pn(&choices[0]), 7);
-        assert_eq!(search.choice_order_pn(&choices[1]), 10);
-        assert_eq!(
-            search.select_child_index(WidePnKind::Choice, &choices, false),
-            Some(0),
-            "graph ordering counts the converged cost-7 obligation once"
-        );
-
-        search.recompute(shared_turn);
-        search.recompute(distinct_turn);
-        assert_eq!(
-            [
-                (
-                    search.entries[shared_turn].pn,
-                    search.entries[shared_turn].dn
-                ),
-                (
-                    search.entries[distinct_turn].pn,
-                    search.entries[distinct_turn].dn,
-                ),
-            ],
-            stored,
-            "Graph profile must not replace canonical stored PN/DN"
-        );
-    }
-
-    #[test]
-    fn wide_graph_pn_sums_distinct_and_unlinked_obligations() {
-        let mut entries = vec![graph_pn_test_choice(3, 7, 2), graph_pn_test_choice(5, 8, 2)];
-        let left = entries.len();
-        entries.push(graph_pn_test_entry(
-            3,
-            WidePnNode::Branch {
-                kind: WidePnKind::Universal {
-                    implicit_dispatch: true,
-                },
-                children: vec![graph_pn_test_child(3, Some(0), 99)],
-            },
-            1,
-        ));
-        let right = entries.len();
-        entries.push(graph_pn_test_entry(
-            5,
-            WidePnNode::Branch {
-                kind: WidePnKind::Universal {
-                    implicit_dispatch: true,
-                },
-                children: vec![graph_pn_test_child(4, Some(1), 99)],
-            },
-            1,
-        ));
-
-        let mut obligations = vec![
-            graph_pn_test_child(1, Some(left), 99),
-            graph_pn_test_child(2, Some(right), 99),
-        ];
-        assert_eq!(graph_universal_pn(&entries, &obligations), 8);
-
-        obligations.push(graph_pn_test_child(5, None, 2));
-        obligations.push(graph_pn_test_child(6, None, 2));
-        assert_eq!(
-            graph_universal_pn(&entries, &obligations),
-            12,
-            "unlinked children have no transposition identity and remain distinct"
-        );
-    }
-
-    #[test]
-    fn wide_graph_pn_refutation_and_cutoff_fail_closed() {
-        let mut entries = vec![
-            graph_pn_test_entry(PN_INFINITY, WidePnNode::Refuted, 2),
-            graph_pn_test_entry(PN_INFINITY, WidePnNode::DepthCutoff, 2),
-        ];
-        let through_refutation = entries.len();
-        entries.push(graph_pn_test_entry(
-            PN_INFINITY,
-            WidePnNode::Branch {
-                kind: WidePnKind::Universal {
-                    implicit_dispatch: true,
-                },
-                children: vec![
-                    graph_pn_test_child(3, Some(0), 1),
-                    WidePnChild {
-                        result: WidePnChildResult::ClaimantTactical,
-                        ..graph_pn_test_child(4, None, 1)
-                    },
-                ],
-            },
-            1,
-        ));
-        let through_cutoff = entries.len();
-        entries.push(graph_pn_test_entry(
-            PN_INFINITY,
-            WidePnNode::Branch {
-                kind: WidePnKind::Universal {
-                    implicit_dispatch: true,
-                },
-                children: vec![graph_pn_test_child(5, Some(1), 1)],
-            },
-            1,
-        ));
-
-        assert_eq!(
-            graph_universal_pn(
-                &entries,
-                &[graph_pn_test_child(1, Some(through_refutation), 1)]
-            ),
-            PN_INFINITY
-        );
-        assert_eq!(
-            graph_universal_pn(&entries, &[graph_pn_test_child(2, Some(through_cutoff), 1)]),
-            PN_INFINITY
-        );
-    }
-
-    #[test]
-    fn wide_graph_pn_self_cycle_fails_closed() {
-        let entries = vec![graph_pn_test_entry(
-            1,
-            WidePnNode::Branch {
-                kind: WidePnKind::Universal {
-                    implicit_dispatch: true,
-                },
-                children: vec![graph_pn_test_child(2, Some(0), 1)],
-            },
-            1,
-        )];
-
-        assert_eq!(
-            graph_universal_pn(&entries, &[graph_pn_test_child(1, Some(0), 1)]),
-            PN_INFINITY,
-            "an active Universal entry cannot be accepted as a completed transposition"
-        );
-    }
-
-    #[test]
-    fn wide_graph_pn_empty_universal_fails_closed() {
-        let entries = vec![graph_pn_test_entry(
-            0,
-            WidePnNode::Branch {
-                kind: WidePnKind::Universal {
-                    implicit_dispatch: true,
-                },
-                children: Vec::new(),
-            },
-            1,
-        )];
-
-        assert_eq!(graph_universal_pn(&entries, &[]), PN_INFINITY);
-        assert_eq!(
-            graph_universal_pn(&entries, &[graph_pn_test_child(1, Some(0), 1)]),
-            PN_INFINITY
-        );
-    }
-
-    #[test]
-    fn wide_graph_pn_zero_unlinked_prior_fails_closed() {
-        assert_eq!(
-            graph_universal_pn(&[], &[graph_pn_test_child(1, None, 0)]),
-            PN_INFINITY,
-            "a lazy pending edge cannot claim a proof before it has a linked entry"
-        );
-    }
-
-    #[test]
-    fn wide_graph_pn_zero_linked_unexpanded_prior_fails_closed() {
-        let mut tactical = graph_pn_test_child(3, None, 1);
-        tactical.result = WidePnChildResult::ClaimantTactical;
-        let entries = vec![
-            graph_pn_test_entry(0, WidePnNode::Unexpanded, 1),
-            graph_pn_test_entry(
-                0,
-                WidePnNode::Branch {
-                    kind: WidePnKind::Choice,
-                    children: vec![tactical],
-                },
-                1,
-            ),
-        ];
-
-        assert_eq!(
-            graph_universal_pn(&entries, &[graph_pn_test_child(1, Some(0), 1)]),
-            PN_INFINITY,
-            "an Unexpanded entry cannot have a solved proof number"
-        );
-        assert_eq!(
-            graph_universal_pn(&entries, &[graph_pn_test_child(2, Some(1), 1)]),
-            0,
-            "a linked Choice entry may legitimately already be solved"
-        );
     }
 
     #[test]
