@@ -529,6 +529,17 @@ prerequisite, and an honest cost/benefit sketch.
 - **Cost/benefit.** Near-free at solve time (the rung already runs); the
   open question is training value — gate on the shadow fire-rate before
   building the head.
+- **PROVEN pre-solve variant (07-16, `ffdd414a` on hunt/dtw-bounds).** The
+  census two-gap distance bound (`PROOF_DTW_CENSUS_BOUND.md`) mints the
+  same artifact class WITHOUT running the solve: FirstStone theorem T1 +
+  sound SecondStone theorem T2 (the naive SecondStone form is FALSE at
+  c=3 — machine-checked reachable ply-5 witness; the +1 increment holds
+  only for c<=2 there). Engine-visible consumer contract 8.1/8.2:
+  ~17 µs census (plausibly ~1 µs on WindowStore) skips the current
+  player's `SolveGoal::Win` attempt at the exact +8 rung for ~49% of
+  human-corpus leaves (91% opening band), each skip carrying the proven
+  "no forced win within h plies" fact. Cannot gate +12 (structural cap
+  ply 10/12). Sole OPEN = production mint/verify integration (Phase-3).
 
 ### A4 — ProvenFragment persistence [S; the leaf-side face of U22]
 
