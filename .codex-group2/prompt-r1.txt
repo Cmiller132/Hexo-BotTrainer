@@ -1,0 +1,135 @@
+Group-2, round 1: build the spare-turn / lambda-2 acceptance corpus + baseline diagnosis.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width at
+commit ac3f455f (round-9b engine — certificate-grade df-pn WidePnSearch; the
+normative engine). This round makes NO engine changes: it builds the
+measurement substrate that all Group-2 engine work will be accepted against.
+
+## Why this round exists
+
+The 19-entry VCF corpus is structurally dispatch-only: continuous forcing
+means every forced defender node has hitting number == budget (k == b), so
+the k < B unforced branch — the entire target of certified ranked-zone
+generation (U12: Z_dir ∪ Z_seed ∪ Z_touch ∪ Z_virgin) — is NEVER exercised.
+See E:\hexo-bot\docs\paper\RZOP_SOLVER_OPTIMIZATION.md §5.1 (read §5 in
+full; you have disk-wide read access). Lambda-orders: lambda-1 = continuous
+forcing wins (own_win_now / forced families); lambda-2 = wins that require at
+least one QUIET (nonthreat, spare-turn) attacker turn somewhere in every
+winning line. Group-2 = extending the certified engine to unforced AND nodes;
+its acceptance test is this corpus. Corpus first, machinery second.
+
+## Sources to read first (in this order)
+
+1. docs/TSS_VCF_WIDTH_BRIEF.md — engine architecture + house invariants
+   (finder/verifier split, no defender-count caps, verifier re-derives).
+2. E:\hexo-bot\docs\paper\RZOP_SOLVER_OPTIMIZATION.md §5 (capstone spec:
+   §5.1 corpus problem, §5.2 |searched|/|Legal|, §5.4 acceptance witness).
+3. E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hexfield-eq-main-review-65bd3a\docs\PLAN_TSS_SOLVER_UPGRADES.md
+   §7 (U12–U18 ranked-zone extension — read-only context for what the corpus
+   must exercise; do NOT implement any of it this round).
+4. packages/hexfield_eq/rust/src/tss_corpus.rs — corpus loader + ladder
+   test shape (tss_corpus_check); corpus data at
+   packages/hexfield_eq/rust/corpus/forcing_corpus_moves.txt and
+   forcing_corpus_lines.txt — mirror this format.
+5. packages/hexfield_eq/rust/src/tss_bench.rs:169 — DEEP_WIN_MOVES
+   (curated_deep_win_s15): an existing proven lambda-2 win fixture (quiet
+   root move, two 3-lines). This is your seed entry.
+6. packages/hexfield_eq/rust/src/tss_reference.rs — the exhaustive reference
+   solver; it is the ground-truth oracle for every entry.
+
+## The job, in order
+
+1. **Mine candidate lambda-2 positions.** Sources, roughly by expected yield:
+   (a) DEEP_WIN_MOVES as entry #1; (b) back-offs of existing corpus WIN
+   entries — rewind the attacker's line to a ply where the win still exists
+   but the first winning move is nonthreat (check with the reference solver);
+   (c) prefixes/variants of the strongloss_a/strongloss_b games at earlier
+   plies; (d) hand-constructed small-frontier positions in the style of
+   DEEP_WIN_MOVES (two separated threats needing one quiet connector is the
+   canonical shape); (e) OPTIONAL, only if cheap: positions from the human
+   corpus (HF timmyburn/hexo-bootstrap-corpus) if a local copy exists.
+   Keep every position SMALL-FRONTIER: the reference solver must be able to
+   ground-truth it exhaustively at matched horizon.
+
+2. **Ground-truth every candidate with tss_reference.rs.** For WIN entries:
+   exhaustive reference WIN at a recorded horizon, AND the §5.4 witness that
+   the entry genuinely needs unforced machinery — verify that NO lambda-1
+   (continuous-forcing) win exists: the current wide engine
+   (vcf_pair_complete) must return non-WIN at a generous cap, and the
+   reference winning line must contain >= 1 nonthreat attacker turn. Record
+   per entry: k<B Universal-node count and nonthreat OR-edge count along the
+   reference win (the lambda-order proxy columns), max spare-turn nesting.
+   For NO entries: reference-confirmed no-win at the recorded horizon
+   (honest NOs — the soundness side of the acceptance test).
+
+3. **Freeze the corpus.** New files
+   packages/hexfield_eq/rust/corpus/spare_corpus_moves.txt (+ a lines file if
+   useful), same replay format as the forcing corpus, each entry with
+   provenance comments (how mined, reference horizon, machine + seed if
+   randomized). Minimum to declare done: 3 WIN + 2 NO. Target if mining is
+   cheap: 6–10 WIN + 3–5 NO. Every number regenerable: write the exact
+   commands into the progress file.
+
+4. **Acceptance test.** Add an #[ignore] test tss_spare_corpus_check in the
+   shape of tss_corpus_check, with one deliberate difference: entries carry
+   expect ∈ {WIN_PENDING, NO}. A WIN_PENDING entry FAILS the test only if the
+   engine answers LOSS (false negative with a certificate) — status UNKNOWN
+   is recorded, not failed, because the current engine structurally cannot
+   find quiet turns. Any WIN answer on a NO entry FAILS (soundness). When
+   Group-2 engine work lands, WIN_PENDING entries get promoted to WIN
+   one-by-one as they become provable. Also emit per-entry
+   |searched|/|Legal| style counters if the existing stats support it
+   cheaply; do not add engine instrumentation this round.
+
+5. **Baseline table.** Run the current engine (default vcf_pair_complete,
+   2GiB TT profile: TSS_BACKWALK_TT_BYTES=2147483648) on every entry up the
+   standard rung ladder (10k/100k/1M). Record status/nodes/wall per rung in
+   .codex-group2/round1-progress.md. Expected: UNKNOWN on most WIN entries —
+   that IS the baseline row of the capstone table.
+
+6. **Diagnosis memo (feeds round 2).** For 2–3 representative WIN entries,
+   localize exactly where the engine's universe excludes the winning quiet
+   move: which gate (forcing gate at turn completion? pair universe? OR
+   generator width?), and what the defender's k<B AND node looks like right
+   after the quiet turn (legal count vs what U12's ranked zone would admit —
+   estimate by hand from T3's mandatoryZone components). End the memo with a
+   concrete, minimal round-2 engine-extension proposal: flag name, where the
+   quiet-turn OR edges enter, where the U12 zone plugs in at unforced AND
+   nodes, and what shadow mode looks like. Owner invariants are binding:
+   finder/verifier separation, verifier re-derives everything, no
+   defender-count caps ever, flags default-off, shadow -> verify -> consume.
+
+## Definition of done
+
+- spare corpus files + loader + tss_spare_corpus_check present and green
+  (green = no false WIN on NO entries, no LOSS on WIN_PENDING, expectations
+  vs recorded reference ground truth all consistent);
+- full unit suite still 95/0 (cargo test --release, default features);
+- narrow byte-identity is untouched by construction (you changed no engine
+  code — state this explicitly in the progress file after verifying the
+  diff surface is only new files + test registration);
+- .codex-group2/round1-progress.md contains: mining log, per-entry
+  ground-truth table (reference horizon, lambda-order proxy columns),
+  baseline rung table, diagnosis memo, and exact regeneration commands;
+- working tree clean of scratch (delete throwaway dirs), all deliverables in
+  place for the orchestrator to review and commit.
+
+## Operational rules, binding
+
+(1) You CANNOT git-commit (sandbox blocks worktree git metadata) — announce
+checkpoint boundaries in the progress file and keep working; never treat
+commit failure as a blocker. (2) ALL cargo target directories go on E:
+inside this worktree (reuse .target-codex/) — NEVER under C: temp. (3) NO
+workspace-wide formatting; rustfmt --edition 2021 only on files you edit.
+(4) Work only in this worktree; everything outside it is read-only context.
+(5) RAM: a Lean lane is running beside you on a 31 GB host — ONE solve /
+one cargo build at a time, no parallel test-runner fan-out
+(--test-threads=1 for solver-heavy tests), keep any single solve within the
+2GiB TT profile. (6) An orchestrator gate re-run (cargo test in this
+worktree's default target dir) may still be running when you start — use
+.target-codex/ as your CARGO_TARGET_DIR so you never contend for its lock,
+and do not kill processes you did not start. (7) The reference solver is
+the oracle: if reference and wide engine ever disagree WIN-vs-LOSS at
+matched horizon, STOP mining and write the disagreement up in the progress
+file with full repro — that is a soundness bug and outranks this round's
+deliverables.
