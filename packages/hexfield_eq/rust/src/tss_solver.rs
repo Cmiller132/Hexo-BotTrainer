@@ -71,6 +71,10 @@ pub(crate) struct WidthOptions {
     vcf_pair_complete: bool,
     quiet_turn_or_edges: Round3Flag,
     ranked_unforced_defender_zone: Round3Flag,
+    /// Default-off C1 migration seam.  When enabled, the historical narrow
+    /// DFS semantics run through `WidePnSearch`'s compatibility entry point.
+    /// No production caller enables this in round 5.
+    narrow_engine_migration: bool,
 }
 
 impl WidthOptions {
@@ -79,6 +83,15 @@ impl WidthOptions {
             vcf_pair_complete: true,
             quiet_turn_or_edges: Round3Flag::Off,
             ranked_unforced_defender_zone: Round3Flag::Off,
+            narrow_engine_migration: false,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn narrow_compat() -> Self {
+        Self {
+            narrow_engine_migration: true,
+            ..Self::default()
         }
     }
 
@@ -88,6 +101,7 @@ impl WidthOptions {
             vcf_pair_complete: true,
             quiet_turn_or_edges: Round3Flag::Shadow,
             ranked_unforced_defender_zone: Round3Flag::Shadow,
+            narrow_engine_migration: false,
         }
     }
 
@@ -96,6 +110,7 @@ impl WidthOptions {
             vcf_pair_complete: true,
             quiet_turn_or_edges: Round3Flag::Consume,
             ranked_unforced_defender_zone: Round3Flag::Consume,
+            narrow_engine_migration: false,
         }
     }
 
@@ -118,6 +133,8 @@ pub(crate) struct TssSolver {
     shared_tt: SharedProofCache,
     zone: ZoneSearchCaps,
     width: WidthOptions,
+    #[cfg(test)]
+    last_narrow_signatures: Vec<NarrowAttemptSignature>,
 }
 
 impl Default for TssSolver {
@@ -128,6 +145,8 @@ impl Default for TssSolver {
             shared_tt: SharedProofCache::new(0, u64::MAX),
             zone: ZoneSearchCaps::default(),
             width: WidthOptions::default(),
+            #[cfg(test)]
+            last_narrow_signatures: Vec::new(),
         }
     }
 }
@@ -164,6 +183,7 @@ impl TssSolver {
             shared_tt: SharedProofCache::new(0, u64::MAX),
             zone: ZoneSearchCaps::default(),
             width: WidthOptions::default(),
+            last_narrow_signatures: Vec::new(),
         }
     }
 
@@ -177,6 +197,7 @@ impl TssSolver {
             shared_tt: SharedProofCache::new(0, hash_mask),
             zone: ZoneSearchCaps::default(),
             width: WidthOptions::default(),
+            last_narrow_signatures: Vec::new(),
         }
     }
 
@@ -189,6 +210,9 @@ impl TssSolver {
         caps: &SolveCaps,
         goal: SolveGoal,
     ) -> DeepResult<TssCertificate> {
+        #[cfg(test)]
+        self.last_narrow_signatures.clear();
+
         let effective_tt_cap = if self.tt_enabled {
             caps.tt_bytes_cap
         } else {
@@ -266,6 +290,10 @@ impl TssSolver {
                 self.zone,
                 self.width,
             );
+            #[cfg(test)]
+            if let Some(signature) = attempt.tt_signature.as_ref() {
+                self.last_narrow_signatures.push(signature.clone());
+            }
             merge_stats(&mut stats, attempt.stats);
             if let Some(cert) = attempt.cert {
                 return DeepResult {
@@ -286,6 +314,10 @@ impl TssSolver {
                 self.zone,
                 self.width,
             );
+            #[cfg(test)]
+            if let Some(signature) = attempt.tt_signature.as_ref() {
+                self.last_narrow_signatures.push(signature.clone());
+            }
             merge_stats(&mut stats, attempt.stats);
             if let Some(cert) = attempt.cert {
                 return DeepResult {
@@ -319,6 +351,20 @@ impl TssSolver {
         zone: ZoneSearchCaps,
         width: WidthOptions,
     ) -> AttemptResult {
+        if width.narrow_engine_migration {
+            return WidePnSearch::prove_narrow_compat(
+                state,
+                claimant,
+                node_cap,
+                local_tt_cap,
+                self.hash_mask,
+                &mut self.shared_tt,
+                semantic_horizon,
+                zone,
+                width,
+                MAX_SEARCH_DEPTH,
+            );
+        }
         if !width.vcf_pair_complete
             || (width.consumes_quiet_turns() && width.consumes_ranked_zone())
         {
@@ -438,7 +484,12 @@ impl TssSolver {
                 rebase_zone_distances(&mut cert, state)?;
                 Some(cert)
             });
-        AttemptResult { cert, stats }
+        AttemptResult {
+            cert,
+            stats,
+            #[cfg(test)]
+            tt_signature: None,
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -498,7 +549,12 @@ impl TssSolver {
             peak_tt_bytes: context.peak_tt_bytes as u64,
             ..stats
         };
-        AttemptResult { cert, stats }
+        AttemptResult {
+            cert,
+            stats,
+            #[cfg(test)]
+            tt_signature: Some(context.tt_behavior_signature()),
+        }
     }
 }
 
@@ -575,6 +631,19 @@ fn goal_accepts(goal: SolveGoal, status: ProofStatus) -> bool {
 struct AttemptResult {
     cert: Option<TssCertificate>,
     stats: SolveStats,
+    #[cfg(test)]
+    tt_signature: Option<NarrowAttemptSignature>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NarrowAttemptSignature {
+    nodes: u64,
+    tt_hits: u64,
+    hit_limit: bool,
+    arena_len: usize,
+    edge_count: usize,
+    local_tt: String,
 }
 
 fn unknown<C>(stats: SolveStats) -> DeepResult<C> {
@@ -1371,6 +1440,78 @@ struct WidePnSearch {
 }
 
 impl WidePnSearch {
+    /// C1 migration mode: preserve the narrow DFS's recursive expansion order
+    /// while entering through the wide engine seam.  Reusing the PN frontier
+    /// here would change node counts even when it found the same proof, which
+    /// is outside the owner-approved identity contract.
+    #[allow(clippy::too_many_arguments)]
+    fn prove_narrow_compat(
+        state: &RustHexoState,
+        claimant: Player,
+        node_cap: u64,
+        local_tt_cap: usize,
+        hash_mask: u64,
+        shared_tt: &mut SharedProofCache,
+        semantic_horizon: u32,
+        zone: ZoneSearchCaps,
+        width: WidthOptions,
+        depth_cap: usize,
+    ) -> AttemptResult {
+        debug_assert!(width.narrow_engine_migration);
+        debug_assert!(!width.vcf_pair_complete);
+
+        let mut work = state.clone();
+        let entry_key = PositionKey::from_state(&work);
+        let root_ply = state.placements_made();
+        let mut search = NarrowCompatSearch::with_shared(
+            node_cap,
+            local_tt_cap,
+            hash_mask,
+            shared_tt,
+            root_ply,
+            semantic_horizon,
+            zone,
+            width,
+            depth_cap,
+        );
+        let proof = search.prove(&mut work, claimant, root_ply, None);
+
+        debug_assert_eq!(entry_key, PositionKey::from_state(&work));
+
+        let stats = SolveStats {
+            nodes: search.nodes,
+            tt_hits: search.tt_hits,
+            peak_tt_bytes: search.peak_tt_bytes as u64,
+        };
+        let cert = proof.and_then(|root| {
+            let (nodes, root_node) = compact_certificate(&search.arena, root)?;
+            if search.can_admit_compact(&entry_key, &nodes) {
+                if let Some(cached) = CachedProof::from_compact(nodes.clone(), root_node) {
+                    search.insert_shared(entry_key.clone(), claimant, cached);
+                }
+            }
+            let mut cert = TssCertificate {
+                root: RootBinding::from_state(state),
+                claimant,
+                root_node,
+                nodes,
+                semantic_horizon,
+            };
+            rebase_zone_distances(&mut cert, state)?;
+            Some(cert)
+        });
+        let stats = SolveStats {
+            peak_tt_bytes: search.peak_tt_bytes as u64,
+            ..stats
+        };
+        AttemptResult {
+            cert,
+            stats,
+            #[cfg(test)]
+            tt_signature: Some(search.tt_behavior_signature()),
+        }
+    }
+
     fn new(
         claimant: Player,
         root_ply: u32,
@@ -3186,7 +3327,10 @@ fn wide_completion_node(
     })
 }
 
-struct SearchContext<'a> {
+/// Historical narrow DFS state, retained byte-for-byte as the compatibility
+/// backend selected by `WidePnSearch::prove_narrow_compat`.  The legacy
+/// dispatcher uses the alias below until the separately gated round-6 flip.
+struct NarrowCompatSearch<'a> {
     node_cap: u64,
     nodes: u64,
     tt_hits: u64,
@@ -3206,13 +3350,17 @@ struct SearchContext<'a> {
     depth_cap: usize,
 }
 
+/// Round-5 legacy name.  The default-off dispatcher continues to name this
+/// alias, making the round-6 removal boundary explicit and reviewable.
+type SearchContext<'a> = NarrowCompatSearch<'a>;
+
 #[derive(Clone, Debug)]
 struct PairContext {
     first: HexCoord,
     turn_start_legal: Vec<HexCoord>,
 }
 
-impl SearchContext<'static> {
+impl NarrowCompatSearch<'static> {
     fn new(node_cap: u64, tt_bytes_cap: usize, hash_mask: u64) -> Self {
         let tt = BoundedTt::new(tt_bytes_cap, hash_mask);
         let peak_tt_bytes = tt.current_bytes;
@@ -3236,7 +3384,7 @@ impl SearchContext<'static> {
     }
 }
 
-impl<'a> SearchContext<'a> {
+impl<'a> NarrowCompatSearch<'a> {
     fn with_shared(
         node_cap: u64,
         tt_bytes_cap: usize,
@@ -3267,6 +3415,18 @@ impl<'a> SearchContext<'a> {
             zone,
             width,
             depth_cap,
+        }
+    }
+
+    #[cfg(test)]
+    fn tt_behavior_signature(&self) -> NarrowAttemptSignature {
+        NarrowAttemptSignature {
+            nodes: self.nodes,
+            tt_hits: self.tt_hits,
+            hit_limit: self.hit_limit,
+            arena_len: self.arena.len(),
+            edge_count: self.edge_count,
+            local_tt: format!("{:?}", self.tt),
         }
     }
 
@@ -4107,6 +4267,10 @@ fn ordered_threat_creating_moves_with_width(
         defender_threats,
     } = if width.vcf_pair_complete {
         threat_creating_moves_with_threshold(state, claimant, 2)
+    } else if width.narrow_engine_migration {
+        // The migrated engine names the generalized generator directly.  The
+        // legacy wrapper remains live in the default-off branch until round 6.
+        threat_creating_moves_with_threshold(state, claimant, 3)
     } else {
         threat_creating_moves(state, claimant)
     };
@@ -5315,6 +5479,7 @@ fn player_code(player: Player) -> u8 {
     }
 }
 
+#[derive(Debug)]
 struct TtEntry {
     hash: u64,
     key: PositionKey,
@@ -5322,6 +5487,7 @@ struct TtEntry {
     node: CertNodeId,
 }
 
+#[derive(Debug)]
 struct BoundedTt {
     slots: Vec<Option<TtEntry>>,
     cap: usize,
@@ -9227,5 +9393,418 @@ mod tests {
         assert_eq!(required, expected);
         assert!(required.contains(&HexCoord::new(8, 0)));
         assert!(!required.contains(&HexCoord::new(0, 1)));
+    }
+
+    fn narrow_identity_pair(hash_mask: u64, zone: ZoneSearchCaps) -> (TssSolver, TssSolver) {
+        let mut legacy = TssSolver::with_hash_mask(hash_mask);
+        let mut migrated = TssSolver::with_hash_mask(hash_mask);
+        legacy.set_zone_options(zone);
+        migrated.set_zone_options(zone);
+        migrated.set_width_options(WidthOptions::narrow_compat());
+        (legacy, migrated)
+    }
+
+    /// The certificate has no public wire codec.  This test-only canonical
+    /// encoder covers every field explicitly so identity is checked as bytes in
+    /// addition to the type's structural equality.
+    fn narrow_certificate_bytes(cert: &Option<TssCertificate>) -> Vec<u8> {
+        fn put_u32(out: &mut Vec<u8>, value: u32) {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        fn put_len(out: &mut Vec<u8>, value: usize) {
+            out.extend_from_slice(&(value as u64).to_le_bytes());
+        }
+        fn put_player(out: &mut Vec<u8>, player: Player) {
+            out.push(player_code(player));
+        }
+        fn put_coord(out: &mut Vec<u8>, coord: HexCoord) {
+            out.extend_from_slice(&coord.q.to_le_bytes());
+            out.extend_from_slice(&coord.r.to_le_bytes());
+        }
+        fn put_window(out: &mut Vec<u8>, window: WindowKey) {
+            put_coord(out, window.start);
+            out.push(window.axis.index());
+        }
+
+        let mut out = Vec::new();
+        let Some(cert) = cert else {
+            out.push(0);
+            return out;
+        };
+        out.push(1);
+        put_len(&mut out, cert.root.occupancy.len());
+        for coord in &cert.root.occupancy {
+            put_coord(&mut out, *coord);
+        }
+        put_len(&mut out, cert.root.owners.len());
+        for owner in &cert.root.owners {
+            put_player(&mut out, *owner);
+        }
+        put_player(&mut out, cert.root.current_player);
+        match cert.root.phase {
+            TurnPhase::Opening => out.push(0),
+            TurnPhase::FirstStone => out.push(1),
+            TurnPhase::SecondStone { first } => {
+                out.push(2);
+                put_coord(&mut out, first);
+            }
+        }
+        put_u32(&mut out, cert.root.placements_made);
+        match cert.root.terminal {
+            None => out.push(0),
+            Some(outcome) => {
+                out.push(1);
+                put_player(&mut out, outcome.winner);
+                put_u32(&mut out, outcome.placements);
+            }
+        }
+        put_player(&mut out, cert.claimant);
+        put_u32(&mut out, cert.root_node);
+        put_len(&mut out, cert.nodes.len());
+        for node in &cert.nodes {
+            match node {
+                CertNode::OrCompletion {
+                    mv,
+                    witness,
+                    completion_ply,
+                } => {
+                    out.push(0);
+                    put_coord(&mut out, *mv);
+                    put_window(&mut out, *witness);
+                    put_u32(&mut out, *completion_ply);
+                }
+                CertNode::Win {
+                    witness,
+                    count,
+                    budget,
+                    resolution_ply,
+                } => {
+                    out.push(1);
+                    put_window(&mut out, *witness);
+                    out.push(*count);
+                    out.push(*budget);
+                    put_u32(&mut out, *resolution_ply);
+                }
+                CertNode::Loss {
+                    witnesses,
+                    resolution_ply,
+                } => {
+                    out.push(2);
+                    put_len(&mut out, witnesses.len());
+                    for witness in witnesses {
+                        put_window(&mut out, *witness);
+                    }
+                    put_u32(&mut out, *resolution_ply);
+                }
+                CertNode::Choice { mv, child } => {
+                    out.push(3);
+                    put_coord(&mut out, *mv);
+                    put_u32(&mut out, *child);
+                }
+                CertNode::Universal {
+                    edges,
+                    implicit_dispatch,
+                    zone,
+                    commutations,
+                } => {
+                    out.push(4);
+                    put_len(&mut out, edges.len());
+                    for edge in edges {
+                        put_coord(&mut out, edge.mv);
+                        put_u32(&mut out, edge.child);
+                    }
+                    out.push(u8::from(*implicit_dispatch));
+                    match zone {
+                        None => out.push(0),
+                        Some(zone) => {
+                            out.push(1);
+                            put_u32(&mut out, zone.d);
+                            put_u32(&mut out, zone.build_horizon);
+                        }
+                    }
+                    put_len(&mut out, commutations.len());
+                    for item in commutations {
+                        put_coord(&mut out, item.first);
+                        put_coord(&mut out, item.omitted_second);
+                        put_u32(&mut out, item.first_child);
+                        put_u32(&mut out, item.mirror_child);
+                    }
+                }
+            }
+        }
+        put_u32(&mut out, cert.semantic_horizon);
+        out
+    }
+
+    fn narrow_replay_string(state: &RustHexoState) -> String {
+        state
+            .placement_history()
+            .iter()
+            .map(|record| format!("({}, {})", record.coord.q, record.coord.r))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn assert_narrow_identity(
+        label: &str,
+        state: &RustHexoState,
+        caps: &SolveCaps,
+        goal: SolveGoal,
+        legacy: &mut TssSolver,
+        migrated: &mut TssSolver,
+    ) -> (SolveStats, SolveStats) {
+        let replay = narrow_replay_string(state);
+        let old = legacy.solve_goal(state, caps, goal);
+        let new = migrated.solve_goal(state, caps, goal);
+        let context = format!(
+            "case={label} goal={goal:?} node_cap={} tt_bytes_cap={} horizon={} replay=[{replay}]",
+            caps.node_cap, caps.tt_bytes_cap, caps.semantic_horizon
+        );
+
+        assert_eq!(old.status, new.status, "status mismatch: {context}");
+        assert_eq!(old.stats.nodes, new.stats.nodes, "node mismatch: {context}");
+        assert_eq!(
+            old.stats.tt_hits, new.stats.tt_hits,
+            "TT-hit mismatch: {context}"
+        );
+        assert_eq!(
+            old.stats.peak_tt_bytes, new.stats.peak_tt_bytes,
+            "TT-byte mismatch: {context}"
+        );
+        assert_eq!(old.cert, new.cert, "certificate mismatch: {context}");
+        assert_eq!(
+            narrow_certificate_bytes(&old.cert),
+            narrow_certificate_bytes(&new.cert),
+            "certificate-byte mismatch: {context}"
+        );
+        assert_eq!(
+            legacy.last_narrow_signatures, migrated.last_narrow_signatures,
+            "solve-local TT behavior mismatch: {context}"
+        );
+        assert_eq!(
+            legacy.shared_tt, migrated.shared_tt,
+            "persistent TT behavior mismatch: {context}"
+        );
+        if let Some(cert) = old.cert.as_ref() {
+            assert!(
+                TssVerifier.verify(state, cert, old.status),
+                "legacy certificate rejected: {context}"
+            );
+            assert!(
+                TssVerifier.verify_with_dispatch_oracle(state, cert, old.status),
+                "legacy certificate rejected by dispatch oracle: {context}"
+            );
+        } else {
+            assert_eq!(
+                old.status,
+                ProofStatus::Unknown,
+                "certless hard result: {context}"
+            );
+        }
+        (old.stats, new.stats)
+    }
+
+    #[derive(Clone, Copy)]
+    struct NarrowIdentityRng(u64);
+
+    impl NarrowIdentityRng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+    }
+
+    #[test]
+    #[ignore = "round-5 C1 full fixture and 512-position identity gate"]
+    fn tss_round5_narrow_compat_identity() {
+        let production_caps = SolveCaps {
+            node_cap: 64,
+            tt_bytes_cap: 256 << 10,
+            semantic_horizon: u32::MAX,
+        };
+
+        // Deterministic certificates, goal filtering, semantic deadlines, and
+        // all three phases from the default narrow fixture family.
+        let fixtures = [
+            ("quiet", quiet_fixture()),
+            ("forced-defense", forced_defense_fixture()),
+            ("win-now", win_now_fixture()),
+            ("forced-loss", forced_loss_fixture()),
+            ("spare-tempo", spare_tempo_fixture()),
+            ("deep-universal", deep_universal_fixture()),
+        ];
+        let (mut legacy, mut migrated) = narrow_identity_pair(u64::MAX, ZoneSearchCaps::default());
+        for (label, state) in &fixtures {
+            for goal in [SolveGoal::Win, SolveGoal::Loss, SolveGoal::Both] {
+                assert_narrow_identity(
+                    label,
+                    state,
+                    &production_caps,
+                    goal,
+                    &mut legacy,
+                    &mut migrated,
+                );
+            }
+        }
+        let expired = SolveCaps {
+            semantic_horizon: deep_universal_fixture().placements_made().saturating_sub(1),
+            ..production_caps
+        };
+        assert_narrow_identity(
+            "expired-horizon",
+            &deep_universal_fixture(),
+            &expired,
+            SolveGoal::Win,
+            &mut legacy,
+            &mut migrated,
+        );
+
+        // A warm second solve must reproduce the exact imported-fragment path,
+        // including its lower node count and positive TT hit.
+        let warm_caps = SolveCaps {
+            node_cap: 64,
+            tt_bytes_cap: 8 << 20,
+            semantic_horizon: u32::MAX,
+        };
+        let warm_state = deep_universal_fixture();
+        let (mut warm_legacy, mut warm_migrated) =
+            narrow_identity_pair(u64::MAX, ZoneSearchCaps::default());
+        let (cold, _) = assert_narrow_identity(
+            "persistent-cold",
+            &warm_state,
+            &warm_caps,
+            SolveGoal::Win,
+            &mut warm_legacy,
+            &mut warm_migrated,
+        );
+        let (warm, _) = assert_narrow_identity(
+            "persistent-warm",
+            &warm_state,
+            &warm_caps,
+            SolveGoal::Win,
+            &mut warm_legacy,
+            &mut warm_migrated,
+        );
+        assert!(warm.tt_hits > 0, "warm solve must import a shared fragment");
+        assert!(warm.nodes < cold.nodes, "warm solve must reduce node count");
+
+        // Forced bucket collisions exercise full-key local and shared TT
+        // equality.  Repeating each solve also covers cache warmth under the
+        // collision mask.
+        let (mut collision_legacy, mut collision_migrated) =
+            narrow_identity_pair(0, ZoneSearchCaps::default());
+        for (label, state) in &fixtures {
+            for repeat in 0..2 {
+                assert_narrow_identity(
+                    &format!("collision-{label}-{repeat}"),
+                    state,
+                    &production_caps,
+                    SolveGoal::Win,
+                    &mut collision_legacy,
+                    &mut collision_migrated,
+                );
+            }
+        }
+
+        // Zone-enabled narrow certificates and all D6 images retain exact
+        // bytes, while the independent verifier rechecks each hard claim.
+        let zone = ZoneSearchCaps {
+            enabled: true,
+            stale_area_filter: false,
+            count2_threshold: false,
+            pair_commutation: false,
+        };
+        let (mut zone_legacy, mut zone_migrated) = narrow_identity_pair(u64::MAX, zone);
+        for symmetry in 0..D6_SYMMETRY_COUNT {
+            let state = transformed_state(&deep_universal_fixture(), symmetry);
+            assert_narrow_identity(
+                &format!("zone-d6-{symmetry}"),
+                &state,
+                &production_caps,
+                SolveGoal::Win,
+                &mut zone_legacy,
+                &mut zone_migrated,
+            );
+        }
+
+        // Fixed-seed randomized sweep: at least 512 positions, all phases,
+        // both one-sided goals, cap exits, zero/small TT, and production TT.
+        let mut corpus = Vec::new();
+        let mut phases = [false; 3];
+        let mut seed = 1u64;
+        while corpus.len() < 512 {
+            let mut rng = NarrowIdentityRng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let mut state = RustHexoState::new();
+            for snapshot in 0..32usize {
+                let phase = match state.phase() {
+                    TurnPhase::Opening => 0,
+                    TurnPhase::FirstStone => 1,
+                    TurnPhase::SecondStone { .. } => 2,
+                };
+                phases[phase] = true;
+                corpus.push((seed, snapshot, state.clone()));
+                if corpus.len() >= 512 {
+                    break;
+                }
+                let mut legal = Vec::new();
+                state.write_legal_moves(&mut legal);
+                if legal.is_empty() {
+                    break;
+                }
+                let coord = legal[(rng.next() as usize) % legal.len()];
+                let result = apply_placement(&mut state, Placement { coord }).unwrap();
+                if result.outcome.is_some() {
+                    break;
+                }
+            }
+            seed = seed.saturating_add(1);
+        }
+        assert!(phases.into_iter().all(|seen| seen));
+        assert!(corpus.len() >= 512);
+
+        let random_caps = [
+            SolveCaps {
+                node_cap: 0,
+                tt_bytes_cap: 0,
+                semantic_horizon: u32::MAX,
+            },
+            SolveCaps {
+                node_cap: 1,
+                tt_bytes_cap: 1024,
+                semantic_horizon: u32::MAX,
+            },
+            SolveCaps {
+                node_cap: 32,
+                tt_bytes_cap: 256 << 10,
+                semantic_horizon: u32::MAX,
+            },
+            SolveCaps {
+                node_cap: 64,
+                tt_bytes_cap: 256 << 10,
+                semantic_horizon: u32::MAX,
+            },
+        ];
+        let (mut random_legacy, mut random_migrated) =
+            narrow_identity_pair(u64::MAX, ZoneSearchCaps::default());
+        for (index, (seed, snapshot, state)) in corpus.iter().enumerate() {
+            let mut caps = random_caps[index % random_caps.len()];
+            if index % 7 == 0 {
+                caps.semantic_horizon = state.placements_made().saturating_add(3);
+            }
+            for goal in [SolveGoal::Win, SolveGoal::Loss] {
+                assert_narrow_identity(
+                    &format!("random-seed-{seed}-snapshot-{snapshot}"),
+                    state,
+                    &caps,
+                    goal,
+                    &mut random_legacy,
+                    &mut random_migrated,
+                );
+            }
+        }
     }
 }

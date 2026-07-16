@@ -1,0 +1,80 @@
+Group-2, round 5 — THE C1 MIGRATION, step 1 of 2 (OWNER-APPROVED): build
+the WidePnSearch narrow-options mode and PROVE byte-identity against the
+live narrow DFS path. The dispatcher flip and deletion are round 6 — NOT
+this round. With the flag off, production behavior must be bit-for-bit
+unchanged; that is the entire contract.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width.
+Confirm HEAD first (expected 961623a7, round-4 consolidation). Read
+.codex-group2/round4-progress.md IN FULL — its C1 dependency map is your
+map of the production path, and its completion proposal is your brief:
+
+  "implement a WidePnSearch narrow-options mode without changing
+   TssSolver::default() routing; prove exact status, node count,
+   certificate bytes, local/shared-TT behavior, cache-warm behavior, and
+   Stage-0 golden digest identity over the full default and narrow
+   fixture set; only then flip the default dispatcher in a separately
+   gated migration and delete SearchContext/the count>=3 generator after
+   a second identity run."
+
+This round delivers everything before "only then".
+
+## The production path you are replicating (from the C1 map)
+tss_solve_verified (256 KiB cap) -> solve_goal -> split_tt_cap (half
+solve-local, half persistent positive-fragment cache) -> prove_for ->
+prove_for_at_depth -> SearchContext; claimant Choice nodes call
+ordered_threat_creating_moves_with_width whose default branch is the
+historical count>=3 threat_creating_moves generator. Consumers:
+TssSolverSlot (tree.rs, persistent + clone), payload root guard
+(search.rs), async workers (tss_async.rs, persistent + panic-reset).
+
+## What to build
+1. A narrow-options mode of WidePnSearch (e.g. WidthOptions::narrow_compat()
+   or equivalent) that reproduces the narrow DFS semantics EXACTLY:
+   count>=3 OR-generator, same defender semantics, same horizon/deadline
+   handling, same TT split behavior (split_tt_cap: solve-local half +
+   persistent positive-fragment cache half — including what survives
+   across solves in a persistent solver), same certificate structure and
+   bytes, same determinism. Where WidePnSearch's architecture makes exact
+   node-count identity genuinely impossible (different search order),
+   STOP and write up precisely why — do not redefine "identity" downward
+   silently. The acceptance metric is the proposal's list verbatim.
+2. An identity harness (test-gated, #[ignore] where long): for every
+   fixture in the default suite's narrow coverage (deterministic
+   certificates, TT collision/equivalence, persistent-cache, goal-filter,
+   verifier checks) plus a randomized corpus sweep (fixed seeds, >=500
+   positions across phases, both goals, caps including the production
+   256 KiB TT), run old-path vs narrow-compat and assert: status ==,
+   nodes ==, certificate bytes ==, TT hit/behavior signature ==,
+   cache-warm second-solve behavior ==. Any mismatch: STOP, diagnose,
+   write it up with the exact position replay — a mismatch is a FINDING
+   about semantics, not a test to weaken.
+3. The dispatcher flag (default OFF, e.g. tss_narrow_engine_migration):
+   routes prove_for through the narrow-compat mode when ON. No production
+   caller flips it this round. Flag-off = byte-identical (prove via the
+   suite + Stage-0 golden digest).
+
+## Definition of done (all required)
+(1) identity harness green over the full fixture set + randomized sweep;
+(2) default release suite 95/0 with flag off; (3) Stage-0 golden digest
+PASS in its documented WSL environment (command in round4-progress.md);
+(4) official all-19 gate PASS at the 2 GiB profile (flags off);
+(5) double_fork_compact consume witness re-verifies WIN/409;
+(6) .codex-group2/round5-progress.md: what narrow-compat required
+architecturally, every identity dimension's evidence, any impossibility
+write-ups, per-checkpoint regen commands, and the round-6 flip/deletion
+checklist (second identity run, dispatcher flip, SearchContext +
+threat_creating_moves deletion, final gates).
+
+## Operational rules, binding
+(1) You CANNOT git-commit — checkpoint boundaries in the progress file.
+(2) CARGO_TARGET_DIR=.target-codex; never C:. (3) rustfmt --edition 2021
+only on files you edit; no workspace-wide formatting. (4) Work only in
+this worktree; siblings read-only. (5) RAM — STRICTER THIS ROUND: three
+other sessions share this host (a Lean lane with priority + two proof
+sessions). Check free RAM > 10 GB before EVERY build/long run
+(powershell "Get-CimInstance Win32_OperatingSystem | % {
+$_.FreePhysicalMemory/1MB }"); if below, wait and re-check; one
+build/solve at a time; --test-threads=1. (6) Any WIN-vs-LOSS
+disagreement at matched semantics = STOP and write up. (7) Long solves:
+chunk <= 2h per exec.
