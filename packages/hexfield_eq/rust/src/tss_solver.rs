@@ -753,8 +753,7 @@ const PN_INFINITY: u32 = 1_000_000_000;
 #[cfg(test)]
 static WIDE_GEN_PAIR_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(test)]
-static WIDE_GEN_DEFENDER_NANOS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static WIDE_GEN_DEFENDER_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(test)]
 static WIDE_GEN_PRIOR_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -1253,6 +1252,8 @@ struct WidePnSearch {
     /// wrapper sets it to `expansions + 1` so the focused stepper tests keep
     /// their one-expansion-per-call contract.
     soft_expansion_cap: u64,
+    /// Fix A scheduling oracle. `None` disables probing (A/B kill-switch).
+    racer: Option<WideRacer>,
     #[cfg(test)]
     tt_index_rejections: u64,
     #[cfg(test)]
@@ -1284,6 +1285,21 @@ impl WidePnSearch {
             current_bytes: 0,
             peak_bytes: 0,
             soft_expansion_cap: u64::MAX,
+            // Fix A oracle, DEFAULT OFF: the direct A/B on the isolated 0l
+            // hard child measured no node-count change in any configuration
+            // (185,790 base / 185,943 probe-everywhere / 185,986 tie-gated)
+            // with 34-94% wall overhead — the tau/fork/tier/commitment
+            // ordering stack already discriminates on this corpus, so the
+            // probes only burn budget. Kept behind a test-only opt-in for
+            // future A/Bs; delete at the next consolidation absent new
+            // evidence (owner's one-system rule).
+            racer: {
+                #[cfg(test)]
+                let enabled = std::env::var_os("TSS_WIDE_AB_RACER").is_some();
+                #[cfg(not(test))]
+                let enabled = false;
+                enabled.then(|| WideRacer::new(claimant, node_cap.saturating_mul(2).max(100_000)))
+            },
             #[cfg(test)]
             tt_index_rejections: 0,
             #[cfg(test)]
@@ -2320,7 +2336,40 @@ impl WidePnSearch {
         }
 
         let (kind, mut children) = if state.current_player() == self.claimant {
-            (WidePnKind::Choice, self.attack_children(state, depth))
+            let mut children = self.attack_children(state, depth);
+            // Fix A probe: at a fresh attacker pair node WHOSE ORDERING IS
+            // AMBIGUOUS, ask the uncertified racer for a winning first turn
+            // and, when it reports one, drop that child's proof-number prior
+            // to the minimum so the df-pn descent drives the oracle line
+            // first. Probing every node measurably regresses (the oracle
+            // burns budget on positions whose ordering was already right);
+            // the tie between the leading candidates is exactly the
+            // historical 0l root-cause shape where static ordering cannot
+            // discriminate. Priors steer visit order only; a wrong oracle
+            // costs re-exploration, never soundness.
+            if children.len() > 1
+                && depth <= RACER_MAX_PROBE_DEPTH
+                && matches!(state.phase(), TurnPhase::FirstStone)
+                && wide_choice_ordering_is_ambiguous(&children)
+            {
+                if let Some(racer) = self.racer.as_mut() {
+                    if let Some((first, second)) = racer.probe(state, RACER_PROBE_TURNS) {
+                        for child in &mut children {
+                            let matches_pair = match child.mv {
+                                WidePnMove::Pair(a, b) => {
+                                    (a == first && b == second) || (a == second && b == first)
+                                }
+                                _ => false,
+                            };
+                            if matches_pair && child.result == WidePnChildResult::Pending {
+                                child.prior.pn = 1;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            (WidePnKind::Choice, children)
         } else {
             let analysis = threats::analyze(state);
             let implicit_dispatch = !matches!(state.phase(), TurnPhase::Opening)
@@ -4072,7 +4121,10 @@ impl WideTurnGate {
                         empties: empties.clone(),
                     };
                     for &cell in &empties {
-                        windows_by_cell.entry(cell).or_default().push(window.clone());
+                        windows_by_cell
+                            .entry(cell)
+                            .or_default()
+                            .push(window.clone());
                     }
                 }
             } else if count >= 4 {
@@ -4193,6 +4245,262 @@ impl WideTurnGate {
             ));
         }
         None
+    }
+}
+
+/// Zobrist keys for the uncertified racer: one 64-bit key per (cell, player)
+/// over a generous coordinate window, generated once from a fixed splitmix64
+/// seed so racer verdicts are deterministic across runs.
+fn racer_zobrist(coord: HexCoord, player: Player) -> u64 {
+    const GRID: i16 = 64;
+    static TABLE: std::sync::OnceLock<Vec<u64>> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut split = || {
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        };
+        (0..(GRID as usize * GRID as usize * 2))
+            .map(|_| split())
+            .collect()
+    });
+    let q = (coord.q.rem_euclid(GRID)) as usize;
+    let r = (coord.r.rem_euclid(GRID)) as usize;
+    table[(q * GRID as usize + r) * 2 + player.index()]
+}
+
+/// Fix A: bounded, UNCERTIFIED depth-first VCF racer over the same wide
+/// forcing universe as the certified search. It answers one question — "does
+/// the claimant have a forcing win from here?" — with top-K move budgets and
+/// a memo table, and its verdicts steer ONLY proof-number priors: a racer
+/// win never mints a certificate, so racer bugs cannot create false WINs.
+struct WideRacer {
+    claimant: Player,
+    /// Attacker-turn evaluations spent (the racer node unit).
+    turns: u64,
+    /// Hard ceiling across the whole solve.
+    turn_budget: u64,
+    /// Attacker-node verdict memo (incremental zobrist -> claimant wins).
+    memo: HashMap<u64, bool>,
+}
+
+/// Racer move budgets: first stones tried per node, second stones per first,
+/// forcing pairs recursed per node, and the defender fan-out above which the
+/// racer declines to claim a win.
+const RACER_FIRST_K: usize = 8;
+const RACER_SECOND_K: usize = 16;
+const RACER_PAIR_TRIES: usize = 12;
+const RACER_MAX_DEFENDER_REPLIES: usize = 12;
+const RACER_PROBE_TURNS: u64 = 600;
+const RACER_MAX_PROBE_DEPTH: usize = 24;
+
+/// The probe trigger: the two leading Pending children tie on (width tier,
+/// prior pn) so the static ordering cannot discriminate between them. This
+/// is the measured 0l root-cause shape; everywhere else the ordering signal
+/// already points at one candidate and a probe is pure overhead.
+fn wide_choice_ordering_is_ambiguous(children: &[WidePnChild]) -> bool {
+    let mut best: Option<(u8, u32)> = None;
+    let mut best_count = 0usize;
+    for child in children {
+        if child.result != WidePnChildResult::Pending {
+            continue;
+        }
+        let key = (child.first_width_tier, child.prior.pn);
+        match best {
+            None => {
+                best = Some(key);
+                best_count = 1;
+            }
+            Some(current) if key < current => {
+                best = Some(key);
+                best_count = 1;
+            }
+            Some(current) if key == current => {
+                best_count += 1;
+            }
+            Some(_) => {}
+        }
+    }
+    best_count >= 2
+}
+
+impl WideRacer {
+    fn new(claimant: Player, turn_budget: u64) -> Self {
+        Self {
+            claimant,
+            turns: 0,
+            turn_budget,
+            memo: HashMap::new(),
+        }
+    }
+
+    fn hash_state(state: &RustHexoState) -> u64 {
+        let mut hash = 0u64;
+        for &coord in state.board().occupied_cells() {
+            if let Some(owner) = state.board().get(coord) {
+                hash ^= racer_zobrist(coord, owner);
+            }
+        }
+        hash
+    }
+
+    /// Probe a claimant FirstStone node: on a racer win, return the winning
+    /// first turn so the caller can boost that child's prior.
+    fn probe(
+        &mut self,
+        state: &mut RustHexoState,
+        probe_budget: u64,
+    ) -> Option<(HexCoord, HexCoord)> {
+        let stop_at = self
+            .turns
+            .saturating_add(probe_budget)
+            .min(self.turn_budget);
+        let hash = Self::hash_state(state);
+        self.race_attacker_turn(state, hash, stop_at, true)
+            .and_then(|winning| winning)
+    }
+
+    /// One attacker turn at a claimant FirstStone node. Returns None when the
+    /// budget is exhausted or no tried turn wins; `Some(pair)` reports a win
+    /// (with the winning first turn only when `report_pair` is set).
+    fn race_attacker_turn(
+        &mut self,
+        state: &mut RustHexoState,
+        hash: u64,
+        stop_at: u64,
+        report_pair: bool,
+    ) -> Option<Option<(HexCoord, HexCoord)>> {
+        if let Some(&won) = self.memo.get(&hash) {
+            return won.then_some(None);
+        }
+        if self.turns >= stop_at {
+            return None;
+        }
+        self.turns += 1;
+        let analysis = threats::analyze(state);
+        if analysis.own_win_now {
+            self.memo.insert(hash, true);
+            return Some(None);
+        }
+        let gate = WideTurnGate::build(state, self.claimant);
+        let firsts = ordered_threat_creating_moves_with_width(
+            state,
+            self.claimant,
+            WidthOptions::vcf_pair_complete(),
+        );
+        let mut pair_tries = 0usize;
+        for first_candidate in firsts.iter().take(RACER_FIRST_K) {
+            let first = first_candidate.coord;
+            let Ok((_result, first_delta)) = state.apply_with_delta(Placement { coord: first })
+            else {
+                continue;
+            };
+            let seconds = ordered_threat_creating_moves_with_width(
+                state,
+                self.claimant,
+                WidthOptions::vcf_pair_complete(),
+            );
+            for second_candidate in seconds.iter().take(RACER_SECOND_K) {
+                let second = second_candidate.coord;
+                let Some((result, _prior)) = gate.evaluate_pair(first, second, u32::MAX) else {
+                    continue;
+                };
+                if result == WidePnChildResult::ClaimantTactical {
+                    state.undo(first_delta);
+                    self.memo.insert(hash, true);
+                    return Some(report_pair.then_some((first, second)));
+                }
+                pair_tries += 1;
+                let Ok((_second_result, second_delta)) =
+                    state.apply_with_delta(Placement { coord: second })
+                else {
+                    continue;
+                };
+                let pair_hash = hash
+                    ^ racer_zobrist(first, self.claimant)
+                    ^ racer_zobrist(second, self.claimant);
+                let refuted_all = self.race_defender_node(state, pair_hash, stop_at);
+                state.undo(second_delta);
+                if refuted_all {
+                    state.undo(first_delta);
+                    self.memo.insert(hash, true);
+                    return Some(report_pair.then_some((first, second)));
+                }
+                if pair_tries >= RACER_PAIR_TRIES || self.turns >= stop_at {
+                    break;
+                }
+            }
+            state.undo(first_delta);
+            if pair_tries >= RACER_PAIR_TRIES || self.turns >= stop_at {
+                break;
+            }
+        }
+        // Budget-capped misses are memoized too: the racer is an ordering
+        // oracle, not a prover, and a stable answer is worth more than a
+        // retry that double-spends budget on the same position.
+        self.memo.insert(hash, false);
+        None
+    }
+
+    /// True when EVERY defender reply pair at this forced node loses to a
+    /// racer-found continuation. Declines (false) on wide fan-outs and budget
+    /// exhaustion so the racer never over-claims cheaply.
+    fn race_defender_node(&mut self, state: &mut RustHexoState, hash: u64, stop_at: u64) -> bool {
+        let analysis = threats::analyze(state);
+        if analysis.own_win_now {
+            return false;
+        }
+        if analysis.min_hitting_set.is_none() {
+            return true;
+        }
+        if self.turns >= stop_at {
+            return false;
+        }
+        let replies = forced_defender_replies(
+            state,
+            self.claimant,
+            analysis.b,
+            WidthOptions::vcf_pair_complete(),
+        );
+        if replies.is_empty() || replies.len() > RACER_MAX_DEFENDER_REPLIES {
+            return false;
+        }
+        for left in 0..replies.len() {
+            for right in (left + 1)..replies.len() {
+                let (c, d) = (replies[left], replies[right]);
+                let Ok((_first, first_delta)) = state.apply_with_delta(Placement { coord: c })
+                else {
+                    return false;
+                };
+                if state.is_terminal() {
+                    state.undo(first_delta);
+                    return false;
+                }
+                let Ok((_second, second_delta)) = state.apply_with_delta(Placement { coord: d })
+                else {
+                    state.undo(first_delta);
+                    return false;
+                };
+                let survived = if state.is_terminal() {
+                    // A defender completion refutes the attack outright.
+                    true
+                } else {
+                    let defender = self.claimant.other();
+                    let child_hash = hash ^ racer_zobrist(c, defender) ^ racer_zobrist(d, defender);
+                    self.race_attacker_turn(state, child_hash, stop_at, false)
+                        .is_none()
+                };
+                state.undo(second_delta);
+                state.undo(first_delta);
+                if survived {
+                    return false;
+                }
+            }
+        }
+        true
     }
 }
 
