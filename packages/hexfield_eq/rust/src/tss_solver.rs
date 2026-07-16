@@ -23,7 +23,8 @@ use hexo_engine::{
 
 use crate::threats_shared as threats;
 use crate::tss_core::{
-    DeepResult, DeepSolve, ProofStatus, SolveCaps, SolveGoal, SolveStats, ZoneSearchCaps,
+    seed_band_radius, DeepResult, DeepSolve, ProofStatus, SolveCaps, SolveGoal, SolveStats,
+    ZoneSearchCaps,
 };
 use crate::tss_verify::{
     CertCommutation, CertEdge, CertNode, CertNodeId, RootBinding, TssCertificate, ZoneInfo,
@@ -58,15 +59,52 @@ const LOCAL_TT_FAILED: CertNodeId = CertNodeId::MAX;
 /// historical narrow generator so production callers retain byte-identical
 /// search behavior.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Round3Flag {
+    #[default]
+    Off,
+    Shadow,
+    Consume,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct WidthOptions {
     vcf_pair_complete: bool,
+    quiet_turn_or_edges: Round3Flag,
+    ranked_unforced_defender_zone: Round3Flag,
 }
 
 impl WidthOptions {
     pub(crate) fn vcf_pair_complete() -> Self {
         Self {
             vcf_pair_complete: true,
+            quiet_turn_or_edges: Round3Flag::Off,
+            ranked_unforced_defender_zone: Round3Flag::Off,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn round3_shadow() -> Self {
+        Self {
+            vcf_pair_complete: true,
+            quiet_turn_or_edges: Round3Flag::Shadow,
+            ranked_unforced_defender_zone: Round3Flag::Shadow,
+        }
+    }
+
+    pub(crate) fn round3_consume() -> Self {
+        Self {
+            vcf_pair_complete: true,
+            quiet_turn_or_edges: Round3Flag::Consume,
+            ranked_unforced_defender_zone: Round3Flag::Consume,
+        }
+    }
+
+    fn consumes_quiet_turns(self) -> bool {
+        self.quiet_turn_or_edges == Round3Flag::Consume
+    }
+
+    fn consumes_ranked_zone(self) -> bool {
+        self.ranked_unforced_defender_zone == Round3Flag::Consume
     }
 }
 
@@ -281,7 +319,19 @@ impl TssSolver {
         zone: ZoneSearchCaps,
         width: WidthOptions,
     ) -> AttemptResult {
-        if !width.vcf_pair_complete {
+        if !width.vcf_pair_complete
+            || (width.consumes_quiet_turns() && width.consumes_ranked_zone())
+        {
+            let zone = if width.consumes_ranked_zone() {
+                ZoneSearchCaps {
+                    enabled: true,
+                    stale_area_filter: false,
+                    count2_threshold: true,
+                    pair_commutation: false,
+                }
+            } else {
+                zone
+            };
             return self.prove_for_at_depth(
                 state,
                 claimant,
@@ -302,6 +352,7 @@ impl TssSolver {
             local_tt_cap,
             semantic_horizon,
             depth_cap,
+            width,
         )
     }
 
@@ -313,15 +364,17 @@ impl TssSolver {
         local_tt_cap: usize,
         semantic_horizon: u32,
         depth_cap: usize,
+        width: WidthOptions,
     ) -> AttemptResult {
         let shared_bytes = self.shared_tt.current_bytes;
-        let mut search = WidePnSearch::new(
+        let mut search = WidePnSearch::new_with_width(
             claimant,
             state.placements_made(),
             node_cap,
             local_tt_cap,
             semantic_horizon,
             depth_cap,
+            width,
         );
         let root = search.insert_root(state);
         search.run(state, root);
@@ -1198,12 +1251,11 @@ fn forced_defender_pair_plan(
             // key is constructible without touching the engine. `second` is a
             // kernel threat-window empty, hence always a legal placement.
             let final_key = WidePositionKey::for_defender_pair(state, claimant, &[second]);
-            let retained_prior = (raw_coord_key(first) < raw_coord_key(second)).then(|| {
-                WidePnPrior {
+            let retained_prior =
+                (raw_coord_key(first) < raw_coord_key(second)).then(|| WidePnPrior {
                     pn: shared_fork_pn,
                     dn: 1,
-                }
-            });
+                });
             directed.push(WideDirectedDefenderPair {
                 first,
                 second,
@@ -1298,6 +1350,7 @@ struct WidePnSearch {
     tt_bytes_cap: usize,
     semantic_horizon: u32,
     depth_cap: usize,
+    width: WidthOptions,
     expansions: u64,
     tt_hits: u64,
     current_bytes: usize,
@@ -1328,6 +1381,26 @@ impl WidePnSearch {
         semantic_horizon: u32,
         depth_cap: usize,
     ) -> Self {
+        Self::new_with_width(
+            claimant,
+            root_ply,
+            node_cap,
+            tt_bytes_cap,
+            semantic_horizon,
+            depth_cap,
+            WidthOptions::vcf_pair_complete(),
+        )
+    }
+
+    fn new_with_width(
+        claimant: Player,
+        root_ply: u32,
+        node_cap: u64,
+        tt_bytes_cap: usize,
+        semantic_horizon: u32,
+        depth_cap: usize,
+        width: WidthOptions,
+    ) -> Self {
         Self {
             claimant,
             root_ply,
@@ -1335,6 +1408,7 @@ impl WidePnSearch {
             tt_bytes_cap,
             semantic_horizon,
             depth_cap,
+            width,
             expansions: 0,
             tt_hits: 0,
             current_bytes: 0,
@@ -3353,6 +3427,11 @@ impl<'a> SearchContext<'a> {
                 candidates.retain(|candidate| pair_candidate_allowed(candidate.coord, pair));
             }
         }
+        let quiet_priority = candidates
+            .iter()
+            .enumerate()
+            .map(|(rank, candidate)| (candidate.coord, rank))
+            .collect::<HashMap<_, _>>();
         let turn_start_candidates = (self.width.vcf_pair_complete
             && pair.is_none()
             && matches!(state.phase(), TurnPhase::FirstStone)
@@ -3443,6 +3522,54 @@ impl<'a> SearchContext<'a> {
                 return None;
             }
         }
+        if self.width.consumes_quiet_turns() {
+            let mut complete = Vec::new();
+            state.write_legal_moves(&mut complete);
+            if let Some(pair) = pair {
+                restrict_pair_candidates(&mut complete, pair);
+            }
+            let frame = canonical_frame(state);
+            complete.sort_by_key(|coord| {
+                (
+                    quiet_priority.get(coord).copied().unwrap_or(usize::MAX),
+                    canonical_coord_key(frame, *coord),
+                )
+            });
+            for coord in complete {
+                let Ok((result, delta)) = state.apply_with_delta(Placement { coord }) else {
+                    continue;
+                };
+                let completion_ply = ply.checked_add(1)?;
+                if result
+                    .outcome
+                    .is_some_and(|outcome| outcome.winner == claimant)
+                {
+                    let completion = (completion_ply <= self.semantic_horizon)
+                        .then(|| wide_completion_node(state, claimant, coord, completion_ply))
+                        .flatten();
+                    state.undo(delta);
+                    return self.alloc_node(completion?, 0);
+                }
+                if result.outcome.is_some() {
+                    state.undo(delta);
+                    continue;
+                }
+                let pair_context = turn_start_candidates.as_ref().and_then(|turn_start_legal| {
+                    matches!(state.phase(), TurnPhase::SecondStone { .. }).then(|| PairContext {
+                        first: coord,
+                        turn_start_legal: turn_start_legal.clone(),
+                    })
+                });
+                let child = self.prove(state, claimant, completion_ply, pair_context.as_ref());
+                state.undo(delta);
+                if let Some(child) = child {
+                    return self.alloc_node(CertNode::Choice { mv: coord, child }, 1);
+                }
+                if self.hit_limit {
+                    return None;
+                }
+            }
+        }
         // Exhausting a restricted attacker set only says that this attack
         // generator found no proof.  It is deliberately not a disproof.
         None
@@ -3465,7 +3592,8 @@ impl<'a> SearchContext<'a> {
         // forcing attacker turn.  Keep this invariant at the dispatcher as a
         // backstop so an opening/special-phase path can never reintroduce the
         // full-legal fallback that vcf_pair_complete is designed to exclude.
-        if self.width.vcf_pair_complete && !implicit_dispatch {
+        if self.width.vcf_pair_complete && !implicit_dispatch && !self.width.consumes_ranked_zone()
+        {
             return None;
         }
 
@@ -3473,7 +3601,7 @@ impl<'a> SearchContext<'a> {
         // complement without enumerating it.  At spare nodes the default-off
         // U1 generator is consumable only because U2 re-derives the zone.
         let zone = (!implicit_dispatch
-            && self.zone.enabled
+            && (self.zone.enabled || self.width.consumes_ranked_zone())
             && !matches!(state.phase(), TurnPhase::Opening))
         .then(|| {
             remaining_defender_placements_for_horizon(state, claimant, self.semantic_horizon).map(
@@ -3520,7 +3648,8 @@ impl<'a> SearchContext<'a> {
             return None;
         }
 
-        let turn_start_legal = ((self.zone.pair_commutation || self.width.vcf_pair_complete)
+        let turn_start_legal = ((self.zone.pair_commutation
+            || (self.width.vcf_pair_complete && implicit_dispatch))
             && pair.is_none()
             && matches!(state.phase(), TurnPhase::FirstStone)
             && threats::placements_remaining(state) == 2)
@@ -5023,7 +5152,7 @@ fn zone_certificate_extras(
         })
         .collect::<Vec<_>>();
     if !pending.is_empty() {
-        let radius = i32::try_from(d.saturating_mul(8)).unwrap_or(i32::MAX);
+        let radius = seed_band_radius(d);
         required.extend(legal.iter().copied().filter(|cell| {
             pending
                 .iter()
@@ -5033,6 +5162,276 @@ fn zone_certificate_extras(
     required.sort_by_key(|coord| (coord.q, coord.r));
     required.dedup();
     Some(required)
+}
+
+/// Step-1-only view of the revised T3/T4 zone.  This is deliberately derived
+/// from a completed certificate, because D10's `Prot(N)` is the union of live
+/// roles in reachable descendants and therefore is not finder-hint data.
+/// The independent verifier gets its own implementation in the verify phase.
+#[cfg(test)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Round3ShadowReport {
+    pub quiet_turns: usize,
+    pub quiet_legal_edges: usize,
+    pub zones: Vec<Round3ShadowZoneRecord>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Round3ShadowZoneRecord {
+    pub ply: u32,
+    pub b: u8,
+    pub k: Option<u8>,
+    pub local_budget: u32,
+    pub full_legal: usize,
+    pub zone: Vec<HexCoord>,
+    pub z_dir: usize,
+    pub z_seed: usize,
+    pub z_touch: usize,
+    pub z_virgin: usize,
+    pub represented_in_zone: usize,
+    pub best_represented_rank: Option<usize>,
+    pub worst_represented_rank: Option<usize>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
+struct Round3ShadowSummary {
+    local_budget: u32,
+    protected: Vec<HexCoord>,
+}
+
+#[cfg(test)]
+fn shadow_uniform_zone(
+    state: &RustHexoState,
+    claimant: Player,
+    local_budget: u32,
+    protected: &[HexCoord],
+) -> (Vec<HexCoord>, usize, usize, usize, usize) {
+    let mut legal = Vec::new();
+    state.write_legal_moves(&mut legal);
+    legal.sort_by_key(|coord| raw_coord_key(*coord));
+    let stones = state.board().occupied_cells();
+
+    let mut z_dir = protected
+        .iter()
+        .copied()
+        .filter(|cell| {
+            legal
+                .binary_search_by_key(&raw_coord_key(*cell), |c| raw_coord_key(*c))
+                .is_ok()
+        })
+        .collect::<Vec<_>>();
+    z_dir.sort_by_key(|coord| raw_coord_key(*coord));
+    z_dir.dedup();
+
+    let pending = protected
+        .iter()
+        .copied()
+        .filter(|cell| {
+            legal
+                .binary_search_by_key(&raw_coord_key(*cell), |c| raw_coord_key(*c))
+                .is_err()
+                && !stones.contains(cell)
+        })
+        .collect::<Vec<_>>();
+    let radius = seed_band_radius(local_budget);
+    let mut z_seed = if pending.is_empty() {
+        Vec::new()
+    } else {
+        legal
+            .iter()
+            .copied()
+            .filter(|cell| {
+                pending
+                    .iter()
+                    .any(|target| i32::from(hex_distance(*cell, *target)) <= radius)
+            })
+            .collect::<Vec<_>>()
+    };
+    z_seed.sort_by_key(|coord| raw_coord_key(*coord));
+    z_seed.dedup();
+
+    let defender = claimant.other();
+    let mut z_touch = Vec::new();
+    for entry in state.board().windows().entries() {
+        let count = entry.count(defender);
+        if entry.active_player() == Some(defender)
+            && count >= 1
+            && u32::from(count).saturating_add(local_budget) >= 6
+        {
+            z_touch.extend(entry.empty_cells());
+        }
+    }
+    z_touch.sort_by_key(|coord| raw_coord_key(*coord));
+    z_touch.dedup();
+
+    // A full legal set is a conservative uniform B-clock implementation of
+    // Z_virgin once B>=6. T4 explicitly permits larger admissible upper bounds;
+    // the common B<=5 case remains the exact empty virgin component.
+    let z_virgin = if local_budget >= 6 {
+        legal.clone()
+    } else {
+        Vec::new()
+    };
+
+    let sizes = (z_dir.len(), z_seed.len(), z_touch.len(), z_virgin.len());
+    let mut zone = z_dir;
+    zone.extend(z_seed);
+    zone.extend(z_touch);
+    zone.extend(z_virgin);
+    zone.sort_by_key(|coord| raw_coord_key(*coord));
+    zone.dedup();
+    if zone.is_empty() {
+        if let Some(&fallback) = legal.first() {
+            zone.push(fallback);
+        }
+    }
+    (zone, sizes.0, sizes.1, sizes.2, sizes.3)
+}
+
+#[cfg(test)]
+pub(crate) fn round3_shadow_certificate(
+    root: &RustHexoState,
+    cert: &TssCertificate,
+) -> Option<Round3ShadowReport> {
+    if cert.root != RootBinding::from_state(root) {
+        return None;
+    }
+
+    fn walk(
+        cert: &TssCertificate,
+        id: CertNodeId,
+        state: &mut RustHexoState,
+        report: &mut Round3ShadowReport,
+        depth: usize,
+    ) -> Option<Round3ShadowSummary> {
+        if depth > MAX_CERT_DEPTH {
+            return None;
+        }
+        let node = cert.nodes.get(id as usize)?;
+        let mut protected = Vec::new();
+        let local_budget = match node {
+            CertNode::OrCompletion { mv, .. } => {
+                protected.push(*mv);
+                0
+            }
+            CertNode::Win { witness, .. } => {
+                protected.extend(
+                    state
+                        .board()
+                        .windows()
+                        .entries()
+                        .find(|entry| entry.key() == *witness)?
+                        .empty_cells(),
+                );
+                0
+            }
+            CertNode::Loss { witnesses, .. } => {
+                for witness in witnesses {
+                    protected.extend(
+                        state
+                            .board()
+                            .windows()
+                            .entries()
+                            .find(|entry| entry.key() == *witness)?
+                            .empty_cells(),
+                    );
+                }
+                u32::from(threats::placements_remaining(state))
+            }
+            CertNode::Choice { mv, child } => {
+                let phase = state.phase();
+                let mut legal = Vec::new();
+                if matches!(phase, TurnPhase::SecondStone { .. }) {
+                    state.write_legal_moves(&mut legal);
+                }
+                let (result, delta) = state.apply_with_delta(Placement { coord: *mv }).ok()?;
+                if result.outcome.is_some() {
+                    state.undo(delta);
+                    return None;
+                }
+                if matches!(phase, TurnPhase::SecondStone { .. })
+                    && !turn_forces_small_defender_reply(state, cert.claimant)
+                {
+                    report.quiet_turns = report.quiet_turns.saturating_add(1);
+                    report.quiet_legal_edges = report.quiet_legal_edges.saturating_add(legal.len());
+                }
+                let child_summary = walk(cert, *child, state, report, depth + 1);
+                state.undo(delta);
+                let child_summary = child_summary?;
+                protected.push(*mv);
+                protected.extend(child_summary.protected);
+                child_summary.local_budget
+            }
+            CertNode::Universal { edges, .. } => {
+                let mut child_budget = 0u32;
+                for edge in edges {
+                    let (result, delta) =
+                        state.apply_with_delta(Placement { coord: edge.mv }).ok()?;
+                    if result.outcome.is_some() {
+                        state.undo(delta);
+                        return None;
+                    }
+                    let child_summary = walk(cert, edge.child, state, report, depth + 1);
+                    state.undo(delta);
+                    let child_summary = child_summary?;
+                    child_budget = child_budget.max(child_summary.local_budget);
+                    protected.extend(child_summary.protected);
+                }
+                let local_budget = child_budget.saturating_add(1);
+                let analysis = threats::analyze(state);
+                if analysis.min_hitting_set.is_none_or(|k| k < analysis.b) {
+                    let mut full_legal_moves = Vec::new();
+                    state.write_legal_moves(&mut full_legal_moves);
+                    let (zone, z_dir, z_seed, z_touch, z_virgin) =
+                        shadow_uniform_zone(state, cert.claimant, local_budget, &protected);
+                    let hitting = hitting_universe(state, cert.claimant);
+                    let frame = canonical_frame(state);
+                    let mut ranked = zone.clone();
+                    ranked.sort_by_key(|coord| {
+                        (!hitting.contains(coord), canonical_coord_key(frame, *coord))
+                    });
+                    let mut ranks = edges
+                        .iter()
+                        .filter_map(|edge| ranked.iter().position(|cell| *cell == edge.mv))
+                        .map(|rank| rank + 1)
+                        .collect::<Vec<_>>();
+                    ranks.sort_unstable();
+                    report.zones.push(Round3ShadowZoneRecord {
+                        ply: state.placements_made(),
+                        b: analysis.b,
+                        k: analysis.min_hitting_set,
+                        local_budget,
+                        full_legal: full_legal_moves.len(),
+                        zone,
+                        z_dir,
+                        z_seed,
+                        z_touch,
+                        z_virgin,
+                        represented_in_zone: ranks.len(),
+                        best_represented_rank: ranks.first().copied(),
+                        worst_represented_rank: ranks.last().copied(),
+                    });
+                }
+                local_budget
+            }
+        };
+        protected.sort_by_key(|coord| raw_coord_key(*coord));
+        protected.dedup();
+        Some(Round3ShadowSummary {
+            local_budget,
+            protected,
+        })
+    }
+
+    let mut state = root.clone();
+    let mut report = Round3ShadowReport::default();
+    walk(cert, cert.root_node, &mut state, &mut report, 0)?;
+    report
+        .zones
+        .sort_by_key(|zone| (zone.ply, zone.full_legal, zone.zone.len()));
+    Some(report)
 }
 
 /// Choose the lexicographically least D6 image of the full semantic position.
@@ -5732,7 +6131,7 @@ fn remap_node_ids_with_offset(node: &mut CertNode, base: usize, final_len: usize
 /// Remove abandoned OR branches from the certificate arena and remap every
 /// reachable child.  The resulting certificate has no orphan nodes, which the
 /// independent verifier requires.
-fn compact_certificate(
+pub(crate) fn compact_certificate(
     arena: &[CertNode],
     root: CertNodeId,
 ) -> Option<(Vec<CertNode>, CertNodeId)> {
@@ -5847,7 +6246,7 @@ fn compact_certificate_limited(
                 CertNode::Universal {
                     edges: mapped_edges,
                     implicit_dispatch: *implicit_dispatch,
-                    zone: *zone,
+                    zone: zone.clone(),
                     commutations: mapped_commutations,
                 }
             }
@@ -7504,7 +7903,15 @@ mod tests {
         let universe = hitting_universe(&state, claimant);
         let kernel = extendable_hit_kernel(&state, claimant, analysis.b);
         let mut solver = TssSolver::default();
-        let attempt = solver.prove_for_wide_pn(&state, claimant, 10_000, 64 << 20, u32::MAX, 64);
+        let attempt = solver.prove_for_wide_pn(
+            &state,
+            claimant,
+            10_000,
+            64 << 20,
+            u32::MAX,
+            64,
+            WidthOptions::vcf_pair_complete(),
+        );
         let cert = attempt.cert.expect("xsnfyll continuation must prove");
         assert!(attempt.stats.nodes < 10_000);
         assert!(TssVerifier.verify(&state, &cert, ProofStatus::Loss));
@@ -9056,5 +9463,75 @@ mod tests {
         assert!(enough.stats.nodes <= 5);
         assert!(small.stats.peak_tt_bytes <= 4096);
         assert!(enough.stats.peak_tt_bytes <= 4096);
+    }
+
+    #[test]
+    #[ignore = "R1b sharpness fixture; run explicitly"]
+    fn hunt_r1b_chain_sharpness() {
+        for b in 2..=5u32 {
+            let seed = HexCoord::new(8, 0);
+            let target = HexCoord::new(8 * i16::try_from(b).unwrap(), 0);
+            let binding_distance = i32::from(hex_distance(seed, target));
+            assert_eq!(binding_distance, 8 * (i32::try_from(b).unwrap() - 1));
+            assert!(binding_distance <= seed_band_radius(b));
+            assert!(binding_distance > seed_band_radius(b - 1));
+        }
+    }
+
+    #[test]
+    #[ignore = "R1b production seed-band cross-check; run explicitly"]
+    fn hunt_seed_band_matches_production() {
+        let mut state = RustHexoState::new();
+        apply_placement(
+            &mut state,
+            Placement {
+                coord: HexCoord::ZERO,
+            },
+        )
+        .unwrap();
+        let claimant = state.current_player();
+        let target = HexCoord::new(32, 0);
+        let witness = WindowKey {
+            start: HexCoord::ZERO,
+            axis: Axis::Q,
+        };
+        let arena = vec![
+            CertNode::Win {
+                witness,
+                count: 5,
+                budget: 2,
+                resolution_ply: 3,
+            },
+            CertNode::Choice {
+                mv: target,
+                child: 0,
+            },
+        ];
+        let edges = vec![CertEdge {
+            mv: target,
+            child: 1,
+        }];
+        let required = zone_certificate_extras(&state, claimant, 4, &edges, &arena).unwrap();
+
+        let mut legal = Vec::new();
+        state.write_legal_moves(&mut legal);
+        let mut protected = witness.cells().to_vec();
+        protected.push(target);
+        let mut expected = protected
+            .iter()
+            .copied()
+            .filter(|cell| legal.contains(cell))
+            .collect::<Vec<_>>();
+        expected.extend(
+            legal
+                .iter()
+                .copied()
+                .filter(|cell| i32::from(hex_distance(*cell, target)) <= seed_band_radius(4)),
+        );
+        expected.sort_by_key(|coord| raw_coord_key(*coord));
+        expected.dedup();
+        assert_eq!(required, expected);
+        assert!(required.contains(&HexCoord::new(8, 0)));
+        assert!(!required.contains(&HexCoord::new(0, 1)));
     }
 }

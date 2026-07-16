@@ -115,6 +115,15 @@ pub struct ZoneSearchCaps {
     pub pair_commutation: bool,
 }
 
+/// Uniform D11/T4 seed-band radius. L9' bounds the first protected occupation
+/// chain by `8(B-1)`; `d` is the verifier-checked admissible local B wrapper.
+/// Keeping this theorem arithmetic in the shared contract module preserves
+/// finder/verifier separation while giving both sides one production value.
+#[inline]
+pub(crate) fn seed_band_radius(d: u32) -> i32 {
+    i32::try_from(d.saturating_sub(1).saturating_mul(8)).unwrap_or(i32::MAX)
+}
+
 /// Which root-perspective hard result a caller wants the deep solver to seek.
 ///
 /// This is deliberately separate from [`SolveCaps`] so existing callers using

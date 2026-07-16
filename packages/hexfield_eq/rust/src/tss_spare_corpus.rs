@@ -7,10 +7,15 @@
 
 use hexo_engine::{apply_placement, HexCoord, HexoState, Placement};
 
-use crate::tss_core::{lambda1_status, DeepSolve, ProofStatus, SolveCaps};
+use crate::tss_core::{
+    lambda1_status, CertVerify, DeepSolve, ProofStatus, SolveCaps, ZoneSearchCaps,
+};
 use crate::tss_reference_fast::{FastOrderingHint, FastReferenceConfig, FastReferenceResult};
-use crate::tss_solver::{TssSolver, WidthOptions};
-use crate::tss_verify::{certificate_horizon_preflight, d6_transform_coord, CertNode};
+use crate::tss_solver::{compact_certificate, round3_shadow_certificate, TssSolver, WidthOptions};
+use crate::tss_verify::{
+    certificate_horizon_preflight, d6_transform_coord, round3_rederived_zones, CertNode,
+    TssVerifier,
+};
 
 const DEEP_WIN_MOVES: &[(i16, i16)] = &[
     (0, 0),
@@ -1259,4 +1264,319 @@ fn tss_spare_mine_candidate() {
     // Keep CertNode imported and its schema compiled into this helper while
     // mining output is still intentionally generic.
     let _ = std::mem::size_of::<CertNode>();
+}
+
+/// Step-1 SHADOW gate. The historical finder supplies the completed strategy
+/// from which D10 live roles can be derived; the wide shadow profile itself is
+/// required to remain byte-for-byte identical to ordinary wide mode.
+#[test]
+#[ignore = "round-3 shadow coverage and default-off identity"]
+fn tss_round3_shadow_spare_coverage() {
+    let state = mining_candidate("double_fork_compact");
+    let caps = SolveCaps {
+        node_cap: 100_000,
+        tt_bytes_cap: 512 << 20,
+        semantic_horizon: 45,
+    };
+
+    let mut historical = TssSolver::default();
+    let historical_result = historical.solve(&state, &caps);
+    assert_eq!(historical_result.status, ProofStatus::Win);
+    let cert = historical_result
+        .cert
+        .as_ref()
+        .expect("historical WIN cert");
+    assert!(TssVerifier.verify(&state, cert, ProofStatus::Win));
+    let report = round3_shadow_certificate(&state, cert).expect("shadow certificate replay");
+    println!(
+        "R3_SHADOW id=double_fork_compact source=historical status=WIN nodes={} quiet_fires={} quiet_legal_edges={} zone_nodes={}",
+        historical_result.stats.nodes,
+        report.quiet_turns,
+        report.quiet_legal_edges,
+        report.zones.len(),
+    );
+    for (index, zone) in report.zones.iter().enumerate() {
+        println!(
+            "R3_SHADOW_ZONE id=double_fork_compact index={index} ply={} b={} k={:?} B={} zone={} legal={} ratio={:.6} z_dir={} z_seed={} z_touch={} z_virgin={} represented_in_zone={} best_rank={:?} worst_rank={:?}",
+            zone.ply,
+            zone.b,
+            zone.k,
+            zone.local_budget,
+            zone.zone.len(),
+            zone.full_legal,
+            zone.zone.len() as f64 / zone.full_legal as f64,
+            zone.z_dir,
+            zone.z_seed,
+            zone.z_touch,
+            zone.z_virgin,
+            zone.represented_in_zone,
+            zone.best_represented_rank,
+            zone.worst_represented_rank,
+        );
+    }
+    assert!(report.quiet_turns >= 1, "witness must contain a quiet turn");
+    assert!(
+        !report.zones.is_empty(),
+        "witness must contain k<b AND nodes"
+    );
+    assert!(report
+        .zones
+        .iter()
+        .any(|zone| zone.full_legal == 478 && zone.zone.len() < zone.full_legal));
+    let verifier_zones = round3_rederived_zones(&state, cert).expect("independent zone replay");
+    let finder_zones = report
+        .zones
+        .iter()
+        .map(|zone| (zone.ply, zone.zone.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        verifier_zones, finder_zones,
+        "finder/verifier shadow zones must match byte-for-byte"
+    );
+
+    let mut ordinary_wide = TssSolver::default();
+    ordinary_wide.set_width_options(WidthOptions::vcf_pair_complete());
+    let ordinary = ordinary_wide.solve(&state, &caps);
+    let mut shadow_wide = TssSolver::default();
+    shadow_wide.set_width_options(WidthOptions::round3_shadow());
+    let shadow = shadow_wide.solve(&state, &caps);
+    assert_eq!(shadow.status, ordinary.status);
+    assert_eq!(shadow.stats.nodes, ordinary.stats.nodes);
+    assert_eq!(shadow.cert, ordinary.cert);
+
+    for control in load_spare_corpus() {
+        let mut solver = TssSolver::default();
+        solver.set_width_options(WidthOptions::round3_shadow());
+        let control_caps = SolveCaps {
+            node_cap: 10_000,
+            tt_bytes_cap: 512 << 20,
+            semantic_horizon: u32::MAX,
+        };
+        let result = solver.solve(&control.state, &control_caps);
+        println!(
+            "R3_SHADOW id={} source=spare_control status={} nodes={} quiet_fires=0 zone_nodes=0 cert={}",
+            control.id,
+            status_name(result.status),
+            result.stats.nodes,
+            result.cert.is_some(),
+        );
+        assert_ne!(result.status, ProofStatus::Win, "NO control became WIN");
+    }
+}
+
+#[test]
+#[ignore = "round-3 independent verifier and mandatory mutation controls"]
+fn tss_round3_verifier_mutations() {
+    let state = mining_candidate("double_fork_compact");
+    let mut solver = TssSolver::default();
+    solver.set_zone_options(ZoneSearchCaps {
+        enabled: true,
+        stale_area_filter: false,
+        count2_threshold: true,
+        pair_commutation: false,
+    });
+    let result = solver.solve(
+        &state,
+        &SolveCaps {
+            node_cap: 100_000,
+            tt_bytes_cap: 512 << 20,
+            semantic_horizon: 45,
+        },
+    );
+    assert_eq!(result.status, ProofStatus::Win);
+    let cert = result.cert.expect("zoned finder certificate");
+    println!(
+        "R3_VERIFY_BASE status=WIN nodes={} cert_nodes={} verifier={}",
+        result.stats.nodes,
+        cert.nodes.len(),
+        TssVerifier.verify(&state, &cert, ProofStatus::Win),
+    );
+    assert!(TssVerifier.verify(&state, &cert, ProofStatus::Win));
+
+    let finder = round3_shadow_certificate(&state, &cert).expect("finder zone replay");
+    let verifier = round3_rederived_zones(&state, &cert).expect("verifier zone replay");
+    assert_eq!(
+        finder
+            .zones
+            .iter()
+            .map(|zone| (zone.ply, zone.zone.clone()))
+            .collect::<Vec<_>>(),
+        verifier,
+        "zoned certificate finder/verifier sets differ"
+    );
+
+    let reject = |label: &str, mutated: &crate::tss_verify::TssCertificate| {
+        let accepted = TssVerifier.verify(&state, mutated, ProofStatus::Win);
+        println!("R3_VERIFY_MUTATION label={label} accepted={accepted}");
+        assert!(!accepted, "mutation {label} was accepted");
+    };
+    let compact_from = |mutated: &mut crate::tss_verify::TssCertificate, root| {
+        let (nodes, root_node) =
+            compact_certificate(&mutated.nodes, root).expect("compact mutation");
+        mutated.nodes = nodes;
+        mutated.root_node = root_node;
+    };
+
+    let (root_move, zone_id) = match &cert.nodes[cert.root_node as usize] {
+        CertNode::Choice { mv, child } => (*mv, *child),
+        other => panic!("expected quiet root Choice, got {other:?}"),
+    };
+    let zone_edges = match &cert.nodes[zone_id as usize] {
+        CertNode::Universal {
+            edges,
+            zone: Some(_),
+            ..
+        } => edges,
+        other => panic!("expected post-quiet zone Universal, got {other:?}"),
+    };
+    assert!(zone_edges.len() > 2);
+
+    let mut zone_state = state.clone();
+    apply_placement(&mut zone_state, Placement { coord: root_move }).expect("quiet root replay");
+    let zone_budget = match &cert.nodes[zone_id as usize] {
+        CertNode::Universal {
+            zone: Some(zone), ..
+        } => zone.d,
+        _ => unreachable!(),
+    };
+    let defender = cert.claimant.other();
+    let mut touch = Vec::new();
+    for entry in zone_state.board().windows().entries() {
+        let count = entry.count(defender);
+        if entry.active_player() == Some(defender)
+            && count >= 1
+            && u32::from(count).saturating_add(zone_budget) >= 6
+        {
+            touch.extend(entry.empty_cells());
+        }
+    }
+    touch.sort_by_key(|coord| (coord.q, coord.r));
+    touch.dedup();
+    touch.retain(|cell| zone_edges.iter().any(|edge| edge.mv == *cell));
+    assert!(
+        touch.len() >= 2,
+        "fixture must expose two stable Z_touch cells"
+    );
+
+    let mut omitted_zone_cell = cert.clone();
+    if let CertNode::Universal { edges, .. } = &mut omitted_zone_cell.nodes[zone_id as usize] {
+        let index = edges
+            .iter()
+            .position(|edge| edge.mv == touch[0])
+            .expect("first touch edge");
+        edges.remove(index);
+    }
+    let omitted_root = omitted_zone_cell.root_node;
+    compact_from(&mut omitted_zone_cell, omitted_root);
+    reject("omitted_zone_cell", &omitted_zone_cell);
+
+    let mut omitted_defender_edge = cert.clone();
+    if let CertNode::Universal { edges, .. } = &mut omitted_defender_edge.nodes[zone_id as usize] {
+        let index = edges
+            .iter()
+            .position(|edge| edge.mv == touch[1])
+            .expect("second touch edge");
+        edges.remove(index);
+    }
+    let omitted_root = omitted_defender_edge.root_node;
+    compact_from(&mut omitted_defender_edge, omitted_root);
+    reject("omitted_defender_edge", &omitted_defender_edge);
+
+    let mut dropped_quiet_edge = cert.clone();
+    compact_from(&mut dropped_quiet_edge, zone_id);
+    reject("dropped_quiet_edge", &dropped_quiet_edge);
+
+    let mut wrong_budget = cert.clone();
+    if let CertNode::Universal {
+        zone: Some(zone), ..
+    } = &mut wrong_budget.nodes[zone_id as usize]
+    {
+        zone.d = zone.d.saturating_add(1);
+    }
+    reject("wrong_budget", &wrong_budget);
+
+    let mut wrong_horizon = cert.clone();
+    wrong_horizon.semantic_horizon = wrong_horizon.semantic_horizon.saturating_add(1);
+    reject("wrong_horizon", &wrong_horizon);
+
+    let mut forged_leaf = cert.clone();
+    let leaf = forged_leaf
+        .nodes
+        .iter_mut()
+        .find(|node| {
+            matches!(
+                node,
+                CertNode::OrCompletion { .. } | CertNode::Win { .. } | CertNode::Loss { .. }
+            )
+        })
+        .expect("certificate leaf");
+    match leaf {
+        CertNode::OrCompletion { completion_ply, .. } => {
+            *completion_ply = completion_ply.saturating_add(1)
+        }
+        CertNode::Win { count, .. } => *count = count.saturating_sub(1),
+        CertNode::Loss { resolution_ply, .. } => *resolution_ply = resolution_ply.saturating_add(1),
+        CertNode::Choice { .. } | CertNode::Universal { .. } => unreachable!(),
+    }
+    reject("forged_leaf", &forged_leaf);
+
+    let represented = zone_edges.iter().map(|edge| edge.mv).collect::<Vec<_>>();
+    let mut full_legal = Vec::new();
+    zone_state.write_legal_moves(&mut full_legal);
+    let outside = full_legal
+        .into_iter()
+        .find(|cell| !represented.contains(cell))
+        .expect("zone must omit some legal cells");
+    let mut out_of_zone = cert.clone();
+    if let CertNode::Universal { edges, .. } = &mut out_of_zone.nodes[zone_id as usize] {
+        let index = edges
+            .iter()
+            .position(|edge| edge.mv == touch[0])
+            .expect("substituted touch edge");
+        edges[index].mv = outside;
+    }
+    reject("out_of_zone_substitution", &out_of_zone);
+}
+
+#[test]
+#[ignore = "round-3 consume witness ladder"]
+fn tss_round3_consume_witness() {
+    let cap = std::env::var("TSS_R3_CAP")
+        .ok()
+        .map(|value| value.parse::<u64>().expect("numeric TSS_R3_CAP"))
+        .unwrap_or(10_000);
+    let tt_bytes_cap = std::env::var("TSS_BACKWALK_TT_BYTES")
+        .ok()
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .expect("numeric TSS_BACKWALK_TT_BYTES")
+        })
+        .unwrap_or(512 << 20);
+    let state = mining_candidate("double_fork_compact");
+    let mut solver = TssSolver::default();
+    solver.set_width_options(WidthOptions::round3_consume());
+    let started = std::time::Instant::now();
+    let result = solver.solve(
+        &state,
+        &SolveCaps {
+            node_cap: cap,
+            tt_bytes_cap,
+            semantic_horizon: 45,
+        },
+    );
+    let verified = result
+        .cert
+        .as_ref()
+        .is_some_and(|cert| TssVerifier.verify(&state, cert, result.status));
+    println!(
+        "R3_CONSUME id=double_fork_compact cap={cap} status={} nodes={} tt_hits={} peak_tt_bytes={} wall_ms={} verified={verified}",
+        status_name(result.status),
+        result.stats.nodes,
+        result.stats.tt_hits,
+        result.stats.peak_tt_bytes,
+        started.elapsed().as_millis(),
+    );
+    assert_eq!(result.status, ProofStatus::Win);
+    assert!(verified);
 }

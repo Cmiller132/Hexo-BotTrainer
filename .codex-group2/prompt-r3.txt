@@ -1,0 +1,105 @@
+Group-2, round 3 — THE ENGINE ROUND: quiet-turn OR edges + certified ranked-zone defender sets, shadow -> verify -> consume, then the R1b seed-radius shrink.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width at
+commit 1e082d40 (round-9b normative engine, gate-verified; round-2 exact
+oracle + honest NO controls). Read .codex-group2/round2-progress.md IN FULL
+first — its "Round-3 diagnosis memo" is your binding design brief. Then skim
+.codex-group2/prompt-r1.txt and round1-progress.md for the witness columns
+and lore corrections. The normative proof document is
+E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hexfield-eq-main-review-65bd3a\docs\PROOF_TSS_DEFENDER_ZONES.md
+(read-only sibling worktree): D9-D18, T3/T4, L9', L11-L14, zones
+Z_dir/Z_seed/Z_touch/Z_virgin under (Z2)/(Z4)/(Z5'). Cite the exact
+definitions you implement; where the doc and code disagree, the doc wins.
+
+## Why this round exists
+double_fork_compact: old finder WIN 2,884 nodes @ horizon 45; the normative
+wide engine dies UNKNOWN in 2 nodes because the first defender node after
+root has k=1 < b=2, implicit_dispatch requires min_hitting_set == b, and no
+quiet attacker continuation is ever generated. Corpus frequencies say this is
+THE structural gap: quiet-move share of real wins rises 8.7% -> 87% with
+distance; unforced k<B defender nodes = 25.7% of threatened defender nodes.
+Round 2 proved no exact oracle can ground-truth this position (478-cell
+universal wall, >=127M nodes) — so ACCEPTANCE COMES FROM THE INDEPENDENT
+VERIFIER, not an oracle: a wide WIN whose certificate the strict verifier
+accepts is the deliverable. The spare corpus must NOT be used as a positive
+acceptance gate (it has no WIN_PENDING row; its semantics are unchanged).
+
+## Step 1 — SHADOW (no behavior change)
+Two default-off flags, computed and recorded but never consumed:
+- quiet_turn_or_edges: complete two-placement attacker OR edges that may
+  finish nonforcing, added alongside (never replacing) the existing forcing
+  pair path. Complete = the attacker's full legal turn universe at nodes
+  where the flag fires (start minimal: fire only when the forcing path is
+  exhausted/refuted at an OR node — the memo's death point — and widen only
+  if the witness needs it).
+- ranked_unforced_defender_zone: at k<b AND nodes, the certified T3 union
+  (Z_dir ∪ Z_seed ∪ Z_touch ∪ Z_virgin per the revised doc; UNIFORM wrapper
+  radii are sufficient this round) with a ranking for ordering only — NEVER
+  a defender-count cap: the zone is the proven-complete searched set, the
+  rank just orders it.
+Shadow instrumentation: on double_fork_compact, the 19-entry forcing corpus,
+and the 2 spare NO controls, record per-node zone size vs full legal count,
+rank of the reference/known-good defender replies within the zone, and how
+often quiet edges would fire. Coverage table goes in the progress file.
+
+## Step 2 — VERIFY (the contract)
+Extend the verifier to accept certificates carrying quiet OR edges and
+unforced-AND zone nodes under the owner-invariant contract: finder/verifier
+separation; the verifier REPLAYS the node and RE-DERIVES the full T3 union
+and every represented edge from the position alone (finder hints are
+inadmissible); no defender caps anywhere; full defender semantics preserved.
+U10-style certificate-MUTATION rejection tests are mandatory before any
+consumption: mutated certificates (omitted zone cell, omitted defender edge,
+dropped quiet edge, wrong budget/horizon, forged leaf, out-of-zone
+substitution) must each be REJECTED by the verifier — negative controls that
+prove the checks bite. Cross-check vs shadow: on every shadow-recorded node,
+the verifier's re-derived zone must equal the finder's shadow zone
+byte-for-byte.
+
+## Step 3 — CONSUME (the headline)
+Enable consumption in wide mode behind the flags. Definition of done:
+double_fork_compact = WIN with a VERIFIER-ACCEPTED certificate at the
+10k/100k/1M ladder (report the first rung that closes; 2 GiB TT profile
+TSS_BACKWALK_TT_BYTES=2147483648 for 1M). Then the no-regression matrix:
+official all-19 single-process gate PASS (failures=0, same profile), suite
+95/0 default (flags off), narrow byte-identity unchanged. If the witness
+does not close at 1M: honest diagnosis (where the search dies now), no bar
+lowering, write it up for round 4.
+
+## Step 4 — R1b seed-radius shrink (fold-in, own gate)
+The R1b sharpness hunt (branches hunt/r1b-r2, commits 53864998 + 1435680d in
+this same repo — cherry-pick or read them; 1435680d already extracts
+seed_band_radius(d)=8*d as the single source of truth for finder+verifier
+with a cfg(test) delta override) proved: minimal sound uniform seed radius =
+8(B-1); shipped 8*d carries at least one full removable relay since d >= B.
+Land the sound one-relay shrink: seed_band_radius(d) = 8*(d-1) for d >= 1
+(0 at d <= 1), production code, BOTH finder and verifier. Justification to
+cite: L9' bounds reach by 8(B-1) <= 8(d-1). Gate it separately: the hunt's
+chain fixtures (hunt_r1b_chain_sharpness keeps the binding seed at 8(B-1),
+sheds at 8(B-2)) plus the seed-band production cross-check updated to the
+new radius, the mutation suite, AND a full re-run of the all-19 gate + suite.
+If ANY certificate that verified before now fails verification, STOP, revert
+the shrink, and write up the exact node — that would mean a shipped cert
+depends on the removable relay, which is itself a finding.
+
+## Ordering and honesty
+Steps are strictly ordered; do not start N+1 with N red. Per-step
+no-regression evidence in .codex-group2/round3-progress.md (checkpoint
+boundaries, every regeneration command, honest dispositions — round-2's
+memo is the standard). Any WIN-vs-LOSS disagreement between engines/verifier
+at matched semantics = STOP and write it up; that outranks every deliverable.
+An honest partial (e.g. shadow+verify landed, consume blocked) beats a
+rushed consume.
+
+## Operational rules, binding
+(1) You CANNOT git-commit — announce checkpoint boundaries in the progress
+file. (2) CARGO_TARGET_DIR=.target-codex inside this worktree; never C:.
+(3) No workspace-wide formatting; rustfmt --edition 2021 only on files you
+edit. (4) Work only in this worktree; sibling worktrees read-only. (5) RAM:
+a Lean lane and other sessions share this 31 GB host — check free RAM > 8 GB
+before builds/long solves (powershell "Get-CimInstance Win32_OperatingSystem
+| % { $_.FreePhysicalMemory/1MB }"), one build/solve at a time,
+--test-threads=1. (6) Flags default-off until step 3's own gate; narrow
+byte-identity is sacred. (7) Long solves: chunk <= 2h per exec; if a rung
+projects past that, record the launch command for the orchestrator instead
+of running it yourself.

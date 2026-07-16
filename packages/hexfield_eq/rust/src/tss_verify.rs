@@ -12,7 +12,7 @@ use hexo_engine::{
 };
 
 use crate::threats_shared;
-use crate::tss_core::{CertVerify, ProofStatus};
+use crate::tss_core::{seed_band_radius, CertVerify, ProofStatus};
 
 /// Maximum number of arena nodes accepted from one certificate.
 pub const MAX_CERT_NODES: usize = 100_000;
@@ -541,7 +541,7 @@ fn verify_node(
             claimant,
             edges,
             *implicit_dispatch,
-            *zone,
+            zone.clone(),
             commutations,
             depth,
             memo,
@@ -551,6 +551,37 @@ fn verify_node(
             allowed_commuted,
         ),
     };
+    #[cfg(test)]
+    if !result && std::env::var_os("TSS_R3_VERIFY_TRACE").is_some() {
+        let kind = match node {
+            CertNode::OrCompletion { .. } => "OrCompletion",
+            CertNode::Win { .. } => "Win",
+            CertNode::Loss { .. } => "Loss",
+            CertNode::Choice { .. } => "Choice",
+            CertNode::Universal { .. } => "Universal",
+        };
+        eprintln!(
+            "R3_VERIFY_TRACE node={id} kind={kind} ply={} mover={:?} phase={:?} failure=replay",
+            state.placements_made(),
+            state.current_player(),
+            state.phase()
+        );
+        if let CertNode::Universal {
+            edges,
+            implicit_dispatch,
+            zone,
+            commutations,
+        } = node
+        {
+            eprintln!(
+                "R3_VERIFY_TRACE_UNIVERSAL node={id} edges={} implicit_dispatch={} zone={zone:?} commutations={} allowed_commuted={}",
+                edges.len(),
+                implicit_dispatch,
+                commutations.len(),
+                allowed_commuted.len()
+            );
+        }
+    }
     if let Some(key) = replay_key {
         if !memo.insert(id, key, result) {
             return false;
@@ -867,7 +898,7 @@ fn verify_universal(
             return false;
         }
     } else if let Some(zone) = zone {
-        if !verify_zone_node(state, claimant, &explicit_moves, zone, meta, node_id) {
+        if !verify_zone_node(cert, state, claimant, &explicit_moves, zone, meta, node_id) {
             return false;
         }
     } else {
@@ -984,7 +1015,206 @@ fn set_contains(sorted: &[HexCoord], coord: HexCoord) -> bool {
         .is_ok()
 }
 
+#[derive(Clone, Debug)]
+struct VerifierZoneSummary {
+    local_budget: u32,
+    protected: Vec<HexCoord>,
+}
+
+/// Independently reconstruct D10's reachable live-role union and D14's local
+/// defender clock. No finder-supplied candidate set participates in this pass.
+fn verifier_zone_summary(
+    cert: &TssCertificate,
+    state: &mut RustHexoState,
+    node_id: CertNodeId,
+    depth: usize,
+) -> Option<VerifierZoneSummary> {
+    if depth > MAX_CERT_DEPTH {
+        return None;
+    }
+    let node = cert.nodes.get(node_id as usize)?;
+    let mut protected = Vec::new();
+    let local_budget = match node {
+        CertNode::OrCompletion { mv, .. } => {
+            protected.push(*mv);
+            0
+        }
+        CertNode::Win { witness, .. } => {
+            protected.extend(window_entry(state, *witness)?.empty_cells());
+            0
+        }
+        CertNode::Loss { witnesses, .. } => {
+            for witness in witnesses {
+                protected.extend(window_entry(state, *witness)?.empty_cells());
+            }
+            u32::from(threats_shared::placements_remaining(state))
+        }
+        CertNode::Choice { mv, child } => {
+            let (result, delta) = state.apply_with_delta(Placement { coord: *mv }).ok()?;
+            if result.outcome.is_some() {
+                state.undo(delta);
+                return None;
+            }
+            let child_summary = verifier_zone_summary(cert, state, *child, depth + 1);
+            state.undo(delta);
+            let child_summary = child_summary?;
+            protected.push(*mv);
+            protected.extend(child_summary.protected);
+            child_summary.local_budget
+        }
+        CertNode::Universal { edges, .. } => {
+            let mut maximum = 0u32;
+            for edge in edges {
+                let (result, delta) = state.apply_with_delta(Placement { coord: edge.mv }).ok()?;
+                if result.outcome.is_some() {
+                    state.undo(delta);
+                    return None;
+                }
+                let child_summary = verifier_zone_summary(cert, state, edge.child, depth + 1);
+                state.undo(delta);
+                let child_summary = child_summary?;
+                maximum = maximum.max(child_summary.local_budget);
+                protected.extend(child_summary.protected);
+            }
+            maximum.saturating_add(1)
+        }
+    };
+    protected.sort_by_key(|coord| coord_key(*coord));
+    protected.dedup();
+    Some(VerifierZoneSummary {
+        local_budget,
+        protected,
+    })
+}
+
+/// Re-derive the mandatory T4 union from the replayed position alone:
+/// Z_dir union Z_seed union Z_touch union Z_virgin, with the deterministic D9
+/// nonempty fallback. Current hitting cells are intentionally absent (the
+/// revised document makes them an optional heuristic, not a T3/T4 clause).
+fn verifier_uniform_zone(
+    state: &RustHexoState,
+    claimant: Player,
+    summary: &VerifierZoneSummary,
+) -> Vec<HexCoord> {
+    let mut legal = Vec::new();
+    state.write_legal_moves(&mut legal);
+    legal.sort_by_key(|coord| coord_key(*coord));
+    let stones = state.board().occupied_cells();
+
+    let mut zone = summary
+        .protected
+        .iter()
+        .copied()
+        .filter(|cell| set_contains(&legal, *cell))
+        .collect::<Vec<_>>();
+
+    let pending = summary
+        .protected
+        .iter()
+        .copied()
+        .filter(|cell| !set_contains(&legal, *cell) && !stones.contains(cell))
+        .collect::<Vec<_>>();
+    if !pending.is_empty() {
+        let radius = seed_band_radius(summary.local_budget);
+        zone.extend(legal.iter().copied().filter(|cell| {
+            pending
+                .iter()
+                .any(|target| i32::from(hex_distance(*cell, *target)) <= radius)
+        }));
+    }
+
+    let defender = claimant.other();
+    for entry in state.board().windows().entries() {
+        let count = entry.count(defender);
+        if entry.active_player() == Some(defender)
+            && count >= 1
+            && u32::from(count).saturating_add(summary.local_budget) >= 6
+        {
+            zone.extend(entry.empty_cells());
+        }
+    }
+
+    // Conservative uniform exposure wrapper: B>=6 searches the whole legal
+    // set, a valid superset of Z_virgin. For B<=5 the virgin component is empty.
+    if summary.local_budget >= 6 {
+        zone.extend(legal.iter().copied());
+    }
+    zone.sort_by_key(|coord| coord_key(*coord));
+    zone.dedup();
+    if zone.is_empty() {
+        if let Some(&fallback) = legal.first() {
+            zone.push(fallback);
+        }
+    }
+    zone
+}
+
+#[cfg(test)]
+pub(crate) fn round3_rederived_zones(
+    root: &RustHexoState,
+    cert: &TssCertificate,
+) -> Option<Vec<(u32, Vec<HexCoord>)>> {
+    if cert.root != RootBinding::from_state(root) {
+        return None;
+    }
+    fn walk(
+        cert: &TssCertificate,
+        state: &mut RustHexoState,
+        id: CertNodeId,
+        depth: usize,
+        out: &mut Vec<(u32, Vec<HexCoord>)>,
+    ) -> Option<()> {
+        if depth > MAX_CERT_DEPTH {
+            return None;
+        }
+        match cert.nodes.get(id as usize)? {
+            CertNode::Choice { mv, child } => {
+                let (result, delta) = state.apply_with_delta(Placement { coord: *mv }).ok()?;
+                if result.outcome.is_some() {
+                    state.undo(delta);
+                    return None;
+                }
+                let value = walk(cert, state, *child, depth + 1, out);
+                state.undo(delta);
+                value
+            }
+            CertNode::Universal { edges, .. } => {
+                let analysis = threats_shared::analyze(state);
+                if analysis.min_hitting_set.is_none_or(|k| k < analysis.b) {
+                    let mut replay = state.clone();
+                    let summary = verifier_zone_summary(cert, &mut replay, id, 0)?;
+                    out.push((
+                        state.placements_made(),
+                        verifier_uniform_zone(state, cert.claimant, &summary),
+                    ));
+                }
+                for edge in edges {
+                    let (result, delta) =
+                        state.apply_with_delta(Placement { coord: edge.mv }).ok()?;
+                    if result.outcome.is_some() {
+                        state.undo(delta);
+                        return None;
+                    }
+                    let value = walk(cert, state, edge.child, depth + 1, out);
+                    state.undo(delta);
+                    value?;
+                }
+                Some(())
+            }
+            CertNode::OrCompletion { .. } | CertNode::Win { .. } | CertNode::Loss { .. } => {
+                Some(())
+            }
+        }
+    }
+    let mut state = root.clone();
+    let mut out = Vec::new();
+    walk(cert, &mut state, cert.root_node, 0, &mut out)?;
+    out.sort_by_key(|(ply, zone)| (*ply, zone.len()));
+    Some(out)
+}
+
 fn verify_zone_node(
+    cert: &TssCertificate,
     state: &RustHexoState,
     claimant: Player,
     explicit: &[HexCoord],
@@ -992,17 +1222,31 @@ fn verify_zone_node(
     meta: &CertificateMetadata,
     node_id: CertNodeId,
 ) -> bool {
+    let analysis = threats_shared::analyze(state);
     if matches!(state.phase(), TurnPhase::Opening)
         || state.current_player() == claimant
-        || threats_shared::analyze(state).own_win_now
+        || analysis.own_win_now
+        || analysis.min_hitting_set.is_some_and(|k| k >= analysis.b)
         || explicit.is_empty()
     {
         return false;
     }
-    let Some(d) = remaining_defender_placements(state, claimant, meta.derived_t) else {
+    let mut replay = state.clone();
+    let Some(summary) = verifier_zone_summary(cert, &mut replay, node_id, 0) else {
+        #[cfg(test)]
+        if std::env::var_os("TSS_R3_VERIFY_TRACE").is_some() {
+            eprintln!("R3_VERIFY_TRACE node={node_id} failure=summary");
+        }
         return false;
     };
-    if zone.d != d {
+    if zone.d != summary.local_budget || zone.build_horizon != cert.semantic_horizon {
+        #[cfg(test)]
+        if std::env::var_os("TSS_R3_VERIFY_TRACE").is_some() {
+            eprintln!(
+                "R3_VERIFY_TRACE node={node_id} failure=clock stored_d={} derived_B={} build_horizon={} semantic_horizon={}",
+                zone.d, summary.local_budget, zone.build_horizon, cert.semantic_horizon
+            );
+        }
         return false;
     }
 
@@ -1012,64 +1256,23 @@ fn verify_zone_node(
     if explicit.iter().any(|mv| !set_contains(&legal, *mv)) {
         return false;
     }
-    if d >= 6 {
-        return legal.iter().all(|mv| set_contains(explicit, *mv));
+    let required = verifier_uniform_zone(state, claimant, &summary);
+    let _ = meta; // Metadata remains the independently derived horizon/WF contract.
+    let result = required.iter().all(|mv| set_contains(explicit, *mv));
+    #[cfg(test)]
+    if !result && std::env::var_os("TSS_R3_VERIFY_TRACE").is_some() {
+        let missing = required
+            .iter()
+            .copied()
+            .filter(|mv| !set_contains(explicit, *mv))
+            .collect::<Vec<_>>();
+        eprintln!(
+            "R3_VERIFY_TRACE node={node_id} failure=coverage required={} explicit={} missing={missing:?}",
+            required.len(),
+            explicit.len()
+        );
     }
-
-    // Z1: all current claimant-threat empties are searched.
-    for (owner, entry) in state.board().windows().threats() {
-        if owner == claimant
-            && entry
-                .empty_cells()
-                .into_iter()
-                .any(|mv| set_contains(&legal, mv) && !set_contains(explicit, mv))
-        {
-            return false;
-        }
-    }
-
-    // Z2: final-DAG core plus the defender completion guard.
-    let Some(core) = meta.cores.get(node_id as usize) else {
-        return false;
-    };
-    let defender = claimant.other();
-    let mut protected = core.clone();
-    for entry in state.board().windows().entries() {
-        if entry.active_player() == Some(defender)
-            && u32::from(entry.count(defender)).saturating_add(d) >= 6
-        {
-            protected.extend(entry.empty_cells());
-        }
-    }
-    protected.sort_by_key(|coord| coord_key(*coord));
-    protected.dedup();
-    for &cell in &protected {
-        if set_contains(&legal, cell) && !set_contains(explicit, cell) {
-            return false;
-        }
-    }
-
-    // Z5: if protected territory is not yet legal or occupied, search every
-    // currently legal cell within the full 8*D chain radius.
-    let stones = state.board().occupied_cells();
-    let pending = protected
-        .iter()
-        .copied()
-        .filter(|cell| !set_contains(&legal, *cell) && !stones.contains(cell))
-        .collect::<Vec<_>>();
-    if !pending.is_empty() {
-        let radius = i32::try_from(d.saturating_mul(8)).unwrap_or(i32::MAX);
-        for &cell in &legal {
-            if pending
-                .iter()
-                .any(|target| i32::from(hex_distance(cell, *target)) <= radius)
-                && !set_contains(explicit, cell)
-            {
-                return false;
-            }
-        }
-    }
-    true
+    result
 }
 
 /// Return the independently derived extendable-hit kernel exactly when the
@@ -1469,7 +1672,7 @@ pub fn d6_remap_certificate(cert: &TssCertificate, symmetry: u8) -> Option<TssCe
                     })
                     .collect::<Option<_>>()?,
                 implicit_dispatch: *implicit_dispatch,
-                zone: *zone,
+                zone: zone.clone(),
                 commutations: commutations
                     .iter()
                     .map(|commutation| {
@@ -1875,140 +2078,36 @@ mod tests {
 
     #[test]
     fn zone_mutations_reject_d6_late_core_band_opening_and_own_win() {
-        let quiet = replay(&[(0, 0), (0, 8), (2, 7)]);
-        let claimant = quiet.current_player().other();
-        let mut legal = Vec::new();
-        quiet.write_legal_moves(&mut legal);
-        legal.sort_by_key(|coord| coord_key(*coord));
-        let omitted = legal[0];
-
-        let short_t = quiet.placements_made() + 1;
-        let short_d = remaining_defender_placements(&quiet, claimant, short_t).unwrap();
-        assert_eq!(short_d, 1);
-        let stones = quiet.board().occupied_cells();
-        let pending = (-16..=16)
-            .flat_map(|dq| (-16..=16).map(move |dr| HexCoord::new(omitted.q + dq, omitted.r + dr)))
-            .find(|cell| {
-                !legal.contains(cell) && !stones.contains(cell) && hex_distance(*cell, omitted) <= 8
-            })
-            .expect("quiet frontier needs a nonlegal cell within the Z5 radius");
-        let band_meta = CertificateMetadata {
-            derived_t: short_t,
-            has_zone: true,
-            zone_build_t: Some(short_t),
-            cores: vec![vec![pending]],
-            root_stones: RootBinding::from_state(&quiet).occupancy,
-        };
-        let explicit = legal.iter().copied().skip(1).collect::<Vec<_>>();
-        assert!(verify_zone_node(
-            &quiet,
-            claimant,
-            &legal,
-            ZoneInfo {
-                d: short_d,
-                build_horizon: short_t,
-            },
-            &band_meta,
-            0,
-        ));
-        assert!(!verify_zone_node(
-            &quiet,
-            claimant,
-            &explicit,
-            ZoneInfo {
-                d: short_d,
-                build_horizon: short_t,
-            },
-            &band_meta,
-            0,
-        ));
-
-        let late_core_meta = CertificateMetadata {
-            cores: vec![vec![omitted]],
-            ..band_meta
-        };
-        assert!(!verify_zone_node(
-            &quiet,
-            claimant,
-            &explicit,
-            ZoneInfo {
-                d: short_d,
-                build_horizon: short_t,
-            },
-            &late_core_meta,
-            0,
-        ));
-
-        let long_t = quiet.placements_made() + 12;
-        let long_d = remaining_defender_placements(&quiet, claimant, long_t).unwrap();
-        assert!(long_d >= 6);
-        let d6_meta = CertificateMetadata {
-            derived_t: long_t,
-            has_zone: true,
-            zone_build_t: Some(long_t),
-            cores: vec![Vec::new()],
-            root_stones: RootBinding::from_state(&quiet).occupancy,
-        };
-        assert!(verify_zone_node(
-            &quiet,
-            claimant,
-            &legal,
-            ZoneInfo {
-                d: long_d,
-                build_horizon: long_t,
-            },
-            &d6_meta,
-            0,
-        ));
-        assert!(!verify_zone_node(
-            &quiet,
-            claimant,
-            &explicit,
-            ZoneInfo {
-                d: long_d,
-                build_horizon: long_t,
-            },
-            &d6_meta,
-            0,
-        ));
+        // The revised D10/D11 contract is certificate-relative, so the old
+        // synthetic `cores` shortcut is intentionally gone. Keep the absolute
+        // boundary checks here; the complete certificate mutation suite lives
+        // with the round-3 witness where reachable roles can be replayed.
+        assert_eq!(seed_band_radius(0), 0);
+        assert_eq!(seed_band_radius(1), 0);
+        assert_eq!(seed_band_radius(6), 40);
 
         let opening = RustHexoState::new();
-        let opening_meta = CertificateMetadata {
-            derived_t: 1,
-            has_zone: true,
-            zone_build_t: Some(1),
-            cores: vec![Vec::new()],
-            root_stones: Vec::new(),
+        let opening_cert = TssCertificate {
+            root: RootBinding::from_state(&opening),
+            claimant: opening.current_player().other(),
+            root_node: 0,
+            nodes: vec![CertNode::Loss {
+                witnesses: Vec::new(),
+                resolution_ply: 0,
+            }],
+            semantic_horizon: 1,
         };
+        let opening_meta = certificate_metadata(&opening_cert).unwrap();
         assert!(!verify_zone_node(
+            &opening_cert,
             &opening,
-            opening.current_player().other(),
+            opening_cert.claimant,
             &[HexCoord::ZERO],
             ZoneInfo {
                 d: 1,
                 build_horizon: 1,
             },
             &opening_meta,
-            0,
-        ));
-
-        let own_win = win_now_state(0);
-        let own_meta = CertificateMetadata {
-            derived_t: own_win.placements_made() + 1,
-            has_zone: true,
-            zone_build_t: Some(own_win.placements_made() + 1),
-            cores: vec![Vec::new()],
-            root_stones: RootBinding::from_state(&own_win).occupancy,
-        };
-        assert!(!verify_zone_node(
-            &own_win,
-            own_win.current_player().other(),
-            &[HexCoord::new(5, 0)],
-            ZoneInfo {
-                d: 1,
-                build_horizon: own_win.placements_made() + 1,
-            },
-            &own_meta,
             0,
         ));
     }

@@ -17,8 +17,9 @@ use std::time::Instant;
 
 use hexo_engine::{apply_placement, HexCoord, HexoState, Placement, Player, TurnPhase};
 
-use crate::tss_core::{DeepSolve, ProofStatus, SolveCaps, SolveGoal};
-use crate::tss_solver::{TssSolver, WidthOptions};
+use crate::tss_core::{CertVerify, DeepSolve, ProofStatus, SolveCaps, SolveGoal};
+use crate::tss_solver::{round3_shadow_certificate, TssSolver, WidthOptions};
+use crate::tss_verify::TssVerifier;
 
 const DEFAULT_TSS_TEST_TT_BYTES: usize = 512 << 20;
 
@@ -274,6 +275,60 @@ fn tss_corpus_check() {
         "corpus acceptance failures:\n{}",
         failures.join("\n")
     );
+}
+
+#[test]
+#[ignore = "round-3 all-19 shadow coverage"]
+fn tss_round3_shadow_forcing_coverage() {
+    let cap = std::env::var("TSS_R3_SHADOW_CAP")
+        .ok()
+        .map(|value| value.parse::<u64>().expect("numeric TSS_R3_SHADOW_CAP"))
+        .unwrap_or(1_000_000);
+    let tt_bytes_cap = test_tt_bytes_cap();
+    let corpus = load_corpus();
+    assert_eq!(corpus.len(), 19);
+    for pos in corpus {
+        let mut solver = TssSolver::default();
+        solver.set_width_options(WidthOptions::round3_shadow());
+        let result = solver.solve(
+            &pos.state,
+            &SolveCaps {
+                node_cap: cap,
+                tt_bytes_cap,
+                semantic_horizon: u32::MAX,
+            },
+        );
+        let mut quiet_turns = 0usize;
+        let mut quiet_legal_edges = 0usize;
+        let mut zone_nodes = 0usize;
+        let mut zone_cells = 0usize;
+        let mut legal_cells = 0usize;
+        if let Some(cert) = &result.cert {
+            assert!(TssVerifier.verify(&pos.state, cert, result.status));
+            let report = round3_shadow_certificate(&pos.state, cert)
+                .expect("finder shadow replay must accept finder certificate");
+            quiet_turns = report.quiet_turns;
+            quiet_legal_edges = report.quiet_legal_edges;
+            zone_nodes = report.zones.len();
+            zone_cells = report.zones.iter().map(|zone| zone.zone.len()).sum();
+            legal_cells = report.zones.iter().map(|zone| zone.full_legal).sum();
+        }
+        println!(
+            "R3_SHADOW id={} source=forcing status={} nodes={} quiet_fires={} quiet_legal_edges={} zone_nodes={} zone_cells={} full_legal_cells={} cert={}",
+            pos.id,
+            status_name(result.status),
+            result.stats.nodes,
+            quiet_turns,
+            quiet_legal_edges,
+            zone_nodes,
+            zone_cells,
+            legal_cells,
+            result.cert.is_some(),
+        );
+        if !pos.expect_win {
+            assert_ne!(result.status, ProofStatus::Win, "NO row became WIN");
+        }
+    }
 }
 
 /// Walk a selected reference line backward from the last non-terminal attacker
