@@ -224,3 +224,73 @@ untouched by static probing.
   faithfulness cross-check): `tss_solver.rs` — `zone_certificate_extras` made
   `pub(crate)`. Module wiring: `lib.rs` — `#[cfg(test)] mod tss_hunt;`.
   No production logic changed.
+
+## Absolute-pin run (follow-up)
+
+**Outcome: `BLOCKED`.** The single ignored test
+`hunt_r1b_absolute_pin` executes three deterministic, legal-replay position
+families under finder/verifier relay deltas 0, 1, and 2. It did not mint a
+weakened false-WIN certificate, so this follow-up does **not** upgrade R1b from
+relative to absolute. The test retains the exact negative controls and prints
+one machine-readable line per attempt plus the final `outcome=BLOCKED` line.
+
+The exact blocker for the literal far-resource family is the finder width gate
+`tss_solver.rs::threat_creating_moves` (currently line 3914), called by
+`prove_choice` (currently line 3350): the shipped narrow finder admits only an
+empty of an already claimant-active count-3-or-stronger length-six window. On
+the real B=4 linear frontier, the claimant has only the anchor, so no downstream
+`Choice` can be generated, `arena_core` never acquires the ghost-illegal target,
+and every delta returns `UNKNOWN` without a certificate. Adding the count-three
+scaffold at the eventual witness collapses the construction into attempt 2:
+every witness empty is within five cells of a claimant stone, hence legal, so
+`verify_zone_node`'s `pending` filter (currently lines 1055-1059) is empty and
+Z5 never fires. Turning that scaffold into a forcing chain collapses it into
+attempt 1: `prove_universal`'s `implicit_dispatch` predicate (currently lines
+3459-3462) is true at the defender nodes, and the zone attachment gate
+(currently lines 3475-3477) attaches no zone. These are the three position
+families permitted by the construction budget; coordinate tweaks inside the
+families reproduced the same trichotomy (leaf/no pending, forced/no zone, or
+quiet/no generated attack).
+
+Attempt details (all coordinates are axial `(q,r)`):
+
+1. **Deep forcing / forced-dispatch control.** Replay
+   `[(0,0),(-1,0),(0,-1),(-2,-3),(-1,-3),(-2,1),(-3,1),
+   (0,-3),(1,-3),(-4,2),(2,-4),(1,4),(2,4),(-5,2),(2,-5),
+   (3,4),(4,1),(-6,3),(3,-6),(4,2),(4,3),(-7,3),(3,-7),
+   (1,7),(2,6),(-1,2),(2,-1),(3,5),(2,-3)]`. The root is
+   Player1/FirstStone at ply 29; solve `Loss` to absolute T=37. All three
+   deltas produce the same accepted 10-node certificate with Universals but
+   `zones=0`; every Universal is `implicit_dispatch=true`.
+2. **One-turn witness / empty-pending control.** Replay
+   `[(0,0),(0,8),(2,7),(1,0),(2,0),(4,6),(6,5),(3,0),(4,0),
+   (8,4),(10,3)]`; solve `Win` to T=13. All three deltas produce the same typed
+   Win leaf for witness `WindowKey { start: (-1,0), axis: Q }`; its independently
+   recomputed ghost-illegal pending set is empty.
+3. **Literal sharp B=4 chain.** Root replay `[(0,0)]`, Player1/FirstStone,
+   `s=(8,0)`, `y=(32,0)`, defender relay
+   `[(8,0),(16,0),(24,0),(32,0)]`, with legal intervening attacker fillers
+   `[(0,-1),(0,-2)]`; solve `Loss` to T=9. The engine accepts the full real line
+   and ends with Player1 owning `y`. At the root, `s` is the only legal cell
+   within the sharp radius 24 of `y`; shipped/sharp/weakened radii are
+   32/24/16. Nevertheless all three finder runs are `UNKNOWN` because the
+   count-three attacker-width precondition blocks creation of the far core.
+
+No RNG is used. Every run uses `node_cap=100_000`, `tt_bytes_cap=64 MiB`
+(well below the 512 MiB cap), zone search enabled with other zone options at
+default, and the fixed exact horizons above. Repro from
+`packages/hexfield_eq/rust`:
+
+```
+CARGO_TARGET_DIR=../../../.target-hunt cargo test -p hexfield_eq --lib hunt_r1b_absolute_pin -- --include-ignored --nocapture --test-threads=1
+```
+
+Production-default confirmation (delta defaults to zero) remains green:
+
+```
+CARGO_TARGET_DIR=../../../.target-hunt cargo test -p hexfield_eq --lib hunt_ -- --nocapture --test-threads=1
+```
+
+Both unchanged cross-checks pass, including
+`hunt_seed_band_matches_production`; a non-test `cargo check -p hexfield_eq`
+also passes with the test-only override absent.

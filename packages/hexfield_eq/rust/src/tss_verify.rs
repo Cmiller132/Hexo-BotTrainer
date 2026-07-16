@@ -1058,7 +1058,7 @@ fn verify_zone_node(
         .filter(|cell| !set_contains(&legal, *cell) && !stones.contains(cell))
         .collect::<Vec<_>>();
     if !pending.is_empty() {
-        let radius = i32::try_from(d.saturating_mul(8)).unwrap_or(i32::MAX);
+        let radius = crate::tss_solver::seed_band_radius(d);
         for &cell in &legal {
             if pending
                 .iter()

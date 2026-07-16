@@ -4978,6 +4978,53 @@ fn arena_core(arena: &[CertNode], root: CertNodeId, out: &mut Vec<HexCoord>) -> 
     Some(())
 }
 
+/// TEST-ONLY seed-band radius override (R1b absolute-pin hunt). NON-test builds
+/// never compile the override, so production is byte-identical; in test builds the
+/// default delta is 0, so `seed_band_radius(d) == 8*d` byte-for-byte and the existing
+/// `hunt_seed_band_matches_production` cross-check still passes. A hunt test may shrink
+/// the radius to 8*(d-delta) to shed the critical seed. Use the RAII guard so the
+/// thread-local never leaks across libtest's shared worker thread (--test-threads=1
+/// reuses ONE worker, so a non-reset thread-local WOULD corrupt later tests).
+#[cfg(test)]
+mod seed_band_override {
+    use std::cell::Cell;
+
+    thread_local!(static RELAY_DELTA: Cell<u32> = const { Cell::new(0) });
+
+    pub(crate) fn get() -> u32 {
+        RELAY_DELTA.with(|c| c.get())
+    }
+
+    /// RAII: sets the delta, restores the previous value on drop.
+    pub(crate) struct ScopedRelayDelta(u32);
+
+    impl ScopedRelayDelta {
+        pub(crate) fn new(delta: u32) -> Self {
+            let prev = RELAY_DELTA.with(|c| c.replace(delta));
+            ScopedRelayDelta(prev)
+        }
+    }
+
+    impl Drop for ScopedRelayDelta {
+        fn drop(&mut self) {
+            RELAY_DELTA.with(|c| c.set(self.0));
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) use seed_band_override::ScopedRelayDelta;
+
+/// Seed-band chain radius. Production: `8*d`. Test builds subtract the thread-local
+/// relay delta (default 0 → identical). Single source of truth for both the finder
+/// (`zone_certificate_extras`) and the verifier (`verify_zone_node`).
+#[inline]
+pub(crate) fn seed_band_radius(d: u32) -> i32 {
+    #[cfg(test)]
+    let d = d.saturating_sub(seed_band_override::get());
+    i32::try_from(d.saturating_mul(8)).unwrap_or(i32::MAX)
+}
+
 pub(crate) fn zone_certificate_extras(
     state: &RustHexoState,
     claimant: Player,
@@ -5023,7 +5070,7 @@ pub(crate) fn zone_certificate_extras(
         })
         .collect::<Vec<_>>();
     if !pending.is_empty() {
-        let radius = i32::try_from(d.saturating_mul(8)).unwrap_or(i32::MAX);
+        let radius = seed_band_radius(d);
         required.extend(legal.iter().copied().filter(|cell| {
             pending
                 .iter()

@@ -35,8 +35,12 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use hexo_engine::{
     apply_placement, hex_distance, HexCoord, HexoState as RustHexoState, Placement, Player,
-    WindowStore,
+    TurnPhase, WindowStore,
 };
+
+use crate::tss_core::{CertVerify, ProofStatus, SolveCaps, SolveGoal, ZoneSearchCaps};
+use crate::tss_solver::{ScopedRelayDelta, TssSolver};
+use crate::tss_verify::{certificate_horizon_preflight, CertNode, TssVerifier};
 
 const LEGAL_RADIUS: i16 = 8;
 
@@ -470,6 +474,238 @@ fn hunt_r1b_chain_sharpness() {
     println!(
         "HUNT R1B_FIXTURE verdict=SHARP-AT-8(B-1)  impl_uses=8B(one relay of slack)  status=OK"
     );
+}
+
+#[test]
+#[ignore = "absolute-pin construction; run explicitly with --nocapture"]
+fn hunt_r1b_absolute_pin() {
+    fn replay(coords: &[(i16, i16)]) -> RustHexoState {
+        let mut state = RustHexoState::new();
+        for &(q, r) in coords {
+            apply_placement(&mut state, Placement { coord: HexCoord::new(q, r) }).unwrap();
+        }
+        state
+    }
+
+    fn solve_at(
+        state: &RustHexoState,
+        goal: SolveGoal,
+        semantic_horizon: u32,
+        delta: u32,
+    ) -> crate::tss_core::DeepResult<crate::tss_verify::TssCertificate> {
+        let _relay = ScopedRelayDelta::new(delta);
+        let mut solver = TssSolver::default();
+        solver.set_zone_options(ZoneSearchCaps {
+            enabled: true,
+            ..ZoneSearchCaps::default()
+        });
+        solver.solve_goal(
+            state,
+            &SolveCaps {
+                node_cap: 100_000,
+                tt_bytes_cap: 64 << 20,
+                semantic_horizon,
+            },
+            goal,
+        )
+    }
+
+    // Attempt 1: the repository's curated deep forcing line.  Entering at its
+    // documented defender node does produce a real deep certificate, but every
+    // Universal is forced dispatch, so prove_universal never attaches a zone
+    // and the seed-band radius is not consulted.
+    let deep_coords = [
+        (0, 0),
+        (-1, 0),
+        (0, -1),
+        (-2, -3),
+        (-1, -3),
+        (-2, 1),
+        (-3, 1),
+        (0, -3),
+        (1, -3),
+        (-4, 2),
+        (2, -4),
+        (1, 4),
+        (2, 4),
+        (-5, 2),
+        (2, -5),
+        (3, 4),
+        (4, 1),
+        (-6, 3),
+        (3, -6),
+        (4, 2),
+        (4, 3),
+        (-7, 3),
+        (3, -7),
+        (1, 7),
+        (2, 6),
+        (-1, 2),
+        (2, -1),
+        (3, 5),
+    ];
+    let mut deep = replay(&deep_coords);
+    apply_placement(
+        &mut deep,
+        Placement {
+            coord: HexCoord::new(2, -3),
+        },
+    )
+    .unwrap();
+    assert_eq!(deep.phase(), TurnPhase::FirstStone);
+    let analysis = crate::threats_shared::analyze(&deep);
+    assert_eq!(analysis.min_hitting_set, Some(analysis.b));
+    assert!(analysis.opp_threat_count > 0 && !analysis.own_win_now);
+    let deep_t = deep.placements_made() + 8;
+    let deep_results = (0..=2)
+        .map(|delta| solve_at(&deep, SolveGoal::Loss, deep_t, delta))
+        .collect::<Vec<_>>();
+    for result in &deep_results {
+        assert_eq!(result.status, ProofStatus::Loss);
+        let cert = result.cert.as_ref().expect("deep forcing certificate");
+        assert!(cert.nodes.iter().any(|node| matches!(node, CertNode::Universal { .. })));
+        assert!(cert.nodes.iter().all(|node| !matches!(
+            node,
+            CertNode::Universal {
+                implicit_dispatch: false,
+                ..
+            }
+        )));
+        assert_eq!(certificate_horizon_preflight(cert), Some((deep_t, false)));
+    }
+    assert_eq!(deep_results[0].cert, deep_results[1].cert);
+    assert_eq!(deep_results[1].cert, deep_results[2].cert);
+    let deep_cert = deep_results[2].cert.as_ref().unwrap();
+    for delta in 0..=2 {
+        let _relay = ScopedRelayDelta::new(delta);
+        assert!(TssVerifier.verify_with_dispatch_oracle(
+            &deep,
+            deep_cert,
+            ProofStatus::Loss
+        ));
+    }
+    println!(
+        "HUNT R1B_ABSOLUTE attempt=1 status=BLOCKED blocker=prove_universal:implicit_dispatch root_ply={} derived_t={} cert_nodes={} zones=0 deltas=identical",
+        deep.placements_made(),
+        deep_t,
+        deep_cert.nodes.len()
+    );
+
+    // Attempt 2: the compact one-turn win family.  The finder emits a typed
+    // leaf with no Universal.  Independently, every empty witness cell is
+    // already legal (within a length-six window of four/five claimant stones),
+    // so verify_zone_node's `pending` filter would be empty even if stapled.
+    let one_turn = replay(&[
+        (0, 0),
+        (0, 8),
+        (2, 7),
+        (1, 0),
+        (2, 0),
+        (4, 6),
+        (6, 5),
+        (3, 0),
+        (4, 0),
+        (8, 4),
+        (10, 3),
+    ]);
+    let one_t = one_turn.placements_made() + 2;
+    let one_results = (0..=2)
+        .map(|delta| solve_at(&one_turn, SolveGoal::Win, one_t, delta))
+        .collect::<Vec<_>>();
+    for result in &one_results {
+        assert_eq!(result.status, ProofStatus::Win);
+        assert!(result.cert.as_ref().is_some_and(|cert| {
+            cert.nodes
+                .iter()
+                .all(|node| !matches!(node, CertNode::Universal { .. }))
+        }));
+    }
+    assert_eq!(one_results[0].cert, one_results[1].cert);
+    assert_eq!(one_results[1].cert, one_results[2].cert);
+    let one_cert = one_results[2].cert.as_ref().unwrap();
+    let witness = one_cert
+        .nodes
+        .iter()
+        .find_map(|node| match node {
+            CertNode::Win { witness, .. } => Some(*witness),
+            _ => None,
+        })
+        .expect("one-turn Win witness");
+    let mut one_legal = Vec::new();
+    one_turn.write_legal_moves(&mut one_legal);
+    let pending = witness
+        .cells()
+        .into_iter()
+        .filter(|cell| {
+            one_turn.board().get(*cell).is_none() && !one_legal.contains(cell)
+        })
+        .collect::<Vec<_>>();
+    assert!(pending.is_empty());
+    println!(
+        "HUNT R1B_ABSOLUTE attempt=2 status=BLOCKED blocker=verify_zone_node:pending-empty witness={witness:?} resolution={} deltas=identical",
+        one_t
+    );
+
+    // Attempt 3: literal B=4 sharp chain on a real legal root.  The geometry is
+    // exact: s=(8,0) is the only root-legal cell within 24=8(B-1) of y=(32,0),
+    // while delta=2 would retain only radius 16.  The four defender placements
+    // are legal in the real engine (two harmless attacker fillers separate the
+    // defender turns).  But the finder cannot create an arena_core obligation:
+    // its narrow attacker generator admits only extensions of an existing
+    // count-three window, and this frontier has one claimant stone.
+    const B: u32 = 4;
+    let chain = replay(&[(0, 0)]);
+    let seed = HexCoord::new(8, 0);
+    let target = HexCoord::new(32, 0);
+    let relay = [seed, HexCoord::new(16, 0), HexCoord::new(24, 0), target];
+    let mut chain_legal = Vec::new();
+    chain.write_legal_moves(&mut chain_legal);
+    assert!(chain_legal.contains(&seed));
+    assert!(!chain_legal.contains(&target));
+    let sharp_seeds = chain_legal
+        .iter()
+        .copied()
+        .filter(|cell| hex_distance(*cell, target) <= 8 * (B as i16 - 1))
+        .collect::<Vec<_>>();
+    assert_eq!(sharp_seeds, vec![seed]);
+    assert!(hex_distance(seed, target) > 8 * (B as i16 - 2));
+
+    let mut real_line = chain.clone();
+    for coord in [
+        relay[0],
+        relay[1],
+        HexCoord::new(0, -1),
+        HexCoord::new(0, -2),
+        relay[2],
+        relay[3],
+    ] {
+        apply_placement(&mut real_line, Placement { coord }).unwrap();
+    }
+    assert_eq!(real_line.board().get(target), Some(Player::Player1));
+
+    let chain_t = chain.placements_made() + 8;
+    let chain_results = (0..=2)
+        .map(|delta| solve_at(&chain, SolveGoal::Loss, chain_t, delta))
+        .collect::<Vec<_>>();
+    assert!(chain_results.iter().all(|result| {
+        result.status == ProofStatus::Unknown && result.cert.is_none()
+    }));
+    println!(
+        "HUNT R1B_ABSOLUTE attempt=3 status=BLOCKED blocker=threat_creating_moves:minimum_strength=3 B={B} seed={seed:?} target={target:?} relay={relay:?} shipped_radius={} sharp_radius={} weakened_radius={} statuses=UNKNOWN/UNKNOWN/UNKNOWN",
+        8 * B,
+        8 * (B - 1),
+        8 * (B - 2)
+    );
+    println!(
+        "HUNT R1B_ABSOLUTE outcome=BLOCKED attempts=3 exact_check=threat_creating_moves(line3914)->prove_choice(line3350); count3-scaffold makes the witness legal, while forcing it makes the defender node implicit_dispatch"
+    );
+
+    // Keep the public verifier trait import exercised as a second independent
+    // check that the one-turn certificate is valid under the production path.
+    for delta in 0..=2 {
+        let _relay = ScopedRelayDelta::new(delta);
+        assert!(TssVerifier.verify(&one_turn, one_cert, ProofStatus::Win));
+    }
 }
 
 // ===========================================================================
