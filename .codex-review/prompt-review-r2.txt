@@ -1,0 +1,74 @@
+GAP-RAW round-2 HOSTILE REVIEW. You are the adversarial referee for the
+round-2 repair document. Round 1 was REJECTED on your predecessor's
+review; round 2 claims to have executed all 12 repairs with honest
+shrinkage. Your job: try to BREAK it. Statement fidelity is the
+campaign's prime directive — a PROVEN label that should be CONJECTURED
+is a rejection-grade defect; an honest OPEN is not.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+at commit 74026b7c. You CANNOT git-commit. Write the review to
+GAP_RAW_REVIEW_ROUND2.md in the worktree root — written incrementally
+(verdict skeleton first, per-section findings as you go).
+
+## Inputs (read in this order)
+1. GAP_RAW_PROOF_ROUND2.md — the document under review.
+2. GAP_RAW_REVIEW_ROUND1.md — your predecessor's review; verify each of
+   its 12 repair items was genuinely executed, not renamed around.
+3. GAP_RAW_PROOF_ROUND1.md — the rejected draft (for withdrawal-ledger
+   completeness: did round 2 withdraw everything round 1 overstated?).
+4. packages/hexfield_eq/rust/src/gap_raw_hunt.rs — the machine checks
+   (round2_ tests). Verify the tests assert what the document says they
+   assert — a regression that checks a weaker predicate than its §8
+   description is a finding.
+
+## Named attack surfaces (mandatory, in addition to your own)
+A. Theorem A2/A2' quantifier structure: does the right-hand side now
+   quantify ONE strategy whose actual legal sequential two-cell reply
+   services I(P) at every reached epoch against every attacker
+   continuation? Hunt for any residual per-epoch existential.
+B. Theorem D2's proof: is clause 2 alone genuinely sufficient via A2,
+   with clauses 1/3/4 honestly redundant? Any circularity between
+   Hist(S,P0) reachability and the account renewal?
+C. Obligation J's well-posedness: is the canonical account B2=Theta2
+   with the n1(c)/9 term exactly defined (equation (9))? Is the update
+   rule total over all attacker replies? Does the §4.2 three-gadget
+   history genuinely fall outside Hist(S,P0) for the strategies J
+   quantifies, or is that exclusion circular?
+D. K2 closure (§5.3): the mass/inventory classification — check every
+   case; this is a new PROVEN with real load.
+E. The complete one-axis lemma (§5.2) and the 0.4147 floor: verify the
+   proof, and that the machine check's universe matches the lemma's
+   hypothesis class.
+F. L2 re-verification (§8): is the "complete normalized machine
+   universe" actually complete w.r.t. the review's specification
+   (edge-disconnected but co-window-interacting, count-5 singleton
+   residuals, hard assertions)? Any silent sub-universe relabeling that
+   the prose then quotes as global?
+G. L3 relabeling: confirm no downstream claim still consumes the
+   withdrawn global L3 maxima.
+H. Withdrawal ledger completeness: diff round 1's claim inventory
+   against round 2's; any round-1 claim silently reused without status?
+I. The straight-four cover repair (§3.1) and R7.4 floor: exact roots,
+   exact two-cell covers.
+
+## Machine work allowed
+Rerun any round2_ test; add [ignore]-gated adversarial checks of your
+own if a suspected counterexample is machine-checkable (same rules:
+CARGO_TARGET_DIR=.target-hunt, one cargo, --test-threads=1, single run
+<=10 min, free RAM >9 GB before cargo via powershell
+"Get-CimInstance Win32_OperatingSystem | % { $_.FreePhysicalMemory/1MB }";
+THREE other sessions share this host — if below, wait and re-check).
+
+## Deliverable
+GAP_RAW_REVIEW_ROUND2.md: overall verdict (ACCEPT / ACCEPT-WITH-EDITS /
+REJECT) with per-claim verdict table (every PROVEN/VERIFIED label:
+CONFIRMED or BROKEN-with-refutation); findings ordered by severity;
+if REJECT or ACCEPT-WITH-EDITS, a numbered repair list; an independent
+judgment section: is J the right residue, and what is the most
+promising attack on J itself (prove or refute)? Final message: verdict,
+tallies, sharpest findings, files.
+
+## Rules
+No commits. Work only in this worktree; siblings read-only. Do not edit
+GAP_RAW_PROOF_ROUND2.md — findings go in the review. Truthfulness
+outranks completeness.
