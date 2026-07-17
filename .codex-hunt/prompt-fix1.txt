@@ -1,0 +1,73 @@
+R-FIX1 — FIX THE BOUNDED-HORIZON ZONE-CLOCK MISMATCH
+(rebase_zone_distances vs verifier-derived local budget).
+
+Context: the NQ8 hunt (HUNT_REPORT_HORIZON_LADDER.md in this worktree —
+READ FIRST, §"Verdict identity and STOP finding") froze a pre-existing
+finder bug: at semantic_horizon = root+16, the solver returns a WIN
+certificate for double_fork_compact that the independent verifier
+REJECTS with `failure=clock stored_d=8 derived_B=4 build_horizon=52
+semantic_horizon=52` at a zoned Universal node (ply 37). Diagnosis in
+the report: the materializer's `rebase_zone_distances` relabels zone
+clocks from the CALLER'S external semantic horizon, while the verifier
+requires the exact local budget induced by the materialized proof DAG.
+With slack in a finite horizon the two disagree; the verifier (single
+mint) correctly rejects, so soundness holds, but the finder LOSES
+genuinely-won positions at finite horizons — which is the Phase-3
+trainer-leaf profile. Owner directive: dramatically more efficient
+solver; a finder that wastes its own wins at bounded horizons is a
+correctness-of-performance bug that must die.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-pn-init
+(branch hunt/pn-init @23ffc65b — includes the NQ6 telemetry, the R-IG1
+gate, and the NQ8 harness with the frozen repro; keep all working).
+You CANNOT git-commit. Engine = packages/hexfield_eq/rust/src/tss_solver.rs
+(+ tss_verify.rs / tss_core.rs as needed). The frozen repro:
+  $env:CARGO_TARGET_DIR='.target-hunt'
+  $env:TSS_HORIZON_LADDER_ONLY_GROUP='double_fork_compact'
+  cargo test --release -p hexfield_eq horizon_ladder_campaign -- --ignored --test-threads=1 --nocapture
+
+## Work order
+1. DIAGNOSIS MEMO first (FIX_ZONE_CLOCK.md): read
+   rebase_zone_distances, the zone materialization path, and the
+   verifier's clock check (the R3_VERIFY_TRACE emitter). State
+   precisely what invariant the verifier enforces (how derived_B is
+   computed from the DAG), what the materializer currently stamps, and
+   in exactly which configurations they diverge (why is the unbounded
+   profile unaffected? why did G2R3's consume profile pass?). If your
+   reading contradicts the NQ8 diagnosis, say so with code cites.
+2. FIX so that materialized certificates carry the exact clocks the
+   verifier derives — the fix must make the FINDER agree with the
+   VERIFIER, never the other way around. DO NOT touch the verifier's
+   checks except provable refactors; the verifier's contract is the
+   normative one (it matches the reviewed D9-D18 proof contract). If
+   you believe the verifier itself is wrong, STOP and write up — that
+   would need a proof-round decision, not a code choice.
+3. REGRESSION: the frozen repro must now produce a verifier-ACCEPTED
+   WIN at h16 with verdict equal to the direct solve; add a permanent
+   #[cfg(test)] regression test pinning this (bounded-horizon compact
+   WIN verifies).
+4. NO-REGRESSION EVIDENCE: rerun, flag states as relevant,
+   (a) the NQ8 forcing ladder cohorts (all previously-green rows stay
+   verdict-identical with verified certs — and note whether previously
+   UNKNOWN bounded rungs now verify as WINs, which is the fix working),
+   (b) the R-IG1 live campaign off+on (frozen baselines: flag-off must
+   stay EXACT; flag-on verdicts identical),
+   (c) the official 2 GiB gate: CORPUS_DONE failures=0,
+   (d) the pn_init_campaign identity line (unchanged).
+5. MEASURE the recovered value: on the ladder cohorts, count bounded
+   rungs whose verdict improves UNKNOWN->verified WIN post-fix, and
+   state clearly whether the NQ8 economics table would change (do NOT
+   rerun the whole economics unless cheap; a per-rung recount is fine).
+
+## Rules
+CARGO_TARGET_DIR=.target-hunt; ONE cargo process; --test-threads=1;
+free RAM >9 GB before every cargo (powershell "Get-CimInstance
+Win32_OperatingSystem | % { $_.FreePhysicalMemory/1MB }") — THREE other
+sessions share this 31 GB host (Lean lane priority); if below, wait and
+re-check; >11 GB before the 2 GiB official gate (exempt from the 10-min
+bound). No commits. This worktree only; siblings read-only. rustfmt
+--edition 2021 only on files you edit. Truthfulness outranks
+completeness; if the fix needs a semantics decision above your pay
+grade, STOP with the sharpest possible memo. Final message: diagnosis,
+fix description, regression + no-regression evidence, recovered-value
+count, files, regen commands.

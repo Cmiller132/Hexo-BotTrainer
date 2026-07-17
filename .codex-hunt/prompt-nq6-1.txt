@@ -1,0 +1,78 @@
+NQ6 MACHINE HUNT — CENSUS-DERIVED PRUNING AND PN/DN INITIALIZATION AT
+INTERIOR NODES.
+
+Goal: size two levers built on the PROVEN DTW census two-gap bound.
+Background you MUST read first (read-only sibling worktree):
+E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-dtw-bounds\PROOF_DTW_CENSUS_BOUND.md
+— the proven result is a WIN-goal distance-to-win lower bound from a
+window census with gap constant c<=2 in BOTH phases at horizon 8, with
+Contract 8.1 (executable spec: the census MUST come from a full
+WindowStore::entries() scan — a threat-only index falsely gates) and 8.2
+(requested-h default artifact). Two known traps, both frozen with
+counterexamples there: naive SecondStone c=3 is FALSE; threat-index
+census falsely gates. The proven leaf gate (h=8, ~49% skip at the leaf
+profile) is a Phase-3 deployment; THIS hunt asks what the same census
+buys INSIDE the deep search tree. Owner directive: the campaign goal is
+a dramatically more efficient solver; this hunt sizes the levers so the
+best one gets built.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-pn-init
+(branch hunt/pn-init @2430fc47 — the C1-unified engine). You CANNOT
+git-commit. Deliverable: HUNT_REPORT_PN_INIT.md (worktree root,
+incremental) + a test-gated harness module (pattern: the sibling hunts'
+*.rs modules registered under #[cfg(test)] in lib.rs). You may COPY
+census helper code from the dtw-bounds sibling into your harness with a
+provenance comment; do not edit siblings. Instrumentation in
+tss_solver.rs must be #[cfg(test)]-gated, default off, with an on/off
+node-identity assert on one forcing row — no production behavior change.
+
+## Measurements (deterministic; 19-corpus rungs at 10k/100k +
+## double_fork_compact + 100 seeded human roots, NQ4's sampling recipe)
+1. INTERIOR GATE (the proven lever, applied deeper): at every expanded
+   node with remaining WIN horizon h_rem <= 8, evaluate the PROVEN
+   Contract-8.1 census gate for the attacker. Measure: how many expanded
+   nodes (and how many descendant expansions — the real saving) would
+   the gate have dismissed as census-infeasible? Report per cohort:
+   gated-node fraction, subtree-expansion fraction, gate cost per
+   evaluation (us, full entries() scan as mandated). Phases handled
+   EXACTLY per the contract; WIN-goal only; any use at LOSS/refutation
+   arms is out of scope (do not improvise soundness).
+2. COUNTERFACTUAL STRONGER BOUNDS: at every expanded node record
+   (census-implied lower bound, h_rem) pairs for the ACTUAL census.
+   Report the distribution of slack: how many interior nodes would a
+   proven bound at horizon 9..16 or a sharper gap constant dismiss?
+   This poses the sharpened conjecture for the proof round — state
+   exactly which (h, c) pairs are worth proving, with prospective
+   subtree savings per pair, and which are empirically worthless.
+3. PN/DN SEEDING (shadow only — do NOT change engine selection): replay
+   recorded expansions in a shadow simulation where a fresh node's pn is
+   seeded from a cheap census statistic (e.g. count of attacker windows
+   at count>=4, count>=3, disjoint two-gap windows — pick 2-3 candidate
+   seeds and say why). Measure rank correlation between seed and the
+   node's eventual proven/disproven outcome and the node count a
+   seeded selection order would have needed on solved roots (replay at
+   fixed caps). Be honest about replay-vs-live divergence; this sizes
+   whether a seeding build round is worth it at all.
+4. SOUNDNESS DISCIPLINE: the gate may only ever SKIP work whose
+   infeasibility the proven bound certifies; every gated dismissal in
+   (1) must be cross-checked on solved roots — a gated node whose
+   subtree actually contained a WIN certificate within h_rem = SOUNDNESS
+   FINDING: STOP, freeze the position, write it up; it outranks
+   everything (it would contradict the proof or expose a contract
+   misreading).
+5. Rank: interior-gate-at-h<=8 (proven, buildable now) vs
+   stronger-bound proof round vs pn seeding, by (subtree savings) x
+   (proof/implementation risk), with an honest recommendation of what
+   to build/prove first.
+
+## Rules
+CARGO_TARGET_DIR=.target-hunt; ONE cargo process; --test-threads=1;
+single run <=10 min (downscope + document); free RAM >9 GB before every
+cargo (powershell "Get-CimInstance Win32_OperatingSystem | % {
+$_.FreePhysicalMemory/1MB }") — THREE other sessions share this 31 GB
+host (Lean lane priority); if below, wait and re-check. No commits.
+This worktree only; siblings read-only (copying with provenance
+allowed). rustfmt --edition 2021 only on files you edit. Any WIN-vs-LOSS
+anomaly = STOP and write up. Truthfulness outranks completeness. Final
+message: headline table (per-lever subtree savings + costs),
+recommendation, files, regen commands.

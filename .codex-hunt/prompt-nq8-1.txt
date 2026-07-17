@@ -1,0 +1,71 @@
+NQ8 MACHINE HUNT — HORIZON-LADDERED DEEP SOLVING.
+
+Context: R-IG1 (BUILD_INTERIOR_GATE.md in this worktree — READ FIRST)
+integrated the proven interior census gate (TSS_INTERIOR_CENSUS_GATE=1,
+default off) with live 79-93% node savings on horizon-bounded solves —
+but the official deep-solve profile runs at semantic_horizon=u32::MAX
+where the gate is INERT. The obvious counter: iterative deepening on
+the SEMANTIC HORIZON. Soundness skeleton (from the NQ4 report's
+monotone-transfer rules, HUNT_REPORT_TURN_QUOTIENT.md in sibling
+hunt-turn-quotient, read-only): a verifier-accepted WIN certificate
+within horizon h IS a WIN for any h'>=h including unbounded — so a
+ladder h=8,16,24,...,u32::MAX that returns the first verified WIN and
+escalates otherwise returns VERDICT-IDENTICAL results to the direct
+unbounded solve (a bounded no-WIN never refutes; the final rung is the
+unchanged unbounded solve). The open question is ECONOMICS: do shallow
+rungs find enough WINs cheaply enough to beat the direct solve, given
+failed rungs are (in the naive scheme) thrown away? Owner directive:
+the campaign goal is a dramatically more efficient solver; this hunt
+decides whether the ladder is a build or a dead end.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-pn-init
+(branch hunt/pn-init @90f559be — includes NQ6 telemetry + the R-IG1
+gate). You CANNOT git-commit. Deliverable: HUNT_REPORT_HORIZON_LADDER.md
++ test-gated harness (extend the existing #[cfg(test)] pattern).
+Production code: NO changes at all this round — the ladder is
+orchestrated FROM the harness by calling the existing solver with
+different SolveCaps/horizons and the existing flag env var.
+
+## Measurements (deterministic; cohorts = 19 forcing roots at
+## 10k/100k, double_fork_compact consume profile, 100 human roots
+## per the established recipe)
+1. RESOLUTION-DEPTH CENSUS: for every WIN certificate obtainable at the
+   unbounded profile (and from existing corpus data), extract the
+   certificate's actual resolution depth relative to root (the
+   certificates carry resolution clocks). Distribution: what fraction
+   of WINs resolve within h=8, 12, 16, 24, 32? This bounds the ladder's
+   best case; report it first.
+2. LADDER VS DIRECT: implement the ladder in the harness (gate flag ON
+   inside rungs; each rung a fresh solve at semantic_horizon = root
+   placements + {8,16,24,32}, final rung unbounded with gate off i.e.
+   today's exact profile). Per root: total nodes/expansions/wall for
+   ladder vs direct unbounded solve. Report per cohort: win, loss, and
+   net. Try at least two rung schedules (e.g. {8,16,unbounded} and
+   {16,unbounded}) and a node-cap-per-rung variant (rung abandoned at
+   small cap counts as failed, escalate) — the design space matters
+   more than one point.
+3. VERDICT IDENTITY: every ladder verdict must equal the direct solve's
+   verdict on every root; every WIN certificate verifier-accepted. Any
+   divergence = STOP, write up (it would violate the monotone rule or
+   expose a horizon-semantics bug).
+4. WASTE ANATOMY: for roots where the ladder LOSES, quantify where the
+   waste went (failed-rung nodes by rung). For roots where it WINS,
+   attribute the saving (shallow WIN found at rung k). Name any
+   TT/fragment-reuse opportunity between rungs you observe (rungs
+   currently share nothing; U18/T10 fragment persistence could change
+   the economics — size that prospect honestly from the data, do not
+   build it).
+5. RECOMMENDATION: build / don't-build / build-only-with-fragment-reuse,
+   with the exact consume-round spec if build.
+
+## Rules
+CARGO_TARGET_DIR=.target-hunt; ONE cargo process; --test-threads=1;
+single run <=10 min (downscope + document); free RAM >9 GB before every
+cargo (powershell "Get-CimInstance Win32_OperatingSystem | % {
+$_.FreePhysicalMemory/1MB }") — THREE other sessions share this 31 GB
+host (Lean lane priority); if below, wait and re-check. No commits.
+This worktree only; siblings read-only. rustfmt --edition 2021 only on
+files you edit. Any verdict divergence = STOP and write up.
+Truthfulness outranks completeness. Final message: resolution-depth
+distribution, ladder-vs-direct headline table per schedule,
+recommendation, files, regen commands.

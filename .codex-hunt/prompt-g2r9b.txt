@@ -1,0 +1,63 @@
+G2R9b — SHARED-FRAGMENT BUILD COMPLETION under the AMENDED verdict
+contract (orchestrator ruling).
+
+You are continuing G2R9 in
+E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-turn-quotient (branch
+hunt/turn-quotient @8615726d — the checkpoint of YOUR OWN prior
+session's build: read BUILD_SHARED_FRAGMENTS.md and
+HUNT_REPORT_SHARED_FRAGMENTS.md first; the code, harness, focused
+tests, and repro env vars are already in place). You CANNOT git-commit.
+
+## The ruling you stopped for
+Your stop was correct and is now resolved. The strict verdict-identity
+requirement is AMENDED as follows, and ONLY as follows:
+
+- COLD comparisons (fragments-on cold vs fragments-off cold, and any
+  flag-off vs baseline): verdict identity REMAINS MANDATORY. Cold
+  flag-on behavior must not change verdicts.
+- WARM comparisons: a verdict change is permitted ONLY in the monotone
+  direction UNKNOWN -> {WIN, LOSS} where the new hard verdict carries a
+  STRICT-VERIFIER-ACCEPTED certificate. Assert exactly this: any other
+  change (hard verdict lost, WIN<->LOSS, unverified hard verdict) =
+  STOP as before. Forcing NO rows must NEVER return WIN in any mode.
+  Count and report every monotone improvement (root, rung, off-verdict,
+  on-verdict, expansions saved) — improvements are the lever's value,
+  not an anomaly.
+
+Rationale (record in the report): UNKNOWN is a resource verdict, not a
+game-theoretic one; a fragment import only supplies verified sub-proofs
+(T10 licenses the merge; the strict verifier re-accepts the final
+certificate), so warm UNKNOWN->verified-hard-verdict is capacity
+recovered at fixed budget — the same effect a larger node cap would
+have. The single-mint architecture is unchanged.
+
+## Remaining work order (from the original G2R9 brief, unchanged
+## except the contract above)
+1. Re-run the full 139-root soundness+warm campaign (eager mode) to
+   completion under the amended contract. Then the mutation control
+   (warm-solve a DIFFERENT root after a first solve; cold-contract
+   identity applies to it).
+2. Composition: repeat with TSS_LAZY_FRONTIER=1 (fragments + lazy).
+3. THE BOTTLENECK METRIC: heaviest official rows (0l rows) at 512 MiB
+   and 1 GiB TT budgets, fragments off vs on (cold and warm): do rows
+   close at budgets where they previously saturated? Honest either way.
+4. OFFICIAL GATE: TSS_BACKWALK_TT_BYTES=2147483648 single process,
+   tss_corpus_check -- --ignored --test-threads=1, CORPUS_DONE
+   failures=0 — once with fragments on, once with fragments+lazy on
+   (>11 GB free RAM before each).
+5. MEASURE: headline tables — cold deltas, warm deltas + monotone
+   improvement census, reduced-budget closures, fragment store
+   size/hit rates. Update HUNT_REPORT_SHARED_FRAGMENTS.md in place
+   (keep the stop history section; append the completion).
+
+## Rules (unchanged)
+CARGO_TARGET_DIR=.target-hunt; ONE cargo process; --test-threads=1;
+free RAM >9 GB before every cargo (powershell "Get-CimInstance
+Win32_OperatingSystem | % { $_.FreePhysicalMemory/1MB }") — other
+sessions share this 31 GB host (Lean lane priority); if below, wait and
+re-check; >11 GB before 2 GiB-profile runs (official gates exempt from
+the 10-min bound). No commits. This worktree only; siblings read-only.
+rustfmt --edition 2021 only on files you edit. Truthfulness outranks
+completeness. Final message: soundness evidence under the amended
+contract, monotone-improvement census, warm/cold tables,
+reduced-budget verdicts, both gate results, files, regen commands.

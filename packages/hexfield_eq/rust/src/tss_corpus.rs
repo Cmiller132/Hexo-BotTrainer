@@ -180,6 +180,45 @@ fn load_forcing_lines() -> Vec<ForcingLine> {
 fn tss_corpus_check() {
     let corpus = load_corpus();
     let tt_bytes_cap = test_tt_bytes_cap();
+    let shared_fragments = std::env::var("TSS_SHARED_FRAGMENTS").ok().as_deref() == Some("1");
+    let lazy_frontier = std::env::var("TSS_LAZY_FRONTIER").ok().as_deref() == Some("1");
+    let interior_gate = std::env::var("TSS_INTERIOR_CENSUS_GATE").ok().as_deref() == Some("1");
+    let k_reply_consume = std::env::var("TSS_K_REPLY_CONSUME").ok().as_deref() == Some("1");
+    if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_SHARED_FRAGMENTS") {
+        assert_eq!(
+            expected,
+            if shared_fragments { "1" } else { "0" },
+            "TSS_SHARED_FRAGMENTS does not match gate expectation",
+        );
+    }
+    if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_LAZY_FRONTIER") {
+        assert_eq!(
+            expected,
+            if lazy_frontier { "1" } else { "0" },
+            "TSS_LAZY_FRONTIER does not match gate expectation",
+        );
+    }
+    if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_INTERIOR_CENSUS_GATE") {
+        assert_eq!(
+            expected,
+            if interior_gate { "1" } else { "0" },
+            "TSS_INTERIOR_CENSUS_GATE does not match gate expectation",
+        );
+    }
+    if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_K_REPLY_CONSUME") {
+        assert_eq!(
+            expected,
+            if k_reply_consume { "1" } else { "0" },
+            "TSS_K_REPLY_CONSUME does not match gate expectation",
+        );
+    }
+    println!(
+        "CORPUS_MODE shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={} tt_bytes_cap={tt_bytes_cap}",
+        if shared_fragments { "on" } else { "off" },
+        if lazy_frontier { "on" } else { "off" },
+        if interior_gate { "on" } else { "off" },
+        if k_reply_consume { "on" } else { "off" },
+    );
     let selected_ids = std::env::var("TSS_CORPUS_ID").ok().map(|value| {
         let mut ids = value
             .split(',')
@@ -211,6 +250,11 @@ fn tss_corpus_check() {
 
     let mut failures: Vec<String> = Vec::new();
     let mut selected = 0usize;
+    let mut fragment_lookups = 0u64;
+    let mut fragment_hits = 0u64;
+    let mut fragment_imports = 0u64;
+    let mut max_fragment_store_entries = 0u64;
+    let mut max_fragment_store_bytes = 0u64;
     for pos in &corpus {
         if selected_ids
             .as_ref()
@@ -234,15 +278,50 @@ fn tss_corpus_check() {
             let t0 = Instant::now();
             let result = solver.solve(&pos.state, &caps);
             let ms = t0.elapsed().as_secs_f64() * 1e3;
+            assert!(
+                result.status == ProofStatus::Unknown || result.cert.is_some(),
+                "{}: hard {} verdict without certificate at cap={cap}",
+                pos.id,
+                status_name(result.status),
+            );
+            if let Some(cert) = &result.cert {
+                assert!(
+                    TssVerifier.verify(&pos.state, cert, result.status),
+                    "{}: strict verifier rejected returned {} certificate at cap={cap}",
+                    pos.id,
+                    status_name(result.status),
+                );
+            }
+            fragment_lookups = fragment_lookups.saturating_add(result.stats.fragment_lookups);
+            fragment_hits = fragment_hits.saturating_add(result.stats.fragment_hits);
+            fragment_imports = fragment_imports.saturating_add(result.stats.fragment_imports);
+            max_fragment_store_entries =
+                max_fragment_store_entries.max(result.stats.fragment_store_entries);
+            max_fragment_store_bytes =
+                max_fragment_store_bytes.max(result.stats.fragment_store_bytes);
             println!(
-                "CORPUS id={} cap={cap} status={} expect={} nodes={} tt_hits={} tt_bytes_cap={} peak_tt_bytes={} ms={ms:.1}",
+                "CORPUS id={} cap={cap} status={} expect={} nodes={} expansions={} tt_entries={} tt_hits={} tt_bytes_cap={} peak_tt_bytes={} gate_evals={} gate_dismissals={} gate_us={:.3} ms={ms:.1}",
                 pos.id,
                 status_name(result.status),
                 if pos.expect_win { "WIN" } else { "NO" },
                 result.stats.nodes,
+                result.stats.expansions,
+                result.stats.tt_entries,
                 result.stats.tt_hits,
                 tt_bytes_cap,
                 result.stats.peak_tt_bytes,
+                result.stats.interior_gate_evaluations,
+                result.stats.interior_gate_dismissals,
+                result.stats.interior_gate_nanos as f64 / 1_000.0,
+            );
+            println!(
+                "FRAGMENT_PROFILE id={} cap={cap} lookups={} hits={} imports={} store_entries={} store_bytes={}",
+                pos.id,
+                result.stats.fragment_lookups,
+                result.stats.fragment_hits,
+                result.stats.fragment_imports,
+                result.stats.fragment_store_entries,
+                result.stats.fragment_store_bytes,
             );
             let (pair_ms, defender_ms, regen_ms, expand_ms, refresh_ms, insert_ms) =
                 crate::tss_solver::wide_gen_profile();
@@ -272,7 +351,22 @@ fn tss_corpus_check() {
             "TSS_CORPUS_ID contained an unknown corpus entry"
         );
     }
-    println!("CORPUS_DONE failures={}", failures.len());
+    let fragment_hit_rate = if fragment_lookups == 0 {
+        0.0
+    } else {
+        fragment_hits as f64 * 100.0 / fragment_lookups as f64
+    };
+    println!(
+        "CORPUS_FRAGMENTS lookups={fragment_lookups} hits={fragment_hits} hit_rate_pct={fragment_hit_rate:.3} imports={fragment_imports} max_store_entries={max_fragment_store_entries} max_store_bytes={max_fragment_store_bytes}"
+    );
+    println!(
+        "CORPUS_DONE failures={} shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={}",
+        failures.len(),
+        if shared_fragments { "on" } else { "off" },
+        if lazy_frontier { "on" } else { "off" },
+        if interior_gate { "on" } else { "off" },
+        if k_reply_consume { "on" } else { "off" },
+    );
     assert!(
         failures.is_empty(),
         "corpus acceptance failures:\n{}",

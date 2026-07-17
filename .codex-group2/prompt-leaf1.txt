@@ -1,0 +1,77 @@
+LEAF-SURFACE CAMPAIGN — decide the Phase-3 trainer-leaf configuration
+with measurements: narrow path vs wide engine with the consolidated
+levers, at the 256 KiB budget.
+
+Context: the consolidated engine (this tree, post-merge tip — read
+MERGE_RESOLUTION.md first) carries four default-off levers whose value
+measurements all pointed AT THE LEAF SURFACE and away from the deep
+profile: TSS_LAZY_FRONTIER (wide-PN only; −62-67% TT admissions, 8.4×
+at memory pressure), TSS_INTERIOR_CENSUS_GATE (WIN-arm h_rem<=8; live
+−79-93% on horizon-bounded solves — the leaf's native query),
+TSS_SHARED_FRAGMENTS (warm reuse −20% on repeat solves; monotone
+contract), TSS_K_REPLY_CONSUME (sound; deep-profile trigger tax ~67ms/
+fire made it a loss there — leaf urgency density may differ, and a
+precomputed-urgency trigger is the named fix if it matters). Prior
+leaf knowledge (read-only sibling worktrees + memory): the leaf-width
+hunt established persistent-solver reuse is mandatory (13ms TT-zeroing
+cliff) and the R-FIX1 zone-clock fix (in this tree) was the leaf
+blocker. Owner's leaf axes: VERDICT RATE AT FIXED CAP + cheaper solves.
+Owner directive: dramatically more efficient solver; this campaign
+produces the Phase-3 leaf configuration recommendation.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width
+(confirm HEAD = the consolidation landing). You CANNOT git-commit.
+Deliverable: HUNT_REPORT_LEAF_SURFACE.md + test-gated harness
+(register under #[cfg(test)] in lib.rs).
+
+## Workload model (state it precisely in the report before running)
+Simulate MCTS-leaf batches: from each of 50 deterministic human-corpus
+games (established Fisher-Yates recipe, seed 0x9E3779B97F4A7C15),
+take a contiguous game segment and solve EVERY position in a sliding
+window (parent + successors = nearby positions in one batch), one
+persistent solver per batch per config. Leaf profile: 256 KiB TT
+budget, small node caps (ladder: 500 / 2,000 / 8,000), WIN goal,
+requested relative horizon 8 (the leaf's native query) AND a second arm
+at horizon 16 — report both. This models the trainer's real call
+pattern (many nearby bounded solves, one process).
+
+## Configurations (per batch, same positions)
+A. NARROW baseline: today's leaf path, fresh-vs-persistent per the
+   leaf-width hunt's finding (persistent).
+B. WIDE bare: wide engine, all flags off.
+C. WIDE + lazy.
+D. WIDE + lazy + interior gate.
+E. WIDE + lazy + interior gate + fragments (warm across the batch).
+F. (cheap probe) E + K_reply consume — report its trigger cost at leaf
+   urgency density; if it obviously loses again, one cohort suffices.
+
+## Measures (per config per cap per horizon arm)
+1. VERDICT RATE: hard verdicts (verified WIN/LOSS) per 100 solves at
+   fixed cap — the owner's primary axis. Soundness rules: configs may
+   differ ONLY monotonically (a config may settle strictly more
+   UNKNOWNs); any WIN/LOSS contradiction between configs = STOP,
+   freeze, write up. Every hard verdict verifier-accepted.
+2. Wall per solve (median/p90) + per-batch total; TT
+   pressure/evictions; fragment hits (config E).
+3. Interior-gate skip counts at h<=8.
+4. The 13ms cliff check: confirm persistent reuse still holds across
+   the batch in every config (no per-solve TT zeroing regressions).
+
+## Verdict (the report's exit artifact)
+The recommended Phase-3 leaf configuration with its measured verdict-
+rate and wall deltas vs the narrow baseline, the flags to assert, and
+an honest list of what a production integration still owes (e.g.
+fragment-store size policy at 256 KiB, gate coordinate guard at leaf
+positions, K_reply trigger engineering if applicable).
+
+## Rules
+CARGO_TARGET_DIR=.target-codex; --target x86_64-pc-windows-msvc on
+EVERY cargo (E0461 otherwise); ONE cargo process; --test-threads=1;
+free RAM >9 GB before every cargo (powershell "Get-CimInstance
+Win32_OperatingSystem | % { $_.FreePhysicalMemory/1MB }") — the Lean
+spine lane has RAM priority; if below, wait and re-check. Single run
+<=15 min (downscope + document). No commits. This worktree only;
+siblings read-only. rustfmt --edition 2021 only on files you edit.
+Truthfulness outranks completeness. Final message: config × cap
+verdict-rate/wall table (both horizon arms), recommendation, files,
+regen commands.

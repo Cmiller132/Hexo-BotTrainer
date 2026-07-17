@@ -1580,3 +1580,41 @@ fn tss_round3_consume_witness() {
     assert_eq!(result.status, ProofStatus::Win);
     assert!(verified);
 }
+
+#[test]
+fn bounded_horizon_compact_win_certificate_verifies() {
+    let state = mining_candidate("double_fork_compact");
+    let solve = |semantic_horizon| {
+        let mut solver = TssSolver::default();
+        solver.set_width_options(WidthOptions::round3_consume());
+        solver.solve(
+            &state,
+            &SolveCaps {
+                node_cap: 100_000,
+                tt_bytes_cap: 512 << 20,
+                semantic_horizon,
+            },
+        )
+    };
+
+    let bounded = solve(state.placements_made().saturating_add(16));
+    assert_eq!(bounded.status, ProofStatus::Win);
+    let bounded_cert = bounded
+        .cert
+        .as_ref()
+        .expect("bounded compact WIN must carry a certificate");
+    assert!(bounded_cert
+        .nodes
+        .iter()
+        .any(|node| matches!(node, CertNode::Universal { zone: Some(_), .. })));
+    assert!(TssVerifier.verify(&state, bounded_cert, bounded.status));
+
+    let direct = solve(u32::MAX);
+    assert_eq!(direct.status, ProofStatus::Win);
+    assert_eq!(bounded.status, direct.status);
+    assert!(direct.cert.as_ref().is_some_and(|cert| TssVerifier.verify(
+        &state,
+        cert,
+        direct.status
+    )));
+}
