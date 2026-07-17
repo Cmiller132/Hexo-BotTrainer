@@ -1,0 +1,84 @@
+R-G2 — RESEARCH ROUND (ultra): GAP-REPLACEMENT-INVARIANT — the successor to refuted J
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+(branch hunt/gap-raw, HEAD = 0f7e9405). You CANNOT git-commit. This is a
+PROOF round at the conventions of GAP_RAW_PROOF_ROUND2/3.md (labels
+PROVEN / VERIFIED / GAP / OPEN, exact coordinates, no status inflation,
+provenance). NO cargo this round (the host-wide slot is held by a
+wall-sensitive measurement job): machine checks are hand-arithmetic or
+DEFERRED test-gated harness cases written but not run — mark any such
+case [UNRUN] and never cite it as evidence.
+
+Read IN ORDER, in full: GAP_RAW_PROOF_ROUND2.md, GAP_RAW_PROOF_ROUND3.md
+(the J refutation — your starting point), GAP_RAW_REVIEW_ROUND3.md,
+HUNT_REPORT_GAP_RAW.md (refutation corpus — nothing that died there may
+be resurrected).
+
+## Where round 3 left the draw-side program
+
+Canonical J (renewal of B2 = Theta_2 < 1) is REFUTED by P*: remote
+anchored launch sites let the Attacker inject the exact 5/9 fresh-pair
+ceiling faster than two Defender cells can recover, from arbitrarily
+many pigeonhole-protected sites. R3.3 proves NO pointwise-dominating
+subunit account exists. But the attack is game-theoretically HARMLESS:
+after it, I = empty, tau = 0 — thirteen scattered count-2 labels, none
+imminent. The potential says "crisis"; the board says "fine." That gap
+between the account and the game is the entire problem.
+
+## PRIMARY TARGET — a replacement invariant or a direct construction
+
+Find the correct formal expression of "the Defender is fine" that (a)
+holds at Phi < 1 roots, (b) survives the P* mechanism (unbounded remote
+virgin births), and (c) still implies perpetual service. Routes (from
+ROUND3 §19, expand or replace them):
+
+Route A — a NON-DOMINATING or PATH-DEPENDENT account: e.g. tolerate
+safe Theta_2 >= 1 excursions when the excess mass is non-imminent;
+charge labels by promotion tempo rather than raw count (a count-2 label
+needs >= 2 further Attacker placements IN that window before it is
+imminent, and L9.6 says imminent mass is what forces service). Consider
+interaction-radius or deadline-weighted tiers (the R-CF1 deadline
+machinery on hunt/census-deep is conceptually adjacent: remote count-2
+mass cannot win soon). Any candidate account MUST be tested against:
+(i) P* itself; (ii) iterated P*-style launches (the Attacker repeats
+the 5/9 injection every turn at fresh anchored sites — your invariant
+must absorb UNBOUNDED accumulation of non-imminent mass); (iii) the
+round-2 three-gadget O1' position; (iv) the promotion cascade — the
+Attacker returns to accumulated count-2 stock and promotes several
+labels toward imminence in different regions faster than service; this
+is where naive "ignore non-imminent mass" dies, and the refutation
+corpus's superadditivity failures live here.
+
+Route B — DIRECT perpetual service: a concrete Defender strategy S
+(priority rule + tie-breaks + fillers) with an invariant proved along
+Hist(S, P0) only. The strategy may STEER: it does not need a statewise
+invariant, only one along its own reachable histories.
+
+Route C (honest alternative) — REFUTE survival: if you come to believe
+GAP-RAW is false, an exact Attacker win construction from some Phi < 1
+root (a forced six against every Defender strategy) would be the
+biggest result of the campaign. Do not force this; but if the promotion
+cascade analysis in (iv) yields a forced win rather than an obstacle,
+follow it with full rigor.
+
+Ranked success modes (any one = complete round):
+(a) A candidate invariant with renewal proved against the full legal
+    Attacker move set at a meaningful root class (state the class
+    exactly), passing tests (i)-(iv).
+(b) A direct-construction partial: S defined exactly, invariant proved
+    for a nontrivial bounded class of histories, with the exact
+    unproved remainder named.
+(c) A sharp impossibility extending R3.3 (e.g. no account in a
+    well-defined broader class works) — this redirects the program to
+    Route B/C with proof.
+(d) An exact Attacker-win construction from a Phi < 1 root (Route C).
+Do NOT weaken a target and keep its name. New GAPs get new names.
+
+## Rules
+Deliverable: GAP_RAW_PROOF_ROUND4.md (resume ROUND3's numbering) + a
+short final message (route taken, verdicts, exact resume point).
+Harness: candidate cases may be ADDED to gap_raw_hunt.rs tests-mod as
+[UNRUN]; production rules and the strict verifier untouched. No cargo,
+no Lean builds, tss-lean is read-only. Incremental disk writes; chunk
+<= 2h per exec; an honest partial stop at a clean boundary with a named
+resume point is success.
