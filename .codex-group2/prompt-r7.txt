@@ -1,0 +1,71 @@
+Group-2, round 7 (RE-SCOPED) — K_reply SHADOW instrumentation at the
+quiet-fallback. The old round-7 plan (consume C(P)=join_adj1) is
+CANCELLED: NQ2 refuted every join-locality tier (frozen witness in
+hunt-quiet-locality). The salvage is the PROVEN Q8 kernel, and this
+round measures it in shadow ONLY. No production semantics change of any
+kind this round; consumption is a later round gated on the NQ2 review's
+Q8 sign-off.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width.
+Confirm HEAD first (expected 2430fc47). You CANNOT git-commit. Write
+.codex-group2/round7-progress.md continuously.
+
+## Inputs (read first, in order)
+1. E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-quiet-locality\PROOF_QUIET_LOCALITY.md
+   (read-only) — §1.2's exact quiet predicate and Q0's corrected
+   production reading (quiet = post-SecondStone edge property;
+   unconditional consume fallback), and Q8's exact K_reply definition:
+   at an URGENT node (>=1 defender count-4/5 window exists), retain
+   wins-now plus cells hitting every defender count-4/count-5 window.
+   Your shadow must implement Q8's kernel EXACTLY as proven — statement
+   fidelity here is what makes the later consume round sound.
+2. .codex-group2/round3-progress.md + round6-progress.md — where the
+   quiet fallback lives post-C1 (prove_narrow_compat hosts the narrow
+   DFS; quiet_turn_or_edges consume path).
+3. The NQ2 frozen witness replay in
+   hunt-quiet-locality/packages/hexfield_eq/rust/src/tss_quiet_locality_hunt.rs
+   (read-only) — you will reproduce that position in a fixture here.
+
+## Work
+1. SHADOW plumbing: behind a new env-gated telemetry switch (default
+   OFF, zero cost when off — same pattern as prior shadow rounds), at
+   every OR node where the quiet fallback fires in Consume mode,
+   record: (a) urgent? (defender count-4/5 window present, computed by
+   a full window scan — NOT a threat-only index; see the DTW review's
+   finding), (b) |full quiet universe|, (c) |K_reply| when urgent,
+   (d) when the node's subtree later proves WIN, whether the winning
+   quiet edge lies in K_reply (urgent nodes only). No move ordering,
+   generation, or TT behavior may change with the switch on — assert
+   node-count identity on at least one corpus row with telemetry
+   on vs off.
+2. Fixture: reproduce the NQ2 frozen witness as a test position here;
+   assert (i) the node is urgent, (ii) K_reply contains the unique
+   winning completion, (iii) |K_reply| == 1 as the proof states. This
+   is the standing regression that any future consume round must keep
+   green.
+3. Measurement sweep (telemetry on): the official 19-corpus rows at
+   their ladder rungs (10k/100k caps are enough for telemetry — do NOT
+   run the 2 GiB official profile for this), double_fork_compact at
+   TSS_R3_CAP=10000, plus 200 deterministic human-corpus deep-solve
+   roots (same sampling recipe as the leaf-width hunt, seed recorded).
+   Report per-class: quiet-fallback fire counts, urgent fraction,
+   median/p90 |quiet| vs |K_reply|, and WIN-edge-in-K_reply hit rate
+   (must be 100% at urgent nodes if Q8 holds — ANY miss is a
+   Q8-counterexample finding: STOP, freeze the position, write it up;
+   that outranks every other deliverable).
+4. Default gates at exit: default release suite; round-5 identity
+   harness; double_fork_compact consume witness (expect WIN/409
+   unchanged — telemetry off). Commands per round5/6-progress.md
+   (--target x86_64-pc-windows-msvc, CARGO_TARGET_DIR=.target-codex).
+
+## Hard rules
+No flag flips, no consumption, no behavior change with telemetry off
+(and none with it on beyond stdout/counters — assert it). Any
+WIN-vs-LOSS disagreement or Q8 miss = STOP and write up. RAM: TWO other
+sessions share this host; free RAM >10 GB before every build/run
+(powershell "Get-CimInstance Win32_OperatingSystem | % {
+$_.FreePhysicalMemory/1MB }"); one build/solve at a time;
+--test-threads=1. rustfmt --edition 2021 only on files you edit. Work
+only in this worktree; siblings read-only. Chunk long work <=2h per
+exec. Final message: headline table (fire counts, urgent %, shrink
+ratios, hit rate), gates, files.

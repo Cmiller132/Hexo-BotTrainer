@@ -1,0 +1,70 @@
+G2R8 — K_reply CONSUMPTION: implement the proven Q8 kernel as the
+defender reply set at urgent SecondStone fallback nodes, default-off,
+verdict-identity-gated.
+
+Context: the Q8 K_reply kernel is PROVEN (NQ2 salvage, 5-clause
+contract, hostile-review signed) and your own G2R7 shadow validated it
+across 220,160 fallback fires with ZERO counterexamples and ZERO
+WIN/LOSS disagreements (read .codex-group2/round7-progress.md and
+tss_k_reply_shadow.rs in this worktree first — the shadow's
+k_reply_kernel fn implements the contract and is currently
+#[cfg(test)]). Urgent nodes are rare (0.07% of fires official / 5.1%
+human) but collapse median 940→2 replies. Owner directive: dramatically
+more efficient solver; this is the first proof-backed consumption of
+the NQ2 line.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width
+(branch claude/tss-vcf-width; confirm HEAD is the G2R7 landing before
+starting). You CANNOT git-commit. Engine =
+packages/hexfield_eq/rust/src/tss_solver.rs.
+
+## Binding contract (the review's exact 5 clauses — restate them in the
+## build memo verbatim from the NQ2 proof/review docs in
+## hunt-quiet-locality sibling, read-only)
+SecondStone{first} only; post-first recomputation; full-legal Win1;
+BlockAll = intersection over ALL defender count-4/5 windows;
+full-Legal fallback when no threat. The kernel replaces the defender
+reply enumeration ONLY where the contract's trigger holds EXACTLY —
+anywhere it does not, today's full enumeration stands. Verdicts must be
+IDENTICAL (the proof licenses exactness, not approximation): any
+verdict difference flag-on vs flag-off = STOP, freeze, write up.
+
+## Work order
+1. BUILD MEMO (BUILD_K_REPLY_CONSUME.md): the 5 clauses verbatim with
+   doc cites; where the consumption hooks in (code cites); why the
+   trigger test matches the contract exactly; promotion plan for
+   k_reply_kernel from cfg(test) to production (flag-gated).
+2. IMPLEMENT behind TSS_K_REPLY_CONSUME=1 (default OFF, zero behavior
+   change off, read once per solve). Keep the G2R7 shadow working
+   (telemetry may now also report agreement between consumed kernel
+   and shadow).
+3. VERDICT-IDENTITY CAMPAIGN (test-gated): flag-on vs flag-off over
+   all 19 forcing rows at 10k/100k + double_fork_compact consume
+   profile + 200 human roots (G2R7's recipe): identical verdicts,
+   identical certificates where both produce one (report any cert
+   difference honestly — kernel-restricted search may find a different
+   but valid certificate; verdict identity is the hard requirement,
+   cert-byte identity is reported not required), every cert
+   verifier-accepted, forcing-NO never WIN.
+4. OFFICIAL GATE flag-on: TSS_BACKWALK_TT_BYTES=2147483648 single
+   process, expect CORPUS_DONE failures=0 (>11 GB free RAM; exempt
+   from the 10-min bound).
+5. MEASURE: nodes/expansions/wall flag-on vs flag-off per cohort +
+   urgent-node counts; report honestly against the shadow's
+   expectation (modest global, huge local). Also measure the
+   double_fork_compact consume profile specifically (its single urgent
+   node was the 478→1 case).
+
+## Rules
+CARGO_TARGET_DIR=.target-codex with --target x86_64-pc-windows-msvc on
+EVERY cargo invocation (the target dir contains Linux-triple artifacts
+from WSL builds — without the explicit triple the build fails E0461);
+ONE cargo process; --test-threads=1; free RAM >9 GB before every cargo
+(powershell "Get-CimInstance Win32_OperatingSystem | % {
+$_.FreePhysicalMemory/1MB }") — THREE other sessions share this 31 GB
+host (Lean lane priority); if below, wait and re-check; >11 GB before
+the official gate. No commits. This worktree only; siblings read-only.
+rustfmt --edition 2021 only on files you edit. Truthfulness outranks
+completeness. Final message: contract restatement confirmation,
+identity evidence, gate result, measured deltas (global + urgent-local),
+files, regen commands.

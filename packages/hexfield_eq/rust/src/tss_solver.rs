@@ -73,6 +73,33 @@ pub(crate) struct WidthOptions {
     ranked_unforced_defender_zone: Round3Flag,
 }
 
+/// Round-7's test-only Q8 observation at one Consume quiet-fallback OR node.
+/// Keeping the entire record type behind `cfg(test)` makes the shipped solver
+/// pay no storage or branch cost for this shadow-only round.
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(crate) struct KReplyShadowRecord {
+    pub full_quiet: usize,
+    pub urgent: bool,
+    pub k_reply: Option<usize>,
+    pub proved_win: bool,
+    pub winning_edge: Option<HexCoord>,
+    pub winning_edge_in_k: Option<bool>,
+    pub position: Option<RootBinding>,
+}
+
+#[cfg(test)]
+struct KReplyShadowTicket {
+    record: usize,
+    kernel: Vec<HexCoord>,
+}
+
+#[cfg(test)]
+pub(crate) struct KReplyKernel {
+    pub urgent: bool,
+    pub cells: Vec<HexCoord>,
+}
+
 impl WidthOptions {
     pub(crate) fn vcf_pair_complete() -> Self {
         Self {
@@ -120,6 +147,8 @@ pub(crate) struct TssSolver {
     width: WidthOptions,
     #[cfg(test)]
     last_narrow_signatures: Vec<NarrowAttemptSignature>,
+    #[cfg(test)]
+    last_k_reply_shadow: Vec<KReplyShadowRecord>,
 }
 
 impl Default for TssSolver {
@@ -132,6 +161,8 @@ impl Default for TssSolver {
             width: WidthOptions::default(),
             #[cfg(test)]
             last_narrow_signatures: Vec::new(),
+            #[cfg(test)]
+            last_k_reply_shadow: Vec::new(),
         }
     }
 }
@@ -161,6 +192,11 @@ impl TssSolver {
     }
 
     #[cfg(test)]
+    pub(crate) fn k_reply_shadow(&self) -> &[KReplyShadowRecord] {
+        &self.last_k_reply_shadow
+    }
+
+    #[cfg(test)]
     fn without_tt() -> Self {
         Self {
             tt_enabled: false,
@@ -169,6 +205,7 @@ impl TssSolver {
             zone: ZoneSearchCaps::default(),
             width: WidthOptions::default(),
             last_narrow_signatures: Vec::new(),
+            last_k_reply_shadow: Vec::new(),
         }
     }
 
@@ -183,6 +220,7 @@ impl TssSolver {
             zone: ZoneSearchCaps::default(),
             width: WidthOptions::default(),
             last_narrow_signatures: Vec::new(),
+            last_k_reply_shadow: Vec::new(),
         }
     }
 
@@ -197,6 +235,8 @@ impl TssSolver {
     ) -> DeepResult<TssCertificate> {
         #[cfg(test)]
         self.last_narrow_signatures.clear();
+        #[cfg(test)]
+        self.last_k_reply_shadow.clear();
 
         let effective_tt_cap = if self.tt_enabled {
             caps.tt_bytes_cap
@@ -360,6 +400,9 @@ impl TssSolver {
                 zone,
                 width,
                 MAX_SEARCH_DEPTH,
+                #[cfg(test)]
+                (width.consumes_quiet_turns() && std::env::var_os("TSS_K_REPLY_SHADOW").is_some())
+                    .then_some(&mut self.last_k_reply_shadow),
             );
         }
         let depth_cap = wide_search_final_depth(state.placements_made(), semantic_horizon);
@@ -1364,6 +1407,7 @@ impl WidePnSearch {
         zone: ZoneSearchCaps,
         width: WidthOptions,
         depth_cap: usize,
+        #[cfg(test)] k_reply_shadow: Option<&mut Vec<KReplyShadowRecord>>,
     ) -> AttemptResult {
         debug_assert!(
             !width.vcf_pair_complete
@@ -1383,6 +1427,8 @@ impl WidePnSearch {
             zone,
             width,
             depth_cap,
+            #[cfg(test)]
+            k_reply_shadow,
         );
         let proof = search.prove(&mut work, claimant, root_ply, None);
 
@@ -3257,12 +3303,70 @@ struct NarrowCompatSearch<'a> {
     zone: ZoneSearchCaps,
     width: WidthOptions,
     depth_cap: usize,
+    #[cfg(test)]
+    k_reply_shadow: Option<&'a mut Vec<KReplyShadowRecord>>,
 }
 
 #[derive(Clone, Debug)]
 struct PairContext {
     first: HexCoord,
     turn_start_legal: Vec<HexCoord>,
+}
+
+/// Exact Q8 reply-survival kernel from the NQ2 proof. Urgency is deliberately
+/// scoped to the theorem's nonterminal attacker SecondStone position. Defender
+/// windows come from a full `WindowStore` scan, never from the threat index.
+#[cfg(test)]
+pub(crate) fn k_reply_kernel(
+    state: &RustHexoState,
+    claimant: Player,
+    legal: &[HexCoord],
+) -> KReplyKernel {
+    let eligible = state.terminal().is_none()
+        && state.current_player() == claimant
+        && matches!(state.phase(), TurnPhase::SecondStone { .. });
+    let defender = claimant.other();
+    let defender_windows = eligible
+        .then(|| {
+            state
+                .board()
+                .windows()
+                .entries()
+                .filter(|entry| {
+                    entry.count(claimant) == 0 && matches!(entry.count(defender), 4 | 5)
+                })
+                .map(|entry| entry.key())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let urgent = !defender_windows.is_empty();
+    let cells = if !eligible {
+        Vec::new()
+    } else if urgent {
+        let win_now_windows = state
+            .board()
+            .windows()
+            .entries()
+            .filter(|entry| entry.count(claimant) == 5 && entry.count(defender) == 0)
+            .map(|entry| entry.key())
+            .collect::<Vec<_>>();
+        legal
+            .iter()
+            .copied()
+            .filter(|coord| {
+                let wins_now = win_now_windows.iter().any(|window| window.contains(*coord));
+                wins_now
+                    || defender_windows
+                        .iter()
+                        .all(|window| window.contains(*coord))
+            })
+            .collect()
+    } else {
+        // Q8 defines BlockAll_D(P)=Legal(P) for the empty defender-window
+        // family, hence K_reply(P)=Legal(P) at an eligible non-urgent node.
+        legal.to_vec()
+    };
+    KReplyKernel { urgent, cells }
 }
 
 impl NarrowCompatSearch<'static> {
@@ -3285,6 +3389,8 @@ impl NarrowCompatSearch<'static> {
             zone: ZoneSearchCaps::default(),
             width: WidthOptions::default(),
             depth_cap: MAX_SEARCH_DEPTH,
+            #[cfg(test)]
+            k_reply_shadow: None,
         }
     }
 }
@@ -3300,6 +3406,7 @@ impl<'a> NarrowCompatSearch<'a> {
         zone: ZoneSearchCaps,
         width: WidthOptions,
         depth_cap: usize,
+        #[cfg(test)] k_reply_shadow: Option<&'a mut Vec<KReplyShadowRecord>>,
     ) -> Self {
         let tt = BoundedTt::new(tt_bytes_cap, hash_mask);
         let peak_tt_bytes = tt.current_bytes.saturating_add(shared_tt.current_bytes);
@@ -3320,6 +3427,8 @@ impl<'a> NarrowCompatSearch<'a> {
             zone,
             width,
             depth_cap,
+            #[cfg(test)]
+            k_reply_shadow,
         }
     }
 
@@ -3332,6 +3441,58 @@ impl<'a> NarrowCompatSearch<'a> {
             arena_len: self.arena.len(),
             edge_count: self.edge_count,
             local_tt: format!("{:?}", self.tt),
+        }
+    }
+
+    #[cfg(test)]
+    fn begin_k_reply_shadow(
+        &mut self,
+        state: &RustHexoState,
+        claimant: Player,
+        full_legal: &[HexCoord],
+    ) -> Option<KReplyShadowTicket> {
+        if self.k_reply_shadow.is_none() {
+            return None;
+        }
+        let kernel = k_reply_kernel(state, claimant, full_legal);
+        let records = self
+            .k_reply_shadow
+            .as_deref_mut()
+            .expect("checked Q8 shadow sink");
+        let record = records.len();
+        records.push(KReplyShadowRecord {
+            full_quiet: full_legal.len(),
+            urgent: kernel.urgent,
+            k_reply: kernel.urgent.then_some(kernel.cells.len()),
+            proved_win: false,
+            winning_edge: None,
+            winning_edge_in_k: None,
+            position: None,
+        });
+        Some(KReplyShadowTicket {
+            record,
+            kernel: kernel.cells,
+        })
+    }
+
+    #[cfg(test)]
+    fn mark_k_reply_shadow_win(
+        &mut self,
+        ticket: &KReplyShadowTicket,
+        state: &RustHexoState,
+        edge: HexCoord,
+    ) {
+        let record = self
+            .k_reply_shadow
+            .as_deref_mut()
+            .expect("Q8 shadow ticket requires sink")
+            .get_mut(ticket.record)
+            .expect("Q8 shadow ticket indexes its record");
+        record.proved_win = true;
+        record.winning_edge = Some(edge);
+        record.winning_edge_in_k = record.urgent.then(|| ticket.kernel.contains(&edge));
+        if record.winning_edge_in_k == Some(false) {
+            record.position = Some(RootBinding::from_state(state));
         }
     }
 
@@ -3540,6 +3701,8 @@ impl<'a> NarrowCompatSearch<'a> {
         if self.width.consumes_quiet_turns() {
             let mut complete = Vec::new();
             state.write_legal_moves(&mut complete);
+            #[cfg(test)]
+            let k_reply_ticket = self.begin_k_reply_shadow(state, claimant, &complete);
             if let Some(pair) = pair {
                 restrict_pair_candidates(&mut complete, pair);
             }
@@ -3563,7 +3726,14 @@ impl<'a> NarrowCompatSearch<'a> {
                         .then(|| wide_completion_node(state, claimant, coord, completion_ply))
                         .flatten();
                     state.undo(delta);
-                    return self.alloc_node(completion?, 0);
+                    let node = self.alloc_node(completion?, 0);
+                    #[cfg(test)]
+                    if node.is_some() {
+                        if let Some(ticket) = &k_reply_ticket {
+                            self.mark_k_reply_shadow_win(ticket, state, coord);
+                        }
+                    }
+                    return node;
                 }
                 if result.outcome.is_some() {
                     state.undo(delta);
@@ -3578,7 +3748,14 @@ impl<'a> NarrowCompatSearch<'a> {
                 let child = self.prove(state, claimant, completion_ply, pair_context.as_ref());
                 state.undo(delta);
                 if let Some(child) = child {
-                    return self.alloc_node(CertNode::Choice { mv: coord, child }, 1);
+                    let node = self.alloc_node(CertNode::Choice { mv: coord, child }, 1);
+                    #[cfg(test)]
+                    if node.is_some() {
+                        if let Some(ticket) = &k_reply_ticket {
+                            self.mark_k_reply_shadow_win(ticket, state, coord);
+                        }
+                    }
+                    return node;
                 }
                 if self.hit_limit {
                     return None;
@@ -8792,6 +8969,7 @@ mod tests {
                 ZoneSearchCaps::default(),
                 WidthOptions::default(),
                 MAX_SEARCH_DEPTH,
+                None,
             );
             let root = context
                 .prove(&mut work, claimant, descendant_root.placements_made(), None)

@@ -47,10 +47,10 @@ fn status_name(status: ProofStatus) -> &'static str {
     }
 }
 
-struct CorpusPosition {
-    id: String,
-    expect_win: bool,
-    state: HexoState,
+pub(crate) struct CorpusPosition {
+    pub(crate) id: String,
+    pub(crate) expect_win: bool,
+    pub(crate) state: HexoState,
 }
 
 struct ForcingLine {
@@ -58,7 +58,7 @@ struct ForcingLine {
     moves: Vec<HexCoord>,
 }
 
-fn load_corpus() -> Vec<CorpusPosition> {
+pub(crate) fn load_corpus() -> Vec<CorpusPosition> {
     let path = std::env::var("TSS_CORPUS_FILE").unwrap_or_else(|_| {
         format!(
             "{}/rust/corpus/forcing_corpus_moves.txt",
