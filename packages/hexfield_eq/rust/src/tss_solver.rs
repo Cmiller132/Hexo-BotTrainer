@@ -15,6 +15,7 @@
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
+use std::sync::Arc;
 
 #[cfg(test)]
 use std::cell::RefCell;
@@ -28,12 +29,13 @@ use hexo_engine::{
 
 use crate::threats_shared as threats;
 use crate::tss_core::{
-    seed_band_radius, DeepResult, DeepSolve, ProofStatus, SolveCaps, SolveGoal, SolveStats,
-    ZoneSearchCaps,
+    seed_band_radius, CertVerify, DeepResult, DeepSolve, ProofStatus, SolveCaps, SolveGoal,
+    SolveStats, ZoneSearchCaps,
 };
 use crate::tss_verify::{
-    CertCommutation, CertEdge, CertNode, CertNodeId, RootBinding, TssCertificate, ZoneInfo,
-    MAX_CERT_COMMUTATIONS, MAX_CERT_DEPTH, MAX_CERT_EDGES, MAX_CERT_NODES, MAX_CERT_ROOT_STONES,
+    CertCommutation, CertEdge, CertNode, CertNodeId, RootBinding, TssCertificate, TssVerifier,
+    ZoneInfo, MAX_CERT_COMMUTATIONS, MAX_CERT_DEPTH, MAX_CERT_EDGES, MAX_CERT_NODES,
+    MAX_CERT_ROOT_STONES, MAX_CERT_WITNESSES,
 };
 
 /// A second, fixed guard in addition to `SolveCaps::node_cap`.  It bounds stack
@@ -55,6 +57,15 @@ const TARGET_BYTES_PER_SHARED_TT_SLOT: usize = 512;
 /// successful attempt root is offered regardless of these two tuning limits.
 const MAX_PROMOTED_FRAGMENT_NODES: usize = 128;
 const MAX_PROMOTED_FRAGMENT_EDGES: usize = 512;
+/// Wide shared fragments may retain at most one eighth of the caller's TT cap.
+/// Slots are allocated lazily after a solve, and the next solve subtracts only
+/// bytes actually retained, so an empty/cold store leaves the historical wide
+/// search cap byte-for-byte intact.
+const WIDE_FRAGMENT_CAP_DIVISOR: usize = 8;
+/// Bounded independently verified descendants collected from one attempt.
+const MAX_WIDE_FRAGMENT_PROMOTIONS: usize = 64;
+/// Fragment slots are wider than key-only PN-index entries.
+const TARGET_BYTES_PER_PROVEN_FRAGMENT_SLOT: usize = 1024;
 /// Solve-local TT sentinel for a fully explored restricted position with no
 /// proof in the current wide/depth-bounded attempt. Certificate IDs can never
 /// approach this value (`MAX_CERT_NODES` is 100k).
@@ -87,6 +98,20 @@ pub(crate) struct QuotientTelemetryReport {
     pub commutation_shared_window: u64,
     pub commutation_legality_coupling: u64,
     pub commutation_threat_response: u64,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SharedFragmentStoreSnapshot {
+    pub enabled: bool,
+    pub entries: u64,
+    pub bytes: u64,
+    pub peak_bytes: u64,
+    pub stored_nodes: u64,
+    pub stored_edges: u64,
+    pub admissions: u64,
+    pub replacements: u64,
+    pub refusals: u64,
 }
 
 #[cfg(test)]
@@ -165,6 +190,9 @@ pub(crate) struct TssSolver {
     tt_enabled: bool,
     hash_mask: u64,
     shared_tt: SharedProofCache,
+    /// Default-off T10/U22 wide proven-fragment path. Read once at construction.
+    shared_fragments_enabled: bool,
+    fragment_store: ProvenFragmentStore,
     zone: ZoneSearchCaps,
     width: WidthOptions,
     #[cfg(test)]
@@ -173,10 +201,14 @@ pub(crate) struct TssSolver {
 
 impl Default for TssSolver {
     fn default() -> Self {
+        let shared_fragments_enabled =
+            std::env::var("TSS_SHARED_FRAGMENTS").ok().as_deref() == Some("1");
         Self {
             tt_enabled: true,
             hash_mask: u64::MAX,
             shared_tt: SharedProofCache::new(0, u64::MAX),
+            shared_fragments_enabled,
+            fragment_store: ProvenFragmentStore::new(0, u64::MAX),
             zone: ZoneSearchCaps::default(),
             width: WidthOptions::default(),
             #[cfg(test)]
@@ -186,6 +218,29 @@ impl Default for TssSolver {
 }
 
 impl TssSolver {
+    #[cfg(test)]
+    pub(crate) fn set_shared_fragments_for_test(&mut self, enabled: bool) {
+        if self.shared_fragments_enabled != enabled {
+            self.fragment_store.clear();
+        }
+        self.shared_fragments_enabled = enabled;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shared_fragment_store_snapshot(&self) -> SharedFragmentStoreSnapshot {
+        SharedFragmentStoreSnapshot {
+            enabled: self.shared_fragments_enabled,
+            entries: self.fragment_store.entry_count as u64,
+            bytes: self.fragment_store.current_bytes as u64,
+            peak_bytes: self.fragment_store.peak_bytes as u64,
+            stored_nodes: self.fragment_store.stored_nodes as u64,
+            stored_edges: self.fragment_store.stored_edges as u64,
+            admissions: self.fragment_store.admissions,
+            replacements: self.fragment_store.replacements,
+            refusals: self.fragment_store.refusals,
+        }
+    }
+
     /// Set the zone/commutation options for subsequent solves. Changing the
     /// options DROPS the persistent positive-fragment cache: cached fragments
     /// are verified proofs either way, but their node-cost provenance belongs
@@ -195,6 +250,7 @@ impl TssSolver {
     pub(crate) fn set_zone_options(&mut self, zone: ZoneSearchCaps) {
         if self.zone != zone {
             self.shared_tt.clear();
+            self.fragment_store.clear();
         }
         self.zone = zone;
     }
@@ -205,6 +261,7 @@ impl TssSolver {
     pub(crate) fn set_width_options(&mut self, width: WidthOptions) {
         if self.width != width {
             self.shared_tt.clear();
+            self.fragment_store.clear();
         }
         self.width = width;
     }
@@ -215,6 +272,8 @@ impl TssSolver {
             tt_enabled: false,
             hash_mask: u64::MAX,
             shared_tt: SharedProofCache::new(0, u64::MAX),
+            shared_fragments_enabled: false,
+            fragment_store: ProvenFragmentStore::new(0, u64::MAX),
             zone: ZoneSearchCaps::default(),
             width: WidthOptions::default(),
             last_narrow_signatures: Vec::new(),
@@ -229,6 +288,8 @@ impl TssSolver {
             tt_enabled: true,
             hash_mask,
             shared_tt: SharedProofCache::new(0, hash_mask),
+            shared_fragments_enabled: false,
+            fragment_store: ProvenFragmentStore::new(0, hash_mask),
             zone: ZoneSearchCaps::default(),
             width: WidthOptions::default(),
             last_narrow_signatures: Vec::new(),
@@ -255,7 +316,21 @@ impl TssSolver {
         } else {
             0
         };
-        let (local_tt_cap, shared_tt_cap) = if self.width.vcf_pair_complete {
+        let uses_wide_pn = self.width.vcf_pair_complete
+            && !(self.width.consumes_quiet_turns() && self.width.consumes_ranked_zone());
+        let fragment_store_cap = if uses_wide_pn && self.shared_fragments_enabled {
+            effective_tt_cap / WIDE_FRAGMENT_CAP_DIVISOR
+        } else {
+            0
+        };
+        self.fragment_store
+            .reconfigure(fragment_store_cap, self.hash_mask);
+        let (local_tt_cap, shared_tt_cap) = if uses_wide_pn && self.shared_fragments_enabled {
+            (
+                effective_tt_cap.saturating_sub(self.fragment_store.current_bytes),
+                0,
+            )
+        } else if self.width.vcf_pair_complete {
             (effective_tt_cap, 0)
         } else {
             split_tt_cap(effective_tt_cap)
@@ -263,7 +338,13 @@ impl TssSolver {
         self.shared_tt.reconfigure(shared_tt_cap, self.hash_mask);
 
         let initial_stats = SolveStats {
-            peak_tt_bytes: self.shared_tt.current_bytes as u64,
+            peak_tt_bytes: self
+                .shared_tt
+                .current_bytes
+                .saturating_add(self.fragment_store.current_bytes)
+                as u64,
+            fragment_store_entries: self.fragment_store.entry_count as u64,
+            fragment_store_bytes: self.fragment_store.current_bytes as u64,
             ..SolveStats::default()
         };
         if caps.node_cap == 0
@@ -437,7 +518,12 @@ impl TssSolver {
         depth_cap: usize,
         width: WidthOptions,
     ) -> AttemptResult {
-        let shared_bytes = self.shared_tt.current_bytes;
+        let fragments_enabled = self.shared_fragments_enabled;
+        let shared_bytes = self
+            .shared_tt
+            .current_bytes
+            .saturating_add(self.fragment_store.current_bytes);
+        let fragment_store = fragments_enabled.then_some(&self.fragment_store);
         let mut search = WidePnSearch::new_with_width(
             claimant,
             state.placements_made(),
@@ -446,6 +532,7 @@ impl TssSolver {
             semantic_horizon,
             depth_cap,
             width,
+            fragment_store,
         );
         let root = search.insert_root(state);
         search.run(state, root);
@@ -490,30 +577,109 @@ impl TssSolver {
                 }
             }
         }
-        let stats = SolveStats {
+        let mut stats = SolveStats {
             nodes: search.expansions,
             tt_hits: search.tt_hits,
             peak_tt_bytes: shared_bytes.saturating_add(search.peak_bytes) as u64,
+            fragment_lookups: search.fragment_lookups,
+            fragment_hits: search.fragment_hits,
+            fragment_store_entries: self.fragment_store.entry_count as u64,
+            fragment_store_bytes: self.fragment_store.current_bytes as u64,
+            ..SolveStats::default()
         };
-        let cert = search
-            .materialize(state, root)
-            .and_then(|(arena, root_node)| {
-                let (nodes, root_node) = compact_certificate(&arena, root_node)?;
+        let mut promotions = Vec::new();
+        let cert = search.materialize(state, root).and_then(|materialized| {
+            let fragment_imports = materialized.fragment_imports;
+            let _dag_reuses = materialized.dag_reuses;
+            let (nodes, root_node) =
+                compact_certificate(&materialized.arena, materialized.root_node)?;
+            let mut cert = TssCertificate {
+                root: RootBinding::from_state(state),
+                claimant,
+                root_node,
+                nodes,
+                semantic_horizon,
+            };
+            if fragments_enabled {
+                rebase_shared_fragment_labels(&mut cert, state)?;
+                let claimed = status_for_claimant(state.current_player(), claimant);
+                if !TssVerifier.verify(state, &cert, claimed) {
+                    return None;
+                }
+                if let Some(proof) = CachedProof::from_compact(cert.nodes.clone(), cert.root_node) {
+                    promotions.push((PositionKey::from_state(state), proof));
+                }
+            } else {
+                rebase_zone_distances(&mut cert, state)?;
+            }
+            // Count only imports that survive compaction, dominant relabel,
+            // and (when enabled) strict final-certificate verification.
+            stats.fragment_imports = fragment_imports;
+            Some(cert)
+        });
+
+        if fragments_enabled {
+            let mut promoted_keys = promotions
+                .iter()
+                .map(|(key, _)| key.clone())
+                .collect::<HashSet<_>>();
+            for candidate in &search.proven_candidates {
+                if promotions.len() >= MAX_WIDE_FRAGMENT_PROMOTIONS {
+                    break;
+                }
+                let key = PositionKey::from_state(&candidate.state);
+                if promoted_keys.contains(&key) {
+                    continue;
+                }
+                let Some(materialized) = search.materialize(&candidate.state, candidate.id) else {
+                    continue;
+                };
+                let Some((nodes, root_node)) = compact_certificate_limited(
+                    &materialized.arena,
+                    materialized.root_node,
+                    MAX_PROMOTED_FRAGMENT_NODES,
+                    MAX_PROMOTED_FRAGMENT_EDGES,
+                ) else {
+                    continue;
+                };
                 let mut cert = TssCertificate {
-                    root: RootBinding::from_state(state),
+                    root: RootBinding::from_state(&candidate.state),
                     claimant,
                     root_node,
                     nodes,
                     semantic_horizon,
                 };
-                rebase_zone_distances(&mut cert, state)?;
-                Some(cert)
-            });
+                if rebase_shared_fragment_labels(&mut cert, &candidate.state).is_none() {
+                    continue;
+                }
+                let claimed = status_for_claimant(candidate.state.current_player(), claimant);
+                if !TssVerifier.verify(&candidate.state, &cert, claimed) {
+                    continue;
+                }
+                if let Some(proof) = CachedProof::from_compact(cert.nodes, cert.root_node) {
+                    promoted_keys.insert(key.clone());
+                    promotions.push((key, proof));
+                }
+            }
+        }
         #[cfg(test)]
         if let Some(telemetry) = search.quotient_telemetry.take() {
             let report = telemetry.finish(&search.entries, &search.by_position, search.tt_hits);
             LAST_QUOTIENT_REPORT.with(|slot| *slot.borrow_mut() = Some(report));
         }
+        drop(search);
+        // The solved attempt root was queued first; admit it last so a direct-
+        // mapped collision with one of its descendants cannot erase the warm
+        // repeat entry in the same promotion batch.
+        promotions.reverse();
+        for (key, proof) in promotions {
+            self.fragment_store.insert(key, claimant, proof);
+        }
+        stats.fragment_store_entries = self.fragment_store.entry_count as u64;
+        stats.fragment_store_bytes = self.fragment_store.current_bytes as u64;
+        stats.peak_tt_bytes = stats
+            .peak_tt_bytes
+            .max(self.fragment_store.current_bytes as u64);
         AttemptResult {
             cert,
             stats,
@@ -579,6 +745,85 @@ fn rebase_zone_distances(cert: &mut TssCertificate, root: &RustHexoState) -> Opt
     Some(())
 }
 
+/// T10/U18 relabelling for an assembled shared DAG. The current Rust grammar
+/// serializes D14's local budget but not D15/D16 tables, so the representable
+/// max-dominant join is the exact child-max recurrence below. Reachable
+/// protected/core obligations remain the union of the final outgoing DAG and
+/// are independently reconstructed by `TssVerifier`.
+fn rebase_shared_fragment_labels(cert: &mut TssCertificate, root: &RustHexoState) -> Option<u64> {
+    fn visit(
+        cert: &TssCertificate,
+        id: CertNodeId,
+        state: &RustHexoState,
+        memo: &mut [Option<(PositionKey, u32)>],
+        visiting: &mut [bool],
+        depth: usize,
+    ) -> Option<u32> {
+        if depth > MAX_CERT_DEPTH {
+            return None;
+        }
+        let index = id as usize;
+        let key = PositionKey::from_state(state);
+        if let Some((seen, budget)) = memo.get(index)?.as_ref() {
+            return (seen == &key).then_some(*budget);
+        }
+        if *visiting.get(index)? {
+            return None;
+        }
+        visiting[index] = true;
+        let budget = match cert.nodes.get(index)? {
+            CertNode::OrCompletion { .. } | CertNode::Win { .. } => 0,
+            CertNode::Loss { .. } => u32::from(threats::placements_remaining(state)),
+            CertNode::Choice { mv, child } => {
+                let mut next = state.clone();
+                let result = apply_placement(&mut next, Placement { coord: *mv }).ok()?;
+                if result.outcome.is_some() {
+                    return None;
+                }
+                visit(cert, *child, &next, memo, visiting, depth + 1)?
+            }
+            CertNode::Universal { edges, .. } => {
+                let mut maximum = 0u32;
+                for edge in edges {
+                    let mut next = state.clone();
+                    let result = apply_placement(&mut next, Placement { coord: edge.mv }).ok()?;
+                    if result.outcome.is_some() {
+                        return None;
+                    }
+                    maximum =
+                        maximum.max(visit(cert, edge.child, &next, memo, visiting, depth + 1)?);
+                }
+                maximum.saturating_add(1)
+            }
+        };
+        visiting[index] = false;
+        memo[index] = Some((key, budget));
+        Some(budget)
+    }
+
+    let mut memo = vec![None; cert.nodes.len()];
+    let mut visiting = vec![false; cert.nodes.len()];
+    visit(cert, cert.root_node, root, &mut memo, &mut visiting, 0)?;
+    if memo.iter().any(Option::is_none) {
+        return None;
+    }
+    let mut relabelled = 0u64;
+    for (index, labelled) in memo.into_iter().enumerate() {
+        let (_, budget) = labelled?;
+        if let CertNode::Universal {
+            zone: Some(zone), ..
+        } = cert.nodes.get_mut(index)?
+        {
+            relabelled = relabelled.saturating_add(u64::from(
+                zone.d != budget || zone.build_horizon != cert.semantic_horizon,
+            ));
+            zone.d = budget;
+            zone.build_horizon = cert.semantic_horizon;
+        }
+    }
+    Some(relabelled)
+}
+
 fn split_tt_cap(total: usize) -> (usize, usize) {
     let shared = total / 2;
     (total - shared, shared)
@@ -623,6 +868,11 @@ fn merge_stats(total: &mut SolveStats, part: SolveStats) {
     total.nodes = total.nodes.saturating_add(part.nodes);
     total.tt_hits = total.tt_hits.saturating_add(part.tt_hits);
     total.peak_tt_bytes = total.peak_tt_bytes.max(part.peak_tt_bytes);
+    total.fragment_lookups = total.fragment_lookups.saturating_add(part.fragment_lookups);
+    total.fragment_hits = total.fragment_hits.saturating_add(part.fragment_hits);
+    total.fragment_imports = total.fragment_imports.saturating_add(part.fragment_imports);
+    total.fragment_store_entries = part.fragment_store_entries;
+    total.fragment_store_bytes = part.fragment_store_bytes;
 }
 
 fn status_for_claimant(root_player: Player, claimant: Player) -> ProofStatus {
@@ -1052,6 +1302,9 @@ fn wide_choice_has_urgent_block(children: &[WidePnChild]) -> bool {
 enum WidePnNode {
     Unexpanded,
     ProvenLeaf(CertNode),
+    /// Independently verified, exact-key positive proof retained by the
+    /// solver-owned cross-solve store. The Arc is immutable for this run.
+    ProvenFragment(Arc<ProvenFragment>),
     /// This restricted horizon did not reach a proof. Unlike a genuine
     /// refutation, the node is reopened when the retained search deepens.
     DepthCutoff,
@@ -1067,6 +1320,7 @@ fn wide_pn_node_tag(node: &WidePnNode) -> &'static str {
     match node {
         WidePnNode::Unexpanded => "unexpanded",
         WidePnNode::ProvenLeaf(_) => "proven_leaf",
+        WidePnNode::ProvenFragment(_) => "proven_fragment",
         WidePnNode::DepthCutoff => "depth_cutoff",
         WidePnNode::Refuted => "refuted",
         WidePnNode::Branch {
@@ -1095,6 +1349,12 @@ struct WidePnEntry {
     /// proves or refutes. This does not participate in PN/DN recomputation or
     /// certificate materialization.
     universal_obligation: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
+struct WideProvenCandidate {
+    id: usize,
+    state: RustHexoState,
 }
 
 /// Exact, compact key used only by the wide proof-number frontier. Coordinates
@@ -1803,7 +2063,9 @@ fn sound_verdicts(
     ids.sort_unstable_by_key(|&id| Reverse(entries[id].depth));
     for id in ids {
         verdicts[id] = match &entries[id].node {
-            WidePnNode::ProvenLeaf(_) => Some(QuotientSoundVerdict::Win),
+            WidePnNode::ProvenLeaf(_) | WidePnNode::ProvenFragment(_) => {
+                Some(QuotientSoundVerdict::Win)
+            }
             WidePnNode::Refuted => Some(QuotientSoundVerdict::Refutation),
             WidePnNode::Unexpanded | WidePnNode::DepthCutoff => None,
             WidePnNode::Branch { kind, children } => match kind {
@@ -1958,13 +2220,15 @@ fn classify_last_two_turns(state: &RustHexoState) -> Option<u8> {
 /// quota-based DFS experiments, expanding a sibling never discards work in an
 /// earlier forcing turn. Claimant pairs are represented as one OR edge, so
 /// turn-forcing is structural rather than an after-the-fact recursive filter.
-struct WidePnSearch {
+struct WidePnSearch<'store> {
     claimant: Player,
     root_ply: u32,
     node_cap: u64,
     tt_bytes_cap: usize,
     semantic_horizon: u32,
     depth_cap: usize,
+    /// Final solve depth; staged deepening mutates `depth_cap` below.
+    max_depth_cap: usize,
     width: WidthOptions,
     /// Read once when this solve-local search is created. Default-off keeps the
     /// historical eager defender-frontier admission path byte-for-byte in the
@@ -1993,9 +2257,14 @@ struct WidePnSearch {
     /// first eager admission's prior/depth and lets a selected attacker thunk
     /// recover that transposed state without pre-linking an arena/TT entry.
     deferred_by_position: HashMap<WidePositionKey, WideDeferredPosition>,
+    fragment_store: Option<&'store ProvenFragmentStore>,
+    fragment_lookups: u64,
+    fragment_hits: u64,
+    proven_candidate_ids: HashSet<usize>,
+    proven_candidates: Vec<WideProvenCandidate>,
 }
 
-impl WidePnSearch {
+impl<'store> WidePnSearch<'store> {
     /// C1 migration mode: preserve the narrow DFS's recursive expansion order
     /// while entering through the wide engine seam.  Reusing the PN frontier
     /// here would change node counts even when it found the same proof, which
@@ -2040,6 +2309,7 @@ impl WidePnSearch {
             nodes: search.nodes,
             tt_hits: search.tt_hits,
             peak_tt_bytes: search.peak_tt_bytes as u64,
+            ..SolveStats::default()
         };
         let cert = proof.and_then(|root| {
             let (nodes, root_node) = compact_certificate(&search.arena, root)?;
@@ -2093,6 +2363,7 @@ impl WidePnSearch {
             semantic_horizon,
             depth_cap,
             WidthOptions::vcf_pair_complete(),
+            None,
         )
     }
 
@@ -2104,6 +2375,7 @@ impl WidePnSearch {
         semantic_horizon: u32,
         depth_cap: usize,
         width: WidthOptions,
+        fragment_store: Option<&'store ProvenFragmentStore>,
     ) -> Self {
         let lazy_frontier = std::env::var("TSS_LAZY_FRONTIER").ok().as_deref() == Some("1");
         Self {
@@ -2113,6 +2385,7 @@ impl WidePnSearch {
             tt_bytes_cap,
             semantic_horizon,
             depth_cap,
+            max_depth_cap: depth_cap,
             width,
             lazy_frontier,
             expansions: 0,
@@ -2131,7 +2404,27 @@ impl WidePnSearch {
             entries: Vec::new(),
             by_position: HashMap::new(),
             deferred_by_position: HashMap::new(),
+            fragment_store,
+            fragment_lookups: 0,
+            fragment_hits: 0,
+            proven_candidate_ids: HashSet::new(),
+            proven_candidates: Vec::new(),
         }
+    }
+
+    fn remember_proven_candidate(&mut self, state: &RustHexoState, id: usize) {
+        if self.fragment_store.is_none()
+            || self.proven_candidates.len() >= MAX_WIDE_FRAGMENT_PROMOTIONS
+            || self.proven_candidate_ids.contains(&id)
+            || !matches!(self.entries[id].node, WidePnNode::Branch { .. })
+        {
+            return;
+        }
+        self.proven_candidate_ids.insert(id);
+        self.proven_candidates.push(WideProvenCandidate {
+            id,
+            state: state.clone(),
+        });
     }
 
     fn insert_root(&mut self, state: &RustHexoState) -> usize {
@@ -2409,6 +2702,9 @@ impl WidePnSearch {
             }
             self.recompute(id);
             if self.entries[id].pn == 0 || self.entries[id].dn == 0 {
+                if self.entries[id].pn == 0 {
+                    self.remember_proven_candidate(state, id);
+                }
                 return if any_progress {
                     WidePnStepOutcome::Progress
                 } else {
@@ -3164,7 +3460,7 @@ impl WidePnSearch {
                 let prior = self.entries[id].prior;
                 (prior.pn, prior.dn)
             }
-            WidePnNode::ProvenLeaf(_) => (0, PN_INFINITY),
+            WidePnNode::ProvenLeaf(_) | WidePnNode::ProvenFragment(_) => (0, PN_INFINITY),
             WidePnNode::DepthCutoff | WidePnNode::Refuted => (PN_INFINITY, 0),
             WidePnNode::Branch { kind, children } => match kind {
                 WidePnKind::Choice => {
@@ -3227,6 +3523,35 @@ impl WidePnSearch {
             self.entries[id].node = WidePnNode::Refuted;
             self.refresh(id);
             return WidePnStepOutcome::Progress;
+        }
+        if let Some(store) = self.fragment_store.filter(|store| store.entry_count != 0) {
+            self.fragment_lookups = self.fragment_lookups.saturating_add(1);
+            let key = PositionKey::from_state(state);
+            if let Some(fragment) = store.lookup(&key, self.claimant) {
+                let proof = &fragment.proof;
+                let root_is_universal = matches!(
+                    proof.nodes.get(proof.root_node as usize),
+                    Some(CertNode::Universal { .. })
+                );
+                let compatible = proof.validate().is_some()
+                    && proof.resolution_t <= self.semantic_horizon
+                    && proof
+                        .zone_build_t
+                        .is_none_or(|build_t| self.semantic_horizon <= build_t)
+                    && depth
+                        .checked_add(proof.height)
+                        .is_some_and(|height| height <= self.max_depth_cap)
+                    // Parent commutation permissions are path-local. A cached
+                    // Universal is consumed only at the solve root, whose
+                    // verifier context is known to be empty.
+                    && (depth == 0 || !root_is_universal);
+                if compatible {
+                    self.fragment_hits = self.fragment_hits.saturating_add(1);
+                    self.entries[id].node = WidePnNode::ProvenFragment(fragment);
+                    self.refresh(id);
+                    return WidePnStepOutcome::Progress;
+                }
+            }
         }
         if let Some(outcome) = state.terminal() {
             self.entries[id].node = if outcome.winner == self.claimant {
@@ -3572,11 +3897,7 @@ impl WidePnSearch {
         )
     }
 
-    fn materialize(
-        &self,
-        state: &RustHexoState,
-        root: usize,
-    ) -> Option<(Vec<CertNode>, CertNodeId)> {
+    fn materialize(&self, state: &RustHexoState, root: usize) -> Option<WideMaterializedProof> {
         if self.entries.get(root)?.pn != 0 {
             return None;
         }
@@ -3586,25 +3907,44 @@ impl WidePnSearch {
             arena: Vec::new(),
             edge_count: 0,
             commutation_count: 0,
+            witness_count: 0,
+            fragment_imports: 0,
+            dag_reuses: 0,
             memo: HashMap::new(),
         };
         let root_node = builder.build(&mut work, root)?;
-        Some((builder.arena, root_node))
+        Some(WideMaterializedProof {
+            arena: builder.arena,
+            root_node,
+            fragment_imports: builder.fragment_imports,
+            dag_reuses: builder.dag_reuses,
+        })
     }
 }
 
-struct WideProofMaterializer<'a> {
-    search: &'a WidePnSearch,
+struct WideMaterializedProof {
+    arena: Vec<CertNode>,
+    root_node: CertNodeId,
+    fragment_imports: u64,
+    dag_reuses: u64,
+}
+
+struct WideProofMaterializer<'search, 'store> {
+    search: &'search WidePnSearch<'store>,
     arena: Vec<CertNode>,
     edge_count: usize,
     commutation_count: usize,
+    witness_count: usize,
+    fragment_imports: u64,
+    dag_reuses: u64,
     memo: HashMap<PositionKey, CertNodeId>,
 }
 
-impl<'a> WideProofMaterializer<'a> {
+impl WideProofMaterializer<'_, '_> {
     fn build(&mut self, state: &mut RustHexoState, id: usize) -> Option<CertNodeId> {
         let key = PositionKey::from_state(state);
         if let Some(&node) = self.memo.get(&key) {
+            self.dag_reuses = self.dag_reuses.saturating_add(1);
             return Some(node);
         }
         let entry = self.search.entries.get(id)?;
@@ -3613,6 +3953,12 @@ impl<'a> WideProofMaterializer<'a> {
         }
         let node = match entry.node.clone() {
             WidePnNode::ProvenLeaf(leaf) => self.alloc(leaf, 0)?,
+            WidePnNode::ProvenFragment(fragment) => {
+                if fragment.claimant != self.search.claimant || fragment.key != key {
+                    return None;
+                }
+                self.import_fragment(state, &fragment.proof)?
+            }
             WidePnNode::Branch {
                 kind: WidePnKind::Choice,
                 children,
@@ -3631,6 +3977,46 @@ impl<'a> WideProofMaterializer<'a> {
         };
         self.memo.insert(key, node);
         Some(node)
+    }
+
+    fn import_fragment(
+        &mut self,
+        state: &RustHexoState,
+        proof: &CachedProof,
+    ) -> Option<CertNodeId> {
+        proof.validate()?;
+        let depth =
+            usize::try_from(state.placements_made().saturating_sub(self.search.root_ply)).ok()?;
+        if proof.resolution_t > self.search.semantic_horizon
+            || proof
+                .zone_build_t
+                .is_some_and(|build_t| self.search.semantic_horizon > build_t)
+            || depth.checked_add(proof.height)? > self.search.max_depth_cap
+            || self.arena.len().checked_add(proof.nodes.len())? > MAX_CERT_NODES
+            || self.edge_count.checked_add(proof.explicit_edges)? > MAX_CERT_EDGES
+            || self
+                .commutation_count
+                .checked_add(proof.commutation_count)?
+                > MAX_CERT_COMMUTATIONS
+            || self.witness_count.checked_add(proof.witness_count)? > MAX_CERT_WITNESSES
+        {
+            return None;
+        }
+
+        let base = self.arena.len();
+        let final_len = base.checked_add(proof.nodes.len())?;
+        u32::try_from(final_len).ok()?;
+        let mut nodes = proof.nodes.clone();
+        for node in &mut nodes {
+            remap_node_ids_with_offset(node, base, final_len)?;
+        }
+        let root = offset_node_id(proof.root_node, base, final_len)?;
+        self.arena.append(&mut nodes);
+        self.edge_count += proof.explicit_edges;
+        self.commutation_count += proof.commutation_count;
+        self.witness_count += proof.witness_count;
+        self.fragment_imports = self.fragment_imports.saturating_add(1);
+        Some(root)
     }
 
     fn build_choice(
@@ -3983,9 +4369,16 @@ impl<'a> WideProofMaterializer<'a> {
             CertNode::Universal { commutations, .. } => commutations.len(),
             _ => 0,
         };
+        let added_witnesses = match &node {
+            CertNode::OrCompletion { .. } | CertNode::Win { .. } => 1,
+            CertNode::Loss { witnesses, .. } => witnesses.len(),
+            CertNode::Choice { .. } | CertNode::Universal { .. } => 0,
+        };
         if self.arena.len() >= MAX_CERT_NODES
             || self.edge_count.saturating_add(added_edges) > MAX_CERT_EDGES
             || self.commutation_count.saturating_add(added_commutations) > MAX_CERT_COMMUTATIONS
+            || (self.search.fragment_store.is_some()
+                && self.witness_count.saturating_add(added_witnesses) > MAX_CERT_WITNESSES)
         {
             return None;
         }
@@ -3993,6 +4386,7 @@ impl<'a> WideProofMaterializer<'a> {
         self.arena.push(node);
         self.edge_count += added_edges;
         self.commutation_count += added_commutations;
+        self.witness_count += added_witnesses;
         Some(id)
     }
 }
@@ -6349,6 +6743,8 @@ struct CachedProof {
     nodes: Vec<CertNode>,
     root_node: CertNodeId,
     explicit_edges: usize,
+    commutation_count: usize,
+    witness_count: usize,
     /// Maximum number of certificate edges below `root_node`.
     height: usize,
     /// Maximum exact resolution label over all contained typed leaves.
@@ -6374,10 +6770,24 @@ impl CachedProof {
         }
         let mut heights = vec![0usize; nodes.len()];
         let mut explicit_edges = 0usize;
+        let mut commutation_count = 0usize;
+        let mut witness_count = 0usize;
         let mut resolution_t = 0u32;
         let mut zone_build_t: Option<u32> = None;
         for (index, node) in nodes.iter().enumerate() {
             resolution_t = resolution_t.max(node_resolution(node));
+            match node {
+                CertNode::OrCompletion { .. } | CertNode::Win { .. } => {
+                    witness_count = witness_count.checked_add(1)?;
+                }
+                CertNode::Loss { witnesses, .. } => {
+                    witness_count = witness_count.checked_add(witnesses.len())?;
+                }
+                CertNode::Universal { commutations, .. } => {
+                    commutation_count = commutation_count.checked_add(commutations.len())?;
+                }
+                CertNode::Choice { .. } => {}
+            }
             if let CertNode::Universal {
                 zone: Some(zone), ..
             } = node
@@ -6427,6 +6837,8 @@ impl CachedProof {
             nodes,
             root_node,
             explicit_edges,
+            commutation_count,
+            witness_count,
             height,
             resolution_t,
             zone_build_t,
@@ -6448,6 +6860,8 @@ impl CachedProof {
         (rebuilt
             == (
                 self.explicit_edges,
+                self.commutation_count,
+                self.witness_count,
                 self.height,
                 self.resolution_t,
                 self.zone_build_t,
@@ -6458,13 +6872,27 @@ impl CachedProof {
     fn from_compact_unchecked_metadata(
         nodes: &[CertNode],
         root_node: CertNodeId,
-    ) -> Option<(usize, usize, u32, Option<u32>)> {
+    ) -> Option<(usize, usize, usize, usize, u32, Option<u32>)> {
         let mut heights = vec![0usize; nodes.len()];
         let mut explicit_edges = 0usize;
+        let mut commutation_count = 0usize;
+        let mut witness_count = 0usize;
         let mut resolution_t = 0u32;
         let mut zone_build_t: Option<u32> = None;
         for (index, node) in nodes.iter().enumerate() {
             resolution_t = resolution_t.max(node_resolution(node));
+            match node {
+                CertNode::OrCompletion { .. } | CertNode::Win { .. } => {
+                    witness_count = witness_count.checked_add(1)?;
+                }
+                CertNode::Loss { witnesses, .. } => {
+                    witness_count = witness_count.checked_add(witnesses.len())?;
+                }
+                CertNode::Universal { commutations, .. } => {
+                    commutation_count = commutation_count.checked_add(commutations.len())?;
+                }
+                CertNode::Choice { .. } => {}
+            }
             if let CertNode::Universal {
                 zone: Some(zone), ..
             } = node
@@ -6511,6 +6939,8 @@ impl CachedProof {
         }
         Some((
             explicit_edges,
+            commutation_count,
+            witness_count,
             heights[root_node as usize],
             resolution_t,
             zone_build_t,
@@ -6714,6 +7144,196 @@ impl SharedProofCache {
                 .iter()
                 .flatten()
                 .map(SharedTtEntry::heap_bytes)
+                .sum::<usize>(),
+        )
+    }
+}
+
+/// One immutable positive proof proposition. `key` and `claimant` are part of
+/// the owned Arc so every live wide-PN handle can recheck identity without
+/// cloning either the key or certificate payload.
+#[derive(Debug, PartialEq, Eq)]
+struct ProvenFragment {
+    key: PositionKey,
+    claimant: Player,
+    proof: CachedProof,
+}
+
+impl ProvenFragment {
+    fn heap_bytes(&self) -> usize {
+        self.key
+            .heap_bytes()
+            .saturating_add(self.proof.heap_bytes())
+            .saturating_add(size_of::<Self>())
+            .saturating_add(ALLOC_OVERHEAD)
+    }
+}
+
+#[derive(Debug)]
+struct ProvenFragmentEntry {
+    hash: u64,
+    fragment: Arc<ProvenFragment>,
+}
+
+#[derive(Debug)]
+struct ProvenFragmentStore {
+    slots: Vec<Option<ProvenFragmentEntry>>,
+    cap: usize,
+    current_bytes: usize,
+    peak_bytes: usize,
+    hash_mask: u64,
+    entry_count: usize,
+    stored_nodes: usize,
+    stored_edges: usize,
+    admissions: u64,
+    replacements: u64,
+    refusals: u64,
+}
+
+impl ProvenFragmentStore {
+    fn new(cap: usize, hash_mask: u64) -> Self {
+        Self {
+            // A fresh official-corpus solver is cold. Reserving a full direct
+            // table here would steal search TT without enabling a single hit.
+            // Allocate it only when a verified proof is actually promoted.
+            slots: Vec::new(),
+            cap,
+            current_bytes: 0,
+            peak_bytes: 0,
+            hash_mask,
+            entry_count: 0,
+            stored_nodes: 0,
+            stored_edges: 0,
+            admissions: 0,
+            replacements: 0,
+            refusals: 0,
+        }
+    }
+
+    fn reconfigure(&mut self, cap: usize, hash_mask: u64) {
+        if self.cap != cap || self.hash_mask != hash_mask {
+            *self = Self::new(cap, hash_mask);
+        } else {
+            self.peak_bytes = self.current_bytes;
+        }
+    }
+
+    fn clear(&mut self) {
+        *self = Self::new(self.cap, self.hash_mask);
+    }
+
+    fn ensure_slots(&mut self) -> bool {
+        if !self.slots.is_empty() {
+            return true;
+        }
+        let slot_count = (self.cap / TARGET_BYTES_PER_PROVEN_FRAGMENT_SLOT).min(MAX_TT_SLOTS);
+        if slot_count == 0 {
+            return false;
+        }
+        let mut slots = Vec::with_capacity(slot_count);
+        slots.resize_with(slot_count, || None);
+        let base = allocation_bytes(slots.capacity(), size_of::<Option<ProvenFragmentEntry>>());
+        if base > self.cap {
+            return false;
+        }
+        self.slots = slots;
+        self.current_bytes = base;
+        self.peak_bytes = self.peak_bytes.max(base);
+        true
+    }
+
+    fn lookup(&self, key: &PositionKey, claimant: Player) -> Option<Arc<ProvenFragment>> {
+        if self.slots.is_empty() {
+            return None;
+        }
+        let hash = key.stable_hash() & self.hash_mask;
+        let index = (hash as usize) % self.slots.len();
+        let entry = self.slots[index].as_ref()?;
+        (entry.hash == hash && entry.fragment.claimant == claimant && entry.fragment.key == *key)
+            .then(|| Arc::clone(&entry.fragment))
+    }
+
+    fn insert(&mut self, key: PositionKey, claimant: Player, proof: CachedProof) -> bool {
+        if proof.validate().is_none() || !self.ensure_slots() {
+            self.refusals = self.refusals.saturating_add(1);
+            return false;
+        }
+        let hash = key.stable_hash() & self.hash_mask;
+        let index = (hash as usize) % self.slots.len();
+        let old = self.slots[index].as_ref();
+
+        // Alternative proof graphs are never structurally unioned. For the
+        // identical proposition replace only when the new admissible horizon
+        // interval contains the old one (or the interval is identical and the
+        // payload is smaller). Resolution/build intervals can otherwise be
+        // incomparable, so a lexicographic choice would silently discard
+        // useful warm queries. This is cache policy, not a proof-label merge.
+        if let Some(old) = old.filter(|old| {
+            old.hash == hash && old.fragment.claimant == claimant && old.fragment.key == key
+        }) {
+            let old_build = old.fragment.proof.zone_build_t.unwrap_or(u32::MAX);
+            let new_build = proof.zone_build_t.unwrap_or(u32::MAX);
+            let interval_dominates =
+                proof.resolution_t <= old.fragment.proof.resolution_t && new_build >= old_build;
+            let interval_is_strict =
+                proof.resolution_t < old.fragment.proof.resolution_t || new_build > old_build;
+            let new_is_better = interval_dominates
+                && (interval_is_strict || proof.heap_bytes() < old.fragment.proof.heap_bytes());
+            if !new_is_better {
+                self.refusals = self.refusals.saturating_add(1);
+                return false;
+            }
+        }
+
+        let fragment = Arc::new(ProvenFragment {
+            key,
+            claimant,
+            proof,
+        });
+        let new_heap = fragment.heap_bytes();
+        let old_heap = old.map(|entry| entry.fragment.heap_bytes()).unwrap_or(0);
+        let candidate_bytes = self
+            .current_bytes
+            .saturating_sub(old_heap)
+            .saturating_add(new_heap);
+        if candidate_bytes > self.cap {
+            self.refusals = self.refusals.saturating_add(1);
+            return false;
+        }
+
+        if let Some(old) = old {
+            self.stored_nodes = self
+                .stored_nodes
+                .saturating_sub(old.fragment.proof.nodes.len());
+            self.stored_edges = self
+                .stored_edges
+                .saturating_sub(old.fragment.proof.explicit_edges);
+            self.replacements = self.replacements.saturating_add(1);
+        } else {
+            self.entry_count = self.entry_count.saturating_add(1);
+        }
+        self.stored_nodes = self.stored_nodes.saturating_add(fragment.proof.nodes.len());
+        self.stored_edges = self
+            .stored_edges
+            .saturating_add(fragment.proof.explicit_edges);
+        self.slots[index] = Some(ProvenFragmentEntry { hash, fragment });
+        self.current_bytes = candidate_bytes;
+        self.peak_bytes = self.peak_bytes.max(candidate_bytes);
+        self.admissions = self.admissions.saturating_add(1);
+        true
+    }
+
+    #[cfg(test)]
+    fn recomputed_bytes(&self) -> usize {
+        allocation_bytes(
+            self.slots.capacity(),
+            size_of::<Option<ProvenFragmentEntry>>(),
+        )
+        .saturating_add(
+            self.slots
+                .iter()
+                .flatten()
+                .map(|entry| entry.fragment.heap_bytes())
                 .sum::<usize>(),
         )
     }
@@ -8532,14 +9152,14 @@ mod tests {
         let root = search.insert_root(&state);
         search.run(&state, root);
         assert_eq!(search.entries[root].pn, 0);
-        let (nodes, root_node) = search
+        let materialized = search
             .materialize(&state, root)
             .expect("collapsed defender proof must materialize");
         let cert = TssCertificate {
             root: RootBinding::from_state(&state),
             claimant,
-            root_node,
-            nodes,
+            root_node: materialized.root_node,
+            nodes: materialized.arena,
             semantic_horizon: u32::MAX,
         };
         let CertNode::Universal {
@@ -9672,6 +10292,91 @@ mod tests {
         }
         assert!(warm.stats.tt_hits > 0);
         assert!(warm.stats.nodes < first.stats.nodes);
+    }
+
+    #[test]
+    fn wide_shared_fragments_warm_exact_root_and_verify() {
+        let state = xsnfyll_forced_defender_fixture();
+        let caps = SolveCaps {
+            node_cap: 10_000,
+            tt_bytes_cap: 64 << 20,
+            semantic_horizon: u32::MAX,
+        };
+        let mut cold_solver = TssSolver::default();
+        cold_solver.set_width_options(WidthOptions::vcf_pair_complete());
+        let cold = cold_solver.solve_goal(&state, &caps, SolveGoal::Loss);
+
+        let mut warm_solver = TssSolver::default();
+        warm_solver.set_shared_fragments_for_test(true);
+        warm_solver.set_width_options(WidthOptions::vcf_pair_complete());
+        let first = warm_solver.solve_goal(&state, &caps, SolveGoal::Loss);
+        let warm = warm_solver.solve_goal(&state, &caps, SolveGoal::Loss);
+
+        for result in [&cold, &first, &warm] {
+            assert_eq!(result.status, ProofStatus::Loss);
+            assert!(TssVerifier.verify(&state, result.cert.as_ref().unwrap(), result.status));
+            assert!(result.stats.peak_tt_bytes <= caps.tt_bytes_cap as u64);
+        }
+        assert_eq!(cold.status, first.status);
+        assert_eq!(first.status, warm.status);
+        assert_eq!(cold.stats.nodes, first.stats.nodes);
+        assert_eq!(cold.stats.tt_hits, first.stats.tt_hits);
+        assert_eq!(first.stats.fragment_lookups, 0);
+        assert!(first.stats.fragment_store_entries > 0);
+        assert_eq!(warm.stats.fragment_hits, 1);
+        assert_eq!(warm.stats.fragment_imports, 1);
+        assert!(warm.stats.nodes < first.stats.nodes);
+        let snapshot = warm_solver.shared_fragment_store_snapshot();
+        assert!(snapshot.enabled);
+        assert!(snapshot.entries > 0);
+        assert!(snapshot.stored_nodes > 0);
+        assert_eq!(
+            snapshot.bytes as usize,
+            warm_solver.fragment_store.recomputed_bytes()
+        );
+    }
+
+    #[test]
+    fn wide_shared_fragments_forced_collision_never_cross_contaminates() {
+        let a = xsnfyll_forced_defender_fixture();
+        let b = transformed_state(&a, 1);
+        let caps = SolveCaps {
+            node_cap: 10_000,
+            tt_bytes_cap: 64 << 20,
+            semantic_horizon: u32::MAX,
+        };
+        let mut solver = TssSolver::with_hash_mask(0);
+        solver.set_shared_fragments_for_test(true);
+        solver.set_width_options(WidthOptions::vcf_pair_complete());
+        let first_a = solver.solve_goal(&a, &caps, SolveGoal::Loss);
+        let first_b = solver.solve_goal(&b, &caps, SolveGoal::Loss);
+        let second_a = solver.solve_goal(&a, &caps, SolveGoal::Loss);
+        for (state, result) in [(&a, &first_a), (&b, &first_b), (&a, &second_a)] {
+            assert_eq!(result.status, ProofStatus::Loss);
+            assert!(TssVerifier.verify(state, result.cert.as_ref().unwrap(), result.status));
+            assert!(result.stats.peak_tt_bytes <= caps.tt_bytes_cap as u64);
+        }
+        // B may evict A's direct-mapped entry, but it can never answer A.
+        assert_eq!(first_b.stats.fragment_hits, 0);
+        assert_eq!(second_a.status, first_a.status);
+    }
+
+    #[test]
+    fn shared_fragment_store_full_key_claimant_and_accounting() {
+        let state = deep_universal_fixture();
+        let other = transformed_state(&state, 1);
+        let proof = CachedProof::from_compact(vec![cache_test_leaf()], 0).unwrap();
+        let mut store = ProvenFragmentStore::new(64 << 10, 0);
+        let key = PositionKey::from_state(&state);
+        assert!(store.insert(key.clone(), Player::Player0, proof));
+        assert!(store.lookup(&key, Player::Player0).is_some());
+        assert!(store.lookup(&key, Player::Player1).is_none());
+        assert!(store
+            .lookup(&PositionKey::from_state(&other), Player::Player0)
+            .is_none());
+        assert_eq!(store.current_bytes, store.recomputed_bytes());
+        assert!(store.current_bytes <= store.cap);
+        assert!(store.peak_bytes <= store.cap);
     }
 
     #[test]

@@ -143,6 +143,16 @@ pub struct SolveStats {
     pub nodes: u64,
     pub tt_hits: u64,
     pub peak_tt_bytes: u64,
+    /// Exact-key positive-fragment queries made by the wide solver.
+    pub fragment_lookups: u64,
+    /// Queries that passed full-key, claimant, horizon, and depth checks.
+    pub fragment_hits: u64,
+    /// Shared fragment roots actually imported into the returned certificate.
+    pub fragment_imports: u64,
+    /// Resident entries after this solve (telemetry only).
+    pub fragment_store_entries: u64,
+    /// Resident byte-accounted fragment-store charge after this solve.
+    pub fragment_store_bytes: u64,
 }
 
 /// A deep solve's outcome: a typed status, an optional replayable certificate

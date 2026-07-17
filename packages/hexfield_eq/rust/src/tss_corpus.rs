@@ -211,6 +211,11 @@ fn tss_corpus_check() {
 
     let mut failures: Vec<String> = Vec::new();
     let mut selected = 0usize;
+    let mut fragment_lookups = 0u64;
+    let mut fragment_hits = 0u64;
+    let mut fragment_imports = 0u64;
+    let mut max_fragment_store_entries = 0u64;
+    let mut max_fragment_store_bytes = 0u64;
     for pos in &corpus {
         if selected_ids
             .as_ref()
@@ -234,6 +239,21 @@ fn tss_corpus_check() {
             let t0 = Instant::now();
             let result = solver.solve(&pos.state, &caps);
             let ms = t0.elapsed().as_secs_f64() * 1e3;
+            if let Some(cert) = &result.cert {
+                assert!(
+                    TssVerifier.verify(&pos.state, cert, result.status),
+                    "{}: strict verifier rejected returned {} certificate at cap={cap}",
+                    pos.id,
+                    status_name(result.status),
+                );
+            }
+            fragment_lookups = fragment_lookups.saturating_add(result.stats.fragment_lookups);
+            fragment_hits = fragment_hits.saturating_add(result.stats.fragment_hits);
+            fragment_imports = fragment_imports.saturating_add(result.stats.fragment_imports);
+            max_fragment_store_entries =
+                max_fragment_store_entries.max(result.stats.fragment_store_entries);
+            max_fragment_store_bytes =
+                max_fragment_store_bytes.max(result.stats.fragment_store_bytes);
             println!(
                 "CORPUS id={} cap={cap} status={} expect={} nodes={} tt_hits={} tt_bytes_cap={} peak_tt_bytes={} ms={ms:.1}",
                 pos.id,
@@ -243,6 +263,15 @@ fn tss_corpus_check() {
                 result.stats.tt_hits,
                 tt_bytes_cap,
                 result.stats.peak_tt_bytes,
+            );
+            println!(
+                "FRAGMENT_PROFILE id={} cap={cap} lookups={} hits={} imports={} store_entries={} store_bytes={}",
+                pos.id,
+                result.stats.fragment_lookups,
+                result.stats.fragment_hits,
+                result.stats.fragment_imports,
+                result.stats.fragment_store_entries,
+                result.stats.fragment_store_bytes,
             );
             let (pair_ms, defender_ms, regen_ms, expand_ms, refresh_ms, insert_ms) =
                 crate::tss_solver::wide_gen_profile();
@@ -272,6 +301,14 @@ fn tss_corpus_check() {
             "TSS_CORPUS_ID contained an unknown corpus entry"
         );
     }
+    let fragment_hit_rate = if fragment_lookups == 0 {
+        0.0
+    } else {
+        fragment_hits as f64 * 100.0 / fragment_lookups as f64
+    };
+    println!(
+        "CORPUS_FRAGMENTS lookups={fragment_lookups} hits={fragment_hits} hit_rate_pct={fragment_hit_rate:.3} imports={fragment_imports} max_store_entries={max_fragment_store_entries} max_store_bytes={max_fragment_store_bytes}"
+    );
     println!("CORPUS_DONE failures={}", failures.len());
     assert!(
         failures.is_empty(),

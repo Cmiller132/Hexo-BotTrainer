@@ -1,22 +1,25 @@
-//! NQ4 search-space quotient measurement harness.
+//! NQ4 search-space quotient and G2R9 shared-fragment measurement harness.
 //!
-//! This is deliberately an ignored, single-threaded measurement test. It does
-//! not alter solver choices: all counters live behind the test-only
-//! `TSS_TURN_QUOTIENT_TELEMETRY` switch.
+//! These are deliberately ignored, single-threaded measurement tests. NQ4's
+//! counters do not alter solver choices; the G2R9 lanes intentionally A/B the
+//! default-off shared-fragment policy through its test-only deterministic
+//! setter.
 
 use std::collections::HashMap;
 use std::time::Instant;
 
 use hexo_engine::{apply_placement, HexCoord, HexoState, Placement, Player, TurnPhase, WindowKey};
 
-use crate::tss_core::{CertVerify, DeepSolve, ProofStatus, SolveCaps, ZoneSearchCaps};
+use crate::tss_core::{CertVerify, DeepSolve, ProofStatus, SolveCaps, SolveStats, ZoneSearchCaps};
 use crate::tss_solver::{
-    take_quotient_telemetry_report, QuotientTelemetryReport, TssSolver, WidthOptions,
+    take_quotient_telemetry_report, QuotientTelemetryReport, SharedFragmentStoreSnapshot,
+    TssSolver, WidthOptions,
 };
 use crate::tss_verify::{CertNode, TssCertificate, TssVerifier};
 
 const DEFAULT_TT_BYTES: usize = 512 << 20;
 const DEFAULT_LAZY_EQ_TT_BYTES: usize = 2 << 30;
+const DEFAULT_SHARED_FRAGMENT_TT_BYTES: usize = 512 << 20;
 const HUMAN_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 const HUMAN_MIN_STONES: u32 = 20;
 const DOUBLE_FORK_COMPACT: &[(i16, i16)] = &[
@@ -138,6 +141,112 @@ struct LazyRun {
     elapsed_ms: f64,
 }
 
+#[derive(Clone)]
+struct SharedFragmentCase {
+    cohort: String,
+    id: String,
+    state: HexoState,
+    caps: SolveCaps,
+    width: WidthOptions,
+    zone: ZoneSearchCaps,
+    /// The forcing corpus's five NO controls must never become WIN. A
+    /// verifier-accepted WIN there is still a campaign-stopping oracle
+    /// disagreement, even if both A/B modes happen to reproduce it.
+    forbid_win: bool,
+}
+
+struct SharedFragmentRun {
+    status: ProofStatus,
+    stats: SolveStats,
+    store: SharedFragmentStoreSnapshot,
+    elapsed_ms: f64,
+}
+
+#[derive(Default)]
+struct SharedFragmentAggregate {
+    roots: u64,
+    nodes: u64,
+    fragment_lookups: u64,
+    fragment_hits: u64,
+    fragment_imports: u64,
+    store_entries_sum: u64,
+    store_bytes_sum: u64,
+    max_store_entries: u64,
+    max_store_bytes: u64,
+    elapsed_ms: f64,
+}
+
+impl SharedFragmentAggregate {
+    fn push(&mut self, run: &SharedFragmentRun) {
+        self.roots = self.roots.saturating_add(1);
+        self.nodes = self.nodes.saturating_add(run.stats.nodes);
+        self.fragment_lookups = self
+            .fragment_lookups
+            .saturating_add(run.stats.fragment_lookups);
+        self.fragment_hits = self.fragment_hits.saturating_add(run.stats.fragment_hits);
+        self.fragment_imports = self
+            .fragment_imports
+            .saturating_add(run.stats.fragment_imports);
+        self.store_entries_sum = self.store_entries_sum.saturating_add(run.store.entries);
+        self.store_bytes_sum = self.store_bytes_sum.saturating_add(run.store.bytes);
+        self.max_store_entries = self.max_store_entries.max(run.store.entries);
+        self.max_store_bytes = self.max_store_bytes.max(run.store.bytes);
+        self.elapsed_ms += run.elapsed_ms;
+    }
+
+    fn print(&self, lazy: bool, fragments: bool, phase: &str) {
+        let hit_rate = ratio(self.fragment_hits, self.fragment_lookups);
+        println!(
+            "SF_SUMMARY lazy={} fragments={} phase={phase} roots={} nodes={} expansions={} ms={:.3} fragment_lookups={} fragment_hits={} fragment_hit_rate={hit_rate:.6} fragment_imports={} store_entries_sum={} store_bytes_sum={} max_store_entries={} max_store_bytes={}",
+            on_off(lazy),
+            on_off(fragments),
+            self.roots,
+            self.nodes,
+            self.nodes,
+            self.elapsed_ms,
+            self.fragment_lookups,
+            self.fragment_hits,
+            self.fragment_imports,
+            self.store_entries_sum,
+            self.store_bytes_sum,
+            self.max_store_entries,
+            self.max_store_bytes,
+        );
+    }
+}
+
+/// Restores the process-global lazy-frontier setting even on an ordinary test
+/// return. G2R9 campaign commands are required to be serialized; this guard
+/// also keeps later ignored tests in that process from inheriting a mode.
+struct LazyFrontierEnvGuard {
+    previous: Option<std::ffi::OsString>,
+}
+
+impl LazyFrontierEnvGuard {
+    fn new() -> Self {
+        Self {
+            previous: std::env::var_os("TSS_LAZY_FRONTIER"),
+        }
+    }
+
+    fn set(&self, enabled: bool) {
+        if enabled {
+            std::env::set_var("TSS_LAZY_FRONTIER", "1");
+        } else {
+            std::env::remove_var("TSS_LAZY_FRONTIER");
+        }
+    }
+}
+
+impl Drop for LazyFrontierEnvGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => std::env::set_var("TSS_LAZY_FRONTIER", value),
+            None => std::env::remove_var("TSS_LAZY_FRONTIER"),
+        }
+    }
+}
+
 impl Aggregate {
     fn push(&mut self, status: ProofStatus, nodes: u64, tt_hits: u64, q: &QuotientTelemetryReport) {
         self.roots += 1;
@@ -224,6 +333,115 @@ fn status_name(status: ProofStatus) -> &'static str {
         ProofStatus::Loss => "LOSS",
         ProofStatus::Unknown => "UNKNOWN",
     }
+}
+
+fn on_off(value: bool) -> &'static str {
+    if value {
+        "on"
+    } else {
+        "off"
+    }
+}
+
+fn ratio(numerator: u64, denominator: u64) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 / denominator as f64
+    }
+}
+
+fn signed_delta_percent(on: u64, off: u64) -> f64 {
+    if off == 0 {
+        if on == 0 {
+            0.0
+        } else {
+            f64::INFINITY
+        }
+    } else {
+        (on as f64 - off as f64) * 100.0 / off as f64
+    }
+}
+
+fn signed_delta_percent_f64(on: f64, off: f64) -> f64 {
+    if off == 0.0 {
+        if on == 0.0 {
+            0.0
+        } else {
+            f64::INFINITY
+        }
+    } else {
+        (on - off) * 100.0 / off
+    }
+}
+
+/// `TSS_SHARED_FRAGMENT_LAZY_MODE=off|on|both` lets a regeneration command
+/// split the two composition lanes without changing what either lane tests.
+fn shared_fragment_lazy_modes(default_both: bool) -> Vec<bool> {
+    match std::env::var("TSS_SHARED_FRAGMENT_LAZY_MODE")
+        .unwrap_or_else(|_| (if default_both { "both" } else { "off" }).to_owned())
+        .as_str()
+    {
+        "off" => vec![false],
+        "on" => vec![true],
+        "both" => vec![false, true],
+        value => panic!("TSS_SHARED_FRAGMENT_LAZY_MODE must be off, on, or both; got {value:?}"),
+    }
+}
+
+fn shared_fragment_reduced_budgets() -> Vec<usize> {
+    let value =
+        std::env::var("TSS_SHARED_FRAGMENT_REDUCED_TT_BYTES").unwrap_or_else(|_| "both".to_owned());
+    if value == "both" {
+        return vec![512usize << 20, 1usize << 30];
+    }
+    let budgets = value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(|item| {
+            item.parse::<usize>()
+                .expect("numeric TSS_SHARED_FRAGMENT_REDUCED_TT_BYTES")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !budgets.is_empty(),
+        "TSS_SHARED_FRAGMENT_REDUCED_TT_BYTES is empty"
+    );
+    budgets
+}
+
+fn shared_fragment_reduced_ladder() -> Vec<u64> {
+    let mut ladder = match std::env::var("TSS_SHARED_FRAGMENT_REDUCED_LADDER") {
+        Ok(value) => value
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(|item| {
+                item.parse::<u64>()
+                    .expect("numeric TSS_SHARED_FRAGMENT_REDUCED_LADDER")
+            })
+            .collect::<Vec<_>>(),
+        Err(_) => vec![10_000, 100_000, 1_000_000, 20_000_000],
+    };
+    assert!(
+        !ladder.is_empty(),
+        "TSS_SHARED_FRAGMENT_REDUCED_LADDER is empty"
+    );
+    assert!(
+        ladder.windows(2).all(|pair| pair[0] < pair[1]),
+        "TSS_SHARED_FRAGMENT_REDUCED_LADDER must be strictly increasing"
+    );
+    let max_cap = std::env::var("TSS_SHARED_FRAGMENT_REDUCED_MAX_CAP")
+        .ok()
+        .map(|value| value.parse::<u64>().expect("numeric reduced-TT max cap"))
+        .unwrap_or(u64::MAX);
+    ladder.retain(|cap| *cap <= max_cap);
+    assert!(
+        !ladder.is_empty(),
+        "TSS_SHARED_FRAGMENT_REDUCED_MAX_CAP removed every ladder rung"
+    );
+    ladder
 }
 
 fn replay(moves: &[(i16, i16)]) -> HexoState {
@@ -387,6 +605,203 @@ fn human_roots(games: &[HumanGame], sample_n: usize) -> Vec<HumanRoot> {
     }
     roots.truncate(sample_n);
     roots
+}
+
+fn shared_fragment_cases(tt_bytes_cap: usize) -> Vec<SharedFragmentCase> {
+    let corpus = forcing_corpus();
+    let mut cases = Vec::with_capacity(139);
+    for cap in [10_000u64, 100_000] {
+        for position in &corpus {
+            cases.push(SharedFragmentCase {
+                cohort: format!("forcing_{cap}"),
+                id: position.id.clone(),
+                state: position.state.clone(),
+                caps: SolveCaps {
+                    node_cap: cap,
+                    tt_bytes_cap,
+                    semantic_horizon: u32::MAX,
+                },
+                width: WidthOptions::vcf_pair_complete(),
+                zone: ZoneSearchCaps::default(),
+                forbid_win: !position.expect_win,
+            });
+        }
+    }
+
+    cases.push(SharedFragmentCase {
+        cohort: "double_fork_compact".to_owned(),
+        id: "double_fork_compact".to_owned(),
+        state: replay(DOUBLE_FORK_COMPACT),
+        caps: SolveCaps {
+            node_cap: 100_000,
+            tt_bytes_cap,
+            semantic_horizon: 45,
+        },
+        width: WidthOptions::round3_consume(),
+        zone: ZoneSearchCaps {
+            enabled: true,
+            stale_area_filter: false,
+            count2_threshold: true,
+            pair_commutation: false,
+        },
+        forbid_win: false,
+    });
+
+    let games = human_games();
+    let roots = human_roots(&games, 100);
+    assert_eq!(roots.len(), 100, "human sample must contain 100 roots");
+    for (rank, root) in roots.into_iter().enumerate() {
+        cases.push(SharedFragmentCase {
+            cohort: "human_100_cap10000".to_owned(),
+            id: format!("human_{rank:03}_g{}_p{}", root.game, root.prefix),
+            state: replay(&games[root.game].moves[..root.prefix]),
+            caps: SolveCaps {
+                node_cap: 10_000,
+                tt_bytes_cap,
+                semantic_horizon: u32::MAX,
+            },
+            width: WidthOptions::vcf_pair_complete(),
+            zone: ZoneSearchCaps::default(),
+            forbid_win: false,
+        });
+    }
+    assert_eq!(cases.len(), 139, "G2R9 campaign root count drifted");
+    cases
+}
+
+fn configured_fragment_solver(
+    fragments: bool,
+    width: WidthOptions,
+    zone: ZoneSearchCaps,
+) -> TssSolver {
+    let mut solver = TssSolver::default();
+    // The production path reads TSS_SHARED_FRAGMENTS once in Default. The
+    // test-only setter gives one serialized process a deterministic A/B pair
+    // without racing process-global environment changes.
+    solver.set_shared_fragments_for_test(fragments);
+    solver.set_width_options(width);
+    solver.set_zone_options(zone);
+    solver
+}
+
+fn solve_shared_fragment_once(
+    solver: &mut TssSolver,
+    case: &SharedFragmentCase,
+    fragments: bool,
+    phase: &str,
+    lazy: bool,
+) -> SharedFragmentRun {
+    let started = Instant::now();
+    let result = solver.solve(&case.state, &case.caps);
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
+    if result.status != ProofStatus::Unknown {
+        assert!(
+            result.cert.is_some(),
+            "SF_STOP hard verdict without certificate: id={} fragments={} phase={phase} lazy={} status={}",
+            case.id,
+            on_off(fragments),
+            on_off(lazy),
+            status_name(result.status),
+        );
+    }
+    if let Some(cert) = result.cert.as_ref() {
+        assert!(
+            TssVerifier.verify(&case.state, cert, result.status),
+            "SF_STOP verifier rejection: id={} fragments={} phase={phase} lazy={} status={}",
+            case.id,
+            on_off(fragments),
+            on_off(lazy),
+            status_name(result.status),
+        );
+    }
+    assert!(
+        !(case.forbid_win && result.status == ProofStatus::Win),
+        "SF_STOP forcing NO control became WIN: id={} fragments={} phase={phase} lazy={}",
+        case.id,
+        on_off(fragments),
+        on_off(lazy),
+    );
+    SharedFragmentRun {
+        status: result.status,
+        stats: result.stats,
+        store: solver.shared_fragment_store_snapshot(),
+        elapsed_ms,
+    }
+}
+
+fn assert_fragment_verdict_identity(
+    case: &SharedFragmentCase,
+    lazy: bool,
+    label: &str,
+    left: ProofStatus,
+    right: ProofStatus,
+) {
+    assert_eq!(
+        left,
+        right,
+        "SF_STOP verdict flip: cohort={} id={} cap={} horizon={} lazy={} comparison={label} left={} right={}",
+        case.cohort,
+        case.id,
+        case.caps.node_cap,
+        case.caps.semantic_horizon,
+        on_off(lazy),
+        status_name(left),
+        status_name(right),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn print_shared_fragment_row(
+    case: &SharedFragmentCase,
+    lazy: bool,
+    off_cold: &SharedFragmentRun,
+    off_warm: &SharedFragmentRun,
+    on_cold: &SharedFragmentRun,
+    on_warm: &SharedFragmentRun,
+) {
+    println!(
+        "SF_ROW cohort={} id={} cap={} horizon={} tt_bytes_cap={} lazy={} off_cold_status={} off_warm_status={} on_cold_status={} on_warm_status={} off_cold_nodes={} off_cold_expansions={} off_warm_nodes={} off_warm_expansions={} on_cold_nodes={} on_cold_expansions={} on_warm_nodes={} on_warm_expansions={} off_cold_ms={:.3} off_warm_ms={:.3} on_cold_ms={:.3} on_warm_ms={:.3} on_cold_lookups={} on_cold_hits={} on_cold_imports={} on_warm_lookups={} on_warm_hits={} on_warm_hit_rate={:.6} on_warm_imports={} store_entries={} store_bytes={} store_peak_bytes={} stored_nodes={} stored_edges={} admissions={} replacements={} refusals={}",
+        case.cohort,
+        case.id,
+        case.caps.node_cap,
+        case.caps.semantic_horizon,
+        case.caps.tt_bytes_cap,
+        on_off(lazy),
+        status_name(off_cold.status),
+        status_name(off_warm.status),
+        status_name(on_cold.status),
+        status_name(on_warm.status),
+        off_cold.stats.nodes,
+        off_cold.stats.nodes,
+        off_warm.stats.nodes,
+        off_warm.stats.nodes,
+        on_cold.stats.nodes,
+        on_cold.stats.nodes,
+        on_warm.stats.nodes,
+        on_warm.stats.nodes,
+        off_cold.elapsed_ms,
+        off_warm.elapsed_ms,
+        on_cold.elapsed_ms,
+        on_warm.elapsed_ms,
+        on_cold.stats.fragment_lookups,
+        on_cold.stats.fragment_hits,
+        on_cold.stats.fragment_imports,
+        on_warm.stats.fragment_lookups,
+        on_warm.stats.fragment_hits,
+        ratio(
+            on_warm.stats.fragment_hits,
+            on_warm.stats.fragment_lookups
+        ),
+        on_warm.stats.fragment_imports,
+        on_warm.store.entries,
+        on_warm.store.bytes,
+        on_warm.store.peak_bytes,
+        on_warm.store.stored_nodes,
+        on_warm.store.stored_edges,
+        on_warm.store.admissions,
+        on_warm.store.replacements,
+        on_warm.store.refusals,
+    );
 }
 
 fn assert_no_win_loss_flip(seen: &mut HashMap<String, ProofStatus>, id: &str, status: ProofStatus) {
@@ -660,6 +1075,384 @@ fn compare_lazy_row(
     );
     off_aggregate.push(&off);
     on_aggregate.push(&on);
+}
+
+fn shared_fragment_mutation_control(corpus: &[CorpusPosition], tt_bytes_cap: usize, lazy: bool) {
+    let first = corpus
+        .iter()
+        .find(|position| position.id == "0hz3hty")
+        .expect("mutation-control first root");
+    let different = corpus
+        .iter()
+        .find(|position| position.id == "8is963b")
+        .expect("mutation-control different root");
+    let first_case = SharedFragmentCase {
+        cohort: "mutation_control".to_owned(),
+        id: first.id.clone(),
+        state: first.state.clone(),
+        caps: SolveCaps {
+            node_cap: 100_000,
+            tt_bytes_cap,
+            semantic_horizon: u32::MAX,
+        },
+        width: WidthOptions::vcf_pair_complete(),
+        zone: ZoneSearchCaps::default(),
+        forbid_win: !first.expect_win,
+    };
+    let different_case = SharedFragmentCase {
+        cohort: "mutation_control".to_owned(),
+        id: different.id.clone(),
+        state: different.state.clone(),
+        caps: first_case.caps,
+        width: first_case.width,
+        zone: first_case.zone,
+        forbid_win: !different.expect_win,
+    };
+
+    let mut warm_on = configured_fragment_solver(
+        true,
+        WidthOptions::vcf_pair_complete(),
+        ZoneSearchCaps::default(),
+    );
+    let seeded = solve_shared_fragment_once(&mut warm_on, &first_case, true, "seed", lazy);
+    let mutated =
+        solve_shared_fragment_once(&mut warm_on, &different_case, true, "different", lazy);
+
+    let mut fresh_on = configured_fragment_solver(
+        true,
+        WidthOptions::vcf_pair_complete(),
+        ZoneSearchCaps::default(),
+    );
+    let fresh_on_result =
+        solve_shared_fragment_once(&mut fresh_on, &different_case, true, "fresh", lazy);
+    let mut fresh_off = configured_fragment_solver(
+        false,
+        WidthOptions::vcf_pair_complete(),
+        ZoneSearchCaps::default(),
+    );
+    let fresh_off_result =
+        solve_shared_fragment_once(&mut fresh_off, &different_case, false, "fresh", lazy);
+
+    assert_fragment_verdict_identity(
+        &different_case,
+        lazy,
+        "seeded-different-vs-fresh-on",
+        mutated.status,
+        fresh_on_result.status,
+    );
+    assert_fragment_verdict_identity(
+        &different_case,
+        lazy,
+        "seeded-different-vs-fresh-off",
+        mutated.status,
+        fresh_off_result.status,
+    );
+    println!(
+        "SF_MUTATION lazy={} seed_id={} seed_status={} different_id={} status={} fresh_on_status={} fresh_off_status={} different_nodes={} different_lookups={} different_hits={} different_imports={} store_entries={} store_bytes={} result=PASS",
+        on_off(lazy),
+        first_case.id,
+        status_name(seeded.status),
+        different_case.id,
+        status_name(mutated.status),
+        status_name(fresh_on_result.status),
+        status_name(fresh_off_result.status),
+        mutated.stats.nodes,
+        mutated.stats.fragment_lookups,
+        mutated.stats.fragment_hits,
+        mutated.stats.fragment_imports,
+        mutated.store.entries,
+        mutated.store.bytes,
+    );
+}
+
+#[test]
+#[ignore = "G2R9 shared-fragment soundness/warm campaign; release-only and serialized"]
+fn shared_fragment_soundness_and_warm_campaign() {
+    let tt_bytes_cap = std::env::var("TSS_SHARED_FRAGMENT_TT_BYTES")
+        .ok()
+        .map(|value| value.parse().expect("numeric shared-fragment TT bytes"))
+        .unwrap_or(DEFAULT_SHARED_FRAGMENT_TT_BYTES);
+    let lazy_guard = LazyFrontierEnvGuard::new();
+    let mut cases = shared_fragment_cases(tt_bytes_cap);
+    let case_filter = std::env::var("TSS_SHARED_FRAGMENT_CASE_ID").ok();
+    if let Some(id) = case_filter.as_deref() {
+        cases.retain(|case| case.id == id);
+        assert!(!cases.is_empty(), "unknown shared-fragment case id {id}");
+    }
+    let corpus = forcing_corpus();
+
+    for lazy in shared_fragment_lazy_modes(true) {
+        lazy_guard.set(lazy);
+        let mut off_cold_total = SharedFragmentAggregate::default();
+        let mut off_warm_total = SharedFragmentAggregate::default();
+        let mut on_cold_total = SharedFragmentAggregate::default();
+        let mut on_warm_total = SharedFragmentAggregate::default();
+
+        for case in &cases {
+            let mut off_solver = configured_fragment_solver(false, case.width, case.zone);
+            let off_cold = solve_shared_fragment_once(&mut off_solver, case, false, "cold", lazy);
+            let off_warm = solve_shared_fragment_once(&mut off_solver, case, false, "warm", lazy);
+
+            let mut on_solver = configured_fragment_solver(true, case.width, case.zone);
+            let on_cold = solve_shared_fragment_once(&mut on_solver, case, true, "cold", lazy);
+            let on_warm = solve_shared_fragment_once(&mut on_solver, case, true, "warm", lazy);
+
+            // Emit the complete A/B row before tripwires so any mandated stop
+            // still leaves enough evidence for a single-root blocker report.
+            print_shared_fragment_row(case, lazy, &off_cold, &off_warm, &on_cold, &on_warm);
+            assert_fragment_verdict_identity(
+                case,
+                lazy,
+                "off-cold-vs-on-cold",
+                off_cold.status,
+                on_cold.status,
+            );
+            assert_fragment_verdict_identity(
+                case,
+                lazy,
+                "off-warm-vs-on-warm",
+                off_warm.status,
+                on_warm.status,
+            );
+            assert_eq!(
+                off_cold.store,
+                SharedFragmentStoreSnapshot::default(),
+                "flag-off fragment store changed for {}",
+                case.id,
+            );
+            assert!(on_cold.store.enabled && on_warm.store.enabled);
+
+            off_cold_total.push(&off_cold);
+            off_warm_total.push(&off_warm);
+            on_cold_total.push(&on_cold);
+            on_warm_total.push(&on_warm);
+        }
+
+        off_cold_total.print(lazy, false, "cold");
+        off_warm_total.print(lazy, false, "warm");
+        on_cold_total.print(lazy, true, "cold");
+        on_warm_total.print(lazy, true, "warm");
+        println!(
+            "SF_DELTA lazy={} roots={} cold_nodes_delta_pct={:.3} cold_expansions_delta_pct={:.3} cold_ms_delta_pct={:.3} warm_nodes_delta_pct={:.3} warm_expansions_delta_pct={:.3} warm_ms_delta_pct={:.3} on_warm_vs_on_cold_nodes_delta_pct={:.3} on_warm_vs_on_cold_ms_delta_pct={:.3} warm_fragment_hit_rate={:.6}",
+            on_off(lazy),
+            cases.len(),
+            signed_delta_percent(on_cold_total.nodes, off_cold_total.nodes),
+            signed_delta_percent(on_cold_total.nodes, off_cold_total.nodes),
+            signed_delta_percent_f64(on_cold_total.elapsed_ms, off_cold_total.elapsed_ms),
+            signed_delta_percent(on_warm_total.nodes, off_warm_total.nodes),
+            signed_delta_percent(on_warm_total.nodes, off_warm_total.nodes),
+            signed_delta_percent_f64(on_warm_total.elapsed_ms, off_warm_total.elapsed_ms),
+            signed_delta_percent(on_warm_total.nodes, on_cold_total.nodes),
+            signed_delta_percent_f64(on_warm_total.elapsed_ms, on_cold_total.elapsed_ms),
+            ratio(on_warm_total.fragment_hits, on_warm_total.fragment_lookups),
+        );
+        if case_filter.is_none() {
+            shared_fragment_mutation_control(&corpus, tt_bytes_cap, lazy);
+        }
+        println!(
+            "SF_CAMPAIGN_DONE lazy={} roots={} cold_verdict_identity=PASS warm_verdict_identity=PASS certificates=PASS mutation=PASS",
+            on_off(lazy),
+            cases.len(),
+        );
+    }
+}
+
+struct ReducedFragmentRun {
+    final_status: ProofStatus,
+    closure_cap: Option<u64>,
+    rungs: Vec<(u64, ProofStatus)>,
+    aggregate: SharedFragmentAggregate,
+    final_store: SharedFragmentStoreSnapshot,
+}
+
+fn run_reduced_fragment_ladder(
+    position: &CorpusPosition,
+    tt_bytes_cap: usize,
+    ladder: &[u64],
+    fragments: bool,
+    lazy: bool,
+) -> ReducedFragmentRun {
+    let width = WidthOptions::vcf_pair_complete();
+    let zone = ZoneSearchCaps::default();
+    let mut solver = configured_fragment_solver(fragments, width, zone);
+    let mut aggregate = SharedFragmentAggregate::default();
+    let mut rungs = Vec::new();
+    let mut closure_cap = None;
+    let mut final_status = ProofStatus::Unknown;
+    let mut final_store = solver.shared_fragment_store_snapshot();
+
+    for (index, &node_cap) in ladder.iter().enumerate() {
+        let case = SharedFragmentCase {
+            cohort: "reduced_tt".to_owned(),
+            id: position.id.clone(),
+            state: position.state.clone(),
+            caps: SolveCaps {
+                node_cap,
+                tt_bytes_cap,
+                semantic_horizon: u32::MAX,
+            },
+            width,
+            zone,
+            forbid_win: !position.expect_win,
+        };
+        let phase = if index == 0 {
+            "cold"
+        } else {
+            "progressive_warm"
+        };
+        let run = solve_shared_fragment_once(&mut solver, &case, fragments, phase, lazy);
+        assert!(
+            !(position.expect_win && run.status == ProofStatus::Loss),
+            "SF_STOP reduced-TT WIN row returned LOSS: id={} cap={node_cap} fragments={} lazy={}",
+            position.id,
+            on_off(fragments),
+            on_off(lazy),
+        );
+        println!(
+            "SF_REDUCED_RUNG id={} tt_bytes_cap={} cap={node_cap} lazy={} fragments={} phase={phase} status={} nodes={} expansions={} ms={:.3} lookups={} hits={} hit_rate={:.6} imports={} store_entries={} store_bytes={} store_peak_bytes={} admissions={} replacements={} refusals={}",
+            position.id,
+            tt_bytes_cap,
+            on_off(lazy),
+            on_off(fragments),
+            status_name(run.status),
+            run.stats.nodes,
+            run.stats.nodes,
+            run.elapsed_ms,
+            run.stats.fragment_lookups,
+            run.stats.fragment_hits,
+            ratio(run.stats.fragment_hits, run.stats.fragment_lookups),
+            run.stats.fragment_imports,
+            run.store.entries,
+            run.store.bytes,
+            run.store.peak_bytes,
+            run.store.admissions,
+            run.store.replacements,
+            run.store.refusals,
+        );
+        final_status = run.status;
+        final_store = run.store;
+        rungs.push((node_cap, run.status));
+        aggregate.push(&run);
+        if run.status == ProofStatus::Win {
+            closure_cap = Some(node_cap);
+            break;
+        }
+        if run.status == ProofStatus::Loss {
+            break;
+        }
+    }
+
+    ReducedFragmentRun {
+        final_status,
+        closure_cap,
+        rungs,
+        aggregate,
+        final_store,
+    }
+}
+
+fn hard_verdicts_disagree(left: ProofStatus, right: ProofStatus) -> bool {
+    matches!(
+        (left, right),
+        (ProofStatus::Win, ProofStatus::Loss) | (ProofStatus::Loss, ProofStatus::Win)
+    )
+}
+
+#[test]
+#[ignore = "G2R9 0l reduced-TT saturation campaign; release-only and serialized"]
+fn shared_fragment_reduced_tt_campaign() {
+    let ladder = shared_fragment_reduced_ladder();
+    let selected_ids = std::env::var("TSS_SHARED_FRAGMENT_HEAVY_IDS")
+        .unwrap_or_else(|_| "0l4291i_live".to_owned())
+        .split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert!(!selected_ids.is_empty(), "heavy-row selection is empty");
+    let corpus = forcing_corpus();
+    let selected = selected_ids
+        .iter()
+        .map(|id| {
+            corpus
+                .iter()
+                .find(|position| &position.id == id)
+                .unwrap_or_else(|| panic!("unknown heavy forcing row {id}"))
+        })
+        .collect::<Vec<_>>();
+    let budgets = shared_fragment_reduced_budgets();
+    let lazy_guard = LazyFrontierEnvGuard::new();
+
+    for lazy in shared_fragment_lazy_modes(false) {
+        lazy_guard.set(lazy);
+        for &tt_bytes_cap in &budgets {
+            for position in &selected {
+                assert!(
+                    position.expect_win,
+                    "reduced-TT closure campaign expects a WIN row: {}",
+                    position.id
+                );
+                let off = run_reduced_fragment_ladder(position, tt_bytes_cap, &ladder, false, lazy);
+                let on = run_reduced_fragment_ladder(position, tt_bytes_cap, &ladder, true, lazy);
+                for &(cap, off_status) in &off.rungs {
+                    if let Some((_, on_status)) = on.rungs.iter().find(|(on_cap, _)| *on_cap == cap)
+                    {
+                        assert!(
+                            !hard_verdicts_disagree(off_status, *on_status),
+                            "SF_STOP reduced-TT hard verdict flip: id={} cap={cap} tt_bytes_cap={tt_bytes_cap} lazy={} off={} on={}",
+                            position.id,
+                            on_off(lazy),
+                            status_name(off_status),
+                            status_name(*on_status),
+                        );
+                    }
+                }
+                let newly_closed = on.closure_cap.is_some() && off.closure_cap.is_none();
+                println!(
+                    "SF_REDUCED_SUMMARY id={} tt_bytes_cap={} lazy={} max_cap={} off_status={} on_status={} off_closure_cap={} on_closure_cap={} newly_closed={} off_nodes={} on_nodes={} node_delta_pct={:.3} off_expansions={} on_expansions={} off_ms={:.3} on_ms={:.3} ms_delta_pct={:.3} on_lookups={} on_hits={} on_hit_rate={:.6} on_imports={} on_store_entries={} on_store_bytes={} on_store_peak_bytes={} on_admissions={} on_replacements={} on_refusals={}",
+                    position.id,
+                    tt_bytes_cap,
+                    on_off(lazy),
+                    ladder.last().copied().unwrap_or_default(),
+                    status_name(off.final_status),
+                    status_name(on.final_status),
+                    off.closure_cap.unwrap_or_default(),
+                    on.closure_cap.unwrap_or_default(),
+                    newly_closed,
+                    off.aggregate.nodes,
+                    on.aggregate.nodes,
+                    signed_delta_percent(on.aggregate.nodes, off.aggregate.nodes),
+                    off.aggregate.nodes,
+                    on.aggregate.nodes,
+                    off.aggregate.elapsed_ms,
+                    on.aggregate.elapsed_ms,
+                    signed_delta_percent_f64(
+                        on.aggregate.elapsed_ms,
+                        off.aggregate.elapsed_ms
+                    ),
+                    on.aggregate.fragment_lookups,
+                    on.aggregate.fragment_hits,
+                    ratio(
+                        on.aggregate.fragment_hits,
+                        on.aggregate.fragment_lookups
+                    ),
+                    on.aggregate.fragment_imports,
+                    on.final_store.entries,
+                    on.final_store.bytes,
+                    on.final_store.peak_bytes,
+                    on.final_store.admissions,
+                    on.final_store.replacements,
+                    on.final_store.refusals,
+                );
+            }
+        }
+    }
+    println!(
+        "SF_REDUCED_DONE rows={} budgets={} max_cap={} result=PASS",
+        selected.len(),
+        budgets.len(),
+        ladder.last().copied().unwrap_or_default(),
+    );
 }
 
 #[test]
