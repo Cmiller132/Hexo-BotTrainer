@@ -1,0 +1,55 @@
+DTW round 1.1 — REPAIR PASS. The DTW census-bound proof was
+ACCEPT-WITH-EDITS (16/16 claims confirmed; math signed off) but
+PRODUCTION sign-off is withheld pending the review's 7 numbered
+repairs. Execute them exactly. The goal at exit: a proof document whose
+Contract 8.1/8.2 a production implementer can follow without reading
+the review, and a hunt report that no longer overclaims exactness.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-dtw-bounds
+at commit bbfb34d0. You CANNOT git-commit.
+
+## Work order = REVIEW_DTW_CENSUS_BOUND.md "Numbered repair list" (read
+the whole review first; the sign-off section states the exact residual
+objections)
+1. Contract 8.1 executable: WindowStore::entries() pseudocode from the
+   review's finding B; attacker count >0 and defender count ==0; zero
+   fallback; explicit prohibition of threat-only indexes and local
+   WindowUpdate scans.
+2. Contract 8.2 artifact scope: mint "no forced WIN through requested
+   h" as the default artifact; the stronger LB_plies-1 endpoint only
+   behind coordinate_safe(state, LB_plies-1). Keep the cheap h-scoped
+   route.
+3. Checked wide arithmetic (i32/i64) for R, q, r, s, absolute values,
+   horizon subtraction — before any coordinate reconstruction.
+4. HUNT_REPORT_DTW_BOUNDS.md: rename dtw_h to restricted proof
+   horizon/upper bound; Unknown/None rows = unresolved; recompute the
+   validation/slack prose accordingly (do NOT re-run solver grinds;
+   recompute only what the frozen JSONL rows support; where the old
+   text claimed exactness the new text states the upper-bound reading).
+   Mark the edit with a dated note rather than silently rewriting
+   history.
+5. Promote the census parity + boundary regressions per the review
+   (keep dtw_hostile_ply_boundaries and the review's c=0/all-c sweep
+   with the production-implementation test list in the doc's machine
+   section).
+6. Insertion-servicing wording: restored defender cells already service
+   their intervals; only H \ D' needs new placements.
+7. "Winning line" -> "axis line" in L3's ledger row; bind the
+   theorem/ruleset record to the reviewed commit and exact census
+   implementation.
+Also add a "Round-1 review disposition" note near the top (verdict,
+16/16, repairs applied, pointer to the review file).
+
+No status changes to any claim. No new claims. Rust edits only if a
+repair names them (5 is doc-level promotion; only touch
+dtw_bounds_hunt.rs if a listed regression needs a rename/comment —
+no semantic changes). If any repair cannot be executed as written,
+STOP on that item and record the conflict at the end of the document.
+
+Machine: if you touch Rust, rerun the affected ignored tests once
+(CARGO_TARGET_DIR=.target-hunt, --test-threads=1, free RAM >9 GB via
+powershell "Get-CimInstance Win32_OperatingSystem | % {
+$_.FreePhysicalMemory/1MB }"; TWO other sessions share this host).
+
+Final message: per-repair list of edits with locations, any conflicts,
+regen commands. No commits.

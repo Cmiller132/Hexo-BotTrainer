@@ -1,10 +1,22 @@
 # Census two-gap distance bound — proof record
 
-Status date: 2026-07-16. Repository state: commit
-`bd3c842f9e719756c36df27a3cec2ec79db5d35b`. This document is a standalone
-proof record for the production distance-to-win census bound. A status is one
-of exactly `PROVEN`, `VERIFIED-EXHAUSTIVE`, or `OPEN`. “Verified” means a
-finite exhaustive program check, not a deductive proof.
+Status date: 2026-07-16. Reviewed theorem/ruleset source: commit
+`ffdd414ad5197444eef44af4f28da376a5d95507`. The production census is bound
+to the exact `WindowStore::entries()` implementation in Contract 8.1
+(attacker count `> 0`, defender count `== 0`, zero fallback), not to a
+threat-only or local-update approximation. This document is a standalone proof
+record for the production distance-to-win census bound. A status is one of
+exactly `PROVEN`, `VERIFIED-EXHAUSTIVE`, or `OPEN`. “Verified” means a finite
+exhaustive program check, not a deductive proof.
+
+### Round-1 review disposition
+
+The 2026-07-16 hostile review returned **ACCEPT-WITH-EDITS**, confirmed all
+16/16 `PROVEN` claims, and found no counterexample to either phase-specific
+theorem. This revision applies all seven numbered production-specification
+repairs. See `REVIEW_DTW_CENSUS_BOUND.md` for the adjudication and attack log;
+the contracts and machine-test list below are complete without requiring that
+review as an implementation supplement.
 
 ## 0. Initial claim ledger (skeleton)
 
@@ -16,7 +28,7 @@ order, and this ledger is updated when each section is closed.
 | R1 | Exact Hexo rules and quantifiers used by the theorem | PROVEN |
 | L1 | Persistence, root-window census, and the single-window floor | PROVEN |
 | L2 | Turn maps from attacker-placement number to ply | PROVEN |
-| L3 | Two distinct cells determine at most one winning line | PROVEN |
+| L3 | Two distinct cells determine at most one axis line | PROVEN |
 | A | One-line cap-3/count-5 union has at most two cells (6,182,998 configurations) | VERIFIED-EXHAUSTIVE |
 | B | One-line cap-2/count-4 family has a hitting set of size at most two (4,953,489 configurations) | VERIFIED-EXHAUSTIVE |
 | L4 | Defender-insertion/subfamily monotonicity over the ternary universe | PROVEN |
@@ -335,7 +347,13 @@ Claim A or B after \(x,y\):
 2. **Insertion route.** Retain every root defender, temporarily omit only
    \(R\), and apply the one-line claim to this injection-free occupancy. Then
    restore \(R\). Lemma 4.1 says the actual surviving target family and its
-   empty-cell union are subsets of the checked family and union.
+   empty-cell union are subsets of the checked family and union. More
+   operationally, if the check chose a hitting/service set \(H\) with defender
+   set \(D\), and restoration gives \(D'=D\cup R\), every cell in
+   \(H\cap D'\) is already a defender stone and has already serviced every
+   interval containing it. Only \(H\setminus D'\) needs new defender
+   placements; that remainder still hits every surviving defender-free
+   interval.
 
 For the FirstStone \(c=1\) application, the second route's cap is valid:
 immediately before attacker placements 3 and 4, but with only the intervening
@@ -398,21 +416,36 @@ defender, that is again an earlier successful termination. ∎
 ### Exact implementation hypothesis
 
 No extra tactical hypothesis is needed, but the current `i16` engine requires
-an explicit representation-safety hypothesis. For a claim through relative
-ply `h`, define in wide integer arithmetic
+an explicit representation-safety hypothesis. The guard must be completed
+before any per-stone window-key, radius-neighborhood, service-cell, or filler
+coordinate reconstruction. For a claim through nonnegative relative ply `h`,
+use checked `i32`, `i64`, or wider arithmetic throughout; the following is
+executable pseudocode using `i64`:
 
 ```text
-SAFE = 16383
-R = 8 * (h + 1)
-s = -q-r
+SAFE: i64 = 16383
+h_wide: i64 = checked_widen_nonnegative(h)       else reject
+R: i64 = h_wide.checked_add(1)
+                 .and_then(|x| x.checked_mul(8)) else reject
+require R <= SAFE else reject
+limit: i64 = SAFE.checked_sub(R)                 else reject
 
 coordinate_safe(state,h) :=
-    R <= SAFE
-    and, for every occupied root cell,
-    abs(q) <= SAFE-R
-    and abs(r) <= SAFE-R
-    and abs(s) <= SAFE-R
+    for every occupied root cell,
+        q: i64 = widen(cell.q)
+        r: i64 = widen(cell.r)
+        s: i64 = q.checked_add(r)
+                    .and_then(|x| x.checked_neg()) else reject
+        aq: i64 = q.checked_abs() else reject
+        ar: i64 = r.checked_abs() else reject
+        as: i64 = s.checked_abs() else reject
+        aq <= limit and ar <= limit and as <= limit
 ```
+
+In particular, do not compute `s = -q-r`, an absolute value, `R`, or
+`SAFE-R` in `i16`, and do not narrow an intermediate result back to `i16`.
+Contract 8.2 applies the same checked-wide rule to absolute-to-relative
+horizon subtraction before this guard runs.
 
 This is conservative, not necessary. Every future legal placement through
 ply `h` is connected to a root stone by at most `h` radius-8 placement steps.
@@ -737,8 +770,25 @@ Given a validated nonterminal `HexoState state`:
    contract at `Opening`.
 3. For every axis-aligned length-6 window, ignore it if it contains an
    `attacker.other()` stone. Among the rest, take the maximum number of
-   `attacker` stones. It is sufficient to scan only windows touched by an
-   attacker stone and return `c = 0` if there are none. Reject rather than
+   `attacker` stones. The exact production-store recipe is:
+
+```rust
+let mut c = 0u8;
+for entry in state.board().windows().entries() {
+    let ac = entry.count(attacker);
+    let dc = entry.count(attacker.other());
+    if ac > 0 && dc == 0 {
+        c = c.max(ac);
+    }
+}
+```
+
+   Initializing `c` to zero is the required fallback when no
+   attacker-touched live entry exists. The `ac > 0` and `dc == 0` predicates
+   are both mandatory. Do **not** substitute `threat_entries()`,
+   `live_threat_entries()`, `has_threats()`, another count-4-or-more index, or
+   a scan of only the most recent/local `WindowUpdate`: those omit live
+   attacker counts 1--3 and can produce a false gate. Reject rather than
    certify if `c > 5`, because that contradicts the required nonterminal/no-six
    invariant.
 4. Select the phase-specific placement bound:
@@ -771,15 +821,23 @@ global loss.
 ### Contract 8.2 (leaf-gate predicate) — `PROVEN`
 
 Let `base = state.placements_made()` and let an intended WIN solve have
-absolute semantic horizon `semantic_horizon`. Require
-`semantic_horizon >= base` and set
+absolute semantic horizon `semantic_horizon`. Widen both operands before
+subtraction and reject on conversion failure, underflow, or overflow:
 
 ```text
-h = semantic_horizon - base
+base_wide: i64 = checked_widen_nonnegative(base) else reject
+semantic_wide: i64 = checked_widen_nonnegative(semantic_horizon) else reject
+h: i64 = semantic_wide.checked_sub(base_wide) else reject
+require h >= 0
+LB_plies_wide: i64 = checked_widen_nonnegative(LB_plies) else reject
 ```
 
-The current player's bounded `SolveGoal::Win` attempt may be skipped with this
-artifact exactly when
+Calculate this `h`, the wide `R`, the widened `q,r,s`, and their checked
+absolute values before any coordinate reconstruction. For the current `i16`
+engine, failure of any check means no artifact and no gate.
+
+The current player's bounded `SolveGoal::Win` attempt may be skipped, and the
+default requested-horizon artifact may be minted, exactly when
 
 ```text
 validated_standard_state
@@ -788,11 +846,26 @@ validated_standard_state
 && phase_is_supported
 && c <= 5
 && (coordinate_safe(state,h) || checked_wide_coordinate_engine)
-&& LB_plies > h
+&& LB_plies_wide > h
 ```
 
-The comparison is strict. `LB_plies == h` does not gate: the theorem permits a
-win on the placement at `LB_plies`.
+The default artifact result is exactly:
+
+> no forced attacker WIN through requested relative horizon `h` (equivalently,
+> through requested absolute `semantic_horizon`).
+
+It must not claim the stronger theorem endpoint merely because the requested
+solve was shorter. On the current `i16` engine, an additional artifact stating
+"no forced attacker WIN through relative ply `LB_plies - 1`" may be minted
+only after computing `LB_plies - 1` in checked-wide arithmetic and separately
+establishing `coordinate_safe(state, LB_plies - 1)`. A coordinate engine that
+is checked/wide by construction may discharge that representation condition
+by its recorded engine version. The cheaper
+`coordinate_safe(state,h)` route above remains sufficient for the ordinary
+`h`-scoped skip and artifact.
+
+The comparison is strict. `LB_plies_wide == h` does not gate: the theorem
+permits a win on the placement at `LB_plies`.
 
 When the **actual computed** relative horizon is exactly `h = 8`, both
 supported phase formulas simplify to
@@ -804,9 +877,9 @@ c <= 2
 but the artifact must still record and verify the phase, because its numeric
 lower-bound ply and every other deadline use the phase-specific formula. For
 a `FirstStone` leaf this gives `LB_plies = 9` at `c=2` and 10 at `c<=1`.
-If an absolute horizon was formed with saturating arithmetic and
-`semantic_horizon-base != 8`, do not call it the exact `h=8` predicate; use
-the computed `h` and `LB_plies > h` directly.
+Do not form the relative horizon with saturating arithmetic. If the checked
+wide subtraction does not produce exactly `h = 8`, do not call it the exact
+`h=8` predicate; use the computed `h` and `LB_plies_wide > h` directly.
 
 ### Required bounded-no-win artifact fields
 
@@ -821,9 +894,13 @@ census c
 phase-specific m
 LB_plies
 requested relative and absolute horizon
-theorem/ruleset version (current legal radius 8; proof minimum 5)
+theorem/ruleset version = dtw-census-two-gap/round-1 at reviewed commit
+    ffdd414ad5197444eef44af4f28da376a5d95507
+census implementation = WindowStore::entries(), ac > 0, dc == 0,
+    initialized-zero fallback
 coordinate-safety result or checked/wide-coordinate engine version
-result: no forced attacker win through relative ply LB_plies-1
+result: no forced attacker WIN through requested relative h / absolute horizon
+optional stronger result through LB_plies-1, only with its separate safety proof
 ```
 
 This proof authorizes gating only the current player's bounded WIN query. It
@@ -893,8 +970,11 @@ above or deliberately excluded from the contract.
     original FirstStone candidate formula and is not a production
     SecondStone implementation. A consumer must implement Contract 8.1's
     phase split.
-12. **Overreading the 245-row regression.** `DTW_RESOLVED.jsonl` stores exact
-    FirstStone ply results but no replay prefix. Reinterpreting attacker
+12. **Overreading the 245-row regression.** `DTW_RESOLVED.jsonl` stores 245
+    positive restricted-solver proof horizons in its legacy `dtw_h` field,
+    but no replay prefix. The legacy `exact:true` label does not establish
+    exact game DTW: an exhausted restricted positive-only search means only
+    "no proof found" at the prior rung. Reinterpreting attacker
     placement ordinals under the SecondStone map tests schedule arithmetic and
     row consistency only; it is not a SecondStone game-tree oracle. The
     separate reachable witness is what falsifies the overstrong `c=3` claim.
@@ -944,13 +1024,14 @@ monotonicity spot:
 The accepted counts, nonempty-family counts, and worst cases are now hard
 assertions, not merely printed diagnostics.
 
-`dtw_secondstone_regression` passed on all 245 exact rows:
+`dtw_secondstone_regression` passed on all 245 legacy `exact:true` rows. In
+this record they are interpreted only as positive restricted-proof horizons:
 
 ```text
 sources: leafwidth=39, fresh=206
 c histogram [c=0..5]: [0,0,18,149,78,0]
 
-(remapped exact dtw, remapped honest bound, slack): count
+(remapped restricted-proof horizon, remapped honest bound, recorded margin): count
 (4,4,0):   78
 (8,5,3):   84
 (12,5,7):  65
@@ -962,6 +1043,31 @@ The same test replayed the reachable SecondStone witness, asserted root
 at most two hits among their six cells leaves one pair untouched. As stressed
 in Section 9, the 245-row portion is a schedule reinterpretation regression,
 not a phase-mutated oracle.
+
+`dtw_hostile_ply_boundaries` passed during the hostile review with 13.082 GB
+free. It is the census/parity and strict-boundary regression that must be
+promoted alongside the production implementation. Its required test list is:
+
+1. replay the sole opening `(0,0)` and assert the next attacker census is
+   `c=0`, the `WindowStore::entries()` recipe agrees, and the legal store has
+   216 cells;
+2. replay every prefix of the review's 11-placement census sweep, covering
+   every FirstStone `c=0..5` boundary and every distinct SecondStone
+   `c=1..5` boundary (`c=0` shares the same bound as `c=1`), and compare the
+   harness census with the exact `WindowStore::entries()` census;
+3. retain both reachable `c=3` threat-index counterexamples: the 37-ply
+   FirstStone prefix and the 18-ply SecondStone witness must have exact census
+   3 while the threat-only index is empty;
+4. retain the five `LB_plies-1`/`LB_plies` ladder checks, require no positive
+   certificate below the boundary, require a WIN certificate at the boundary,
+   and independently pass every positive boundary certificate through
+   `TssVerifier`; and
+5. assert the production gate uses the strict comparison `LB_plies > h`.
+
+The pre-boundary restricted-solver `Unknown` results in item 4 are regression
+observations, not no-WIN evidence; the theorem supplies the exclusion. When
+the production gate lands, these checks should be normal unit/property tests,
+not an ignored review-only suite.
 
 `rustfmt --edition 2021 --check` also passed on the edited Rust file.
 
@@ -987,12 +1093,20 @@ cargo test -p hexfield_eq --lib --release `
     dtw_bounds_hunt::dtw_secondstone_regression -- `
     --ignored --nocapture --test-threads=1
 
+Get-CimInstance Win32_OperatingSystem | % {
+    $_.FreePhysicalMemory/1MB
+}
+$env:CARGO_TARGET_DIR='.target-hunt'
+cargo test -p hexfield_eq --lib --release `
+    dtw_bounds_hunt::dtw_hostile_ply_boundaries -- `
+    --ignored --nocapture --test-threads=1
+
 rustfmt --edition 2021 --check `
     packages/hexfield_eq/rust/src/dtw_bounds_hunt.rs
 ```
 
 Set `DTW_RESOLVED_IN` only if `DTW_RESOLVED.jsonl` is not in the worktree
-root. No oracle, soundness, or corpus output file is rewritten by these two
+root. No oracle, soundness, or corpus output file is rewritten by these three
 tests.
 
 ### 10.3 Final claim tally

@@ -5,17 +5,32 @@
 in PLIES from the position (the unit of the production leaf ladder's +8/+12
 deadlines). If LB(P) > deadline, the whole leaf solve is skippable for free and
 the skip doubles as a proof-backed bounded-no-win artifact. This hunt produced
-CANDIDATES with empirical soundness validation plus one exhaustively-verified
+CANDIDATES with restricted-solver screening plus one exhaustively-verified
 geometric core lemma; a later round proves the survivor.
 
-**Ground-truth oracle (exact).** The production WIN solver strictly respects
+**Round-1 review correction (2026-07-16).** The hostile review in
+`REVIEW_DTW_CENSUS_BOUND.md` accepted the census proof with edits (16/16
+`PROVEN` claims confirmed) but rejected this report's historical exact-DTW
+interpretation. Throughout this corrected report, the JSONL field `dtw_h` is
+read as **restricted proof horizon** `restricted_win_h`: the first horizon at
+which the positive-only, pair-restricted solver found a forced-WIN proof, and
+therefore an upper bound on game DTW. A prior-rung `Unknown` and a final
+`None` are unresolved, not disproofs; the legacy `exact:true` field does not
+change that. No solver grind was rerun for this repair. Counts and margins
+below were recomputed only from the frozen JSONL rows, and all former
+exactness language is replaced by this upper-bound reading.
+
+**Restricted positive-proof oracle (not exact).** The production WIN solver strictly respects
 `semantic_horizon`: any node beyond it is Refuted (tss_solver.rs:2435) and any
 completion must satisfy `completion_ply <= semantic_horizon`
 (tss_solver.rs:2644/2655). Laddering `semantic_horizon = base+h` for h=1,2,...
-yields the minimal h* at which a forced win is provable — an upper bound on the
-true distance-to-win dtw (dtw <= h*), and exactly dtw when the previous rung
-exhausted below the node cap (it did, on **all 245** resolved samples). Any
-candidate with LB(P) > h* on a solved win is REFUTED.
+yields the first restricted proof horizon `h* = restricted_win_h`. A positive
+WIN is sound, so true game DTW satisfies `dtw <= h*`; consequently any
+candidate with `LB(P) > h*` is refuted. Exhaustion of this restricted attacker
+set at `h*-1` means only "no proof found" and does not prove `dtw == h*`.
+Every positive certificate must be independently verified before being called
+production ground truth; this report makes no such promotion for the 245-row
+legacy file.
 
 **Units and the structural cap (frames everything).** Every candidate here
 maps "attacker's own placements needed, m" through the deterministic turn
@@ -30,15 +45,17 @@ entire family — proved by arithmetic, confirmed by the sweep.
 
 ## HEADLINE
 
-- **`lb_census_block1` — the sharpest validated candidate: 0 violations on 386
-  solved wins (245 with exact dtw), EXACT (slack 0) on 162/245 of them, and
-  its core geometric step is now EXHAUSTIVELY VERIFIED (11.1M line
+- **`lb_census_block1` — the sharpest surviving candidate: 0 frozen
+  counterexamples among 245 positive restricted-proof rows; its value matches
+  the recorded upper-bound horizon on 162/245 rows, which is not an exactness
+  result. Its core geometric step is EXHAUSTIVELY VERIFIED (11.1M line
   configurations). Fire rate at the h=8 deadline: 49.0% of 4,000 leaf-shaped
   nodes (90.97% in the opening band), at ~17 µs/eval (unoptimized).**
 - **At the h=12 deadline the fire rate is 0.0% — structurally.** No
   single-window census bound can gate +12. A candidate designed to go deeper
-  (`lb_triple_heur`) was **REFUTED** (162 violations, overshoot up to 8 plies):
-  census counts alone, without servicing analysis, overestimate the distance.
+  (`lb_triple_heur`) was **REFUTED** by 162 positive WIN rows (`LB-h*` up to
+  8 plies): census counts alone, without servicing analysis, overestimate the
+  distance.
 - Verdict: **leaf gating pays at h=8, cannot pay at h=12 with this family.**
 
 ---
@@ -63,7 +80,7 @@ stones — no defense accelerates the attacker). The m-th own placement lands at
 `ply_of_mth(m)` by strict alternation. No win strictly before that ply,
 against ANY defense — this direction needs no servicing argument at all.
 
-### C2. `lb_census_block1` (`lb_block1_heur` in the harness) [VALIDATED + core verified]
+### C2. `lb_census_block1` (`lb_block1_heur` in the harness) [VALIDATED (historical label; positive rows only) + core verified]
 
     m = 6 - maxcnt           if maxcnt >= 4
     m = min(6-maxcnt+1, 6)   if maxcnt <= 3
@@ -86,43 +103,47 @@ clusters reach the pileup far faster than the distinct-window greedy estimate.
 
 ## Soundness results
 
-Sample = 386 attacker-to-move solved-WIN positions:
+Sample = 386 attacker-to-move positions selected by WIN-oriented screening:
 14 forcing-corpus WINs + 122 leaf-width `wide_only_win` prefixes + 250 fresh
 human-corpus FirstStone nodes screened by a 30k-node WIN solve at horizon
 base+14 (deterministic seed; the screen deliberately harvests SHALLOW wins —
 the tight tests). Oracle ladder: node cap 1.5M, TT cap 256 MiB, per-sample
-rungs h = 1..min(max candidate LB, 14); a sample with no WIN by that rung has
-dtw > every candidate LB and is safe by construction (counted as checked).
-245/386 resolved to an exact dtw (all with the exhausted-previous-rung
-certificate); the rest have dtw > 14 > every LB.
+rungs h = 1..min(max candidate LB, 14). Frozen `DTW_RESOLVED.jsonl` contains
+245 positive restricted-WIN rows; against the historical 386-position screen,
+the remaining 141 `Unknown`/`None` outcomes are unresolved. Only the 245
+positive rows constrain game DTW; the other 141 are not counted as checked or
+auto-safe.
 
-| candidate | checked | violations | min slack | verdict |
+Here `h*-LB` is a recorded **upper-bound margin**, not true-DTW slack:
+
+| candidate | positive rows compared | frozen counterexamples | min `h*-LB` | reading |
 |---|--:|--:|--:|:--|
-| `lb0_single_window` | 386 | **0** | 0 | **VALIDATED-ON-386-WINS** |
-| `lb_census_block1`  | 386 | **0** | 0 | **VALIDATED-ON-386-WINS** |
-| `lb_triple_heur`    | 386 | **162** | **-8** | **REFUTED** |
+| `lb0_single_window` | 245 | **0** | 0 | no counterexample in positive rows |
+| `lb_census_block1`  | 245 | **0** | 0 | no counterexample in positive rows |
+| `lb_triple_heur`    | 245 | **162** | **-8** | **REFUTED** |
 
 Refutation example (`DTW_SOUNDNESS.jsonl` row 1): leaf-width node
 `4c716bfed1924aaf@37` — `lb_triple` claims no win before ply 10; the engine
-proves a win in **6** plies (exact). The position's threats overlap: the
+finds a restricted forced-WIN proof by **6** plies, so true DTW is at most 6
+and the claimed lower bound 10 is impossible. The position's threats overlap: the
 greedy distinct-empty-set estimate charges ~9 fills where the real cluster
-needs 4 placements. 162/245 resolved wins refute it; worst overshoot 8 plies.
+needs 4 placements. The 162 positive rows in `DTW_SOUNDNESS.jsonl` refute it;
+the largest recorded `LB-h*` is 8 plies.
 
-**Exact-dtw distribution (245 resolved).** dtw in {2, 6, 10} ONLY — every
-solved win completes on the SECOND placement of an attacker turn (pair
-completion; odd-ply wins, which require a count-5 surviving a full defender
-turn, never occur in this corpus):
+**Restricted-proof-horizon distribution (245 positive rows).** The first
+restricted proof horizons are `{2,6,10}`. This distribution does not exclude
+shorter game wins or odd-ply wins; it describes only where this restricted
+solver first returned a positive proof.
 
-| dtw | n | lb0 value (n) | block1 value (n) |
+| `h*` | n | lb0 value (n) / upper-bound margin | block1 value (n) / upper-bound margin |
 |--:|--:|:--|:--|
-| 2  | 78 | 2 (78) — exact | 2 (78) — exact |
-| 6  | 84 | 5 (84) — slack 1 | **6 (84) — exact** |
-| 10 | 83 | 5 (65), 6 (18) | 6 (65), **9 (18) — slack 1** |
+| 2  | 78 | 2 (78) / 0 | 2 (78) / 0 |
+| 6  | 84 | 5 (84) / 1 | 6 (84) / 0 |
+| 10 | 83 | 5 (65) / 5; 6 (18) / 4 | 6 (65) / 4; 9 (18) / 1 |
 
-`lb_census_block1` is EXACT on 162/245 and within 1 ply on 18 more; the
-remaining 65 (maxcnt=3 leaves whose real distance is 10) show the intrinsic
-limit of a one-number census: it cannot see how much servicing the defender
-still has in hand.
+`lb_census_block1` equals the recorded restricted-proof upper bound on 162/245
+positive rows, trails it by 1 on 18, and by 4 on 65. These are upper-bound
+margins only; none establishes exact DTW or theorem tightness.
 
 ---
 
@@ -185,8 +206,11 @@ survive the ternary universe.)
 > (c) lift the harness convention (attacker = side to move at a FirstStone
 > node) to the SecondStone variant if the consumer needs it.
 
-Empirical status: 0 violations on 386 solved wins; exact on 162/245.
-The two computational claims are exhaustive facts, not samples.
+Empirical status: no counterexample among the 245 positive restricted-proof
+rows; the other 141 screened rows are unresolved. The block1 value equals the
+recorded upper-bound horizon on 162/245 positive rows, which is not an
+exactness claim. The two computational claims are exhaustive facts, not
+samples.
 
 ---
 
@@ -203,7 +227,7 @@ maxcnt 0: 124, 1: 375, 2: 1460, 3: 1854, 4: 183, 5: 4.
 | candidate | µs/eval (med) | h=2 | h=4 | h=6 | **h=8** | **h=12** | h=16 |
 |---|--:|--:|--:|--:|--:|--:|--:|
 | `lb0_single_window` (proven) | 17.3 | 95.3% | 95.3% | 12.5% | **12.5%** | **0.0%** | 0.0% |
-| `lb_census_block1` (validated) | 16.5 | 95.3% | 95.3% | 49.0% | **49.0%** | **0.0%** | 0.0% |
+| `lb_census_block1` (round-1 proof-backed) | 16.5 | 95.3% | 95.3% | 49.0% | **49.0%** | **0.0%** | 0.0% |
 | `lb_triple_heur` (REFUTED) | 17.3 | — | — | — | — | — | — |
 
 Per-band fire at h=8: `lb0` 56.2% / 2.0% / 0.1%; `block1` **91.0% / 51.6% /
@@ -215,14 +239,16 @@ Cost context (sibling leaf-width hunt, same corpus, 4 MiB TT profile,
 604-684 µs median, 12-25 ms p95; WIN-goal-only narrow = 78 µs median. The
 17 µs reference screen is 4-40x cheaper than the median solve and ~10^3x
 cheaper than p95 — and it is a deliberately naive BTreeSet re-scan; a
-production implementation reading the engine's incrementally-maintained
-`WindowStore` would be O(few lookups), plausibly ~1 µs.
+correct production implementation can scan all `WindowStore::entries()` or
+perform a deduplicated 18-window-key lookup set for every attacker stone. The
+current store has no max-census index, so this report does not claim a
+few-lookup or ~1 µs production cost.
 
 ---
 
 ## Verdict on leaf gating
 
-- **h=8 ladder rung: PAYS.** The validated `lb_census_block1` skips **49%**
+- **h=8 ladder rung: PAYS.** The round-1-proven `lb_census_block1` skips **49%**
   of all leaf solves (91% in the opening band, where the +8 rung is most
   often invoked) for ~3% of the median solve cost — before any
   implementation tuning. Even restricting to the already-proven-shape `lb0`,
@@ -249,18 +275,23 @@ production implementation reading the engine's incrementally-maintained
 - `HUNT_REPORT_DTW_BOUNDS.md` — this report.
 - `DTW_SOUNDNESS.jsonl` — 162 refutation rows for `lb_triple_heur`
   (candidate, source, tag, lb_plies, oracle_h, replay prefix). No rows for
-  the two validated candidates.
-- `DTW_RESOLVED.jsonl` — 245 resolved samples (source, tag, exact dtw_h,
-  lb0, side to move).
+  the two surviving lower-bound candidates.
+- `DTW_RESOLVED.jsonl` — 245 positive restricted-proof rows (source, tag,
+  legacy field `dtw_h` = `restricted_win_h`, legacy non-exact `exact` flag,
+  lb0, side to move). It contains no replay prefixes.
 - `DTW_FIRERATE.json` — machine-readable fire-rate table.
 - `packages/hexfield_eq/rust/src/dtw_bounds_hunt.rs` — the harness
-  (test-gated, registered in lib.rs under `#[cfg(test)]`; uncommitted).
+  (test-gated and registered in lib.rs under `#[cfg(test)]`).
 
 ## Reproduction
 
-Worktree `hunt-dtw-bounds` (branch `hunt/dtw-bounds`, HEAD 5536b2bb + the
-uncommitted harness). Deterministic: fixed xorshift seeds, no RNG on any
-solved path, fixed node/TT caps; `--test-threads=1` throughout.
+Historical hunt regeneration context: worktree `hunt-dtw-bounds`, branch
+`hunt/dtw-bounds`. The theorem and ruleset were reviewed at
+`ffdd414ad5197444eef44af4f28da376a5d95507`; see the proof record for the
+exact production census binding. The hunt is deterministic under its fixed
+xorshift seeds and node/TT caps; `--test-threads=1` throughout. These commands
+regenerate the historical restricted-solver observations; their
+`exact:true` output must still be interpreted as non-exact.
 
 ```
 cd E:/Hexo-BotTrainer-hexgt/.claude/worktrees/hunt-dtw-bounds
