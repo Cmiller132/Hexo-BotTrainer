@@ -115,6 +115,7 @@ dependencies = [
 name = "hexfield_eq"
 version = "0.1.0"
 dependencies = [
+ "ahash",
  "half",
  "hexo_engine",
  "hexo_utils",

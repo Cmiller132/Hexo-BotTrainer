@@ -1,0 +1,4 @@
+PAIRCLASS_IDENTITY check=fast baseline_rows=3 optimized_rows=3 identical=True
+PAIRCLASS_IDENTITY check=full_vs_r_ie2 baseline_rows=31 optimized_rows=31 identical=True
+PAIRCLASS_IDENTITY check=component_vs_r_ie2 baseline_rows=31 optimized_rows=31 identical=True
+PAIRCLASS_IDENTITY check=leaf_vs_r_ie2 baseline_rows=2 optimized_rows=2 identical=True

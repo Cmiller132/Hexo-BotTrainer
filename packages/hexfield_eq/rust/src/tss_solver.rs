@@ -17,6 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
 use std::sync::Arc;
 
+use ahash::{AHashMap, AHashSet};
 #[cfg(test)]
 use std::cell::{Cell, RefCell};
 #[cfg(test)]
@@ -2686,6 +2687,81 @@ impl WidePositionKey {
     }
 }
 
+/// Sorted turn-root occupancy reused by every exact defender-pair key in one
+/// atomic plan.  The historical constructor rebuilt and resorted the same
+/// board for every directed pair; merging two sorted extras produces identical
+/// bytes while paying the board scan and owner lookups once.
+struct WideDefenderKeyBuilder {
+    stones: Vec<(i16, i16, u8)>,
+    current_player: u8,
+    placements_made: u32,
+    defender: u8,
+}
+
+impl WideDefenderKeyBuilder {
+    fn new(state: &RustHexoState, claimant: Player) -> Self {
+        let mut stones = state
+            .board()
+            .occupied_cells()
+            .iter()
+            .map(|&coord| {
+                (
+                    coord.q,
+                    coord.r,
+                    player_code(state.board().get(coord).expect("occupied cell has owner")),
+                )
+            })
+            .collect::<Vec<_>>();
+        stones.sort_unstable();
+        Self {
+            stones,
+            current_player: player_code(claimant),
+            placements_made: state.placements_made(),
+            defender: player_code(claimant.other()),
+        }
+    }
+
+    fn completed_pair(&self, first: HexCoord, second: HexCoord) -> WidePositionKey {
+        let mut extras = [
+            (first.q, first.r, self.defender),
+            (second.q, second.r, self.defender),
+        ];
+        extras.sort_unstable();
+        let mut encoded = Vec::with_capacity(
+            self.stones
+                .len()
+                .saturating_add(2)
+                .saturating_mul(3)
+                .saturating_add(12),
+        );
+        encoded.push(self.current_player);
+        push_wide_varint(&mut encoded, self.placements_made.saturating_add(2));
+        encoded.push(1); // TurnPhase::FirstStone
+        encoded.push(0); // non-terminal
+
+        let mut extra_index = 0usize;
+        for &stone in &self.stones {
+            while extra_index < extras.len() && extras[extra_index] < stone {
+                encode_wide_key_stone(&mut encoded, extras[extra_index]);
+                extra_index += 1;
+            }
+            encode_wide_key_stone(&mut encoded, stone);
+        }
+        while extra_index < extras.len() {
+            encode_wide_key_stone(&mut encoded, extras[extra_index]);
+            extra_index += 1;
+        }
+        WidePositionKey {
+            bytes: encoded.into_boxed_slice(),
+        }
+    }
+}
+
+fn encode_wide_key_stone(encoded: &mut Vec<u8>, (q, r, owner): (i16, i16, u8)) {
+    push_wide_varint(encoded, zigzag_i16(q).saturating_mul(2) | u32::from(owner));
+    push_wide_varint(encoded, zigzag_i16(r));
+}
+
 #[derive(Clone, Debug)]
 struct WideDefenderPair {
     first: HexCoord,
@@ -2960,7 +3036,8 @@ fn forced_defender_pair_plan_incremental(
     if kernel.is_empty() {
         return None;
     }
-    let kernel_set = kernel.iter().copied().collect::<HashSet<_>>();
+    let kernel_set = kernel.iter().copied().collect::<AHashSet<_>>();
+    let key_builder = WideDefenderKeyBuilder::new(state, claimant);
     let shared_fork_pn = pn_from_fork_degree(attacker_fork_degree(state, claimant));
     let mut directed = Vec::new();
     for &first in &kernel {
@@ -2979,7 +3056,7 @@ fn forced_defender_pair_plan_incremental(
             if second == first || !kernel_set.contains(&second) {
                 return None;
             }
-            let final_key = WidePositionKey::for_defender_pair(state, claimant, &[first, second]);
+            let final_key = key_builder.completed_pair(first, second);
             let retained_prior =
                 (raw_coord_key(first) < raw_coord_key(second)).then(|| WidePnPrior {
                     pn: shared_fork_pn,
@@ -3002,7 +3079,7 @@ fn forced_defender_pair_plan_incremental(
                 index,
             )
         })
-        .collect::<HashMap<_, _>>();
+        .collect::<AHashMap<_, _>>();
     if directed_index.len() != directed.len() {
         return None;
     }
@@ -3019,7 +3096,7 @@ fn forced_defender_pair_plan_incremental(
         .copied()
         .enumerate()
         .map(|(rank, coord)| (coord, rank))
-        .collect::<HashMap<_, _>>();
+        .collect::<AHashMap<_, _>>();
     let mut pairs = directed
         .into_iter()
         .filter(|pair| raw_coord_key(pair.first) < raw_coord_key(pair.second))
@@ -3152,7 +3229,8 @@ fn forced_defender_pair_plan_impl(
     if kernel.is_empty() {
         return None;
     }
-    let kernel_set = kernel.iter().copied().collect::<HashSet<_>>();
+    let kernel_set = kernel.iter().copied().collect::<AHashSet<_>>();
+    let key_builder = WideDefenderKeyBuilder::new(state, claimant);
 
     // One fork scan per plan: a defender pair perturbs the claimant window
     // structure only by two-colouring hit windows, so the plan-root fork
@@ -3296,7 +3374,7 @@ fn forced_defender_pair_plan_impl(
             // kernel threat-window empty, hence always a legal placement.
             #[cfg(test)]
             let key_started = profile.as_ref().map(|_| Instant::now());
-            let final_key = WidePositionKey::for_defender_pair(state, claimant, &[second]);
+            let final_key = key_builder.completed_pair(first, second);
             #[cfg(test)]
             if let (Some(started), Some(profile)) = (key_started, profile.as_deref_mut()) {
                 profile.stats.final_key_nanos = profile
@@ -3337,7 +3415,7 @@ fn forced_defender_pair_plan_impl(
                 index,
             )
         })
-        .collect::<HashMap<_, _>>();
+        .collect::<AHashMap<_, _>>();
     if directed_index.len() != directed.len() {
         return None;
     }
@@ -3355,7 +3433,7 @@ fn forced_defender_pair_plan_impl(
         .copied()
         .enumerate()
         .map(|(rank, coord)| (coord, rank))
-        .collect::<HashMap<_, _>>();
+        .collect::<AHashMap<_, _>>();
     let mut pairs = directed
         .into_iter()
         .filter(|pair| raw_coord_key(pair.first) < raw_coord_key(pair.second))
@@ -5862,12 +5940,12 @@ impl<'store> WidePnSearch<'store> {
         // played, but the unordered pair still contains that original block.
         let defender_blocks = turn_start_defender_blocks(&first_candidates);
         let mut children = Vec::new();
-        let mut seen_pairs = HashSet::new();
+        let mut seen_pairs = AHashSet::new();
         // No claimant >=4 window exists here (win-now nodes leaf before
         // generation), so a lone first stone can never complete six: the
         // whole double loop is stateless — zero engine applies.
         let mut second_coords: Vec<HexCoord> = Vec::new();
-        let mut second_seen: HashSet<HexCoord> = HashSet::new();
+        let mut second_seen: AHashSet<HexCoord> = AHashSet::new();
         for first_candidate in &first_candidates {
             let first_width_tier = wide_candidate_width_tier(first_candidate);
             let first = first_candidate.coord;
@@ -8208,12 +8286,12 @@ struct WidePairWindow {
 /// placed stones that reach count >=4.
 struct WideTurnGate {
     /// For each empty cell: the claimant-pure count>=2 windows holding it.
-    windows_by_cell: HashMap<HexCoord, Vec<WidePairWindow>>,
+    windows_by_cell: AHashMap<HexCoord, Vec<WidePairWindow>>,
     /// For each empty cell: the claimant-pure count-1 windows holding it.
     /// After a first stone in such a window its other empties join the
     /// count>=2 second-ply universe; stored separately so pair evaluation
     /// never scans them.
-    weak_windows_by_cell: HashMap<HexCoord, Vec<WidePairWindow>>,
+    weak_windows_by_cell: AHashMap<HexCoord, Vec<WidePairWindow>>,
     /// Empties of every live defender >=4 window (the hit/block sets).
     defender_threats: Vec<Vec<HexCoord>>,
     #[cfg(test)]
@@ -8234,8 +8312,8 @@ impl WideTurnGate {
         claimant: Player,
         #[cfg(test)] incr_enum_counters: bool,
     ) -> Self {
-        let mut windows_by_cell: HashMap<HexCoord, Vec<WidePairWindow>> = HashMap::new();
-        let mut weak_windows_by_cell: HashMap<HexCoord, Vec<WidePairWindow>> = HashMap::new();
+        let mut windows_by_cell: AHashMap<HexCoord, Vec<WidePairWindow>> = AHashMap::new();
+        let mut weak_windows_by_cell: AHashMap<HexCoord, Vec<WidePairWindow>> = AHashMap::new();
         let mut defender_threats = Vec::new();
         #[cfg(test)]
         let mut live_claimant_windows = Vec::new();
@@ -8310,7 +8388,7 @@ impl WideTurnGate {
         first: HexCoord,
         turn_start: &[Candidate],
         out: &mut Vec<HexCoord>,
-        seen: &mut HashSet<HexCoord>,
+        seen: &mut AHashSet<HexCoord>,
     ) {
         out.clear();
         seen.clear();
@@ -8540,7 +8618,7 @@ fn wide_family_min_hitting_set(family: &[(WindowKey, Vec<HexCoord>)]) -> Option<
 fn attacker_fork_degree(state: &RustHexoState, claimant: Player) -> usize {
     let mut threat_count = 0usize;
     let mut any_candidate = false;
-    let mut degrees: HashMap<HexCoord, (usize, usize)> = HashMap::new();
+    let mut degrees: AHashMap<HexCoord, (usize, usize)> = AHashMap::new();
     for entry in state.board().windows().entries() {
         let Some(owner) = entry.active_player() else {
             continue;
@@ -9196,9 +9274,84 @@ fn canonical_frame(state: &RustHexoState) -> u8 {
             )
         })
         .collect();
+    let phases = std::array::from_fn::<_, 12, _>(|symmetry| match state.phase() {
+        TurnPhase::Opening => (0, 0, 0),
+        TurnPhase::FirstStone => (1, 0, 0),
+        TurnPhase::SecondStone { first } => {
+            let (q, r) = d6_coord_i32(first, symmetry as u8);
+            (2, q, r)
+        }
+    });
+    let best_phase = *phases.iter().min().expect("D6 contains identity");
+
+    // Lexicographic comparison of sorted images is normally decided by their
+    // first stone.  Find that first tuple for all 12 images in one allocation-
+    // free pass and fully sort only exact contenders.  This is the same total
+    // ordering as the historical twelve full sorts; ties still keep the
+    // lowest symmetry number.
+    let first_stones = std::array::from_fn::<_, 12, _>(|symmetry| {
+        stones
+            .iter()
+            .map(|&(coord, owner)| {
+                let (q, r) = d6_coord_i32(coord, symmetry as u8);
+                (q, r, owner)
+            })
+            .min()
+    });
+    let best_first = (0..12usize)
+        .filter(|&symmetry| phases[symmetry] == best_phase)
+        .filter_map(|symmetry| first_stones[symmetry])
+        .min();
+    let mut contenders = (0..12usize).filter(|&symmetry| {
+        phases[symmetry] == best_phase
+            && (best_first.is_none() || first_stones[symmetry] == best_first)
+    });
+    let first_contender = contenders.next().expect("D6 contains identity");
+    if let Some(second_contender) = contenders.next() {
+        let mut best_stones = Vec::with_capacity(stone_count);
+        let mut candidate_stones = Vec::with_capacity(stone_count);
+        let mut best_symmetry = first_contender;
+        for symmetry in std::iter::once(second_contender).chain(contenders) {
+            candidate_stones.clear();
+            candidate_stones.extend(stones.iter().map(|&(coord, owner)| {
+                let (q, r) = d6_coord_i32(coord, symmetry as u8);
+                (q, r, owner)
+            }));
+            candidate_stones.sort_unstable();
+            if best_stones.is_empty() {
+                best_stones.extend(stones.iter().map(|&(coord, owner)| {
+                    let (q, r) = d6_coord_i32(coord, best_symmetry as u8);
+                    (q, r, owner)
+                }));
+                best_stones.sort_unstable();
+            }
+            if candidate_stones < best_stones {
+                best_symmetry = symmetry;
+                std::mem::swap(&mut best_stones, &mut candidate_stones);
+            }
+        }
+        return best_symmetry as u8;
+    }
+
+    first_contender as u8
+}
+
+#[cfg(test)]
+fn canonical_frame_full_sort_reference(state: &RustHexoState) -> u8 {
+    let stones = state
+        .board()
+        .occupied_cells()
+        .iter()
+        .map(|&coord| {
+            (
+                coord,
+                player_code(state.board().get(coord).expect("occupied cell has owner")),
+            )
+        })
+        .collect::<Vec<_>>();
     let mut best_phase: Option<(u8, i32, i32)> = None;
-    let mut best_stones = Vec::with_capacity(stone_count);
-    let mut candidate_stones = Vec::with_capacity(stone_count);
+    let mut best_stones = Vec::with_capacity(stones.len());
+    let mut candidate_stones = Vec::with_capacity(stones.len());
     let mut best_symmetry = 0;
     for symmetry in 0..12u8 {
         let phase = match state.phase() {
@@ -9224,7 +9377,6 @@ fn canonical_frame(state: &RustHexoState) -> u8 {
             std::mem::swap(&mut best_stones, &mut candidate_stones);
         }
     }
-    debug_assert!(best_phase.is_some(), "D6 contains identity");
     best_symmetry
 }
 
@@ -11887,6 +12039,35 @@ mod tests {
                 && child.result == WidePnChildResult::Pending
                 && matches!(child.mv, WidePnMove::DefenderPair(_, _))
         }));
+    }
+
+    #[test]
+    fn canonical_frame_contender_pruning_matches_full_sort_on_all_fixture_prefixes() {
+        let fixture = xsnfyll_forced_defender_fixture();
+        let history = fixture.placement_history().to_vec();
+        for symmetry in 0..D6_SYMMETRY_COUNT {
+            let mut state = RustHexoState::new();
+            assert_eq!(
+                canonical_frame(&state),
+                canonical_frame_full_sort_reference(&state)
+            );
+            for record in &history {
+                apply_placement(
+                    &mut state,
+                    Placement {
+                        coord: d6_transform_coord(record.coord, symmetry)
+                            .expect("fixture transform remains in i16 range"),
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    canonical_frame(&state),
+                    canonical_frame_full_sort_reference(&state),
+                    "symmetry={symmetry} ply={}",
+                    state.placements_made(),
+                );
+            }
+        }
     }
 
     #[test]

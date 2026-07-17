@@ -20,6 +20,7 @@ default = []
 python = ["dep:pyo3"]
 
 [dependencies]
+ahash.workspace = true
 hexo_engine.workspace = true
 hexo_utils.workspace = true
 half = "2"

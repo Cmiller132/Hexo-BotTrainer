@@ -1,0 +1,51 @@
+R-PC1 — PAIR/PLANNER MICRO-OPTIMIZATION ROUND (constant factors on the measured hot core)
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-incr-enum
+(branch hunt/incr-enum, HEAD = bcf2cc70 — R-IE1+R-IE2 are COMMITTED and
+are your baselines; read HUNT_REPORT_INCR_ENUM.md and
+HUNT_REPORT_INCR_ENUM_MEM.md first). You CANNOT git-commit.
+Deliverable: HUNT_REPORT_PAIRCLASS.md + implementation + retained raws
++ regen commands.
+
+## The target (priced by R-IE1's decomposition; the residual core)
+Within the defender planner: canonical frame 40.730 s (30.0% of planner
+time), final-key construction 34.460 s (25.4%), fork-prior scan
+15.138 s (11.2%) — all classified NOT carryable across make/unmake, so
+they survive R-IE2 and are now the dominant defender-side cost. On the
+attacker side, pair generation is 157.18 s (~42% of solve wall) and its
+sound-reveal ceiling is closed — only constant-factor work remains.
+Goal: engineering micro-optimizations (allocation/layout, hashing,
+memoized canonical frames, incremental key construction, scan fusion,
+SIMD-friendly loops) on these measured paths.
+
+## Bars (binding; stricter than usual because changes may touch production paths)
+- Two implementation modes allowed:
+  (a) provably semantics-identical rewrites of existing hot paths MAY
+  change production code directly, but ONLY with the full evidence set:
+  fast-subset byte identity + full official 1 GiB lazy+gate profile
+  with ALL 31 rows identical on status/nodes/expansions/TT
+  entries/hits/peak/stage refreshes vs the R-IE2 baseline raws + leaf
+  h8/h16 row-identity;
+  (b) anything with any semantic risk goes behind a default-off
+  cfg(test) env instead.
+- Strict verifier UNTOUCHED — not one line.
+- Profile first, optimize second: refine the existing counters if the
+  attribution is too coarse; never optimize an unmeasured path.
+- PROMOTE bar: >=3% full-wall improvement deep (this is a
+  constant-factor round; 3% of wall ~ 10% of the targeted core), no
+  leaf regression, exact row identity. An honest miss with a measured
+  frontier (what was tried, what each bought) is a complete round.
+- Report per-optimization attribution (which path, before/after
+  component time), not just the aggregate wall.
+
+## Rules
+CARGO_TARGET_DIR=.target-ie; --target x86_64-pc-windows-msvc on EVERY
+cargo; --test-threads=1; ONE cargo process host-wide (check
+Get-Process cargo, sleep-300 wait loop). Lean spine lane holds RAM
+priority. RAM gates (relaxed 07-17 + idle-host clause,
+E:\tss-lean\RAM_PROTOCOL.md): cargo availability >= 10 GB AND free
+>= 5 GB; gate-class 1 GiB profiles >= 12/>= 6; record readings.
+94gnnol out of scope. Honest partial stop at a clean boundary is
+success. Final message: per-path attributions, aggregate walls vs
+R-IE2 baselines, mode (a)/(b) classification of every change, files,
+regen commands.
