@@ -145,6 +145,11 @@ pub struct SolveStats {
     pub tt_hits: u64,
     pub tt_entries: u64,
     pub peak_tt_bytes: u64,
+    /// Direct-map slot replacements in the solve-local TT. These are cache
+    /// evictions, not proof-semantic events.
+    pub tt_evictions: u64,
+    /// TT/index insertions refused because the caller's byte cap was full.
+    pub tt_admission_rejections: u64,
     /// Exact-key positive-fragment queries made by the wide solver.
     pub fragment_lookups: u64,
     /// Queries that passed full-key, claimant, horizon, and depth checks.

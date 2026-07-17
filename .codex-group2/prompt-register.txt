@@ -1,0 +1,54 @@
+MASTER-PLAN REGISTER UPDATE — align docs/PLAN_TSS_SOLVER_UPGRADES.md
+with every verdict from the efficiency program. Documentation-only.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width
+(confirm HEAD = the leaf-surface landing). You CANNOT git-commit. Read
+docs/PLAN_TSS_SOLVER_UPGRADES.md in full first — it is the campaign's
+normative lever register and it currently predates the entire overnight
+program. Sources of truth (all in this tree or its commit history; cite
+commits): MERGE_RESOLUTION.md; HUNT_REPORT_LEAF_SURFACE.md;
+HUNT_REPORT_LAZY_MEMORY_WALL.md; BUILD_SHARED_FRAGMENTS.md +
+HUNT_REPORT_SHARED_FRAGMENTS.md; BUILD_K_REPLY_CONSUME.md;
+BUILD_INTERIOR_GATE.md; FIX_ZONE_CLOCK.md; the hunt reports on branches
+hunt/turn-quotient (NQ4, R-LF1/2), hunt/pn-init (NQ6, NQ8, R-IG1,
+R-FIX1), hunt/cert-support (NQ3); and commit messages.
+
+## Required register updates (each with status, commit, one-line
+## verdict, and pointer to the evidence doc)
+- U18/U22 DAG-sharing: BUILT as the shared-fragment store (monotone
+  contract); deep-profile saturation value NULL; leaf value none at
+  current profile; default-off. T10 remains its soundness license.
+- Lazy frontier (new lever, discovered by NQ4): BUILT; official
+  profile ruling = 1 GiB + flag asserted; 8.4x at 512 MiB; leaf config
+  winner component.
+- Interior census gate (from the DTW census bound): BUILT; inert at
+  unbounded profile; leaf config winner component; live 79-93% on
+  horizon-bounded solves.
+- Zone-clock fix (R-FIX1): ALWAYS-ON correctness fix; the program's
+  only unconditional production behavior change.
+- K_reply (NQ2 salvage): kernel proven + shadow-validated (220,160
+  fires); consume SOUND but deep economics negative (trigger tax);
+  leaf economics negative (not routed through wide PN; probe 85x
+  slower) — default-off, closed unless a precomputed-urgency trigger
+  is ever justified.
+- NQ3 support-hashing: REFUTED for current format; C_rel redesign
+  conjecture with 8 obligations = the open successor.
+- NQ5 D6 search-TT folding: DEAD (zero duplicates measured).
+- NQ8 horizon laddering: DEAD (every schedule loses).
+- Domination b=2: PARKED open-computation-limited (zero reversals;
+  d>=4 unmeasured; reopening = certified-engine exact reference). b=1
+  unchanged (proven, Phase-3 dispatch wiring).
+- PHASE-3 LEAF CONFIG (new section): the leaf-surface campaign's
+  recommended flags verbatim + the verdict-rate table headline + the
+  open horizon-height question (h=8 vs 16).
+- Official profile section: 1 GiB + TSS_LAZY_FRONTIER=1 recommended;
+  2 GiB legacy retained; spare-corpus coverage note (checked-in gate
+  near-vacuous; real expansion = paper capstone item).
+
+## Rules
+Documentation-only: NO code changes, NO cargo, NO new claims beyond
+the cited evidence; preserve the register's existing structure and
+numbering; every number carries its commit. If any register entry
+contradicts the evidence and you cannot reconcile, flag it inline
+rather than choosing. No commits. Final message: list of register
+sections touched, any flags, file list.

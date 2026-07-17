@@ -527,6 +527,15 @@ pub(crate) struct SharedFragmentStoreSnapshot {
 }
 
 #[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct LeafSurfaceReuseSnapshot {
+    pub(crate) shared_reconfigurations: u64,
+    pub(crate) fragment_reconfigurations: u64,
+    pub(crate) shared_slots: u64,
+    pub(crate) fragment_slots: u64,
+}
+
+#[cfg(test)]
 thread_local! {
     static LAST_QUOTIENT_REPORT: RefCell<Option<QuotientTelemetryReport>> = const { RefCell::new(None) };
 }
@@ -655,6 +664,10 @@ pub(crate) struct TssSolver {
     last_narrow_signatures: Vec<NarrowAttemptSignature>,
     #[cfg(test)]
     last_k_reply_shadow: Vec<KReplyShadowRecord>,
+    #[cfg(test)]
+    leaf_surface_shared_reconfigurations: u64,
+    #[cfg(test)]
+    leaf_surface_fragment_reconfigurations: u64,
 }
 
 impl Default for TssSolver {
@@ -673,11 +686,25 @@ impl Default for TssSolver {
             last_narrow_signatures: Vec::new(),
             #[cfg(test)]
             last_k_reply_shadow: Vec::new(),
+            #[cfg(test)]
+            leaf_surface_shared_reconfigurations: 0,
+            #[cfg(test)]
+            leaf_surface_fragment_reconfigurations: 0,
         }
     }
 }
 
 impl TssSolver {
+    #[cfg(test)]
+    pub(crate) fn leaf_surface_reuse_snapshot(&self) -> LeafSurfaceReuseSnapshot {
+        LeafSurfaceReuseSnapshot {
+            shared_reconfigurations: self.leaf_surface_shared_reconfigurations,
+            fragment_reconfigurations: self.leaf_surface_fragment_reconfigurations,
+            shared_slots: self.shared_tt.slots.len() as u64,
+            fragment_slots: self.fragment_store.slots.len() as u64,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn set_shared_fragments_for_test(&mut self, enabled: bool) {
         if self.shared_fragments_enabled != enabled {
@@ -743,6 +770,8 @@ impl TssSolver {
             width: WidthOptions::default(),
             last_narrow_signatures: Vec::new(),
             last_k_reply_shadow: Vec::new(),
+            leaf_surface_shared_reconfigurations: 0,
+            leaf_surface_fragment_reconfigurations: 0,
         }
     }
 
@@ -760,6 +789,8 @@ impl TssSolver {
             width: WidthOptions::default(),
             last_narrow_signatures: Vec::new(),
             last_k_reply_shadow: Vec::new(),
+            leaf_surface_shared_reconfigurations: 0,
+            leaf_surface_fragment_reconfigurations: 0,
         }
     }
 
@@ -800,6 +831,14 @@ impl TssSolver {
         } else {
             0
         };
+        #[cfg(test)]
+        if self.fragment_store.cap != fragment_store_cap
+            || self.fragment_store.hash_mask != self.hash_mask
+        {
+            self.leaf_surface_fragment_reconfigurations = self
+                .leaf_surface_fragment_reconfigurations
+                .saturating_add(1);
+        }
         self.fragment_store
             .reconfigure(fragment_store_cap, self.hash_mask);
         let (local_tt_cap, shared_tt_cap) = if uses_wide_pn && self.shared_fragments_enabled {
@@ -812,6 +851,11 @@ impl TssSolver {
         } else {
             split_tt_cap(effective_tt_cap)
         };
+        #[cfg(test)]
+        if self.shared_tt.cap != shared_tt_cap || self.shared_tt.hash_mask != self.hash_mask {
+            self.leaf_surface_shared_reconfigurations =
+                self.leaf_surface_shared_reconfigurations.saturating_add(1);
+        }
         self.shared_tt.reconfigure(shared_tt_cap, self.hash_mask);
 
         let initial_stats = SolveStats {
@@ -1076,6 +1120,8 @@ impl TssSolver {
             tt_hits: search.tt_hits,
             tt_entries: (search.by_position.len() + self.shared_tt.entry_count()) as u64,
             peak_tt_bytes: shared_bytes.saturating_add(search.peak_bytes) as u64,
+            #[cfg(test)]
+            tt_admission_rejections: search.tt_index_rejections,
             fragment_lookups: search.fragment_lookups,
             fragment_hits: search.fragment_hits,
             fragment_store_entries: self.fragment_store.entry_count as u64,
@@ -1405,6 +1451,10 @@ fn merge_stats(total: &mut SolveStats, part: SolveStats) {
     total.tt_hits = total.tt_hits.saturating_add(part.tt_hits);
     total.tt_entries = total.tt_entries.max(part.tt_entries);
     total.peak_tt_bytes = total.peak_tt_bytes.max(part.peak_tt_bytes);
+    total.tt_evictions = total.tt_evictions.saturating_add(part.tt_evictions);
+    total.tt_admission_rejections = total
+        .tt_admission_rejections
+        .saturating_add(part.tt_admission_rejections);
     total.fragment_lookups = total.fragment_lookups.saturating_add(part.fragment_lookups);
     total.fragment_hits = total.fragment_hits.saturating_add(part.fragment_hits);
     total.fragment_imports = total.fragment_imports.saturating_add(part.fragment_imports);
@@ -2944,6 +2994,8 @@ impl<'store> WidePnSearch<'store> {
             tt_hits: search.tt_hits,
             tt_entries: search.tt_entry_count() as u64,
             peak_tt_bytes: search.peak_tt_bytes as u64,
+            tt_evictions: search.tt.replacements,
+            tt_admission_rejections: search.tt.refusals,
             interior_gate_evaluations: search.interior_gate_evaluations,
             interior_gate_dismissals: search.interior_gate_dismissals,
             interior_gate_nanos: search.interior_gate_nanos,
@@ -7543,6 +7595,8 @@ struct BoundedTt {
     current_bytes: usize,
     peak_bytes: usize,
     hash_mask: u64,
+    replacements: u64,
+    refusals: u64,
 }
 
 impl BoundedTt {
@@ -7555,6 +7609,8 @@ impl BoundedTt {
                 current_bytes: 0,
                 peak_bytes: 0,
                 hash_mask,
+                replacements: 0,
+                refusals: 0,
             };
         }
         let mut slots = Vec::with_capacity(slot_count);
@@ -7570,6 +7626,8 @@ impl BoundedTt {
                 current_bytes: 0,
                 peak_bytes: 0,
                 hash_mask,
+                replacements: 0,
+                refusals: 0,
             };
         }
         Self {
@@ -7578,6 +7636,8 @@ impl BoundedTt {
             current_bytes: base,
             peak_bytes: base,
             hash_mask,
+            replacements: 0,
+            refusals: 0,
         }
     }
 
@@ -7612,7 +7672,14 @@ impl BoundedTt {
             .saturating_sub(old_heap)
             .saturating_add(new_heap);
         if candidate_bytes > self.cap {
+            self.refusals = self.refusals.saturating_add(1);
             return;
+        }
+        if self.slots[index]
+            .as_ref()
+            .is_some_and(|old| old.hash != hash || old.claimant != claimant || old.key != key)
+        {
+            self.replacements = self.replacements.saturating_add(1);
         }
         self.slots[index] = Some(TtEntry {
             hash,
