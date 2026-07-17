@@ -1,0 +1,58 @@
+R-LF2 — DOES LAZY FRONTIER MOVE THE MEMORY WALL? Reduced-TT official
+corpus study.
+
+Context: R-LF1 (PROOF_LAZY_FRONTIER.md + HUNT_REPORT_LAZY_FRONTIER.md,
+this worktree) built TSS_LAZY_FRONTIER=1 (default off) with −62.6…−67.3%
+indexed TT entries and peak bytes at equal verdicts/certificates.
+G2R9b's reduced-TT study answered the FRAGMENT question NULL (0l does
+not close at 512 MiB/1 GiB via fragments) but never isolated the LAZY
+question: if admissions drop ~3×, the 2 GiB official profile may close
+at 1 GiB or below. Round-8b context: TT saturation was the root cause
+of deep-solve failure; the 0l row historically closes only at the 2 GiB
+profile (WIN at ~1.88M expansions, ~447 s). Owner directive:
+dramatically more efficient solver — memory IS one of the two axes.
+
+You are working in
+E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-turn-quotient (branch
+hunt/turn-quotient @e4ef021f). You CANNOT git-commit. The official gate
+now echoes CORPUS_MODE and honors TSS_CORPUS_EXPECT_* assertions.
+
+## Work order
+1. If tss_corpus_check lacks a row filter, add a test-only env filter
+   (e.g. TSS_CORPUS_ONLY_ID=<id>, default off = today's exact behavior;
+   additive, echo the filter in CORPUS_MODE; the no-filter path must be
+   byte-identical — this file is the official gate, treat it with that
+   respect).
+2. THE MATRIX: run the official corpus profile (standard rung ladder,
+   single process) at TT budgets {512 MiB, 1 GiB, 2 GiB} × lazy
+   {off, on} — fragments OFF throughout (isolate the lazy variable).
+   For wall-clock economy: run the full 19-row gate at {1 GiB × on},
+   {1 GiB × off}, and {2 GiB × on} (the 2 GiB × off baseline is known
+   green — cite the existing logs); use the row filter for the heavy
+   0l rows at 512 MiB (both lazy states). Each gate-class run may take
+   up to 45 min; >11 GB free RAM before each.
+3. Report per row: status@rung, expansions, peak_tt_bytes, wall. The
+   headline question: the exact smallest budget in the matrix at which
+   the FULL gate stays CORPUS_DONE failures=0 with lazy on, and the
+   per-row closure story for the 0l rows at 512 MiB.
+4. VERDICT DISCIPLINE: lazy is proven verdict-preserving only in the
+   uncapped-index regime; at TT-cap pressure the cap-aware corollary
+   allows traversal divergence with validity invariant. So: any row
+   that flips WIN->UNKNOWN at a reduced budget is a capacity fact
+   (report it); any WIN without verified certificate or any NO->WIN =
+   STOP soundness finding. Certificates must verify everywhere.
+5. Deliverable: HUNT_REPORT_LAZY_MEMORY_WALL.md — the matrix, the
+   smallest-green-budget answer, per-row 0l detail, and an honest
+   recommendation: does lazy-on justify dropping the official profile
+   to 1 GiB, and does the 256 KiB leaf budget benefit proportionally
+   (estimate from admission ratios, do not overclaim)?
+
+## Rules
+CARGO_TARGET_DIR=.target-hunt; ONE cargo process; --test-threads=1;
+free RAM >9 GB before every cargo, >11 GB before gate-class runs
+(exempt from the 10-min bound, <=45 min each) — THREE other sessions
+share this 31 GB host (Lean lane priority); if below, wait and
+re-check. No commits. This worktree only; siblings read-only. rustfmt
+--edition 2021 only on files you edit. Truthfulness outranks
+completeness. Final message: the matrix table, smallest green budget,
+0l story, recommendation, files, regen commands.
