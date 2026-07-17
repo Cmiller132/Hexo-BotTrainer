@@ -172,6 +172,11 @@ struct Cell {
     threshold_reselections: u64,
     threshold_sibling_switches: u64,
     threshold_descent_nanos: u64,
+    incr_calls: u64,
+    incr_fallbacks: u64,
+    incr_parent_nanos: u64,
+    incr_plan_nanos: u64,
+    incr_peak_snapshot_bytes: u64,
     shared_reconfigs_max: u64,
     fragment_reconfigs_max: u64,
     shared_slots_max: u64,
@@ -481,6 +486,21 @@ fn run_cell(
             cell.threshold_descent_nanos = cell
                 .threshold_descent_nanos
                 .saturating_add(result.stats.threshold_scale.descent_nanos);
+            cell.incr_calls = cell
+                .incr_calls
+                .saturating_add(result.stats.incr_enum.incremental_calls);
+            cell.incr_fallbacks = cell
+                .incr_fallbacks
+                .saturating_add(result.stats.incr_enum.incremental_fallbacks);
+            cell.incr_parent_nanos = cell
+                .incr_parent_nanos
+                .saturating_add(result.stats.incr_enum.parent_maintenance_nanos);
+            cell.incr_plan_nanos = cell
+                .incr_plan_nanos
+                .saturating_add(result.stats.incr_enum.incremental_plan_nanos);
+            cell.incr_peak_snapshot_bytes = cell
+                .incr_peak_snapshot_bytes
+                .max(result.stats.incr_enum.peak_snapshot_payload_bytes);
 
             let reuse = solver.leaf_surface_reuse_snapshot();
             cell.shared_reconfigs_max =
@@ -873,4 +893,87 @@ fn threshold_scale_leaf_ab() {
         std::env::remove_var("TSS_THRESHOLD_COUNTERS");
     }
     println!("THRESHOLD_LEAF_DONE result=PASS");
+}
+
+#[test]
+#[ignore = "R-IE1 incremental defender selected Phase-3 D cells; serialized release-only"]
+fn incr_defender_leaf_ab() {
+    let batches = load_batches();
+    let old = std::env::var_os("TSS_INCR_DEFENDER");
+    println!(
+        "INCR_DEFENDER_LEAF_MODE config=D_WIDE_LAZY_GATE cap=500 horizons=8,16 tt_bytes={} shared_fragments=off k_reply=off",
+        TT_BYTES
+    );
+    for horizon in [8u32, 16] {
+        std::env::remove_var("TSS_INCR_DEFENDER");
+        let off = run_cell(&batches, Config::D, 500, horizon, None);
+        std::env::set_var("TSS_INCR_DEFENDER", "1");
+        let on = run_cell(&batches, Config::D, 500, horizon, None);
+        assert_eq!(
+            off.status, on.status,
+            "incremental defender leaf status drift"
+        );
+        assert_eq!(off.nodes, on.nodes, "incremental defender leaf node drift");
+        assert_eq!(
+            off.expansions, on.expansions,
+            "incremental defender leaf expansion drift"
+        );
+        assert_eq!(
+            off.tt_hits, on.tt_hits,
+            "incremental defender leaf TT-hit drift"
+        );
+        assert_eq!(
+            off.tt_entries_max, on.tt_entries_max,
+            "incremental defender leaf TT-entry drift"
+        );
+        assert_eq!(
+            off.peak_tt_bytes, on.peak_tt_bytes,
+            "incremental defender leaf TT-byte drift"
+        );
+        assert_eq!(
+            off.tt_rejections, on.tt_rejections,
+            "incremental defender leaf admission drift"
+        );
+        assert_eq!(
+            off.stage_refreshes, on.stage_refreshes,
+            "incremental defender leaf refresh drift"
+        );
+        let off_ns = off.solve_ns.iter().copied().sum::<u64>();
+        let on_ns = on.solve_ns.iter().copied().sum::<u64>();
+        println!(
+            "INCR_DEFENDER_LEAF_AB horizon={horizon} cap=500 off_verdicts={} on_verdicts={} off_nodes={} on_nodes={} off_expansions={} on_expansions={} off_tt_hits={} on_tt_hits={} off_tt_entries_max={} on_tt_entries_max={} off_peak_tt_bytes={} on_peak_tt_bytes={} off_verified={} on_verified={} off_wall_ms={:.3} on_wall_ms={:.3} wall_delta_pct={:.6} incr_calls={} fallbacks={} parent_ms={:.3} plan_ms={:.3} peak_snapshot_bytes={}",
+            off.wins + off.losses,
+            on.wins + on.losses,
+            off.nodes,
+            on.nodes,
+            off.expansions,
+            on.expansions,
+            off.tt_hits,
+            on.tt_hits,
+            off.tt_entries_max,
+            on.tt_entries_max,
+            off.peak_tt_bytes,
+            on.peak_tt_bytes,
+            off.verified,
+            on.verified,
+            off_ns as f64 / 1e6,
+            on_ns as f64 / 1e6,
+            if off_ns == 0 {
+                0.0
+            } else {
+                (on_ns as f64 / off_ns as f64 - 1.0) * 100.0
+            },
+            on.incr_calls,
+            on.incr_fallbacks,
+            on.incr_parent_nanos as f64 / 1e6,
+            on.incr_plan_nanos as f64 / 1e6,
+            on.incr_peak_snapshot_bytes,
+        );
+    }
+    if let Some(value) = old {
+        std::env::set_var("TSS_INCR_DEFENDER", value);
+    } else {
+        std::env::remove_var("TSS_INCR_DEFENDER");
+    }
+    println!("INCR_DEFENDER_LEAF_DONE result=PASS");
 }

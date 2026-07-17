@@ -182,6 +182,137 @@ pub(crate) struct ThresholdScaleStats {
     pub(crate) state_apply_undo_nanos: u64,
 }
 
+/// Test-only accounting for R-IE1.  The counter path observes the existing
+/// batch defender planner; none of these values participate in search.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct IncrEnumStats {
+    pub(crate) calls: u64,
+    pub(crate) plans: u64,
+    pub(crate) parent_fingerprints: u64,
+    pub(crate) parent_exact: u64,
+    pub(crate) parent_mismatch: u64,
+    pub(crate) residuals: u64,
+    pub(crate) residual_patch_exact: u64,
+    pub(crate) residual_patch_mismatch: u64,
+    pub(crate) root_windows: u64,
+    pub(crate) root_incidences: u64,
+    pub(crate) root_cells: u64,
+    pub(crate) root_kernel_cells: u64,
+    pub(crate) residual_windows: u64,
+    pub(crate) residual_incidences: u64,
+    pub(crate) residual_cells: u64,
+    pub(crate) residual_kernel_cells: u64,
+    pub(crate) removed_windows: u64,
+    /// Width bins 0, 1, 2, 3, 4, 5, 6, 7+.
+    pub(crate) root_window_bins: [u64; 8],
+    pub(crate) root_cell_bins: [u64; 8],
+    pub(crate) root_kernel_bins: [u64; 8],
+    pub(crate) residual_window_bins: [u64; 8],
+    pub(crate) residual_cell_bins: [u64; 8],
+    pub(crate) residual_kernel_bins: [u64; 8],
+    pub(crate) total_nanos: u64,
+    pub(crate) root_analysis_nanos: u64,
+    pub(crate) root_enum_nanos: u64,
+    pub(crate) canonical_nanos: u64,
+    pub(crate) fork_scan_nanos: u64,
+    pub(crate) apply_undo_nanos: u64,
+    pub(crate) child_analysis_nanos: u64,
+    pub(crate) child_enum_nanos: u64,
+    pub(crate) final_key_nanos: u64,
+    pub(crate) fingerprint_nanos: u64,
+    pub(crate) fingerprint_xor: u64,
+    pub(crate) incremental_calls: u64,
+    pub(crate) incremental_fallbacks: u64,
+    pub(crate) shadow_calls: u64,
+    pub(crate) shadow_equal: u64,
+    pub(crate) parent_maintenance_nanos: u64,
+    pub(crate) incremental_plan_nanos: u64,
+    pub(crate) shadow_batch_nanos: u64,
+    pub(crate) snapshot_payload_bytes: u64,
+    pub(crate) peak_snapshot_payload_bytes: u64,
+}
+
+#[cfg(test)]
+impl IncrEnumStats {
+    pub(crate) fn merge(&mut self, other: Self) {
+        macro_rules! add {
+            ($field:ident) => {
+                self.$field = self.$field.saturating_add(other.$field)
+            };
+        }
+        add!(calls);
+        add!(plans);
+        add!(parent_fingerprints);
+        add!(parent_exact);
+        add!(parent_mismatch);
+        add!(residuals);
+        add!(residual_patch_exact);
+        add!(residual_patch_mismatch);
+        add!(root_windows);
+        add!(root_incidences);
+        add!(root_cells);
+        add!(root_kernel_cells);
+        add!(residual_windows);
+        add!(residual_incidences);
+        add!(residual_cells);
+        add!(residual_kernel_cells);
+        add!(removed_windows);
+        add!(total_nanos);
+        add!(root_analysis_nanos);
+        add!(root_enum_nanos);
+        add!(canonical_nanos);
+        add!(fork_scan_nanos);
+        add!(apply_undo_nanos);
+        add!(child_analysis_nanos);
+        add!(child_enum_nanos);
+        add!(final_key_nanos);
+        add!(fingerprint_nanos);
+        add!(incremental_calls);
+        add!(incremental_fallbacks);
+        add!(shadow_calls);
+        add!(shadow_equal);
+        add!(parent_maintenance_nanos);
+        add!(incremental_plan_nanos);
+        add!(shadow_batch_nanos);
+        add!(snapshot_payload_bytes);
+        self.peak_snapshot_payload_bytes = self
+            .peak_snapshot_payload_bytes
+            .max(other.peak_snapshot_payload_bytes);
+        for (target, value) in self.root_window_bins.iter_mut().zip(other.root_window_bins) {
+            *target = target.saturating_add(value);
+        }
+        for (target, value) in self.root_cell_bins.iter_mut().zip(other.root_cell_bins) {
+            *target = target.saturating_add(value);
+        }
+        for (target, value) in self.root_kernel_bins.iter_mut().zip(other.root_kernel_bins) {
+            *target = target.saturating_add(value);
+        }
+        for (target, value) in self
+            .residual_window_bins
+            .iter_mut()
+            .zip(other.residual_window_bins)
+        {
+            *target = target.saturating_add(value);
+        }
+        for (target, value) in self
+            .residual_cell_bins
+            .iter_mut()
+            .zip(other.residual_cell_bins)
+        {
+            *target = target.saturating_add(value);
+        }
+        for (target, value) in self
+            .residual_kernel_bins
+            .iter_mut()
+            .zip(other.residual_kernel_bins)
+        {
+            *target = target.saturating_add(value);
+        }
+        self.fingerprint_xor ^= other.fingerprint_xor;
+    }
+}
+
 #[cfg(test)]
 impl ThresholdScaleStats {
     pub(crate) fn merge(&mut self, other: Self) {
@@ -299,6 +430,8 @@ pub struct SolveStats {
     pub(crate) closure_debt: ClosureDebtStats,
     #[cfg(test)]
     pub(crate) threshold_scale: ThresholdScaleStats,
+    #[cfg(test)]
+    pub(crate) incr_enum: IncrEnumStats,
 }
 
 /// A deep solve's outcome: a typed status, an optional replayable certificate

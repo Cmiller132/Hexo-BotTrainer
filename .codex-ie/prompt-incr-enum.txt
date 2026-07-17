@@ -1,0 +1,75 @@
+R-IE1 — INCREMENTAL DEFENDER ENUMERATION (counter-first; primary defender-bucket attack post-R-KT1)
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-incr-enum
+(branch hunt/incr-enum, HEAD = d5a2b5fd). You CANNOT git-commit.
+Deliverable: HUNT_REPORT_INCR_ENUM.md + cfg(test) instrumentation (+
+optional Phase-2 implementation behind a default-off env) + retained raw
+logs + exact regen commands.
+
+Read first (binding context):
+- E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-kernel-taxonomy\HUNT_REPORT_KERNEL_TAXONOMY.md
+  — R-KT1's structural verdict: the defender bucket is per-node
+  enumeration WORK on tiny post-T6 widths (reply cells 2–4, atomic pair
+  children 1–4), NOT branching width. In the 18-position official
+  profile: defender enumeration 130.336 s of 371.189 s summed solve
+  wall (~35%), pair generation 157.181 s (~42%).
+- IDEATION_FINAL.md (telemetry decomposition), HUNT_REPORT_CAP_RESUME.md
+  (baselines), HUNT_REPORT_THRESHOLD_SCALE.md (the counter-first round
+  style to imitate), docs/TSS_SOLVER_PROOF.md (engine semantics),
+  docs/PROOF_TSS_DEFENDER_ZONES.md (T6/P2/P3 — what the enumeration
+  computes).
+
+## The conjecture
+Defender enumeration recomputes candidate structures (T6 exact cell
+unions, pair incidence, zone scans) from scratch at each AND node, while
+make/unmake changes only a bounded neighborhood of the position. An
+incrementally-maintained structure (delta updates on make/unmake) could
+eliminate most of that recomputation. R-KT1 already demonstrated cheap
+exact traversal with make/unmake, so the state-carrying pattern is
+proven feasible in this codebase.
+
+## Phase 1 — counters (decision gate; run FIRST)
+Default-off cfg(test) counters (TSS_INCR_ENUM_COUNTERS=1) measuring,
+per defender-enumeration call: time, input fingerprint (which
+windows/cells the enumeration actually read), and how much of the
+enumerated result is identical to the result at the parent node
+(re-derivable by a bounded local patch vs genuinely new). Aggregate: what
+fraction of the 130.3 s defender wall is recomputation an incremental
+structure could carry? Run the official 1 GiB lazy+gate profile.
+DECISION: if the carryable fraction cannot plausibly reach >=5% of FULL
+wall (i.e. ~15% of the defender bucket), STOP and record the lever dry —
+a complete, successful round. Report the cost distribution either way
+(it prices the pair-classification micro-round too).
+
+## Phase 2 — implementation (only if Phase 1 justifies)
+Incremental structure behind ONE default-off env (TSS_INCR_DEFENDER=1),
+cfg(test)-gated this round (no production wiring):
+- HARD soundness bar, stronger than verdict identity: the incremental
+  enumeration must produce EXACTLY the batch result at every node. Ship
+  a shadow-equality mode that computes both and aborts with a full
+  specimen on the FIRST mismatch; run it corpus-wide green before any
+  timing claim.
+- Then A/B: official 1 GiB lazy+gate profile + the Phase-3 leaf cells
+  (h8/h16, cap 500, per HUNT_REPORT_LEAF_SURFACE.md). Because this is
+  compute-only, require row-identical statuses/nodes/expansions/TT
+  stats; the only allowed delta is wall. PROMOTE bar: >=5% full-wall
+  improvement deep, no leaf regression.
+- Report per-arm walls, the incremental structure's maintenance
+  overhead (make/unmake tax), and peak memory delta.
+
+## Rules
+CARGO_TARGET_DIR=.target-ie; --target x86_64-pc-windows-msvc on EVERY
+cargo; --test-threads=1. ONE cargo process host-wide — ANOTHER solver
+lane (R-CF1) runs cargo in a different worktree: before every cargo
+invocation check Get-Process cargo and WAIT in a sleep-300 loop while
+any exists; do design/doc work while waiting; never kill other lanes'
+processes. The Lean spine lane (S9S-27) is also running and holds RAM
+priority. RAM gates (relaxed 07-17 + idle-host clause, see
+E:\tss-lean\RAM_PROTOCOL.md): before any cargo, availability
+(free-physical + standby via Get-Counter '\Memory\Standby Cache Normal
+Priority Bytes') >= 10 GB AND free-physical >= 5 GB; gate-class 1 GiB
+profiles >= 12/>= 6. Record readings. 94gnnol is out of scope (owner).
+cfg(test)-gated default-off only; production byte-identity when off
+(fast subset); strict verifier untouched. Honest partial stop at a
+clean boundary is success. Final message: Phase-1 decision with
+numbers, Phase-2 verdicts (if run), files, regen commands.

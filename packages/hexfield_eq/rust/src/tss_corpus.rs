@@ -21,7 +21,8 @@ use std::time::Instant;
 use hexo_engine::{apply_placement, HexCoord, HexoState, Placement, Player, TurnPhase};
 
 use crate::tss_core::{
-    CertVerify, ClosureDebtStats, DeepSolve, ProofStatus, SolveCaps, SolveGoal, ThresholdScaleStats,
+    CertVerify, ClosureDebtStats, DeepSolve, IncrEnumStats, ProofStatus, SolveCaps, SolveGoal,
+    ThresholdScaleStats,
 };
 use crate::tss_solver::{
     round3_shadow_certificate, CapResumeError, CapResumeSession, TssSolver, WidthOptions,
@@ -192,6 +193,8 @@ fn tss_corpus_check() {
     let live_ge3_seed = std::env::var("TSS_LIVE_GE3_SEED").ok().as_deref() == Some("1");
     let closure_counters = std::env::var("TSS_CLOSURE_COUNTERS").ok().as_deref() == Some("1");
     let threshold_counters = std::env::var("TSS_THRESHOLD_COUNTERS").ok().as_deref() == Some("1");
+    let incr_enum_counters = std::env::var("TSS_INCR_ENUM_COUNTERS").ok().as_deref() == Some("1");
+    let incr_defender = std::env::var("TSS_INCR_DEFENDER").unwrap_or_else(|_| "off".to_owned());
     let threshold_delta = std::env::var("TSS_THRESHOLD_DELTA").unwrap_or_else(|_| "off".to_owned());
     if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_SHARED_FRAGMENTS") {
         assert_eq!(
@@ -255,8 +258,21 @@ fn tss_corpus_check() {
             "TSS_THRESHOLD_DELTA does not match gate expectation",
         );
     }
+    if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_INCR_ENUM_COUNTERS") {
+        assert_eq!(
+            expected,
+            if incr_enum_counters { "1" } else { "0" },
+            "TSS_INCR_ENUM_COUNTERS does not match gate expectation",
+        );
+    }
+    if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_INCR_DEFENDER") {
+        assert_eq!(
+            expected, incr_defender,
+            "TSS_INCR_DEFENDER does not match gate expectation",
+        );
+    }
     println!(
-        "CORPUS_MODE shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={} cap_resume={} live_ge3_seed={} closure_counters={} threshold_counters={} threshold_delta={} tt_bytes_cap={tt_bytes_cap}",
+        "CORPUS_MODE shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={} cap_resume={} live_ge3_seed={} closure_counters={} threshold_counters={} threshold_delta={} incr_enum_counters={} incr_defender={} tt_bytes_cap={tt_bytes_cap}",
         if shared_fragments { "on" } else { "off" },
         if lazy_frontier { "on" } else { "off" },
         if interior_gate { "on" } else { "off" },
@@ -266,6 +282,8 @@ fn tss_corpus_check() {
         if closure_counters { "on" } else { "off" },
         if threshold_counters { "on" } else { "off" },
         threshold_delta,
+        if incr_enum_counters { "on" } else { "off" },
+        incr_defender,
     );
     let selected_ids = std::env::var("TSS_CORPUS_ID").ok().map(|value| {
         let mut ids = value
@@ -307,6 +325,7 @@ fn tss_corpus_check() {
     let mut resume_total_reentries = 0u64;
     let mut closure_total = ClosureDebtStats::default();
     let mut threshold_total = ThresholdScaleStats::default();
+    let mut incr_enum_total = IncrEnumStats::default();
     let mut stage_refresh_total = 0u64;
     let mut live_ge3_seed_scans = 0u64;
     let mut live_ge3_seed_nanos = 0u64;
@@ -429,6 +448,7 @@ fn tss_corpus_check() {
                 live_ge3_seed_nanos.saturating_add(result.stats.live_ge3_seed_nanos);
             closure_total.merge(result.stats.closure_debt);
             threshold_total.merge(result.stats.threshold_scale);
+            incr_enum_total.merge(result.stats.incr_enum);
             let closure = result.stats.closure_debt;
             println!(
                 "CLOSURE_ROW id={} cap={cap} evaluated={} accepted={} retained={} selected={} linked={} expanded={} winning_choices={} winning_rank_bins={:?} reveal_evaluated={} reveal_prefix={} pair_ms={:.3} gate_ms={:.3} second_ms={:.3} eval_ms={:.3} dedup_ms={:.3} avoid_second_ms={:.3} avoid_eval_ms={:.3} avoid_dedup_ms={:.3}",
@@ -466,6 +486,46 @@ fn tss_corpus_check() {
                 threshold.residency_expansion_bins,
                 threshold.descent_nanos as f64 / 1e6,
                 threshold.state_apply_undo_nanos as f64 / 1e6,
+            );
+            let incr = result.stats.incr_enum;
+            println!(
+                "INCR_ENUM_ROW id={} cap={cap} calls={} plans={} parent={} exact={} mismatch={} residuals={} patch_exact={} patch_mismatch={} root_windows={} root_cells={} root_kernel={} residual_windows={} residual_cells={} residual_kernel={} removed_windows={} total_ms={:.3} root_analysis_ms={:.3} root_enum_ms={:.3} canonical_ms={:.3} fork_ms={:.3} apply_undo_ms={:.3} child_analysis_ms={:.3} child_enum_ms={:.3} key_ms={:.3} fingerprint_ms={:.3} fingerprint_xor={:016x} incr_calls={} fallbacks={} shadow_calls={} shadow_equal={} parent_maint_ms={:.3} incr_plan_ms={:.3} shadow_batch_ms={:.3} snapshot_bytes={} peak_snapshot_bytes={}",
+                pos.id,
+                incr.calls,
+                incr.plans,
+                incr.parent_fingerprints,
+                incr.parent_exact,
+                incr.parent_mismatch,
+                incr.residuals,
+                incr.residual_patch_exact,
+                incr.residual_patch_mismatch,
+                incr.root_windows,
+                incr.root_cells,
+                incr.root_kernel_cells,
+                incr.residual_windows,
+                incr.residual_cells,
+                incr.residual_kernel_cells,
+                incr.removed_windows,
+                incr.total_nanos as f64 / 1e6,
+                incr.root_analysis_nanos as f64 / 1e6,
+                incr.root_enum_nanos as f64 / 1e6,
+                incr.canonical_nanos as f64 / 1e6,
+                incr.fork_scan_nanos as f64 / 1e6,
+                incr.apply_undo_nanos as f64 / 1e6,
+                incr.child_analysis_nanos as f64 / 1e6,
+                incr.child_enum_nanos as f64 / 1e6,
+                incr.final_key_nanos as f64 / 1e6,
+                incr.fingerprint_nanos as f64 / 1e6,
+                incr.fingerprint_xor,
+                incr.incremental_calls,
+                incr.incremental_fallbacks,
+                incr.shadow_calls,
+                incr.shadow_equal,
+                incr.parent_maintenance_nanos as f64 / 1e6,
+                incr.incremental_plan_nanos as f64 / 1e6,
+                incr.shadow_batch_nanos as f64 / 1e6,
+                incr.snapshot_payload_bytes,
+                incr.peak_snapshot_payload_bytes,
             );
             if let Some((pn, dn, stage_depth, advances, reentries)) = resume_meta {
                 println!(
@@ -558,6 +618,52 @@ fn tss_corpus_check() {
         threshold_total.residency_expansion_bins,
         threshold_total.descent_nanos as f64 / 1e6,
         threshold_total.state_apply_undo_nanos as f64 / 1e6,
+    );
+    println!(
+        "INCR_ENUM_DONE calls={} plans={} parent={} exact={} mismatch={} residuals={} patch_exact={} patch_mismatch={} root_windows={} root_incidences={} root_cells={} root_kernel={} residual_windows={} residual_incidences={} residual_cells={} residual_kernel={} removed_windows={} root_window_bins={:?} root_cell_bins={:?} root_kernel_bins={:?} residual_window_bins={:?} residual_cell_bins={:?} residual_kernel_bins={:?} total_ms={:.3} root_analysis_ms={:.3} root_enum_ms={:.3} canonical_ms={:.3} fork_ms={:.3} apply_undo_ms={:.3} child_analysis_ms={:.3} child_enum_ms={:.3} key_ms={:.3} fingerprint_ms={:.3} fingerprint_xor={:016x} incr_calls={} fallbacks={} shadow_calls={} shadow_equal={} parent_maint_ms={:.3} incr_plan_ms={:.3} shadow_batch_ms={:.3} snapshot_bytes={} peak_snapshot_bytes={}",
+        incr_enum_total.calls,
+        incr_enum_total.plans,
+        incr_enum_total.parent_fingerprints,
+        incr_enum_total.parent_exact,
+        incr_enum_total.parent_mismatch,
+        incr_enum_total.residuals,
+        incr_enum_total.residual_patch_exact,
+        incr_enum_total.residual_patch_mismatch,
+        incr_enum_total.root_windows,
+        incr_enum_total.root_incidences,
+        incr_enum_total.root_cells,
+        incr_enum_total.root_kernel_cells,
+        incr_enum_total.residual_windows,
+        incr_enum_total.residual_incidences,
+        incr_enum_total.residual_cells,
+        incr_enum_total.residual_kernel_cells,
+        incr_enum_total.removed_windows,
+        incr_enum_total.root_window_bins,
+        incr_enum_total.root_cell_bins,
+        incr_enum_total.root_kernel_bins,
+        incr_enum_total.residual_window_bins,
+        incr_enum_total.residual_cell_bins,
+        incr_enum_total.residual_kernel_bins,
+        incr_enum_total.total_nanos as f64 / 1e6,
+        incr_enum_total.root_analysis_nanos as f64 / 1e6,
+        incr_enum_total.root_enum_nanos as f64 / 1e6,
+        incr_enum_total.canonical_nanos as f64 / 1e6,
+        incr_enum_total.fork_scan_nanos as f64 / 1e6,
+        incr_enum_total.apply_undo_nanos as f64 / 1e6,
+        incr_enum_total.child_analysis_nanos as f64 / 1e6,
+        incr_enum_total.child_enum_nanos as f64 / 1e6,
+        incr_enum_total.final_key_nanos as f64 / 1e6,
+        incr_enum_total.fingerprint_nanos as f64 / 1e6,
+        incr_enum_total.fingerprint_xor,
+        incr_enum_total.incremental_calls,
+        incr_enum_total.incremental_fallbacks,
+        incr_enum_total.shadow_calls,
+        incr_enum_total.shadow_equal,
+        incr_enum_total.parent_maintenance_nanos as f64 / 1e6,
+        incr_enum_total.incremental_plan_nanos as f64 / 1e6,
+        incr_enum_total.shadow_batch_nanos as f64 / 1e6,
+        incr_enum_total.snapshot_payload_bytes,
+        incr_enum_total.peak_snapshot_payload_bytes,
     );
     println!(
         "CORPUS_DONE failures={} shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={} cap_resume={} resume_wall_ms={resume_total_ms:.3} resume_reentries={resume_total_reentries}",

@@ -34,7 +34,7 @@ use crate::tss_core::{
     SolveStats, ZoneSearchCaps,
 };
 #[cfg(test)]
-use crate::tss_core::{ClosureDebtStats, ThresholdScaleStats};
+use crate::tss_core::{ClosureDebtStats, IncrEnumStats, ThresholdScaleStats};
 use crate::tss_verify::{
     CertCommutation, CertEdge, CertNode, CertNodeId, RootBinding, TssCertificate, TssVerifier,
     ZoneInfo, MAX_CERT_COMMUTATIONS, MAX_CERT_DEPTH, MAX_CERT_EDGES, MAX_CERT_NODES,
@@ -1161,6 +1161,8 @@ impl TssSolver {
             closure_debt: *search.closure_stats.borrow(),
             #[cfg(test)]
             threshold_scale: *search.threshold_stats.borrow(),
+            #[cfg(test)]
+            incr_enum: *search.incr_enum_stats.borrow(),
             ..SolveStats::default()
         };
         let mut promotions = Vec::new();
@@ -1498,6 +1500,7 @@ impl CapResumeSession {
                 live_ge3_seed_nanos: self.search.live_ge3_seed_nanos.get(),
                 closure_debt: *self.search.closure_stats.borrow(),
                 threshold_scale: *self.search.threshold_stats.borrow(),
+                incr_enum: *self.search.incr_enum_stats.borrow(),
                 ..SolveStats::default()
             },
         };
@@ -1761,6 +1764,7 @@ fn merge_stats(total: &mut SolveStats, part: SolveStats) {
             .saturating_add(part.live_ge3_seed_nanos);
         total.closure_debt.merge(part.closure_debt);
         total.threshold_scale.merge(part.threshold_scale);
+        total.incr_enum.merge(part.incr_enum);
     }
 }
 
@@ -2158,6 +2162,10 @@ struct WidePnChild {
 enum WideFutureKey {
     /// Historical attacker lazy edge: the key participates only when selected.
     OnSelection(WidePositionKey),
+    /// Counter-only form of an attacker lazy edge carrying the exact T6
+    /// family/kernel fingerprint already computed by its parent gate.
+    #[cfg(test)]
+    OnSelectionIncr(WidePositionKey, u64, Option<Arc<IncrDefenderSnapshot>>),
     /// R-LF1 defender thunk: pre-selection reads virtually observe the eager
     /// entry represented by the deferred key.
     Virtual(WidePositionKey),
@@ -2167,6 +2175,8 @@ impl WideFutureKey {
     fn key(&self) -> &WidePositionKey {
         match self {
             Self::OnSelection(key) | Self::Virtual(key) => key,
+            #[cfg(test)]
+            Self::OnSelectionIncr(key, _, _) => key,
         }
     }
 
@@ -2174,6 +2184,24 @@ impl WideFutureKey {
         match self {
             Self::Virtual(key) => Some(key),
             Self::OnSelection(_) => None,
+            #[cfg(test)]
+            Self::OnSelectionIncr(_, _, _) => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn incr_parent_fingerprint(&self) -> u64 {
+        match self {
+            Self::OnSelectionIncr(_, fingerprint, _) => *fingerprint,
+            _ => 0,
+        }
+    }
+
+    #[cfg(test)]
+    fn incr_parent_snapshot(&self) -> Option<Arc<IncrDefenderSnapshot>> {
+        match self {
+            Self::OnSelectionIncr(_, _, snapshot) => snapshot.clone(),
+            _ => None,
         }
     }
 }
@@ -2693,20 +2721,382 @@ struct WideDefenderPairPlan {
     pairs: Vec<WideDefenderPair>,
 }
 
+#[cfg(test)]
+#[derive(Default)]
+struct IncrEnumCallProfile {
+    stats: IncrEnumStats,
+    parent_fingerprint: u64,
+    root_family: Vec<(WindowKey, Vec<HexCoord>)>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IncrDefenderMode {
+    Off,
+    Shadow,
+    Consume,
+}
+
+#[cfg(test)]
+impl IncrDefenderMode {
+    fn from_env() -> Self {
+        match std::env::var("TSS_INCR_DEFENDER").ok().as_deref() {
+            None | Some("") | Some("0") => Self::Off,
+            Some("shadow") => Self::Shadow,
+            Some("1") => Self::Consume,
+            Some(value) => {
+                panic!("TSS_INCR_DEFENDER must be absent/0, shadow, or 1; got {value:?}")
+            }
+        }
+    }
+
+    fn enabled(self) -> bool {
+        self != Self::Off
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
+struct IncrDefenderSnapshot {
+    windows: [[HexCoord; 2]; 8],
+    window_lens: [u8; 8],
+    window_len: u8,
+    kernel: [HexCoord; 8],
+    kernel_len: u8,
+    fingerprint: u64,
+}
+
+#[cfg(test)]
+impl IncrDefenderSnapshot {
+    fn new(
+        family: &[(WindowKey, Vec<HexCoord>)],
+        kernel: &[HexCoord],
+        fingerprint: u64,
+    ) -> Option<Self> {
+        if family.len() > 8 || kernel.len() > 8 || family.iter().any(|(_, cells)| cells.len() > 2) {
+            return None;
+        }
+        let mut snapshot = Self {
+            windows: [[HexCoord::ZERO; 2]; 8],
+            window_lens: [0; 8],
+            window_len: family.len() as u8,
+            kernel: [HexCoord::ZERO; 8],
+            kernel_len: kernel.len() as u8,
+            fingerprint,
+        };
+        for (index, (_, cells)) in family.iter().enumerate() {
+            snapshot.window_lens[index] = cells.len() as u8;
+            for (slot, &cell) in cells.iter().enumerate() {
+                snapshot.windows[index][slot] = cell;
+            }
+        }
+        snapshot.kernel[..kernel.len()].copy_from_slice(kernel);
+        Some(snapshot)
+    }
+
+    fn windows(&self) -> impl Iterator<Item = &[HexCoord]> {
+        (0..usize::from(self.window_len))
+            .map(|index| &self.windows[index][..usize::from(self.window_lens[index])])
+    }
+
+    fn kernel(&self) -> &[HexCoord] {
+        &self.kernel[..usize::from(self.kernel_len)]
+    }
+
+    fn payload_bytes(&self) -> usize {
+        size_of::<Self>().saturating_add(2 * size_of::<usize>())
+    }
+}
+
+#[cfg(test)]
+fn incr_enum_bin(value: usize) -> usize {
+    value.min(7)
+}
+
+#[cfg(test)]
+fn incr_enum_elapsed(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+fn incr_enum_family(state: &RustHexoState, claimant: Player) -> Vec<(WindowKey, Vec<HexCoord>)> {
+    state
+        .board()
+        .windows()
+        .live_threat_entries()
+        .filter_map(|(owner, entry)| {
+            (owner == claimant).then(|| (entry.key(), entry.empty_cells()))
+        })
+        .collect()
+}
+
+/// Stable 64-bit fingerprint of every window/cell read by the exact T6
+/// enumeration plus its emitted kernel.  Zero is reserved for "not captured".
+#[cfg(test)]
+fn incr_enum_fingerprint(family: &[(WindowKey, Vec<HexCoord>)], kernel: &[HexCoord]) -> u64 {
+    const OFFSET: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+    fn mix(hash: &mut u64, value: u64) {
+        *hash ^= value;
+        *hash = hash.wrapping_mul(PRIME);
+    }
+    let mut normalized = family.to_vec();
+    for (_, empties) in &mut normalized {
+        empties.sort_by_key(|cell| raw_coord_key(*cell));
+    }
+    normalized.sort_by_key(|(key, _)| window_key_order(*key));
+    let mut normalized_kernel = kernel.to_vec();
+    normalized_kernel.sort_by_key(|cell| raw_coord_key(*cell));
+    let mut hash = OFFSET;
+    mix(&mut hash, normalized.len() as u64);
+    for (key, empties) in normalized {
+        mix(&mut hash, u64::from(key.axis.index()));
+        mix(&mut hash, u64::from(key.start.q as u16));
+        mix(&mut hash, u64::from(key.start.r as u16));
+        mix(&mut hash, empties.len() as u64);
+        for cell in empties {
+            mix(&mut hash, u64::from(cell.q as u16));
+            mix(&mut hash, u64::from(cell.r as u16));
+        }
+    }
+    mix(&mut hash, normalized_kernel.len() as u64);
+    for cell in normalized_kernel {
+        mix(&mut hash, u64::from(cell.q as u16));
+        mix(&mut hash, u64::from(cell.r as u16));
+    }
+    if hash == 0 {
+        1
+    } else {
+        hash
+    }
+}
+
+#[cfg(test)]
+fn incr_enum_record_shape(
+    stats: &mut IncrEnumStats,
+    family: &[(WindowKey, Vec<HexCoord>)],
+    kernel: &[HexCoord],
+    root: bool,
+) {
+    let windows = family.len();
+    let incidences = family.iter().map(|(_, cells)| cells.len()).sum::<usize>();
+    let mut cells = family
+        .iter()
+        .flat_map(|(_, cells)| cells.iter().copied())
+        .collect::<Vec<_>>();
+    cells.sort_by_key(|cell| raw_coord_key(*cell));
+    cells.dedup();
+    if root {
+        stats.root_windows = stats.root_windows.saturating_add(windows as u64);
+        stats.root_incidences = stats.root_incidences.saturating_add(incidences as u64);
+        stats.root_cells = stats.root_cells.saturating_add(cells.len() as u64);
+        stats.root_kernel_cells = stats.root_kernel_cells.saturating_add(kernel.len() as u64);
+        stats.root_window_bins[incr_enum_bin(windows)] += 1;
+        stats.root_cell_bins[incr_enum_bin(cells.len())] += 1;
+        stats.root_kernel_bins[incr_enum_bin(kernel.len())] += 1;
+    } else {
+        stats.residual_windows = stats.residual_windows.saturating_add(windows as u64);
+        stats.residual_incidences = stats.residual_incidences.saturating_add(incidences as u64);
+        stats.residual_cells = stats.residual_cells.saturating_add(cells.len() as u64);
+        stats.residual_kernel_cells = stats
+            .residual_kernel_cells
+            .saturating_add(kernel.len() as u64);
+        stats.residual_window_bins[incr_enum_bin(windows)] += 1;
+        stats.residual_cell_bins[incr_enum_bin(cells.len())] += 1;
+        stats.residual_kernel_bins[incr_enum_bin(kernel.len())] += 1;
+    }
+}
+
+#[cfg(test)]
+fn profiled_defender_kernel(
+    state: &RustHexoState,
+    claimant: Player,
+    budget: u8,
+) -> (Vec<(WindowKey, Vec<HexCoord>)>, Vec<HexCoord>) {
+    let family = incr_enum_family(state, claimant);
+    let sets = family
+        .iter()
+        .map(|(_, empties)| empties.clone())
+        .collect::<Vec<_>>();
+    let kernel = extendable_hit_kernel_for_family(&sets, budget);
+    (family, kernel)
+}
+
+fn forced_defender_pair_plan(
+    state: &mut RustHexoState,
+    claimant: Player,
+) -> Option<WideDefenderPairPlan> {
+    forced_defender_pair_plan_impl(
+        state,
+        claimant,
+        #[cfg(test)]
+        None,
+    )
+}
+
+#[cfg(test)]
+fn forced_defender_pair_plan_profiled(
+    state: &mut RustHexoState,
+    claimant: Player,
+    parent_fingerprint: u64,
+) -> (Option<WideDefenderPairPlan>, IncrEnumStats) {
+    let mut profile = IncrEnumCallProfile {
+        parent_fingerprint,
+        ..IncrEnumCallProfile::default()
+    };
+    profile.stats.calls = 1;
+    let started = Instant::now();
+    let plan = forced_defender_pair_plan_impl(state, claimant, Some(&mut profile));
+    profile.stats.total_nanos = incr_enum_elapsed(started);
+    profile.stats.plans = u64::from(plan.is_some());
+    (plan, profile.stats)
+}
+
+/// R-IE1 test-only consumer: derive the same atomic defender plan from the
+/// parent gate's exact post-attacker-pair family. A defender placement only
+/// deletes the claimant windows containing that cell; no engine mutation or
+/// fresh window scan is needed.
+#[cfg(test)]
+fn forced_defender_pair_plan_incremental(
+    state: &RustHexoState,
+    claimant: Player,
+    snapshot: &IncrDefenderSnapshot,
+) -> Option<WideDefenderPairPlan> {
+    if state.current_player() == claimant || !matches!(state.phase(), TurnPhase::FirstStone) {
+        return None;
+    }
+    let mut kernel = snapshot.kernel().to_vec();
+    let root_frame = canonical_frame(state);
+    kernel.sort_by_key(|coord| canonical_coord_key(root_frame, *coord));
+    kernel.dedup();
+    if kernel.is_empty() {
+        return None;
+    }
+    let kernel_set = kernel.iter().copied().collect::<HashSet<_>>();
+    let shared_fork_pn = pn_from_fork_degree(attacker_fork_degree(state, claimant));
+    let mut directed = Vec::new();
+    for &first in &kernel {
+        let residual = snapshot
+            .windows()
+            .filter(|empties| !empties.contains(&first))
+            .map(|empties| empties.to_vec())
+            .collect::<Vec<_>>();
+        let mut seconds = extendable_hit_kernel_for_family(&residual, 1);
+        seconds.sort_by_key(|coord| canonical_coord_key(root_frame, *coord));
+        seconds.dedup();
+        if seconds.is_empty() {
+            return None;
+        }
+        for second in seconds {
+            if second == first || !kernel_set.contains(&second) {
+                return None;
+            }
+            let final_key = WidePositionKey::for_defender_pair(state, claimant, &[first, second]);
+            let retained_prior =
+                (raw_coord_key(first) < raw_coord_key(second)).then(|| WidePnPrior {
+                    pn: shared_fork_pn,
+                    dn: 1,
+                });
+            directed.push(WideDirectedDefenderPair {
+                first,
+                second,
+                final_key,
+                retained_prior,
+            });
+        }
+    }
+    let directed_index = directed
+        .iter()
+        .enumerate()
+        .map(|(index, pair)| {
+            (
+                (raw_coord_key(pair.first), raw_coord_key(pair.second)),
+                index,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    if directed_index.len() != directed.len() {
+        return None;
+    }
+    for pair in &directed {
+        let reverse = directed_index
+            .get(&(raw_coord_key(pair.second), raw_coord_key(pair.first)))
+            .and_then(|&index| directed.get(index))?;
+        if reverse.final_key != pair.final_key {
+            return None;
+        }
+    }
+    let kernel_rank = kernel
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(rank, coord)| (coord, rank))
+        .collect::<HashMap<_, _>>();
+    let mut pairs = directed
+        .into_iter()
+        .filter(|pair| raw_coord_key(pair.first) < raw_coord_key(pair.second))
+        .map(|pair| {
+            Some(WideDefenderPair {
+                first: pair.first,
+                second: pair.second,
+                final_key: pair.final_key,
+                final_prior: pair.retained_prior?,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    pairs.sort_by_key(|pair| {
+        let first_rank = kernel_rank[&pair.first];
+        let second_rank = kernel_rank[&pair.second];
+        (first_rank.min(second_rank), first_rank.max(second_rank))
+    });
+    if pairs.is_empty() {
+        return None;
+    }
+    Some(WideDefenderPairPlan { kernel, pairs })
+}
+
+#[cfg(test)]
+fn incr_defender_plans_equal(
+    left: &Option<WideDefenderPairPlan>,
+    right: &Option<WideDefenderPairPlan>,
+) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            left.kernel == right.kernel
+                && left.pairs.len() == right.pairs.len()
+                && left.pairs.iter().zip(&right.pairs).all(|(left, right)| {
+                    left.first == right.first
+                        && left.second == right.second
+                        && left.final_key == right.final_key
+                        && left.final_prior == right.final_prior
+                })
+        }
+        _ => false,
+    }
+}
+
 /// Derive a complete defender turn at a forced B=2 boundary. The reduction is
 /// deliberately all-or-nothing: every K2 first move must be nonterminal, must
 /// reach another exact forced boundary with B=1, and every resulting directed
 /// pair must have the reverse direction with the identical final position.
 /// Any unsupported shape is reported to the caller, which falls back to the
 /// ordinary ordered defender expansion rather than dropping a reply.
-fn forced_defender_pair_plan(
+fn forced_defender_pair_plan_impl(
     state: &mut RustHexoState,
     claimant: Player,
+    #[cfg(test)] mut profile: Option<&mut IncrEnumCallProfile>,
 ) -> Option<WideDefenderPairPlan> {
     if state.current_player() == claimant || !matches!(state.phase(), TurnPhase::FirstStone) {
         return None;
     }
+    #[cfg(test)]
+    let root_analysis_started = profile.as_ref().map(|_| Instant::now());
     let root_analysis = threats::analyze(state);
+    #[cfg(test)]
+    if let (Some(started), Some(profile)) = (root_analysis_started, profile.as_deref_mut()) {
+        profile.stats.root_analysis_nanos = incr_enum_elapsed(started);
+    }
     if root_analysis.b != 2
         || root_analysis.opp_threat_count == 0
         || root_analysis.own_win_now
@@ -2715,15 +3105,62 @@ fn forced_defender_pair_plan(
         return None;
     }
 
+    #[cfg(test)]
+    let mut kernel = if let Some(profile) = profile.as_deref_mut() {
+        let started = Instant::now();
+        let (family, kernel) = profiled_defender_kernel(state, claimant, root_analysis.b);
+        profile.stats.root_enum_nanos = incr_enum_elapsed(started);
+        let fingerprint_started = Instant::now();
+        let fingerprint = incr_enum_fingerprint(&family, &kernel);
+        profile.stats.fingerprint_nanos = profile
+            .stats
+            .fingerprint_nanos
+            .saturating_add(incr_enum_elapsed(fingerprint_started));
+        profile.stats.fingerprint_xor ^= fingerprint;
+        incr_enum_record_shape(&mut profile.stats, &family, &kernel, true);
+        if profile.parent_fingerprint != 0 {
+            profile.stats.parent_fingerprints = 1;
+            if profile.parent_fingerprint == fingerprint {
+                profile.stats.parent_exact = 1;
+            } else {
+                profile.stats.parent_mismatch = 1;
+                eprintln!(
+                    "INCR_ENUM_PARENT_MISMATCH expected={:016x} batch={:016x} ply={} last_turn={:?} family={:?} kernel={:?}",
+                    profile.parent_fingerprint,
+                    fingerprint,
+                    state.placements_made(),
+                    state.last_turn(),
+                    family,
+                    kernel,
+                );
+            }
+        }
+        profile.root_family = family;
+        kernel
+    } else {
+        forced_defender_replies(
+            state,
+            claimant,
+            root_analysis.b,
+            WidthOptions::vcf_pair_complete(),
+        )
+    };
+    #[cfg(not(test))]
     let mut kernel = forced_defender_replies(
         state,
         claimant,
         root_analysis.b,
         WidthOptions::vcf_pair_complete(),
     );
+    #[cfg(test)]
+    let canonical_started = profile.as_ref().map(|_| Instant::now());
     let root_frame = canonical_frame(state);
     kernel.sort_by_key(|coord| canonical_coord_key(root_frame, *coord));
     kernel.dedup();
+    #[cfg(test)]
+    if let (Some(started), Some(profile)) = (canonical_started, profile.as_deref_mut()) {
+        profile.stats.canonical_nanos = incr_enum_elapsed(started);
+    }
     if kernel.is_empty() {
         return None;
     }
@@ -2733,17 +3170,32 @@ fn forced_defender_pair_plan(
     // structure only by two-colouring hit windows, so the plan-root fork
     // degree is a faithful child prior (validated by node-count A/B against
     // the historical per-pair exact scan).
+    #[cfg(test)]
+    let fork_started = profile.as_ref().map(|_| Instant::now());
     let shared_fork_pn = pn_from_fork_degree(attacker_fork_degree(state, claimant));
+    #[cfg(test)]
+    if let (Some(started), Some(profile)) = (fork_started, profile.as_deref_mut()) {
+        profile.stats.fork_scan_nanos = incr_enum_elapsed(started);
+    }
 
     // Apply/undo on the caller's state instead of cloning the full engine
     // (board + window store) once per kernel cell. Every exit path restores
     // the exact turn-start state.
     let mut directed = Vec::new();
     for &first in &kernel {
+        #[cfg(test)]
+        let apply_started = profile.as_ref().map(|_| Instant::now());
         let Ok((first_result, first_delta)) = state.apply_with_delta(Placement { coord: first })
         else {
             return None;
         };
+        #[cfg(test)]
+        if let (Some(started), Some(profile)) = (apply_started, profile.as_deref_mut()) {
+            profile.stats.apply_undo_nanos = profile
+                .stats
+                .apply_undo_nanos
+                .saturating_add(incr_enum_elapsed(started));
+        }
         if first_result.outcome.is_some()
             || state.current_player() == claimant
             || !matches!(state.phase(), TurnPhase::SecondStone { .. })
@@ -2752,7 +3204,16 @@ fn forced_defender_pair_plan(
             return None;
         }
 
+        #[cfg(test)]
+        let child_analysis_started = profile.as_ref().map(|_| Instant::now());
         let analysis = threats::analyze(state);
+        #[cfg(test)]
+        if let (Some(started), Some(profile)) = (child_analysis_started, profile.as_deref_mut()) {
+            profile.stats.child_analysis_nanos = profile
+                .stats
+                .child_analysis_nanos
+                .saturating_add(incr_enum_elapsed(started));
+        }
         if analysis.b != 1
             || analysis.opp_threat_count == 0
             || analysis.own_win_now
@@ -2761,6 +3222,64 @@ fn forced_defender_pair_plan(
             state.undo(first_delta);
             return None;
         }
+        #[cfg(test)]
+        let mut seconds = if let Some(profile) = profile.as_deref_mut() {
+            let started = Instant::now();
+            let (family, seconds) = profiled_defender_kernel(state, claimant, analysis.b);
+            profile.stats.child_enum_nanos = profile
+                .stats
+                .child_enum_nanos
+                .saturating_add(incr_enum_elapsed(started));
+            profile.stats.residuals = profile.stats.residuals.saturating_add(1);
+            incr_enum_record_shape(&mut profile.stats, &family, &seconds, false);
+            let patched = profile
+                .root_family
+                .iter()
+                .filter(|(_, empties)| !empties.contains(&first))
+                .cloned()
+                .collect::<Vec<_>>();
+            profile.stats.removed_windows = profile
+                .stats
+                .removed_windows
+                .saturating_add(profile.root_family.len().saturating_sub(patched.len()) as u64);
+            let patched_sets = patched
+                .iter()
+                .map(|(_, empties)| empties.clone())
+                .collect::<Vec<_>>();
+            let patched_kernel = extendable_hit_kernel_for_family(&patched_sets, analysis.b);
+            let fingerprint_started = Instant::now();
+            let batch_fingerprint = incr_enum_fingerprint(&family, &seconds);
+            let patched_fingerprint = incr_enum_fingerprint(&patched, &patched_kernel);
+            profile.stats.fingerprint_nanos = profile
+                .stats
+                .fingerprint_nanos
+                .saturating_add(incr_enum_elapsed(fingerprint_started));
+            profile.stats.fingerprint_xor ^= batch_fingerprint;
+            if batch_fingerprint == patched_fingerprint {
+                profile.stats.residual_patch_exact =
+                    profile.stats.residual_patch_exact.saturating_add(1);
+            } else {
+                profile.stats.residual_patch_mismatch =
+                    profile.stats.residual_patch_mismatch.saturating_add(1);
+                eprintln!(
+                    "INCR_ENUM_PATCH_MISMATCH first={first:?} ply={} batch={:016x} patched={:016x} root={:?} residual={:?}",
+                    state.placements_made(),
+                    batch_fingerprint,
+                    patched_fingerprint,
+                    profile.root_family,
+                    family,
+                );
+            }
+            seconds
+        } else {
+            forced_defender_replies(
+                state,
+                claimant,
+                analysis.b,
+                WidthOptions::vcf_pair_complete(),
+            )
+        };
+        #[cfg(not(test))]
         let mut seconds = forced_defender_replies(
             state,
             claimant,
@@ -2787,7 +3306,16 @@ fn forced_defender_pair_plan(
             // child is exactly (claimant, FirstStone, non-terminal) and its
             // key is constructible without touching the engine. `second` is a
             // kernel threat-window empty, hence always a legal placement.
+            #[cfg(test)]
+            let key_started = profile.as_ref().map(|_| Instant::now());
             let final_key = WidePositionKey::for_defender_pair(state, claimant, &[second]);
+            #[cfg(test)]
+            if let (Some(started), Some(profile)) = (key_started, profile.as_deref_mut()) {
+                profile.stats.final_key_nanos = profile
+                    .stats
+                    .final_key_nanos
+                    .saturating_add(incr_enum_elapsed(started));
+            }
             let retained_prior =
                 (raw_coord_key(first) < raw_coord_key(second)).then(|| WidePnPrior {
                     pn: shared_fork_pn,
@@ -2800,7 +3328,16 @@ fn forced_defender_pair_plan(
                 retained_prior,
             });
         }
+        #[cfg(test)]
+        let undo_started = profile.as_ref().map(|_| Instant::now());
         state.undo(first_delta);
+        #[cfg(test)]
+        if let (Some(started), Some(profile)) = (undo_started, profile.as_deref_mut()) {
+            profile.stats.apply_undo_nanos = profile
+                .stats
+                .apply_undo_nanos
+                .saturating_add(incr_enum_elapsed(started));
+        }
     }
 
     let directed_index = directed
@@ -3317,6 +3854,18 @@ struct WidePnSearch<'store> {
     #[cfg(test)]
     threshold_last_selected: Vec<Option<usize>>,
     #[cfg(test)]
+    incr_enum_counters: bool,
+    #[cfg(test)]
+    incr_enum_stats: RefCell<IncrEnumStats>,
+    #[cfg(test)]
+    incr_active_parent_fingerprint: Cell<u64>,
+    #[cfg(test)]
+    incr_defender_mode: IncrDefenderMode,
+    #[cfg(test)]
+    incr_active_parent_snapshot: RefCell<Option<Arc<IncrDefenderSnapshot>>>,
+    #[cfg(test)]
+    incr_snapshot_payload_bytes: Cell<u64>,
+    #[cfg(test)]
     quotient_telemetry: Option<QuotientTelemetry>,
     entries: Vec<WidePnEntry>,
     by_position: HashMap<WidePositionKey, usize>,
@@ -3570,6 +4119,19 @@ impl<'store> WidePnSearch<'store> {
             threshold_entry_visits: Vec::new(),
             #[cfg(test)]
             threshold_last_selected: Vec::new(),
+            #[cfg(test)]
+            incr_enum_counters: std::env::var("TSS_INCR_ENUM_COUNTERS").ok().as_deref()
+                == Some("1"),
+            #[cfg(test)]
+            incr_enum_stats: RefCell::new(IncrEnumStats::default()),
+            #[cfg(test)]
+            incr_active_parent_fingerprint: Cell::new(0),
+            #[cfg(test)]
+            incr_defender_mode: IncrDefenderMode::from_env(),
+            #[cfg(test)]
+            incr_active_parent_snapshot: RefCell::new(None),
+            #[cfg(test)]
+            incr_snapshot_payload_bytes: Cell::new(0),
             #[cfg(test)]
             quotient_telemetry: QuotientTelemetry::enabled(),
             entries: Vec::new(),
@@ -4357,6 +4919,21 @@ impl<'store> WidePnSearch<'store> {
                         Some(WidePnNode::Unexpanded)
                     );
                     #[cfg(test)]
+                    let previous_incr_parent = self.incr_active_parent_fingerprint.replace(
+                        child
+                            .future_key
+                            .as_ref()
+                            .map(WideFutureKey::incr_parent_fingerprint)
+                            .unwrap_or(0),
+                    );
+                    #[cfg(test)]
+                    let previous_incr_snapshot = self.incr_active_parent_snapshot.replace(
+                        child
+                            .future_key
+                            .as_ref()
+                            .and_then(WideFutureKey::incr_parent_snapshot),
+                    );
+                    #[cfg(test)]
                     threshold_residency.pause();
                     let outcome = self.work(
                         state,
@@ -4367,6 +4944,12 @@ impl<'store> WidePnSearch<'store> {
                     );
                     #[cfg(test)]
                     threshold_residency.resume();
+                    #[cfg(test)]
+                    self.incr_active_parent_fingerprint
+                        .set(previous_incr_parent);
+                    #[cfg(test)]
+                    self.incr_active_parent_snapshot
+                        .replace(previous_incr_snapshot);
                     #[cfg(test)]
                     if closure_was_unexpanded
                         && !matches!(
@@ -5259,7 +5842,14 @@ impl<'store> WidePnSearch<'store> {
         let closure_started = self.closure_counters.then(Instant::now);
         #[cfg(test)]
         let gate_started = self.closure_counters.then(Instant::now);
-        let gate = WideTurnGate::build(state, self.claimant);
+        let gate = WideTurnGate::build(
+            state,
+            self.claimant,
+            #[cfg(test)]
+            self.incr_enum_counters,
+            #[cfg(test)]
+            self.incr_defender_mode,
+        );
         #[cfg(test)]
         let gate_build_nanos = gate_started
             .map(|started| u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX))
@@ -5317,6 +5907,13 @@ impl<'store> WidePnSearch<'store> {
                 let evaluation_started = self.closure_counters.then(Instant::now);
                 let evaluated = self.evaluate_wide_pair_at_gate(&gate, first, second);
                 #[cfg(test)]
+                if self.incr_defender_mode.enabled() {
+                    let nanos = gate.incr_parent_maintenance_nanos.get();
+                    let mut stats = self.incr_enum_stats.borrow_mut();
+                    stats.parent_maintenance_nanos =
+                        stats.parent_maintenance_nanos.saturating_add(nanos);
+                }
+                #[cfg(test)]
                 if let Some(started) = evaluation_started {
                     pair_profile.evaluated = pair_profile.evaluated.saturating_add(1);
                     pair_profile.pair_evaluation_nanos =
@@ -5366,6 +5963,19 @@ impl<'store> WidePnSearch<'store> {
                             ..ClosurePairChildProfile::default()
                         });
                     }
+                    #[cfg(test)]
+                    let incr_snapshot = gate.incr_defender_snapshot.borrow().clone();
+                    #[cfg(test)]
+                    if let Some(snapshot) = &incr_snapshot {
+                        let bytes = snapshot.payload_bytes() as u64;
+                        let current = self.incr_snapshot_payload_bytes.get().saturating_add(bytes);
+                        self.incr_snapshot_payload_bytes.set(current);
+                        let mut stats = self.incr_enum_stats.borrow_mut();
+                        stats.snapshot_payload_bytes =
+                            stats.snapshot_payload_bytes.saturating_add(bytes);
+                        stats.peak_snapshot_payload_bytes =
+                            stats.peak_snapshot_payload_bytes.max(current);
+                    }
                     let mv = WidePnMove::Pair(first, second);
                     children.push(WidePnChild {
                         mv,
@@ -5373,9 +5983,17 @@ impl<'store> WidePnSearch<'store> {
                         entry: None,
                         future_key: (self.lazy_frontier && result == WidePnChildResult::Pending)
                             .then(|| {
-                                WideFutureKey::OnSelection(WidePositionKey::after_completed_pair(
-                                    state, first, second,
-                                ))
+                                let key =
+                                    WidePositionKey::after_completed_pair(state, first, second);
+                                #[cfg(test)]
+                                if self.incr_enum_counters || self.incr_defender_mode.enabled() {
+                                    return WideFutureKey::OnSelectionIncr(
+                                        key,
+                                        gate.incr_defender_fingerprint.get(),
+                                        incr_snapshot,
+                                    );
+                                }
+                                WideFutureKey::OnSelection(key)
                             }),
                         prior,
                         urgent_block: wide_move_contains_defender_block(mv, &defender_blocks),
@@ -5563,6 +6181,79 @@ impl<'store> WidePnSearch<'store> {
     fn defender_pair_children(&mut self, state: &mut RustHexoState) -> Option<Vec<WidePnChild>> {
         #[cfg(test)]
         let _gen_timer = WideGenTimer::start(&WIDE_GEN_DEFENDER_NANOS);
+        #[cfg(test)]
+        let plan = match self.incr_defender_mode {
+            IncrDefenderMode::Off if self.incr_enum_counters => {
+                let (plan, stats) = forced_defender_pair_plan_profiled(
+                    state,
+                    self.claimant,
+                    self.incr_active_parent_fingerprint.get(),
+                );
+                self.incr_enum_stats.borrow_mut().merge(stats);
+                plan
+            }
+            IncrDefenderMode::Off => forced_defender_pair_plan(state, self.claimant),
+            IncrDefenderMode::Shadow => {
+                let snapshot = self.incr_active_parent_snapshot.borrow().clone();
+                if let Some(snapshot) = snapshot {
+                    let incremental_started = Instant::now();
+                    let incremental =
+                        forced_defender_pair_plan_incremental(state, self.claimant, &snapshot);
+                    let incremental_nanos = incr_enum_elapsed(incremental_started);
+                    let batch_started = Instant::now();
+                    let batch = forced_defender_pair_plan(state, self.claimant);
+                    let batch_nanos = incr_enum_elapsed(batch_started);
+                    let equal = incr_defender_plans_equal(&batch, &incremental);
+                    {
+                        let mut stats = self.incr_enum_stats.borrow_mut();
+                        stats.incremental_calls = stats.incremental_calls.saturating_add(1);
+                        stats.shadow_calls = stats.shadow_calls.saturating_add(1);
+                        stats.incremental_plan_nanos = stats
+                            .incremental_plan_nanos
+                            .saturating_add(incremental_nanos);
+                        stats.shadow_batch_nanos =
+                            stats.shadow_batch_nanos.saturating_add(batch_nanos);
+                        stats.shadow_equal = stats.shadow_equal.saturating_add(u64::from(equal));
+                    }
+                    assert!(
+                        equal,
+                        "INCR_DEFENDER_MISMATCH ply={} last_turn={:?} history={:?} snapshot={:?} batch={:?} incremental={:?}",
+                        state.placements_made(),
+                        state.last_turn(),
+                        state.placement_history(),
+                        snapshot,
+                        batch,
+                        incremental,
+                    );
+                    batch
+                } else {
+                    let mut stats = self.incr_enum_stats.borrow_mut();
+                    stats.incremental_fallbacks = stats.incremental_fallbacks.saturating_add(1);
+                    drop(stats);
+                    forced_defender_pair_plan(state, self.claimant)
+                }
+            }
+            IncrDefenderMode::Consume => {
+                let snapshot = self.incr_active_parent_snapshot.borrow().clone();
+                if let Some(snapshot) = snapshot {
+                    let started = Instant::now();
+                    let plan =
+                        forced_defender_pair_plan_incremental(state, self.claimant, &snapshot);
+                    let nanos = incr_enum_elapsed(started);
+                    let mut stats = self.incr_enum_stats.borrow_mut();
+                    stats.incremental_calls = stats.incremental_calls.saturating_add(1);
+                    stats.incremental_plan_nanos =
+                        stats.incremental_plan_nanos.saturating_add(nanos);
+                    plan
+                } else {
+                    let mut stats = self.incr_enum_stats.borrow_mut();
+                    stats.incremental_fallbacks = stats.incremental_fallbacks.saturating_add(1);
+                    drop(stats);
+                    forced_defender_pair_plan(state, self.claimant)
+                }
+            }
+        }?;
+        #[cfg(not(test))]
         let plan = forced_defender_pair_plan(state, self.claimant)?;
         let depth = usize::try_from(
             state
@@ -7516,12 +8207,27 @@ struct WideTurnGate {
     defender_threats: Vec<Vec<HexCoord>>,
     #[cfg(test)]
     live_claimant_windows: Vec<WidePairWindow>,
+    #[cfg(test)]
+    incr_enum_counters: bool,
+    #[cfg(test)]
+    incr_defender_fingerprint: Cell<u64>,
+    #[cfg(test)]
+    incr_defender_mode: IncrDefenderMode,
+    #[cfg(test)]
+    incr_defender_snapshot: RefCell<Option<Arc<IncrDefenderSnapshot>>>,
+    #[cfg(test)]
+    incr_parent_maintenance_nanos: Cell<u64>,
     /// `placements_made` at turn start.
     start_placements: u32,
 }
 
 impl WideTurnGate {
-    fn build(state: &RustHexoState, claimant: Player) -> Self {
+    fn build(
+        state: &RustHexoState,
+        claimant: Player,
+        #[cfg(test)] incr_enum_counters: bool,
+        #[cfg(test)] incr_defender_mode: IncrDefenderMode,
+    ) -> Self {
         let mut windows_by_cell: HashMap<HexCoord, Vec<WidePairWindow>> = HashMap::new();
         let mut weak_windows_by_cell: HashMap<HexCoord, Vec<WidePairWindow>> = HashMap::new();
         let mut defender_threats = Vec::new();
@@ -7561,6 +8267,16 @@ impl WideTurnGate {
             defender_threats,
             #[cfg(test)]
             live_claimant_windows,
+            #[cfg(test)]
+            incr_enum_counters,
+            #[cfg(test)]
+            incr_defender_fingerprint: Cell::new(0),
+            #[cfg(test)]
+            incr_defender_mode,
+            #[cfg(test)]
+            incr_defender_snapshot: RefCell::new(None),
+            #[cfg(test)]
+            incr_parent_maintenance_nanos: Cell::new(0),
             start_placements: state.placements_made(),
         }
     }
@@ -7656,6 +8372,12 @@ impl WideTurnGate {
         second: HexCoord,
         semantic_horizon: u32,
     ) -> Option<(WidePnChildResult, WidePnPrior)> {
+        #[cfg(test)]
+        self.incr_defender_fingerprint.set(0);
+        #[cfg(test)]
+        self.incr_defender_snapshot.borrow_mut().take();
+        #[cfg(test)]
+        self.incr_parent_maintenance_nanos.set(0);
         // The claimant windows reaching >=4 once the pair is placed, with
         // their post-pair empties. A window through both stones is collected
         // once (from the `first` list; the `second` pass skips it).
@@ -7707,6 +8429,13 @@ impl WideTurnGate {
         if defender_win_now {
             return None;
         }
+        #[cfg(test)]
+        let (mhs, incr_kernel) = if self.incr_defender_mode.enabled() {
+            wide_family_min_hitting_set_and_kernel(&family)
+        } else {
+            (wide_family_min_hitting_set(&family), Vec::new())
+        };
+        #[cfg(not(test))]
         let mhs = wide_family_min_hitting_set(&family);
         let threat_count = family.len();
         if mhs.is_none() {
@@ -7736,6 +8465,31 @@ impl WideTurnGate {
             ));
         }
         if mhs == Some(2) {
+            #[cfg(test)]
+            if self.incr_enum_counters || self.incr_defender_mode.enabled() {
+                let started = Instant::now();
+                let kernel = if self.incr_defender_mode.enabled() {
+                    incr_kernel
+                } else {
+                    let sets = family
+                        .iter()
+                        .map(|(_, empties)| empties.clone())
+                        .collect::<Vec<_>>();
+                    extendable_hit_kernel_for_family(&sets, 2)
+                };
+                let fingerprint = if self.incr_enum_counters {
+                    incr_enum_fingerprint(&family, &kernel)
+                } else {
+                    1
+                };
+                self.incr_defender_fingerprint.set(fingerprint);
+                if self.incr_defender_mode.enabled() {
+                    *self.incr_defender_snapshot.borrow_mut() =
+                        IncrDefenderSnapshot::new(&family, &kernel, fingerprint).map(Arc::new);
+                }
+                self.incr_parent_maintenance_nanos
+                    .set(incr_enum_elapsed(started));
+            }
             return Some((
                 WidePnChildResult::Pending,
                 WidePnPrior {
@@ -7782,6 +8536,58 @@ fn wide_family_min_hitting_set(family: &[(WindowKey, Vec<HexCoord>)]) -> Option<
         }
     }
     None
+}
+
+/// Test-only fused parent classification for R-IE1. The ordinary pair gate
+/// already visits every covering pair to establish tau=2; retaining the
+/// incident cells during that same pass avoids a second pair-incidence scan
+/// merely to seed the incremental defender child.
+#[cfg(test)]
+fn wide_family_min_hitting_set_and_kernel(
+    family: &[(WindowKey, Vec<HexCoord>)],
+) -> (Option<u8>, Vec<HexCoord>) {
+    if family.is_empty() {
+        return (Some(0), Vec::new());
+    }
+    if family.iter().any(|(_, set)| set.is_empty()) {
+        return (None, Vec::new());
+    }
+    let mut universe = family
+        .iter()
+        .flat_map(|(_, set)| set.iter().copied())
+        .collect::<Vec<_>>();
+    universe.sort_by_key(|cell| raw_coord_key(*cell));
+    universe.dedup();
+    if universe
+        .iter()
+        .any(|cell| family.iter().all(|(_, set)| set.contains(cell)))
+    {
+        return (Some(1), Vec::new());
+    }
+    let mut in_kernel = HashSet::new();
+    for left in 0..universe.len() {
+        for right in (left + 1)..universe.len() {
+            let (x, y) = (universe[left], universe[right]);
+            if family
+                .iter()
+                .all(|(_, set)| set.contains(&x) || set.contains(&y))
+            {
+                in_kernel.insert(x);
+                in_kernel.insert(y);
+            }
+        }
+    }
+    if in_kernel.is_empty() {
+        (None, Vec::new())
+    } else {
+        (
+            Some(2),
+            universe
+                .into_iter()
+                .filter(|cell| in_kernel.contains(cell))
+                .collect(),
+        )
+    }
 }
 
 /// Static fork potential for an unexpanded attacker OR node. Count-three
@@ -11148,6 +11954,35 @@ mod tests {
                 && child.result == WidePnChildResult::Pending
                 && matches!(child.mv, WidePnMove::DefenderPair(_, _))
         }));
+    }
+
+    #[test]
+    fn incremental_defender_counter_matches_parent_and_every_local_patch() {
+        let mut state = xsnfyll_forced_defender_fixture();
+        let claimant = Player::Player1;
+        let family = incr_enum_family(&state, claimant);
+        let sets = family
+            .iter()
+            .map(|(_, empties)| empties.clone())
+            .collect::<Vec<_>>();
+        let kernel = extendable_hit_kernel_for_family(&sets, 2);
+        let parent_fingerprint = incr_enum_fingerprint(&family, &kernel);
+        let snapshot = IncrDefenderSnapshot::new(&family, &kernel, parent_fingerprint).unwrap();
+        let incremental = forced_defender_pair_plan_incremental(&state, claimant, &snapshot);
+        let (profiled, stats) =
+            forced_defender_pair_plan_profiled(&mut state, claimant, parent_fingerprint);
+        let batch = forced_defender_pair_plan(&mut state, claimant);
+        assert!(profiled.is_some());
+        assert!(batch.is_some());
+        assert!(incr_defender_plans_equal(&batch, &incremental));
+        assert_eq!(stats.calls, 1);
+        assert_eq!(stats.parent_fingerprints, 1);
+        assert_eq!(stats.parent_exact, 1);
+        assert_eq!(stats.parent_mismatch, 0);
+        assert_eq!(stats.residuals, kernel.len() as u64);
+        assert_eq!(stats.residual_patch_exact, stats.residuals);
+        assert_eq!(stats.residual_patch_mismatch, 0);
+        assert_eq!(profiled.unwrap().pairs.len(), batch.unwrap().pairs.len(),);
     }
 
     #[test]
