@@ -24,7 +24,7 @@ non-urgent nodes.
 
 | ID | Claim | Status | Result |
 |---|---|---|---|
-| Q0 | The report's “quiet gate fires at OR node `P`” describes production literally. | **REFUTED** | Quiet is a post-SecondStone edge property; the consume fallback is unconditional after the ordinary frontier fails. |
+| Q0 | The report's “quiet gate fires at OR node `P`” describes production literally. | **REFUTED** | Quiet is a post-SecondStone edge property; after clean ordinary failure, the consume fallback is ungated by quietness, subject to earlier hit-limit return and `PairContext` filtering. |
 | Q1 | The seven previously frozen distinct placements hit `join_adj1`. | **VERIFIED-EXHAUSTIVE** | True only for those seven records; it is empirical coverage, not completeness. |
 | Q2a | A move outside `join_live` changes no old live-window count and births only count-1/delta-5 windows. | **PROVEN** | Window-level lemma. |
 | Q2b | Such a move creates only new overlap-connected families. | **REFUTED** | A born window can overlap and merge into an old component. |
@@ -56,9 +56,12 @@ From `HUNT_REPORT_QUIET_LOCALITY.md`:
 
 The phrase “gate fires at `P`” is not a literal production predicate.  In
 `tss_solver.rs`, `prove_choice` first tries the ordinary attacker frontier.  If
-consume is enabled, it then enumerates `write_legal_moves` unconditionally
-(`tss_solver.rs:3414-3575`).  This happens at Opening, FirstStone, and
-SecondStone Choice nodes.  The function
+consume is enabled and ordinary search fails cleanly, it then enumerates
+`write_legal_moves` without consulting the quiet predicate
+(`tss_solver.rs:3414-3575`).  An earlier hit-limit return prevents reaching
+this fallback, and a non-null `PairContext` filters the written legal set where
+applicable; neither condition applies at the frozen root.  The fallback is
+available at Opening, FirstStone, and SecondStone Choice nodes.  The function
 `turn_forces_small_defender_reply` (`tss_solver.rs:3990`) is evaluated on the
 **post-placement** state.  The shadow walker calls a turn quiet only when the
 pre-move phase was SecondStone and the post-move predicate is false
@@ -218,11 +221,18 @@ certificate with §2.3 proves that `r` is the unique winning completion.
 
 ### 2.5 Counterexample family
 
-The canonical witness above is frozen.  Hex geometry, window ownership,
-distance, legality radius, the gate, and certificates are D6-covariant, so its
-rotations/reflections form the corresponding D6 counterexample orbit.  The
-canonical member—not all orbit images—was the member counted in the round-1
-machine tally.
+**D6 covariance corollary.** Let `g` be any of the 12 D6 symmetries.  Applying
+`d6_transform_coord` to every coordinate in the replay and root, including the
+stored `SecondStone { first }` coordinate, preserves axial distance,
+length-six windows, ownership, radius-eight legality, phase, and the forcing
+census.  It carries the reply-survival kernel equivariantly:
+`K_reply(gP)=g(K_reply(P))`.  Applying `d6_remap_certificate` to every
+coordinate-bearing certificate field commutes with verification.  Therefore
+the transformed replay and remapped accepted certificate give the
+corresponding D6 image of the counterexample.  This is the covariance mechanism
+and all-12 exact-witness regression cited by `REVIEW_QUIET_LOCALITY.md` § E.
+The canonical member—not all orbit images—was the member counted in the
+round-1 machine tally.
 
 This family is the named danger case from the attack plan: **defensive tempo**.
 The remote move does not advance an old attacker window; it prevents the
@@ -340,6 +350,27 @@ K_reply(P) = Win1_A(P) union BlockAll_D(P).
 
 Use `BlockAll_D(P)=Legal(P)` when `T_D(P)` is empty.
 
+**Normative production contract** (verbatim from
+`REVIEW_QUIET_LOCALITY.md`, “Q8 production pre-filter sign-off”): A future
+implementation may replace the attacker's full legal Choice set by
+`K_reply(P)` only when all of the following are true:
+
+1. `P` is nonterminal, `P.current_player()==A`, and
+   `P.phase()==SecondStone { first }`. The stored coordinate must be part of the
+   state/root binding. Do not apply this rule at Opening or FirstStone.
+2. Recompute from the current board, after the stored first placement:
+   `D=A.other()` and
+   `T_D(P)={W: active_player(W)==Some(D) and count_D(W) in {4,5}}`.
+   Define `E_P(W)` explicitly as the current empty cells of `W`; "urgent" means
+   `T_D(P)` is nonempty.
+3. Compute `Win1_A(P)` from the same full legal set and retain every placement
+   whose application immediately returns terminal winner `A`.
+4. Compute
+   `BlockAll_D(P)={c in Legal(P): for every W in T_D(P), c in E_P(W)}` and retain
+   `Win1_A(P) union BlockAll_D(P)`.
+5. If `T_D(P)` is empty, return all of `Legal(P)`. Do not substitute a locality
+   tier for this vacuous case.
+
 **Theorem.** Every winning placement from `P` belongs to `K_reply(P)`.
 
 **Proof.** Let `c` be winning.  If it wins immediately, it is in `Win1_A`.
@@ -363,6 +394,10 @@ SecondStone nodes, keep the reply-survival kernel even when its member is
 remote.  It does **not** prove `K_reply union join_adj1` complete at non-urgent
 nodes; when `T_D(P)` is empty, the theorem deliberately falls back to full
 legal.
+
+**Validation postscript.** G2R7 subsequently shadow-validated this kernel on
+`claude/tss-vcf-width` at commit `b8b67bf5` across 220,160 fallback fires with
+zero counterexamples.
 
 ## 5. Consumption-soundness clause
 

@@ -1,0 +1,32 @@
+NQ2 PROOF-DOC EDIT PASS — apply the review's three queued edits to
+PROOF_QUIET_LOCALITY.md. Small, surgical round.
+
+You are working in
+E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-quiet-locality (branch
+hunt/quiet-locality @016577bb). You CANNOT git-commit. Read
+PROOF_QUIET_LOCALITY.md and REVIEW_QUIET_LOCALITY.md in full first.
+The review signed off Q8 with a 5-clause contract and queued exactly
+three edits; apply them and nothing else:
+
+1. **Formalize the Q8 contract in the proof doc**: the review's exact
+   5-clause statement (SecondStone{first} only; post-first
+   recomputation; full-legal Win1; BlockAll = intersection over ALL
+   defender count-4/5 windows; full-Legal fallback when no threat)
+   belongs in the Q8 section verbatim as the normative contract, cited
+   to the review. Note that G2R7 (claude/tss-vcf-width b8b67bf5)
+   subsequently shadow-validated the kernel across 220,160 fallback
+   fires with zero counterexamples — add this as a validation
+   postscript with the commit cite.
+2. **Qualify Q0's 'unconditional' claim** exactly as the review
+   required (state the actual precondition scope).
+3. **Add the D6 covariance remark** the review requested (the
+   witness/kernel construction commutes with the D6 action; state it
+   precisely, no new claims beyond what the review asked).
+
+Rules: documentation-only round — NO code changes, NO new claims, NO
+rewriting beyond the three edits (light connective prose around them is
+fine). Preserve the doc's Q0-Q9 ledger structure. If any edit as
+specified by the review contradicts something now known (e.g. the
+G2R7 data), do NOT silently reconcile — flag it in a short note at the
+edit site. No cargo needed; no commits. Final message: the three edits
+quoted (before/after), any flags, file list.
