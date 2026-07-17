@@ -13,8 +13,14 @@ There are three memory contexts, all expressed as caller-owned byte caps:
 
 - The ordinary offline test profile is **512 MiB**. This is the bare default
   in the forcing and spare corpus harnesses.
-- The official deep-solve acceptance profile is **2 GiB**, selected with
-  `TSS_BACKWALK_TT_BYTES=2147483648`. The all-19 forcing gate is one process
+- The official deep-solve acceptance profile is **1 GiB with
+  `TSS_LAZY_FRONTIER=1` and `TSS_INCR_DEFENDER=1`**, selected with
+  `TSS_BACKWALK_TT_BYTES=1073741824` (owner rulings: lazy frontier at
+  `5f836b70` R-LF2; incremental defender enumeration wired 2026-07-17 after
+  R-IE2 `bcf2cc70` + R-PC1 `0415fcec` — exact 31/31 row identity, zero
+  retained memory). The **2 GiB flags-off** profile
+  (`TSS_BACKWALK_TT_BYTES=2147483648`) is retained as the legacy baseline.
+  The all-19 forcing gate is one process
   and uses the fixed node ladder **10k → 100k → 1M → 20M** for WIN
   rows; NO rows stop after 1M because their acceptance condition is non-WIN.
 - Trainer leaf, root-guard, and async-worker solves use the **256 KiB
@@ -27,9 +33,14 @@ The official all-19 gate command from the worktree root is:
 
 ```powershell
 $env:CARGO_TARGET_DIR='.target-codex'
-$env:TSS_BACKWALK_TT_BYTES='2147483648'
+$env:TSS_BACKWALK_TT_BYTES='1073741824'
+$env:TSS_LAZY_FRONTIER='1'
+$env:TSS_INCR_DEFENDER='1'
 cargo test --release -p hexfield_eq tss_corpus_check -- --ignored --test-threads=1 --nocapture
 ```
+
+(Legacy 2 GiB baseline: `TSS_BACKWALK_TT_BYTES='2147483648'` with both
+flags unset.)
 
 The spare corpus is not a second positive ladder. `NO` rows are soundness
 controls and must remain non-WIN. A positive row may be labelled

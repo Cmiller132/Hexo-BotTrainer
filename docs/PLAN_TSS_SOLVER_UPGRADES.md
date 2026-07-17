@@ -306,7 +306,12 @@ Once G2R3 is folded and gate-green at the tip:
 - **C4 — official profiles and ladder.** `TSS_RUNBOOK.md` remains the
   deployment authority. For deep solves, recommend 1 GiB only with
   `TSS_LAZY_FRONTIER=1`; retain the 2 GiB flags-off profile as the legacy
-  baseline (`5f836b70`, `HUNT_REPORT_LAZY_MEMORY_WALL.md`). Trainer solves
+  baseline (`5f836b70`, `HUNT_REPORT_LAZY_MEMORY_WALL.md`). **Owner ruling
+  07-17: `TSS_INCR_DEFENDER=1` is additionally asserted in the official
+  deep profile** — exact search identity (31/31 rows at both R-IE2
+  `bcf2cc70` and the R-PC1 tip `0415fcec`), zero retained memory, −8.74%
+  deep / −9% leaf (`HUNT_REPORT_INCR_ENUM_MEM.md`,
+  `HUNT_REPORT_PAIRCLASS.md`). Trainer solves
   retain their 256 KiB ceiling, with the selected leaf configuration in
   §II.7 (`5172d42d`). The forcing ladder remains 10k→100k→1M→20M (NO rows
   stop at 1M), retained at consolidation `b45b9bf0`. The checked-in spare
@@ -467,7 +472,7 @@ was vindicated by G2R3. Row-by-row:
 | 5 | Residual re-attack frontier on UNKNOWN | **LIVE** (U23) — now *more* valuable: with quiet width landed, the blocking-reply work-list is actionable, and it is exactly the routing signal A4/atlas resumption wants. |
 | 6 | RZS/Lemma 12 template for U11 sub-hitting | LIVE with U11/U24; `[UNPROVEN]` label stands. |
 | 7 | Frontier-inertness telemetry | Fold into capstone telemetry (§I.5). |
-| 8 | Incremental generator state along DFS path | **UNCLEAR — re-profile.** The claim targeted the old generator's per-node rebuild; the wide generator's cost profile differs (stateless pair classification). Re-measure before building; node-throughput only, converts no UNKNOWN. |
+| 8 | Incremental generator state along DFS path | **RESOLVED — built, landed, and wired (07-17).** The re-profile happened (R-IE1 decomposition) and the defender half was carryable: incremental enumeration landed exact-identity at R-IE1 `2f46925e` (−7.64%) and went production-ready via selected-edge path-local reconstruction at R-IE2 `bcf2cc70` (−8.74%, 0-byte payload); R-PC1 `0415fcec` then removed the non-carryable planner core's constant factors (−30.21% official wall, exact identity). Owner wired `TSS_INCR_DEFENDER=1` into the official deep profile 07-17. The attacker half stays closed by R-CD1's sound-reveal ceiling. |
 | 9 | Racer + zone-cardinality PN into U8 | Racer: **delete** (C2). Zone-cardinality scheduling: folds into U8 (Part II), verifier-derived quantities only. |
 | 10 | Promotion-composable zone schema | Carried into U22's admission design. |
 | 11–13 | Capstone corpus / measurement / robustness | Adopted wholesale as §I.5. |
