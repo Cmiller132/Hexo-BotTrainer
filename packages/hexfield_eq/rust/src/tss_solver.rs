@@ -16,6 +16,11 @@ use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
 
+#[cfg(test)]
+use std::cell::RefCell;
+#[cfg(test)]
+use std::time::Instant;
+
 use hexo_engine::{
     apply_placement, hex_distance, Axis, HexCoord, HexoState as RustHexoState, Placement, Player,
     TurnPhase, WindowKey,
@@ -54,6 +59,50 @@ const MAX_PROMOTED_FRAGMENT_EDGES: usize = 512;
 /// proof in the current wide/depth-bounded attempt. Certificate IDs can never
 /// approach this value (`MAX_CERT_NODES` is 100k).
 const LOCAL_TT_FAILED: CertNodeId = CertNodeId::MAX;
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct QuotientTelemetryReport {
+    pub retained_entries: u64,
+    pub indexed_entries: u64,
+    pub tt_hits: u64,
+    pub d6_index_duplicates: u64,
+    pub d6_index_denominator: u64,
+    pub expanded_unique_positions: u64,
+    pub d6_expanded_duplicates: u64,
+    pub d6_canonicalization_calls: u64,
+    pub d6_canonicalization_nanos: u64,
+    pub horizon_queries: u64,
+    pub horizon_exact_hits: u64,
+    pub horizon_clock_misses: u64,
+    pub horizon_monotone_hits: u64,
+    pub horizon_position_clock_entries: u64,
+    pub horizon_multi_clock_positions: u64,
+    pub horizon_positions: u64,
+    pub horizon_sound_wins: u64,
+    pub horizon_sound_refutations: u64,
+    pub horizon_staged_cutoffs_excluded: u64,
+    pub commutation_eligible_nodes: u64,
+    pub commutation_independent_nodes: u64,
+    pub commutation_shared_window: u64,
+    pub commutation_legality_coupling: u64,
+    pub commutation_threat_response: u64,
+}
+
+#[cfg(test)]
+thread_local! {
+    static LAST_QUOTIENT_REPORT: RefCell<Option<QuotientTelemetryReport>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_quotient_telemetry_report() -> Option<QuotientTelemetryReport> {
+    LAST_QUOTIENT_REPORT.with(|slot| slot.borrow_mut().take())
+}
+
+#[cfg(test)]
+fn clear_quotient_telemetry_report() {
+    LAST_QUOTIENT_REPORT.with(|slot| *slot.borrow_mut() = None);
+}
 
 /// Optional attacker-universe expansions.  The default is deliberately the
 /// historical narrow generator so production callers retain byte-identical
@@ -196,7 +245,10 @@ impl TssSolver {
         goal: SolveGoal,
     ) -> DeepResult<TssCertificate> {
         #[cfg(test)]
-        self.last_narrow_signatures.clear();
+        {
+            self.last_narrow_signatures.clear();
+            clear_quotient_telemetry_report();
+        }
 
         let effective_tt_cap = if self.tt_enabled {
             caps.tt_bytes_cap
@@ -457,6 +509,11 @@ impl TssSolver {
                 rebase_zone_distances(&mut cert, state)?;
                 Some(cert)
             });
+        #[cfg(test)]
+        if let Some(telemetry) = search.quotient_telemetry.take() {
+            let report = telemetry.finish(&search.entries, &search.by_position, search.tt_hits);
+            LAST_QUOTIENT_REPORT.with(|slot| *slot.borrow_mut() = Some(report));
+        }
         AttemptResult {
             cert,
             stats,
@@ -1055,8 +1112,138 @@ impl WidePositionKey {
         }
     }
 
+    #[cfg(test)]
+    fn from_position_key(key: &PositionKey) -> Self {
+        let mut encoded = Vec::with_capacity(key.stones.len().saturating_mul(3).saturating_add(12));
+        encoded.push(key.current_player);
+        push_wide_varint(&mut encoded, key.placements_made);
+        match key.phase {
+            KeyPhase::Opening => encoded.push(0),
+            KeyPhase::FirstStone => encoded.push(1),
+            KeyPhase::SecondStone { q, r } => {
+                encoded.push(2);
+                push_wide_varint(&mut encoded, zigzag_i16(q));
+                push_wide_varint(&mut encoded, zigzag_i16(r));
+            }
+        }
+        match key.terminal {
+            None => encoded.push(0),
+            Some(terminal) => {
+                encoded.push(1 + terminal.winner);
+                push_wide_varint(&mut encoded, terminal.placements);
+            }
+        }
+        for stone in &key.stones {
+            push_wide_varint(
+                &mut encoded,
+                zigzag_i16(stone.q).saturating_mul(2) | u32::from(stone.owner),
+            );
+            push_wide_varint(&mut encoded, zigzag_i16(stone.r));
+        }
+        Self {
+            bytes: encoded.into_boxed_slice(),
+        }
+    }
+
     fn heap_bytes(&self) -> usize {
         self.bytes.len()
+    }
+
+    #[cfg(test)]
+    fn d6_canonical(&self) -> Self {
+        fn take_varint(bytes: &[u8], cursor: &mut usize) -> u32 {
+            let mut value = 0u32;
+            let mut shift = 0u32;
+            loop {
+                let byte = bytes[*cursor];
+                *cursor += 1;
+                value |= u32::from(byte & 0x7f) << shift;
+                if byte & 0x80 == 0 {
+                    return value;
+                }
+                shift += 7;
+                assert!(shift < 35, "wide-position varint overflow");
+            }
+        }
+        fn unzigzag(value: u32) -> i16 {
+            let signed = ((value >> 1) as i32) ^ -((value & 1) as i32);
+            i16::try_from(signed).expect("wide-position coordinate is i16")
+        }
+
+        let mut cursor = 0usize;
+        let current_player = self.bytes[cursor];
+        cursor += 1;
+        let placements_made = take_varint(&self.bytes, &mut cursor);
+        let phase_tag = self.bytes[cursor];
+        cursor += 1;
+        let phase_first = if phase_tag == 2 {
+            Some((
+                unzigzag(take_varint(&self.bytes, &mut cursor)),
+                unzigzag(take_varint(&self.bytes, &mut cursor)),
+            ))
+        } else {
+            None
+        };
+        let terminal_tag = self.bytes[cursor];
+        cursor += 1;
+        let terminal_placements = if terminal_tag == 0 {
+            None
+        } else {
+            Some(take_varint(&self.bytes, &mut cursor))
+        };
+        let mut stones = Vec::new();
+        while cursor < self.bytes.len() {
+            let packed_q = take_varint(&self.bytes, &mut cursor);
+            let owner = (packed_q & 1) as u8;
+            let q = unzigzag(packed_q >> 1);
+            let r = unzigzag(take_varint(&self.bytes, &mut cursor));
+            stones.push((HexCoord::new(q, r), owner));
+        }
+
+        let mut best: Option<Vec<u8>> = None;
+        for symmetry in 0..12u8 {
+            let mut transformed = stones
+                .iter()
+                .map(|&(coord, owner)| {
+                    let (q, r) = d6_coord_i32(coord, symmetry);
+                    (
+                        i16::try_from(q).expect("D6 q remains i16"),
+                        i16::try_from(r).expect("D6 r remains i16"),
+                        owner,
+                    )
+                })
+                .collect::<Vec<_>>();
+            transformed.sort_unstable();
+            let mut encoded = Vec::with_capacity(self.bytes.len());
+            encoded.push(current_player);
+            push_wide_varint(&mut encoded, placements_made);
+            encoded.push(phase_tag);
+            if let Some((q, r)) = phase_first {
+                let (q, r) = d6_coord_i32(HexCoord::new(q, r), symmetry);
+                push_wide_varint(&mut encoded, zigzag_i16(q as i16));
+                push_wide_varint(&mut encoded, zigzag_i16(r as i16));
+            }
+            encoded.push(terminal_tag);
+            if let Some(placements) = terminal_placements {
+                push_wide_varint(&mut encoded, placements);
+            }
+            for (q, r, owner) in transformed {
+                push_wide_varint(
+                    &mut encoded,
+                    zigzag_i16(q).saturating_mul(2) | u32::from(owner),
+                );
+                push_wide_varint(&mut encoded, zigzag_i16(r));
+            }
+            if best
+                .as_ref()
+                .is_none_or(|old| encoded.as_slice() < old.as_slice())
+            {
+                best = Some(encoded);
+            }
+        }
+        Self {
+            bytes: best.expect("D6 contains identity").into_boxed_slice(),
+        }
     }
 
     /// The key of the NONTERMINAL claimant FirstStone position reached after
@@ -1316,6 +1503,364 @@ fn push_wide_varint(out: &mut Vec<u8>, mut value: u32) {
     out.push(value as u8);
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QuotientSoundVerdict {
+    Win,
+    Refutation,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct HorizonHistory {
+    clocks: HashSet<usize>,
+    sound_wins: Vec<usize>,
+    sound_refutations: Vec<usize>,
+}
+
+#[cfg(test)]
+struct QuotientTelemetry {
+    report: QuotientTelemetryReport,
+    entry_keys: Vec<(WidePositionKey, WidePositionKey)>,
+    expanded_raw: HashSet<WidePositionKey>,
+    expanded_canonical: HashMap<WidePositionKey, WidePositionKey>,
+    horizon: HashMap<WidePositionKey, HorizonHistory>,
+}
+
+#[cfg(test)]
+impl QuotientTelemetry {
+    fn enabled() -> Option<Self> {
+        std::env::var_os("TSS_TURN_QUOTIENT_TELEMETRY").map(|_| Self {
+            report: QuotientTelemetryReport::default(),
+            entry_keys: Vec::new(),
+            expanded_raw: HashSet::new(),
+            expanded_canonical: HashMap::new(),
+            horizon: HashMap::new(),
+        })
+    }
+
+    fn canonicalize(&mut self, raw: &WidePositionKey) -> WidePositionKey {
+        let started = Instant::now();
+        let canonical = raw.d6_canonical();
+        self.report.d6_canonicalization_calls =
+            self.report.d6_canonicalization_calls.saturating_add(1);
+        self.report.d6_canonicalization_nanos = self
+            .report
+            .d6_canonicalization_nanos
+            .saturating_add(started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
+        canonical
+    }
+
+    fn observe_insert(&mut self, raw: &WidePositionKey) {
+        let canonical = self.canonicalize(raw);
+        self.entry_keys.push((raw.clone(), canonical));
+    }
+
+    fn observe_expand(&mut self, id: usize, state: &RustHexoState) {
+        let Some((raw, canonical)) = self.entry_keys.get(id).cloned() else {
+            return;
+        };
+        if !self.expanded_raw.insert(raw.clone()) {
+            return;
+        }
+        self.report.expanded_unique_positions =
+            self.report.expanded_unique_positions.saturating_add(1);
+        if self
+            .expanded_canonical
+            .get(&canonical)
+            .is_some_and(|first_raw| first_raw != &raw)
+        {
+            self.report.d6_expanded_duplicates =
+                self.report.d6_expanded_duplicates.saturating_add(1);
+        } else {
+            self.expanded_canonical.insert(canonical, raw);
+        }
+
+        if let Some(interaction) = classify_last_two_turns(state) {
+            self.report.commutation_eligible_nodes =
+                self.report.commutation_eligible_nodes.saturating_add(1);
+            if interaction == 0 {
+                self.report.commutation_independent_nodes =
+                    self.report.commutation_independent_nodes.saturating_add(1);
+            }
+            if interaction & 1 != 0 {
+                self.report.commutation_shared_window =
+                    self.report.commutation_shared_window.saturating_add(1);
+            }
+            if interaction & 2 != 0 {
+                self.report.commutation_legality_coupling =
+                    self.report.commutation_legality_coupling.saturating_add(1);
+            }
+            if interaction & 4 != 0 {
+                self.report.commutation_threat_response =
+                    self.report.commutation_threat_response.saturating_add(1);
+            }
+        }
+    }
+
+    fn observe_stage(
+        &mut self,
+        entries: &[WidePnEntry],
+        by_position: &HashMap<WidePositionKey, usize>,
+        stage_depth: usize,
+    ) {
+        let verdicts = sound_verdicts(entries);
+        for (id, entry) in entries.iter().enumerate() {
+            if entry.depth > stage_depth {
+                continue;
+            }
+            let Some((raw, _)) = self.entry_keys.get(id) else {
+                continue;
+            };
+            let clock = stage_depth - entry.depth;
+            self.report.horizon_queries = self.report.horizon_queries.saturating_add(1);
+            let history = self.horizon.entry(raw.clone()).or_default();
+            if history.clocks.contains(&clock) {
+                self.report.horizon_exact_hits = self.report.horizon_exact_hits.saturating_add(1);
+            } else {
+                self.report.horizon_clock_misses =
+                    self.report.horizon_clock_misses.saturating_add(1);
+                let monotone = history.sound_wins.iter().any(|&old| old <= clock)
+                    || history.sound_refutations.iter().any(|&old| old >= clock);
+                if monotone {
+                    self.report.horizon_monotone_hits =
+                        self.report.horizon_monotone_hits.saturating_add(1);
+                }
+                history.clocks.insert(clock);
+            }
+            match verdicts.get(id).copied().flatten() {
+                Some(QuotientSoundVerdict::Win) => {
+                    if !history.sound_wins.contains(&clock) {
+                        history.sound_wins.push(clock);
+                        self.report.horizon_sound_wins =
+                            self.report.horizon_sound_wins.saturating_add(1);
+                    }
+                }
+                Some(QuotientSoundVerdict::Refutation) => {
+                    if !history.sound_refutations.contains(&clock) {
+                        history.sound_refutations.push(clock);
+                        self.report.horizon_sound_refutations =
+                            self.report.horizon_sound_refutations.saturating_add(1);
+                    }
+                }
+                None => {}
+            }
+            if matches!(entry.node, WidePnNode::DepthCutoff) {
+                self.report.horizon_staged_cutoffs_excluded = self
+                    .report
+                    .horizon_staged_cutoffs_excluded
+                    .saturating_add(1);
+            }
+        }
+
+        self.report.indexed_entries = by_position.len() as u64;
+    }
+
+    fn finish(
+        mut self,
+        entries: &[WidePnEntry],
+        by_position: &HashMap<WidePositionKey, usize>,
+        tt_hits: u64,
+    ) -> QuotientTelemetryReport {
+        self.report.retained_entries = entries.len() as u64;
+        self.report.indexed_entries = by_position.len() as u64;
+        self.report.tt_hits = tt_hits;
+        let mut canonical = HashSet::new();
+        for &id in by_position.values() {
+            if let Some((_, key)) = self.entry_keys.get(id) {
+                canonical.insert(key.clone());
+            }
+        }
+        self.report.d6_index_denominator = by_position.len() as u64;
+        self.report.d6_index_duplicates =
+            (by_position.len().saturating_sub(canonical.len())) as u64;
+        self.report.horizon_positions = self.horizon.len() as u64;
+        self.report.horizon_position_clock_entries = self
+            .horizon
+            .values()
+            .map(|history| history.clocks.len() as u64)
+            .sum();
+        self.report.horizon_multi_clock_positions = self
+            .horizon
+            .values()
+            .filter(|history| history.clocks.len() > 1)
+            .count() as u64;
+        self.report
+    }
+}
+
+#[cfg(test)]
+fn child_sound_verdict(
+    child: &WidePnChild,
+    verdicts: &[Option<QuotientSoundVerdict>],
+) -> Option<QuotientSoundVerdict> {
+    match child.result {
+        WidePnChildResult::ClaimantCompletion | WidePnChildResult::ClaimantTactical => {
+            Some(QuotientSoundVerdict::Win)
+        }
+        WidePnChildResult::Refuted => Some(QuotientSoundVerdict::Refutation),
+        WidePnChildResult::Pending => child
+            .entry
+            .and_then(|id| verdicts.get(id).copied().flatten()),
+    }
+}
+
+#[cfg(test)]
+fn sound_verdicts(entries: &[WidePnEntry]) -> Vec<Option<QuotientSoundVerdict>> {
+    let mut verdicts = vec![None; entries.len()];
+    let mut ids = (0..entries.len()).collect::<Vec<_>>();
+    ids.sort_unstable_by_key(|&id| Reverse(entries[id].depth));
+    for id in ids {
+        verdicts[id] = match &entries[id].node {
+            WidePnNode::ProvenLeaf(_) => Some(QuotientSoundVerdict::Win),
+            WidePnNode::Refuted => Some(QuotientSoundVerdict::Refutation),
+            WidePnNode::Unexpanded | WidePnNode::DepthCutoff => None,
+            WidePnNode::Branch { kind, children } => match kind {
+                WidePnKind::Choice => {
+                    if children.iter().any(|child| {
+                        child_sound_verdict(child, &verdicts) == Some(QuotientSoundVerdict::Win)
+                    }) {
+                        Some(QuotientSoundVerdict::Win)
+                    } else if children.iter().all(|child| {
+                        child_sound_verdict(child, &verdicts)
+                            == Some(QuotientSoundVerdict::Refutation)
+                    }) {
+                        Some(QuotientSoundVerdict::Refutation)
+                    } else {
+                        None
+                    }
+                }
+                WidePnKind::Universal { .. } => {
+                    if children.iter().all(|child| {
+                        child_sound_verdict(child, &verdicts) == Some(QuotientSoundVerdict::Win)
+                    }) {
+                        Some(QuotientSoundVerdict::Win)
+                    } else if children.iter().any(|child| {
+                        child_sound_verdict(child, &verdicts)
+                            == Some(QuotientSoundVerdict::Refutation)
+                    }) {
+                        Some(QuotientSoundVerdict::Refutation)
+                    } else {
+                        None
+                    }
+                }
+            },
+        };
+    }
+    verdicts
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct TelemetryTurn {
+    player: Player,
+    placements: Vec<HexCoord>,
+}
+
+#[cfg(test)]
+fn last_two_complete_turns(state: &RustHexoState) -> Option<(TelemetryTurn, TelemetryTurn)> {
+    let history = state.placement_history();
+    let last = history.last()?;
+    if !matches!(last.phase, TurnPhase::SecondStone { .. }) || history.len() < 4 {
+        return None;
+    }
+    let last_first = history.get(history.len() - 2)?;
+    if !matches!(last_first.phase, TurnPhase::FirstStone) || last_first.player != last.player {
+        return None;
+    }
+    let previous_last = history.get(history.len() - 3)?;
+    if !matches!(previous_last.phase, TurnPhase::SecondStone { .. }) {
+        return None;
+    }
+    let previous_first = history.get(history.len() - 4)?;
+    if !matches!(previous_first.phase, TurnPhase::FirstStone)
+        || previous_first.player != previous_last.player
+        || previous_last.player == last.player
+    {
+        return None;
+    }
+    Some((
+        TelemetryTurn {
+            player: previous_last.player,
+            placements: vec![previous_first.coord, previous_last.coord],
+        },
+        TelemetryTurn {
+            player: last.player,
+            placements: vec![last_first.coord, last.coord],
+        },
+    ))
+}
+
+#[cfg(test)]
+fn coords_share_window(left: HexCoord, right: HexCoord) -> bool {
+    let dq = i32::from(left.q) - i32::from(right.q);
+    let dr = i32::from(left.r) - i32::from(right.r);
+    (dq == 0 && dr.abs() <= 5) || (dr == 0 && dq.abs() <= 5) || (dq == -dr && dq.abs() <= 5)
+}
+
+#[cfg(test)]
+fn classify_last_two_turns(state: &RustHexoState) -> Option<u8> {
+    let (first, second) = last_two_complete_turns(state)?;
+    let mut flags = 0u8;
+    if first.placements.iter().any(|&left| {
+        second
+            .placements
+            .iter()
+            .any(|&right| coords_share_window(left, right))
+    }) {
+        flags |= 1;
+    }
+
+    let excluded = first
+        .placements
+        .iter()
+        .chain(second.placements.iter())
+        .copied()
+        .collect::<HashSet<_>>();
+    let mut available = state
+        .board()
+        .occupied_cells()
+        .iter()
+        .copied()
+        .filter(|coord| !excluded.contains(coord))
+        .collect::<Vec<_>>();
+    for &coord in &second.placements {
+        if !available
+            .iter()
+            .any(|&support| hex_distance(coord, support) <= 8)
+        {
+            flags |= 2;
+            break;
+        }
+        available.push(coord);
+    }
+
+    let first_hits_second = first.placements.iter().any(|&coord| {
+        state.board().windows().entries().any(|entry| {
+            if !entry.key().contains(coord) {
+                return false;
+            }
+            let later = second
+                .placements
+                .iter()
+                .filter(|&&placed| entry.key().contains(placed))
+                .count() as u8;
+            entry.count(second.player).saturating_sub(later) >= 3
+        })
+    });
+    let second_hits_first = second.placements.iter().any(|&coord| {
+        state
+            .board()
+            .windows()
+            .entries()
+            .any(|entry| entry.key().contains(coord) && entry.count(first.player) >= 3)
+    });
+    if first_hits_second || second_hits_first {
+        flags |= 4;
+    }
+    Some(flags)
+}
+
 /// Wide VCF search keeps a persistent proof-number frontier.  Unlike the
 /// quota-based DFS experiments, expanding a sibling never discards work in an
 /// earlier forcing turn. Claimant pairs are represented as one OR edge, so
@@ -1343,6 +1888,8 @@ struct WidePnSearch {
     tt_first_rejection: Option<(u64, usize)>,
     #[cfg(test)]
     stage_refreshes: u64,
+    #[cfg(test)]
+    quotient_telemetry: Option<QuotientTelemetry>,
     entries: Vec<WidePnEntry>,
     by_position: HashMap<WidePositionKey, usize>,
 }
@@ -1414,11 +1961,18 @@ impl WidePnSearch {
             peak_tt_bytes: search.peak_tt_bytes as u64,
             ..stats
         };
+        #[cfg(test)]
+        let tt_signature = search.tt_behavior_signature();
+        #[cfg(test)]
+        if let Some(telemetry) = search.quotient_telemetry.take() {
+            let report = telemetry.finish(&search.tt, search.tt_hits);
+            LAST_QUOTIENT_REPORT.with(|slot| *slot.borrow_mut() = Some(report));
+        }
         AttemptResult {
             cert,
             stats,
             #[cfg(test)]
-            tt_signature: Some(search.tt_behavior_signature()),
+            tt_signature: Some(tt_signature),
         }
     }
 
@@ -1469,6 +2023,8 @@ impl WidePnSearch {
             tt_first_rejection: None,
             #[cfg(test)]
             stage_refreshes: 0,
+            #[cfg(test)]
+            quotient_telemetry: QuotientTelemetry::enabled(),
             entries: Vec::new(),
             by_position: HashMap::new(),
         }
@@ -1492,6 +2048,10 @@ impl WidePnSearch {
         // refusing the arena entry would strand the selected Pending edge and
         // make a memory-profile choice alter frontier progress.
         let id = self.entries.len();
+        #[cfg(test)]
+        if let Some(telemetry) = self.quotient_telemetry.as_mut() {
+            telemetry.observe_insert(&key);
+        }
         self.entries.push(WidePnEntry {
             pn: prior.pn,
             dn: prior.dn,
@@ -1564,6 +2124,10 @@ impl WidePnSearch {
             // Transposed parents outside the active recursion also need to see
             // the selected cutoff (or proof) before the stage decision.
             self.refresh_all_bottom_up();
+            #[cfg(test)]
+            if let Some(telemetry) = self.quotient_telemetry.as_mut() {
+                telemetry.observe_stage(&self.entries, &self.by_position, stage_depth);
+            }
             #[cfg(test)]
             if self.trace_enabled() {
                 let root_entry = &self.entries[root];
@@ -2456,6 +3020,10 @@ impl WidePnSearch {
             return WidePnStepOutcome::Stalled;
         }
         self.expansions += 1;
+        #[cfg(test)]
+        if let Some(telemetry) = self.quotient_telemetry.as_mut() {
+            telemetry.observe_expand(id, state);
+        }
         let depth = usize::try_from(state.placements_made().saturating_sub(self.root_ply))
             .unwrap_or(usize::MAX);
         if depth > self.depth_cap {
@@ -3257,6 +3825,91 @@ struct NarrowCompatSearch<'a> {
     zone: ZoneSearchCaps,
     width: WidthOptions,
     depth_cap: usize,
+    #[cfg(test)]
+    quotient_telemetry: Option<NarrowQuotientTelemetry>,
+}
+
+#[cfg(test)]
+struct NarrowQuotientTelemetry {
+    report: QuotientTelemetryReport,
+    expanded_raw: HashSet<WidePositionKey>,
+    expanded_canonical: HashMap<WidePositionKey, WidePositionKey>,
+}
+
+#[cfg(test)]
+impl NarrowQuotientTelemetry {
+    fn enabled() -> Option<Self> {
+        std::env::var_os("TSS_TURN_QUOTIENT_TELEMETRY").map(|_| Self {
+            report: QuotientTelemetryReport::default(),
+            expanded_raw: HashSet::new(),
+            expanded_canonical: HashMap::new(),
+        })
+    }
+
+    fn observe_expand(&mut self, state: &RustHexoState) {
+        let raw = WidePositionKey::from_state(state);
+        let started = Instant::now();
+        let canonical = raw.d6_canonical();
+        self.report.d6_canonicalization_calls =
+            self.report.d6_canonicalization_calls.saturating_add(1);
+        self.report.d6_canonicalization_nanos = self
+            .report
+            .d6_canonicalization_nanos
+            .saturating_add(started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
+        if !self.expanded_raw.insert(raw.clone()) {
+            return;
+        }
+        self.report.expanded_unique_positions =
+            self.report.expanded_unique_positions.saturating_add(1);
+        if self
+            .expanded_canonical
+            .get(&canonical)
+            .is_some_and(|first_raw| first_raw != &raw)
+        {
+            self.report.d6_expanded_duplicates =
+                self.report.d6_expanded_duplicates.saturating_add(1);
+        } else {
+            self.expanded_canonical.insert(canonical, raw);
+        }
+        if let Some(interaction) = classify_last_two_turns(state) {
+            self.report.commutation_eligible_nodes =
+                self.report.commutation_eligible_nodes.saturating_add(1);
+            if interaction == 0 {
+                self.report.commutation_independent_nodes =
+                    self.report.commutation_independent_nodes.saturating_add(1);
+            }
+            if interaction & 1 != 0 {
+                self.report.commutation_shared_window =
+                    self.report.commutation_shared_window.saturating_add(1);
+            }
+            if interaction & 2 != 0 {
+                self.report.commutation_legality_coupling =
+                    self.report.commutation_legality_coupling.saturating_add(1);
+            }
+            if interaction & 4 != 0 {
+                self.report.commutation_threat_response =
+                    self.report.commutation_threat_response.saturating_add(1);
+            }
+        }
+    }
+
+    fn finish(mut self, tt: &BoundedTt, tt_hits: u64) -> QuotientTelemetryReport {
+        let entries = tt.slots.iter().flatten().collect::<Vec<_>>();
+        let mut canonical = HashSet::new();
+        for entry in &entries {
+            canonical.insert(WidePositionKey::from_position_key(&entry.key).d6_canonical());
+        }
+        self.report.retained_entries = entries.len() as u64;
+        self.report.indexed_entries = entries.len() as u64;
+        self.report.tt_hits = tt_hits;
+        self.report.d6_index_denominator = entries.len() as u64;
+        self.report.d6_index_duplicates = entries.len().saturating_sub(canonical.len()) as u64;
+        self.report.horizon_queries = self.report.expanded_unique_positions;
+        self.report.horizon_clock_misses = self.report.expanded_unique_positions;
+        self.report.horizon_positions = self.report.expanded_unique_positions;
+        self.report.horizon_position_clock_entries = self.report.expanded_unique_positions;
+        self.report
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -3285,6 +3938,8 @@ impl NarrowCompatSearch<'static> {
             zone: ZoneSearchCaps::default(),
             width: WidthOptions::default(),
             depth_cap: MAX_SEARCH_DEPTH,
+            #[cfg(test)]
+            quotient_telemetry: NarrowQuotientTelemetry::enabled(),
         }
     }
 }
@@ -3320,6 +3975,8 @@ impl<'a> NarrowCompatSearch<'a> {
             zone,
             width,
             depth_cap,
+            #[cfg(test)]
+            quotient_telemetry: NarrowQuotientTelemetry::enabled(),
         }
     }
 
@@ -3362,6 +4019,10 @@ impl<'a> NarrowCompatSearch<'a> {
             return None;
         }
         self.nodes += 1;
+        #[cfg(test)]
+        if let Some(telemetry) = self.quotient_telemetry.as_mut() {
+            telemetry.observe_expand(state);
+        }
 
         let key = PositionKey::from_state(state);
         if pair.is_none() {

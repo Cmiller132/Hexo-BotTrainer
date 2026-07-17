@@ -1,0 +1,70 @@
+NQ4 MACHINE HUNT — SEARCH-SPACE QUOTIENTS BEYOND POSITION TRANSPOSITION.
+Goal: measure how much of the deep solver's node/TT work is spent on
+states that a sound quotient would identify, and find the largest
+implementable quotient. The engine already dedups canonical placement
+pairs within a turn and keys the TT by position; the open question is
+what remains: (a) COMMUTING CONSECUTIVE TURNS — two consecutive turns
+whose placements don't interact (no shared window, no legality-store
+coupling, no threat/response relation) produce the same position via
+two search paths that the position-keyed TT already merges at the
+ENDPOINT, but the INTERIOR nodes differ — measure the interior
+duplication; (b) HORIZON QUOTIENT — TT entries for the same position
+at different remaining-horizon values: measure how many entries differ
+ONLY in clock, and how often the stronger entry's verdict would settle
+the weaker query via monotonicity (WIN within h implies WIN within
+h'>=h; refutation at h' implies refutation at h<=h'); (c) D6 SYMMETRY
+at the TT — fraction of TT entries whose D6-canonical form already has
+an entry (the cert layer handles D6 images; the SEARCH TT may not);
+(d) anything else the telemetry exposes — you are hunting for wasted
+node classes, name what you find. Owner directive: the campaign goal
+is a dramatically more efficient solver; this hunt sizes the levers so
+the best one gets built.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-turn-quotient
+(branch hunt/turn-quotient @2430fc47 — the C1-unified engine). You
+CANNOT git-commit. Deliverable: HUNT_REPORT_TURN_QUOTIENT.md (worktree
+root, incremental) + a test-gated harness module (register under
+#[cfg(test)] in lib.rs). Instrumentation may add env-gated counters to
+tss_solver.rs (default off, zero cost off, node-count-identity assert
+on one corpus row on-vs-off) — no behavior change of any kind.
+
+## Measurements (deterministic; 19-corpus rungs at 10k/100k caps +
+## double_fork_compact + 100 seeded human-corpus deep roots)
+1. Baseline telemetry: nodes, TT entries, TT hits, per the above roots.
+2. (b) HORIZON: histogram TT entries by (position-key, horizon) —
+   count positions with >1 horizon entry; replay queries: how many
+   lookups MISSED but would have HIT under monotonicity-aware lookup
+   (verdict at stronger/weaker horizon applies)? Report the prospective
+   hit-rate gain and any correctness subtleties the replay exposes
+   (staged reopening semantics! a staged cutoff is not a disproof —
+   respect the engine's own dn=0 reopening rules; document exactly
+   which monotone transfers are sound under staged deepening and which
+   are NOT).
+3. (c) D6: canonicalize position keys under the 12 symmetries (reuse
+   the cert layer's D6 machinery); measure duplicate fraction among TT
+   entries and among expanded nodes, at each corpus rung. Report the
+   canonicalization cost per node (µs) vs prospective saving.
+4. (a) COMMUTATION: instrument parent-child turn pairs — classify
+   consecutive turns as INTERACTING (shared window on any placement
+   pair, legality coupling, or either turn hits the other side's
+   count>=3 window) vs independent; measure the fraction of interior
+   nodes on independent-turn paths and estimate the reachable interior
+   dedup (this sizes a canonical-turn-order rule: e.g. only expand
+   independent turns in one canonical order at OR nodes — is that
+   SOUND for the defender side? think adversarially about
+   completeness; report the exact soundness obligation a proof round
+   would owe).
+5. Rank the levers by (prospective node/TT saving) x (implementation
+   risk), with an honest recommendation of the ONE to build first and
+   the theorem it requires.
+
+## Rules
+CARGO_TARGET_DIR=.target-hunt; one cargo; --test-threads=1; single run
+<=10 min; free RAM >9 GB before every cargo (powershell
+"Get-CimInstance Win32_OperatingSystem | % { $_.FreePhysicalMemory/1MB
+}") — THREE other sessions share this 31 GB host (Lean priority); if
+below, wait and re-check. No commits. This worktree only; siblings
+read-only. rustfmt --edition 2021 only on files you edit. Any
+WIN-vs-LOSS anomaly = STOP and write up. Truthfulness outranks
+completeness. Final message: headline table (per-lever savings),
+recommendation, files, regen commands.
