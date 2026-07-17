@@ -6,14 +6,14 @@
 //! leaves the defender unforced), and measures where the quiet placements sit
 //! relative to the threat structures they eventually serve.
 //!
-//! Quiet-turn definition used here (stated explicitly for the report): an
-//! attacker turn is QUIET iff, after both of its placements (defender to move),
-//! the position is non-terminal AND there is no attacker window with
-//! `count(attacker) >= 4` and `count(defender) == 0` -- i.e. the defender is not
-//! forced to answer an immediate >=4 threat. This is the position-based reading
-//! of "the defender is not forced". We also record the engine's own
-//! `turn_forces_small_defender_reply` verdict (via `round3_shadow_certificate`)
-//! as an independent cross-check on the quiet-turn count.
+//! Quiet-turn definition used here (stated explicitly for the report): after a
+//! nonterminal SecondStone placement, the turn is QUIET iff the engine's
+//! `turn_forces_small_defender_reply` predicate is false.  A turn is forcing
+//! iff the claimant wins under threat analysis, or (outside Opening) there is
+//! at least one claimant >=4 threat, the defender cannot win now, and the
+//! minimum hitting set equals the defender's remaining budget.  The weaker
+//! "no claimant >=4 window" property is recorded separately as `strict_quiet`.
+//! `round3_shadow_certificate` independently cross-checks the engine verdict.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -24,10 +24,11 @@ use hexo_engine::{
 };
 
 use crate::threats_shared as threats;
-use crate::tss_core::{CertVerify, DeepSolve, ProofStatus, SolveCaps};
+use crate::tss_core::{CertVerify, DeepSolve, ProofStatus, SolveCaps, SolveGoal};
 use crate::tss_solver::{round3_shadow_certificate, TssSolver, WidthOptions};
 use crate::tss_verify::{
-    d6_transform_coord, CertNode, CertNodeId, TssCertificate, TssVerifier, MAX_CERT_DEPTH,
+    d6_transform_coord, CertNode, CertNodeId, RootBinding, TssCertificate, TssVerifier,
+    MAX_CERT_DEPTH,
 };
 
 // ------------------------------------------------------------------------
@@ -478,10 +479,11 @@ fn candidate_universes(
             .iter()
             .any(|&s| i32::from(hex_distance(cell, s)) <= k)
     };
-    // C(P) refinement: adjacency to a live attacker window AND within k of an
-    // attacker stone (the observed quiet moves both join a live window and sit
-    // one hex from an existing stone). `join_adj1` = join_live ∧ adj_stone(1).
+    // C(P) refinements: membership in a live attacker window AND within k of
+    // an attacker stone. `join_adj1` is the report's conjectured universe;
+    // `join_adj2` is the separately audited weaker adjacency tier.
     let join_adj1 = |cell: HexCoord| -> bool { in_live(cell) && adj_stone(cell, 1) };
+    let join_adj2 = |cell: HexCoord| -> bool { in_live(cell) && adj_stone(cell, 2) };
     let fams_within = |cell: HexCoord, k: i32| -> usize {
         live_families
             .iter()
@@ -502,7 +504,7 @@ fn candidate_universes(
     };
 
     // (name, predicate result for a cell) evaluated over the legal universe.
-    let eval = |cell: HexCoord| -> [bool; 9] {
+    let eval = |cell: HexCoord| -> [bool; 10] {
         [
             in_live(cell),
             fams_within(cell, 0) >= 2,
@@ -512,6 +514,7 @@ fn candidate_universes(
             pair_within(cell, 2),
             adj_stone(cell, 1),
             adj_stone(cell, 2),
+            join_adj2(cell),
             join_adj1(cell),
         ]
     };
@@ -524,9 +527,10 @@ fn candidate_universes(
         "nearpair_k2",
         "adj_stone_k1",
         "adj_stone_k2",
+        "join_adj2",
         "join_adj1",
     ];
-    const NC: usize = 9;
+    const NC: usize = 10;
     let mut sizes = [0usize; NC];
     for &c in legal {
         let e = eval(c);
@@ -858,7 +862,13 @@ fn replay_moves(moves: &[(i16, i16)]) -> Option<HexoState> {
         if state.is_terminal() {
             return None;
         }
-        apply_placement(&mut state, Placement { coord: HexCoord::new(q, r) }).ok()?;
+        apply_placement(
+            &mut state,
+            Placement {
+                coord: HexCoord::new(q, r),
+            },
+        )
+        .ok()?;
     }
     if state.is_terminal() {
         return None;
@@ -869,9 +879,7 @@ fn replay_moves(moves: &[(i16, i16)]) -> Option<HexoState> {
 fn d6_moves(moves: &[(i16, i16)], sym: u8) -> Option<Vec<(i16, i16)>> {
     moves
         .iter()
-        .map(|&(q, r)| {
-            d6_transform_coord(HexCoord::new(q, r), sym).map(|c| (c.q, c.r))
-        })
+        .map(|&(q, r)| d6_transform_coord(HexCoord::new(q, r), sym).map(|c| (c.q, c.r)))
         .collect()
 }
 
@@ -969,8 +977,7 @@ fn solve_and_mine(
                     eprintln!("QL_WARN spec_id={spec_id} walk_visit_budget_hit=true (partial)");
                 }
                 outcome.quiet_turns_mine = walk.out.len();
-                outcome.quiet_placements =
-                    walk.out.iter().map(|t| t.placements.len()).sum();
+                outcome.quiet_placements = walk.out.iter().map(|t| t.placements.len()).sum();
                 emit_records(
                     sink,
                     source,
@@ -1009,13 +1016,18 @@ fn open_sink(path_key: &str, default: &str) -> std::io::BufWriter<std::fs::File>
 #[test]
 #[ignore = "NQ2 quiet-locality: canonical + constructed double-fork family variants"]
 fn quiet_locality_specimens() {
-    let cap: u64 = std::env::var("QL_CAP").ok().and_then(|v| v.parse().ok()).unwrap_or(100_000);
+    let cap: u64 = std::env::var("QL_CAP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100_000);
     let tt_bytes: usize = std::env::var("QL_TT_BYTES")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(256 << 20);
-    let horizon_slack: u32 =
-        std::env::var("QL_HORIZON_SLACK").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
+    let horizon_slack: u32 = std::env::var("QL_HORIZON_SLACK")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
     let ram = free_ram_gb();
     eprintln!("QL_SPECIMENS_SETUP cap={cap} tt_bytes={tt_bytes} slack={horizon_slack} free_ram_gb={ram:.2}");
     assert!(ram > 9.0, "insufficient free RAM: {ram:.2} GiB");
@@ -1120,14 +1132,22 @@ fn quiet_locality_specimens() {
 #[test]
 #[ignore = "NQ2 quiet-locality: 122 leaf-width wide-only-win records"]
 fn quiet_locality_leafwidth() {
-    let cap: u64 = std::env::var("QL_CAP").ok().and_then(|v| v.parse().ok()).unwrap_or(100_000);
+    let cap: u64 = std::env::var("QL_CAP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100_000);
     let tt_bytes: usize = std::env::var("QL_TT_BYTES")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(256 << 20);
-    let horizon_slack: u32 =
-        std::env::var("QL_HORIZON_SLACK").ok().and_then(|v| v.parse().ok()).unwrap_or(40);
-    let limit: usize = std::env::var("QL_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
+    let horizon_slack: u32 = std::env::var("QL_HORIZON_SLACK")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(40);
+    let limit: usize = std::env::var("QL_LIMIT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(usize::MAX);
     let path = std::env::var("QL_LEAFW_PATH").unwrap_or_else(|_| {
         "E:/Hexo-BotTrainer-hexgt/.claude/worktrees/hunt-leaf-width/LEAF_WIDTH_RECORDS.jsonl"
             .to_string()
@@ -1156,7 +1176,8 @@ fn quiet_locality_leafwidth() {
         }
         n += 1;
         let prefix = parse_pairs_after(line, "prefix").expect("prefix array");
-        let game_hash = parse_string_field(line, "game_hash").unwrap_or_else(|| format!("rec{idx}"));
+        let game_hash =
+            parse_string_field(line, "game_hash").unwrap_or_else(|| format!("rec{idx}"));
         let ply = parse_int_field(line, "ply").unwrap_or(-1);
         let spec_id = format!("{game_hash}:ply{ply}");
         let Some(state) = replay_moves(&prefix) else {
@@ -1201,16 +1222,30 @@ fn quiet_locality_leafwidth() {
 #[test]
 #[ignore = "NQ2 quiet-locality: human-corpus attacker-node sample"]
 fn quiet_locality_human() {
-    let cap: u64 = std::env::var("QL_CAP").ok().and_then(|v| v.parse().ok()).unwrap_or(20_000);
+    let cap: u64 = std::env::var("QL_CAP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20_000);
     let tt_bytes: usize = std::env::var("QL_TT_BYTES")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(256 << 20);
-    let horizon_slack: u32 =
-        std::env::var("QL_HORIZON_SLACK").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
-    let sample: usize = std::env::var("QL_SAMPLE").ok().and_then(|v| v.parse().ok()).unwrap_or(400);
-    let seed: u64 = std::env::var("QL_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(0xC0FFEE);
-    let min_ply: u32 = std::env::var("QL_MIN_PLY").ok().and_then(|v| v.parse().ok()).unwrap_or(14);
+    let horizon_slack: u32 = std::env::var("QL_HORIZON_SLACK")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
+    let sample: usize = std::env::var("QL_SAMPLE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(400);
+    let seed: u64 = std::env::var("QL_SEED")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0xC0FFEE);
+    let min_ply: u32 = std::env::var("QL_MIN_PLY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(14);
     let path = std::env::var("QL_HUMAN_PATH").unwrap_or_else(|_| {
         "E:/Hexo-BotTrainer-hexgt/data/hexo-bootstrap-corpus/hexo_human_corpus.jsonl".to_string()
     });
@@ -1226,7 +1261,10 @@ fn quiet_locality_human() {
     // random midgame node almost never has one, so consume would burn caps for
     // nothing. The winner is read from the TRUE engine terminal (robust to any
     // winner-int convention).
-    let tail: u32 = std::env::var("QL_TAIL").ok().and_then(|v| v.parse().ok()).unwrap_or(16);
+    let tail: u32 = std::env::var("QL_TAIL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(16);
     struct Node {
         moves: Vec<(i16, i16)>, // prefix
         game_hash: String,
@@ -1250,7 +1288,14 @@ fn quiet_locality_human() {
             if end.is_terminal() {
                 break;
             }
-            if apply_placement(&mut end, Placement { coord: HexCoord::new(q, r) }).is_err() {
+            if apply_placement(
+                &mut end,
+                Placement {
+                    coord: HexCoord::new(q, r),
+                },
+            )
+            .is_err()
+            {
                 break;
             }
             applied += 1;
@@ -1280,12 +1325,22 @@ fn quiet_locality_human() {
                     ply,
                 });
             }
-            if apply_placement(&mut state, Placement { coord: HexCoord::new(q, r) }).is_err() {
+            if apply_placement(
+                &mut state,
+                Placement {
+                    coord: HexCoord::new(q, r),
+                },
+            )
+            .is_err()
+            {
                 break;
             }
         }
     }
-    eprintln!("QL_HUMAN_POOL decisive_games={decisive_games} tail={tail} candidate_nodes={}", nodes.len());
+    eprintln!(
+        "QL_HUMAN_POOL decisive_games={decisive_games} tail={tail} candidate_nodes={}",
+        nodes.len()
+    );
     let pool = nodes.len();
     let mut rng = XorShift(seed | 1);
     for i in (1..nodes.len()).rev() {
@@ -1335,5 +1390,333 @@ fn quiet_locality_human() {
     eprintln!(
         "QL_HUMAN_DONE pool={pool} sampled={} solved_win={solved_win} with_quiet={with_quiet} total_quiet_placements={total_quiet_placements}",
         nodes.len()
+    );
+}
+
+// ------------------------------------------------------------------------
+// TEST 4: adversarial remote defensive-tempo counterexamples.
+// ------------------------------------------------------------------------
+
+#[test]
+#[ignore = "NQ2 quiet-locality: overlap-family remote-seed counterexample"]
+fn quiet_locality_adversarial_family_geometry() {
+    // P0 stones (0,0),(1,0),(2,0) give an old horizontal live window.  The
+    // remote P0 placement (5,3) is in no old P0-live window.  It nevertheless
+    // creates a count-one vertical window through (5,0), which overlaps the
+    // old horizontal window.  Thus every old window keeps its exact count and
+    // every born window has completion distance five, but "only NEW families"
+    // is false for the harness's overlap-component definition of Family.
+    let replay = [(0, 0), (0, 8), (1, 7), (1, 0), (2, 0), (2, 7), (3, 7)];
+    let mut state = replay_moves(&replay).expect("remote-family replay");
+    let claimant = state.current_player();
+    assert_eq!(claimant, Player::Player0);
+    assert!(matches!(state.phase(), TurnPhase::FirstStone));
+
+    let remote = HexCoord::new(5, 3);
+    let before = live_attacker_windows(&state, claimant);
+    assert!(!before.iter().any(|(window, _)| window.contains(remote)));
+
+    let result = apply_placement(&mut state, Placement { coord: remote })
+        .expect("remote placement is engine-legal");
+    assert!(result.outcome.is_none());
+    let after = live_attacker_windows(&state, claimant);
+
+    for (window, old_count) in &before {
+        let new_count = after
+            .iter()
+            .find_map(|(candidate, count)| (candidate == window).then_some(*count))
+            .expect("old live window remains live");
+        assert_eq!(new_count, *old_count, "remote changed an old live window");
+    }
+
+    let born = after
+        .iter()
+        .filter(|(window, count)| {
+            *count == 1 && window.contains(remote) && !before.iter().any(|(old, _)| old == window)
+        })
+        .map(|(window, _)| *window)
+        .collect::<Vec<_>>();
+    assert!(!born.is_empty());
+    assert!(born
+        .iter()
+        .any(|new_window| before.iter().any(|(old, _)| new_window.intersects(*old))));
+    eprintln!(
+        "QL_ADV_FAMILY replay={} remote=[{},{}] old_windows={} born_delta5={} overlap_merge=true",
+        pairs_json(&replay),
+        remote.q,
+        remote.r,
+        before.len(),
+        born.len(),
+    );
+}
+
+#[test]
+#[ignore = "NQ2 quiet-locality: targeted required-remote quiet-win search"]
+fn quiet_locality_adversarial_required_remote() {
+    let cap: u64 = std::env::var("QL_ADV_CAP")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(200_000);
+    let tt_bytes: usize = std::env::var("QL_TT_BYTES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(256 << 20);
+    let horizon_slack: u32 = std::env::var("QL_ADV_HORIZON_SLACK")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(30);
+    let ram = free_ram_gb();
+    eprintln!(
+        "QL_ADV_SETUP cap={cap} tt_bytes={tt_bytes} slack={horizon_slack} free_ram_gb={ram:.2}"
+    );
+    assert!(ram > 9.0, "insufficient free RAM: {ram:.2} GiB");
+
+    #[derive(Clone)]
+    struct AdversarialCase {
+        id: &'static str,
+        replacements: Vec<(usize, (i16, i16))>,
+        remote: (i16, i16),
+    }
+
+    // Each mutation starts from the verifier-accepted double_fork_compact
+    // replay.  The first four variants translate P1's five-in-a-row and use a
+    // nonterminal P0 FirstStone build before the remaining stone must block a
+    // remote completion.  The final variant is a separate compact row
+    // mutation retaining the original first stone.
+    let cases = vec![
+        AdversarialCase {
+            id: "trapped_origin_diag_build6",
+            replacements: vec![
+                (2, (1, -1)),
+                (5, (2, -2)),
+                (6, (3, -3)),
+                (9, (4, -4)),
+                (10, (5, -5)),
+                (35, (6, 0)),
+            ],
+            remote: (6, -6),
+        },
+        AdversarialCase {
+            id: "trapped_origin_diag_build31",
+            replacements: vec![
+                (2, (1, -1)),
+                (5, (2, -2)),
+                (6, (3, -3)),
+                (9, (4, -4)),
+                (10, (5, -5)),
+                (35, (3, 1)),
+            ],
+            remote: (6, -6),
+        },
+        AdversarialCase {
+            id: "trapped_origin_vertical_build6",
+            replacements: vec![
+                (2, (0, -1)),
+                (5, (0, -2)),
+                (6, (0, -3)),
+                (9, (0, -4)),
+                (10, (0, -5)),
+                (35, (6, 0)),
+            ],
+            remote: (0, -6),
+        },
+        AdversarialCase {
+            id: "split_far_row_build6",
+            replacements: vec![
+                (2, (-7, -2)),
+                (5, (-8, -2)),
+                (6, (-9, -2)),
+                (9, (-11, -2)),
+                (10, (-12, -2)),
+                (35, (6, 0)),
+            ],
+            remote: (-10, -2),
+        },
+        AdversarialCase {
+            id: "compact_row2",
+            replacements: vec![(2, (0, 2)), (6, (1, 2)), (9, (2, 2)), (10, (3, 2))],
+            remote: (5, 2),
+        },
+    ];
+
+    let base = crate::tss_spare_corpus::mining_candidate("double_fork_compact");
+    let base_replay = state_replay(&base);
+    assert_eq!(base_replay.len(), 36);
+    let expected = [
+        (2usize, (4, 1)),
+        (5, (4, 2)),
+        (6, (4, 3)),
+        (9, (4, 4)),
+        (10, (4, 5)),
+        (35, (-1, 2)),
+    ];
+    for (index, coord) in expected {
+        assert_eq!(base_replay[index], coord, "base replay drift at {index}");
+    }
+
+    let mut structural = 0usize;
+    let mut quiet = 0usize;
+    let mut solver_unknown = 0usize;
+    let mut solver_hard_nonloss = 0usize;
+    let mut witness: Option<&'static str> = None;
+
+    for case in &cases {
+        let mut replay = base_replay.clone();
+        for &(index, replacement) in &case.replacements {
+            replay[index] = replacement;
+        }
+        let Some(root) = replay_moves(&replay) else {
+            eprintln!("QL_ADV_CASE id={} replay_valid=false", case.id);
+            continue;
+        };
+        let claimant = root.current_player();
+        assert_eq!(claimant, Player::Player0);
+        assert!(matches!(root.phase(), TurnPhase::SecondStone { .. }));
+        let defender = claimant.other();
+        let remote = HexCoord::new(case.remote.0, case.remote.1);
+
+        let mut legal = Vec::new();
+        root.write_legal_moves(&mut legal);
+        assert!(legal.contains(&remote), "{} remote is not legal", case.id);
+        let live = live_attacker_windows(&root, claimant);
+        let live_families = build_families(&live);
+        let stones = attacker_stones(&root, claimant);
+        let d_stone = stones
+            .iter()
+            .map(|stone| i32::from(hex_distance(remote, *stone)))
+            .min()
+            .expect("claimant has stones");
+        let candidates = candidate_universes(&legal, remote, &live, &live_families, &stones);
+        let hit = |name: &str| {
+            candidates
+                .iter()
+                .find_map(|(candidate, _, is_hit)| (*candidate == name).then_some(*is_hit))
+                .expect("named candidate")
+        };
+        assert!(!hit("join_live"), "{} unexpectedly joins live", case.id);
+        assert!(!hit("join_adj2"), "{} unexpectedly hits join_adj2", case.id);
+        assert!(!hit("join_adj1"), "{} unexpectedly hits join_adj1", case.id);
+        assert!(d_stone > 1);
+        structural += 1;
+
+        // Exact finite elimination: every other legal completion is
+        // nonterminal for A and leaves `remote` as a legal immediate six for
+        // D.  This proves necessity without interpreting UNKNOWN as absence.
+        let mut alternatives_eliminated = 0usize;
+        let mut invalid_alternative = None;
+        for &alternative in &legal {
+            if alternative == remote {
+                continue;
+            }
+            let mut child = root.clone();
+            let attack_result = apply_placement(&mut child, Placement { coord: alternative })
+                .expect("enumerated legal attacker completion");
+            if attack_result.outcome.is_some() {
+                invalid_alternative = Some((alternative, "attacker_completion"));
+                break;
+            }
+            let defender_result = apply_placement(&mut child, Placement { coord: remote })
+                .expect("remote remains a legal defender completion");
+            if defender_result.outcome.map(|outcome| outcome.winner) != Some(defender) {
+                invalid_alternative = Some((alternative, "no_immediate_defender_completion"));
+                break;
+            }
+            alternatives_eliminated += 1;
+        }
+        if let Some((alternative, reason)) = invalid_alternative {
+            eprintln!(
+                "QL_ADV_CASE id={} structural=true exact_elimination=false reason={} alternative=[{},{}]",
+                case.id, reason, alternative.q, alternative.r
+            );
+            continue;
+        }
+        assert_eq!(alternatives_eliminated + 1, legal.len());
+
+        let mut post = root.clone();
+        let post_result = apply_placement(&mut post, Placement { coord: remote })
+            .expect("forced remote attacker block");
+        assert!(post_result.outcome.is_none());
+        if engine_turn_forces_small_reply(&post, claimant) {
+            eprintln!(
+                "QL_ADV_CASE id={} structural=true quiet=false d_stone={} legal={} eliminated={}",
+                case.id,
+                d_stone,
+                legal.len(),
+                alternatives_eliminated
+            );
+            continue;
+        }
+        quiet += 1;
+
+        let caps = SolveCaps {
+            node_cap: cap,
+            tt_bytes_cap: tt_bytes,
+            semantic_horizon: root.placements_made().saturating_add(horizon_slack),
+        };
+        let mut solver = TssSolver::default();
+        solver.set_width_options(WidthOptions::round3_consume());
+        let result = solver.solve_goal(&post, &caps, SolveGoal::Loss);
+        eprintln!(
+            "QL_ADV_CASE id={} structural=true quiet=true d_stone={} legal={} eliminated={} status={:?} nodes={} cert_nodes={}",
+            case.id,
+            d_stone,
+            legal.len(),
+            alternatives_eliminated,
+            result.status,
+            result.stats.nodes,
+            result.cert.as_ref().map_or(0, |cert| cert.nodes.len()),
+        );
+        if result.status == ProofStatus::Unknown {
+            solver_unknown += 1;
+            continue;
+        }
+        if result.status != ProofStatus::Loss {
+            solver_hard_nonloss += 1;
+            continue;
+        }
+
+        let mut cert = result.cert.expect("hard result carries certificate");
+        assert!(TssVerifier.verify(&post, &cert, ProofStatus::Loss));
+        assert_eq!(cert.claimant, claimant);
+        let old_root = cert.root_node;
+        let parent_root = u32::try_from(cert.nodes.len()).expect("certificate node id");
+        cert.nodes.push(CertNode::Choice {
+            mv: remote,
+            child: old_root,
+        });
+        cert.root_node = parent_root;
+        cert.root = RootBinding::from_state(&root);
+        assert!(TssVerifier.verify(&root, &cert, ProofStatus::Win));
+
+        eprintln!(
+            "QL_ADV_WITNESS schema=1 id={} claimant={} phase=SecondStone remote=[{},{}] d_stone={} quiet=true legal={} eliminated={} candidates={} horizon={} cert_nodes={} replay={}",
+            case.id,
+            claimant.index(),
+            remote.q,
+            remote.r,
+            d_stone,
+            legal.len(),
+            alternatives_eliminated,
+            cand_json(&candidates),
+            cert.semantic_horizon,
+            cert.nodes.len(),
+            pairs_json(&replay),
+        );
+        witness = Some(case.id);
+        break;
+    }
+
+    eprintln!(
+        "QL_ADV_DONE generated={} structural={} quiet={} solver_unknown={} solver_hard_nonloss={} witnesses={}",
+        cases.len(),
+        structural,
+        quiet,
+        solver_unknown,
+        solver_hard_nonloss,
+        usize::from(witness.is_some()),
+    );
+    assert!(
+        witness.is_some(),
+        "no required-remote quiet-win witness verified"
     );
 }

@@ -1,0 +1,94 @@
+NQ2 QUIET-LOCALITY PROOF ROUND 1 — attack the locality conjecture for
+the certified quiet universe C(P). This is the crux gate for Group-2
+round 7: if C(P)=join_adj1 is proven complete for quiet-required wins,
+the production quiet OR fan-out shrinks ~15x (534 -> 36 median) with
+certificate-grade soundness. If it is FALSE, we need the counterexample
+family and the weakest sound restriction. Either outcome is a win;
+a gapped PROVEN is the only failure. Statement fidelity is the
+campaign's prime directive.
+
+You are working in
+E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-quiet-locality at commit
+a5c9c69b. You CANNOT git-commit. Write the deliverable to
+PROOF_QUIET_LOCALITY.md in the worktree root — standalone, incremental
+(skeleton with per-claim statuses first).
+
+## The conjecture (verbatim target)
+HUNT_REPORT_QUIET_LOCALITY.md §"Conjecture": at an unforced attacker OR
+node P (quiet-turn gate fires), if the attacker has a win whose winning
+line begins with a quiet turn, then it has one whose quiet placement c
+satisfies (i) c in a live attacker window AND (ii) dist(c, nearest
+attacker stone) <= 1. The report names the proof obstacle honestly: the
+anchor / remote-seed problem — quiet moves don't force, so the T3
+forced-reply potential does not apply; you need a strategy-preserving
+transformation ("no useful remote seed") that pulls any remote quiet
+move onto a C(P) cell without losing the win, against GENERAL BRANCHING
+DEFENSE.
+
+## Inputs (read in this order)
+1. HUNT_REPORT_QUIET_LOCALITY.md — definitions (use ITS exact quiet-turn
+   gate, live-window, and universe definitions), the law, the candidate
+   table, the named obstacle, the one displacement outlier (d_win=6).
+2. packages/hexfield_eq/rust/src/tss_quiet_locality_hunt.rs — the
+   harness (specimen replay, C(P) computation).
+3. The T3 zone proof for technique (potential/budget machinery):
+   E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hexfield-eq-main-review-65bd3a\docs\PROOF_TSS_DEFENDER_ZONES.md
+   (read the T3/T4 proof sections and the substitution-envelope D17
+   material; siblings read-only).
+4. The quiet-turn production semantics: tss_solver.rs in
+   E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width (read-only)
+   — quiet_turn_or_edges consume path; your theorem's hypotheses must
+   match the exact gate condition the engine fires.
+
+## Attack plan (suggested, not binding)
+A. Formalize the build potential: for a live family F, completion
+   distance delta(F) = min over windows W in F of |empty(W)|; a quiet
+   placement's progress = the multiset of delta reductions it causes.
+   Prove or refute: a remote seed (violating (i)) creates only NEW
+   families at delta >= 5 and reduces no existing live family, hence a
+   swap-argument (play instead the C(P) move the winning line uses
+   later, or any progress-maximal C(P) move) preserves the win with the
+   same or fewer total placements. The danger case: remote seeds whose
+   VALUE is defensive-tempo (bait) or dual-purpose geometry — hunt for
+   these adversarially before believing the swap.
+B. Treat condition (ii) separately from (i): (i) join-live may be
+   provable while (ii) adjacency is merely empirical (the hunt's
+   join_live candidate = 0.29x shrink, still valuable). If (ii) resists
+   proof, deliver the strongest provable C(P) (join_live? join_adj2?)
+   and label the rest CONJECTURED — the shadow-first round consumes
+   whatever is PROVEN.
+C. Machine adversarial search for counterexamples: extend the hunt
+   harness with a targeted search for wins REQUIRING a remote seed
+   (small constructed families, defender configurations that punish
+   every C(P) move but not a remote one; exploit the d_win=6
+   displacement outlier's geometry as a seed). A found counterexample
+   at any candidate tier immediately relabels that tier REFUTED with a
+   frozen witness.
+D. Also state the exhaustion consequence precisely: with a restricted
+   quiet generator, staged-frontier exhaustion means "no win via
+   C(P)-quiet lines" — spell out what additional claim (your theorem)
+   licenses lifting that to "no win", and what the verifier must check
+   (this is the consumption-soundness clause Group-2 round 7 will
+   implement).
+
+## Machine checks
+Extend tss_quiet_locality_hunt.rs with [ignore]-gated tests: the
+adversarial counterexample search (C) and any finite case-analysis your
+proof reduces to. CARGO_TARGET_DIR=.target-hunt, one cargo,
+--test-threads=1, single run <=10 min, free RAM >9 GB before cargo
+(powershell "Get-CimInstance Win32_OperatingSystem | % {
+$_.FreePhysicalMemory/1MB }") — TWO other sessions share this host; if
+below, wait and re-check.
+
+## Deliverable
+PROOF_QUIET_LOCALITY.md: per-claim labels (PROVEN /
+VERIFIED-EXHAUSTIVE / CONJECTURED / REFUTED / OPEN); the strongest
+proven C(P) tier with its exact theorem and consumption-soundness
+clause; refuted tiers with frozen witnesses; the residue stated
+sharply; an attack-surface section for hostile review. Final message:
+which tier is proven, tallies, files, regen commands.
+
+## Rules
+No commits. Work only in this worktree; siblings read-only. rustfmt
+--edition 2021 only on files you edit. Truthfulness outranks
+completeness — a weaker true theorem beats a strong gapped one.
