@@ -898,10 +898,10 @@ impl TssSolver {
     }
 }
 
-/// Imported zone fragments may have been built at a larger admissible
-/// horizon. Their searched set remains sound at a smaller T, but the carried
-/// D evidence must be relabelled to the assembled certificate's exact build
-/// horizon before solver-side preflight and independent verification.
+/// Imported zone fragments may have been built with a larger admissible
+/// budget. Their searched set remains sound for the selected proof, but the
+/// carried evidence must be relabelled from the assembled certificate itself:
+/// exact D14 local budgets and the certificate's exact build horizon.
 fn rebase_zone_distances(cert: &mut TssCertificate, root: &RustHexoState) -> Option<()> {
     let mut states = vec![None; cert.nodes.len()];
     let mut stack = vec![(cert.root_node, root.clone())];
@@ -936,19 +936,56 @@ fn rebase_zone_distances(cert: &mut TssCertificate, root: &RustHexoState) -> Opt
             _ => {}
         }
     }
-    for (index, state) in states.into_iter().enumerate() {
-        let Some(state) = state else {
-            return None;
+    if states.iter().any(Option::is_none) {
+        return None;
+    }
+
+    // `compact_certificate` emits nodes in postorder, so every ordinary child
+    // precedes its parent. Reconstruct the same D14 recurrence as the
+    // independent verifier: factual WIN leaves consume no defender budget,
+    // LOSS leaves retain the current turn remainder, Choice passes the budget
+    // through, and Universal adds one to the maximum child budget.
+    let mut local_budgets = Vec::with_capacity(cert.nodes.len());
+    for (index, node) in cert.nodes.iter().enumerate() {
+        let local_budget = match node {
+            CertNode::OrCompletion { .. } | CertNode::Win { .. } => 0,
+            CertNode::Loss { .. } => {
+                let state = states.get(index)?.as_ref()?;
+                u32::from(threats::placements_remaining(state))
+            }
+            CertNode::Choice { child, .. } => {
+                let child = *child as usize;
+                if child >= index {
+                    return None;
+                }
+                *local_budgets.get(child)?
+            }
+            CertNode::Universal { edges, .. } => {
+                let mut maximum = 0u32;
+                for edge in edges {
+                    let child = edge.child as usize;
+                    if child >= index {
+                        return None;
+                    }
+                    maximum = maximum.max(*local_budgets.get(child)?);
+                }
+                maximum.saturating_add(1)
+            }
         };
+        local_budgets.push(local_budget);
+    }
+
+    let build_horizon = cert.semantic_horizon;
+    for (index, node) in cert.nodes.iter_mut().enumerate() {
         if let CertNode::Universal {
             zone: Some(zone), ..
-        } = cert.nodes.get_mut(index)?
+        } = node
         {
-            zone.d = remaining_defender_placements_for_horizon(
-                &state,
-                cert.claimant,
-                cert.semantic_horizon,
-            )?;
+            let Some(&local_budget) = local_budgets.get(index) else {
+                return None;
+            };
+            zone.d = local_budget;
+            zone.build_horizon = build_horizon;
         }
     }
     Some(())
