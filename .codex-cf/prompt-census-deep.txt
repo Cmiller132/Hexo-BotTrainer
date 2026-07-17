@@ -1,0 +1,86 @@
+R-CF1 — DEADNESS CENSUS FAMILY, DEEP-PROFILE EXTENSION (hunt + conjecture design; proofs come LATER)
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-census-deep
+(branch hunt/census-deep, HEAD = d5a2b5fd). You CANNOT git-commit.
+Deliverables: HUNT_REPORT_CENSUS_DEEP.md + CENSUS_CANDIDATES.md (the
+conjecture ladder for the later proof round) + cfg(test)
+instrumentation + retained raw logs + exact regen commands.
+
+Read first (binding context):
+- BUILD_INTERIOR_GATE.md + the census passages of
+  docs/PLAN_TSS_SOLVER_UPGRADES.md — the landed interior census gate
+  (R-IG1): live at horizon-16 (−79/−93/−41% expansions) but INERT at
+  the unbounded official profile. Understanding WHY it is inert at
+  depth is this round's first job.
+- docs/PROOF_TSS_DEFENDER_ZONES.md — the proven census/zone substrate.
+  The DTW census theorem is h=8, gate c<=2, WIN-goal ONLY; its 7
+  production repairs are recorded (WindowStore::entries() scan
+  mandatory; threat-index census falsely gates; naive SS c=3 is FALSE —
+  treat that refutation as a hard warning against naive strengthening).
+- HUNT_REPORT_CAP_RESUME.md (official baselines), IDEATION_FINAL.md
+  (wall decomposition), and
+  E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-kernel-taxonomy\HUNT_REPORT_KERNEL_TAXONOMY.md
+  (R-KT1: post-T6 seam facts — forced reply widths 2–4; use its DAG
+  traversal pattern for shadow work).
+
+## Goal
+The census gate is the only landed mechanism that deletes whole
+subtrees by proof, and it currently does nothing at the deep profile.
+Extend the census FAMILY until it bites at depth — as measured,
+shadow-validated CONJECTURES ranked for the Lean proof round. Nothing
+from this round is consumable until proven (proof-backed bar); design
+candidates to be provable, not just empirically clean.
+
+## Phase A — why is the gate inert at depth? (measure FIRST)
+Default-off cfg(test) counters (TSS_CENSUS_DEEP_COUNTERS=1): at every
+point the interior gate is evaluated (or would be), record the census
+values vs thresholds — the near-miss distribution (how close does it
+come to firing?), which precondition fails (horizon bound? gate shape?
+census count?), and at what depths/phases. Run the official 1 GiB
+lazy+gate profile. Output: a quantitative inertness diagnosis. If the
+diagnosis shows deep firings are structurally impossible for the WHOLE
+family (not just the current member), an honest dry verdict here is a
+complete round — state it and stop.
+
+## Phase B — candidate design (the creative core; take it seriously)
+From the Phase-A data and the zone grammar, design candidate census
+extensions that WOULD fire at depth. Directions to weigh (not a closed
+list): more gate shapes; higher census thresholds c with the exact
+counting the DTW repairs mandate; LOSS-side censuses; horizon-
+parametric bounds f(h) that stay finite as h grows; censuses over
+zone/exposure structure rather than raw gates; compositional censuses
+(combining independent regional deficits). For each candidate record:
+the exact deadness claim ("no WIN within the contract if census < X"),
+why it should be PROVABLE from the existing substrate (name the
+theorems it would lean on), the evaluation cost, and the predicted fire
+rate from Phase-A data. Discard candidates that repeat the naive-SS
+mistake (counting that ignores window aliveness/occupancy exactness).
+
+## Phase C — shadow validation (conjectures, not consumption)
+For the top candidates (by predicted fire x prune value): cfg(test)
+shadow behind TSS_CENSUS_DEEP_SHADOW=1 — evaluate the candidate at
+interior nodes, record every WOULD-PRUNE, and adversarially check each
+against the actual search outcome: a COUNTEREXAMPLE is any would-pruned
+subtree in which the real search found a WIN (retain the full specimen;
+that candidate is REFUTED). For survivors report: fires, would-prune
+count, measured expansion mass inside would-pruned subtrees (= honest
+upper bound on the prize), evaluation overhead, 0 counterexamples.
+Rank survivors into CENSUS_CANDIDATES.md as the ordered proof queue
+with their deadness claims stated theorem-precisely. No consumption
+wiring anywhere; strict verifier untouched.
+
+## Rules
+CARGO_TARGET_DIR=.target-cf; --target x86_64-pc-windows-msvc on EVERY
+cargo; --test-threads=1. ONE cargo process host-wide — ANOTHER solver
+lane (R-IE1) runs cargo in a different worktree: before every cargo
+invocation check Get-Process cargo and WAIT in a sleep-300 loop while
+any exists; design/doc work while waiting; never kill other lanes'
+processes. The Lean spine lane (S9S-27) is running and holds RAM
+priority. RAM gates (relaxed 07-17 + idle-host clause, see
+E:\tss-lean\RAM_PROTOCOL.md): cargo needs availability >= 10 GB AND
+free-physical >= 5 GB; gate-class 1 GiB profiles >= 12/>= 6. Record
+readings. 94gnnol is out of scope (owner). cfg(test)-gated default-off
+only; production byte-identity when off (fast subset); honest partial
+stop at a clean boundary is success. Final message: inertness
+diagnosis, candidate list with per-candidate verdicts, survivor proof
+queue, files, regen commands.

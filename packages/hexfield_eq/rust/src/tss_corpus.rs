@@ -184,6 +184,9 @@ fn load_forcing_lines() -> Vec<ForcingLine> {
 fn tss_corpus_check() {
     let corpus = load_corpus();
     let tt_bytes_cap = test_tt_bytes_cap();
+    crate::tss_census_deep::reset();
+    let census_deep_counters = crate::tss_census_deep::counters_enabled();
+    let census_deep_shadow = crate::tss_census_deep::shadow_enabled();
     let shared_fragments = std::env::var("TSS_SHARED_FRAGMENTS").ok().as_deref() == Some("1");
     let lazy_frontier = std::env::var("TSS_LAZY_FRONTIER").ok().as_deref() == Some("1");
     let interior_gate = std::env::var("TSS_INTERIOR_CENSUS_GATE").ok().as_deref() == Some("1");
@@ -255,8 +258,22 @@ fn tss_corpus_check() {
             "TSS_THRESHOLD_DELTA does not match gate expectation",
         );
     }
+    if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_CENSUS_DEEP_COUNTERS") {
+        assert_eq!(
+            expected,
+            if census_deep_counters { "1" } else { "0" },
+            "TSS_CENSUS_DEEP_COUNTERS does not match gate expectation",
+        );
+    }
+    if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_CENSUS_DEEP_SHADOW") {
+        assert_eq!(
+            expected,
+            if census_deep_shadow { "1" } else { "0" },
+            "TSS_CENSUS_DEEP_SHADOW does not match gate expectation",
+        );
+    }
     println!(
-        "CORPUS_MODE shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={} cap_resume={} live_ge3_seed={} closure_counters={} threshold_counters={} threshold_delta={} tt_bytes_cap={tt_bytes_cap}",
+        "CORPUS_MODE shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={} cap_resume={} live_ge3_seed={} closure_counters={} threshold_counters={} threshold_delta={} census_deep_counters={} census_deep_shadow={} tt_bytes_cap={tt_bytes_cap}",
         if shared_fragments { "on" } else { "off" },
         if lazy_frontier { "on" } else { "off" },
         if interior_gate { "on" } else { "off" },
@@ -266,6 +283,8 @@ fn tss_corpus_check() {
         if closure_counters { "on" } else { "off" },
         if threshold_counters { "on" } else { "off" },
         threshold_delta,
+        if census_deep_counters { "on" } else { "off" },
+        if census_deep_shadow { "on" } else { "off" },
     );
     let selected_ids = std::env::var("TSS_CORPUS_ID").ok().map(|value| {
         let mut ids = value
@@ -337,6 +356,7 @@ fn tss_corpus_check() {
                 tt_bytes_cap,
                 semantic_horizon: u32::MAX,
             };
+            crate::tss_census_deep::set_context(&pos.id, *cap);
             let t0 = Instant::now();
             let (result, resume_meta) = if let Some(solver) = resume_solver.as_ref() {
                 if resume_session.is_none() && !resume_unsupported {
@@ -559,6 +579,7 @@ fn tss_corpus_check() {
         threshold_total.descent_nanos as f64 / 1e6,
         threshold_total.state_apply_undo_nanos as f64 / 1e6,
     );
+    crate::tss_census_deep::print_report();
     println!(
         "CORPUS_DONE failures={} shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={} cap_resume={} resume_wall_ms={resume_total_ms:.3} resume_reentries={resume_total_reentries}",
         failures.len(),

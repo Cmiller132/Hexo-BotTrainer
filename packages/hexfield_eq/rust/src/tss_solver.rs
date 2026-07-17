@@ -1090,6 +1090,8 @@ impl TssSolver {
         let root = search.insert_root(state);
         search.run(state, root);
         #[cfg(test)]
+        search.audit_census_deep(state, root);
+        #[cfg(test)]
         {
             self.last_wide_root_numbers = Some((search.entries[root].pn, search.entries[root].dn));
         }
@@ -1446,6 +1448,7 @@ impl CapResumeSession {
             &mut self.stage_depth,
             &mut self.stage_initialized,
         );
+        self.search.audit_census_deep(state, self.root);
         pn_init_finalize_wide(&self.search);
 
         let root_pn = self.search.entries[self.root].pn;
@@ -2384,6 +2387,40 @@ struct WidePnEntry {
     universal_obligation: Option<usize>,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum CensusDeepActual {
+    Proven,
+    Refuted,
+    #[default]
+    Unknown,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
+struct CensusDeepAuditNode {
+    visited: bool,
+    bits: [bool; crate::tss_census_deep::CANDIDATE_COUNT],
+    deadline: Option<u32>,
+    children: Vec<usize>,
+    actual: CensusDeepActual,
+    proof_resolution: Option<u32>,
+}
+
+#[cfg(test)]
+impl Default for CensusDeepAuditNode {
+    fn default() -> Self {
+        Self {
+            visited: false,
+            bits: [false; crate::tss_census_deep::CANDIDATE_COUNT],
+            deadline: None,
+            children: Vec::new(),
+            actual: CensusDeepActual::Unknown,
+            proof_resolution: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct WideProvenCandidate {
     id: usize,
@@ -3317,6 +3354,12 @@ struct WidePnSearch<'store> {
     #[cfg(test)]
     threshold_last_selected: Vec<Option<usize>>,
     #[cfg(test)]
+    census_deep_shadow: bool,
+    #[cfg(test)]
+    census_deep_expansion_events: Vec<u32>,
+    #[cfg(test)]
+    census_deep_gate_stage_remaining: Vec<Option<usize>>,
+    #[cfg(test)]
     quotient_telemetry: Option<QuotientTelemetry>,
     entries: Vec<WidePnEntry>,
     by_position: HashMap<WidePositionKey, usize>,
@@ -3571,6 +3614,12 @@ impl<'store> WidePnSearch<'store> {
             #[cfg(test)]
             threshold_last_selected: Vec::new(),
             #[cfg(test)]
+            census_deep_shadow: crate::tss_census_deep::shadow_enabled(),
+            #[cfg(test)]
+            census_deep_expansion_events: Vec::new(),
+            #[cfg(test)]
+            census_deep_gate_stage_remaining: Vec::new(),
+            #[cfg(test)]
             quotient_telemetry: QuotientTelemetry::enabled(),
             entries: Vec::new(),
             by_position: HashMap::new(),
@@ -3635,6 +3684,13 @@ impl<'store> WidePnSearch<'store> {
             depth,
             universal_obligation: None,
         });
+        #[cfg(test)]
+        if self.census_deep_shadow {
+            debug_assert_eq!(self.census_deep_expansion_events.len(), id);
+            self.census_deep_expansion_events.push(0);
+            debug_assert_eq!(self.census_deep_gate_stage_remaining.len(), id);
+            self.census_deep_gate_stage_remaining.push(None);
+        }
 
         let added = wide_position_index_bytes(&key);
         if self.tt_bytes_cap > 0 && self.current_bytes.saturating_add(added) <= self.tt_bytes_cap {
@@ -5061,6 +5117,13 @@ impl<'store> WidePnSearch<'store> {
         self.expansions += 1;
         #[cfg(test)]
         {
+            if self.census_deep_shadow {
+                let events = self
+                    .census_deep_expansion_events
+                    .get_mut(id)
+                    .expect("shadow expansion entry must exist");
+                *events = events.saturating_add(1);
+            }
             if self.threshold_counters {
                 self.threshold_expansion_clock.set(self.expansions);
             }
@@ -5145,6 +5208,33 @@ impl<'store> WidePnSearch<'store> {
                 return WidePnStepOutcome::Progress;
             }
         }
+
+        #[cfg(test)]
+        if self.census_deep_shadow {
+            let remaining = self.depth_cap.checked_sub(depth);
+            let slot = self
+                .census_deep_gate_stage_remaining
+                .get_mut(id)
+                .expect("shadow gate entry must exist");
+            // A node normally reaches the post-tactical gate once: earlier
+            // too-shallow visits return as DepthCutoff before this seam. Keep
+            // the first actual deadline rather than retrospectively choosing
+            // the smallest budget across a staged run.
+            if slot.is_none() {
+                *slot = remaining;
+            }
+        }
+
+        #[cfg(test)]
+        crate::tss_census_deep::observe_gate_point(
+            state,
+            self.claimant,
+            self.root_ply,
+            self.semantic_horizon,
+            depth,
+            self.depth_cap.checked_sub(depth),
+            crate::tss_census_deep::Backend::Wide,
+        );
 
         if self.interior_census_gate && state.current_player() == self.claimant {
             if let Some(evaluation) = evaluate_interior_census_gate(
@@ -5558,6 +5648,630 @@ impl<'store> WidePnSearch<'store> {
             }
         }
         self.defender_children(state, defender_budget)
+    }
+
+    #[cfg(test)]
+    fn audit_census_deep(&self, root_state: &RustHexoState, root: usize) {
+        use crate::tss_census_deep::{CandidateAudit, CANDIDATES};
+
+        if !self.census_deep_shadow {
+            return;
+        }
+        let started = Instant::now();
+        let mut work = root_state.clone();
+        let mut nodes = vec![CensusDeepAuditNode::default(); self.entries.len()];
+        let mut audits = CANDIDATES.map(|candidate| CandidateAudit {
+            candidate: Some(candidate),
+            ..CandidateAudit::default()
+        });
+        let mut traversal_errors = 0u64;
+        let mut pair_scans = 0u64;
+        let mut pair_nanos = 0u64;
+        let mut families_checked = 0u64;
+        let mut resolution_memo = vec![None; self.entries.len()];
+        let mut path = Vec::new();
+        self.audit_census_deep_node(
+            &mut work,
+            root,
+            &mut nodes,
+            &mut audits,
+            &mut traversal_errors,
+            &mut pair_scans,
+            &mut pair_nanos,
+            &mut families_checked,
+            &mut resolution_memo,
+            &mut path,
+        );
+
+        for candidate in CANDIDATES {
+            let index = candidate.index();
+            let audit = &mut audits[index];
+            let mut seeds = nodes
+                .iter()
+                .enumerate()
+                .filter_map(|(id, node)| (node.visited && node.bits[index]).then_some(id))
+                .collect::<Vec<_>>();
+            seeds.sort_unstable_by_key(|&id| {
+                self.entries
+                    .get(id)
+                    .map(|entry| entry.depth)
+                    .unwrap_or(usize::MAX)
+            });
+            audit.fires = u64::try_from(seeds.len()).unwrap_or(u64::MAX);
+            for &id in &seeds {
+                match nodes[id].actual {
+                    CensusDeepActual::Proven if candidate.is_bounded() => {
+                        match (nodes[id].proof_resolution, nodes[id].deadline) {
+                            (Some(resolution), Some(deadline)) if resolution <= deadline => {
+                                audit.counterexamples = audit.counterexamples.saturating_add(1);
+                            }
+                            (Some(_), Some(_)) => {
+                                audit.late_wins = audit.late_wins.saturating_add(1);
+                            }
+                            _ => {
+                                audit.unresolved_wins = audit.unresolved_wins.saturating_add(1);
+                            }
+                        }
+                    }
+                    CensusDeepActual::Proven => {
+                        audit.counterexamples = audit.counterexamples.saturating_add(1);
+                    }
+                    CensusDeepActual::Refuted => {
+                        audit.search_refuted = audit.search_refuted.saturating_add(1);
+                    }
+                    CensusDeepActual::Unknown => {
+                        audit.search_unknown = audit.search_unknown.saturating_add(1);
+                    }
+                }
+            }
+
+            let mut covered = vec![false; nodes.len()];
+            for seed in seeds {
+                if covered.get(seed).copied().unwrap_or(true) {
+                    continue;
+                }
+                audit.would_prunes = audit.would_prunes.saturating_add(1);
+                let mut stack = vec![seed];
+                while let Some(id) = stack.pop() {
+                    let Some(mark) = covered.get_mut(id) else {
+                        traversal_errors = traversal_errors.saturating_add(1);
+                        continue;
+                    };
+                    if *mark {
+                        continue;
+                    }
+                    *mark = true;
+                    if let Some(node) = nodes.get(id) {
+                        stack.extend(node.children.iter().copied());
+                    }
+                }
+            }
+            audit.expansion_mass = covered
+                .iter()
+                .enumerate()
+                .filter(|(_, marked)| **marked)
+                .map(|(id, _)| {
+                    u64::from(
+                        self.census_deep_expansion_events
+                            .get(id)
+                            .copied()
+                            .unwrap_or(0),
+                    )
+                })
+                .fold(0u64, u64::saturating_add);
+        }
+
+        let audit_nanos = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+        crate::tss_census_deep::record_shadow_audit(
+            &audits,
+            audit_nanos,
+            pair_scans,
+            pair_nanos,
+            families_checked,
+            traversal_errors,
+        );
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    fn audit_census_deep_node(
+        &self,
+        state: &mut RustHexoState,
+        id: usize,
+        nodes: &mut [CensusDeepAuditNode],
+        audits: &mut [crate::tss_census_deep::CandidateAudit],
+        traversal_errors: &mut u64,
+        pair_scans: &mut u64,
+        pair_nanos: &mut u64,
+        families_checked: &mut u64,
+        resolution_memo: &mut [Option<Option<u32>>],
+        path: &mut Vec<HexCoord>,
+    ) {
+        use crate::tss_census_deep::Candidate;
+
+        let Some(node_slot) = nodes.get_mut(id) else {
+            *traversal_errors = (*traversal_errors).saturating_add(1);
+            return;
+        };
+        if node_slot.visited {
+            return;
+        }
+        node_slot.visited = true;
+        let Some(entry) = self.entries.get(id) else {
+            *traversal_errors = (*traversal_errors).saturating_add(1);
+            return;
+        };
+        let depth = entry.depth;
+        let pn = entry.pn;
+        let dn = entry.dn;
+        let arena_node = entry.node.clone();
+        let mut observed_pair = None;
+        nodes[id].actual = if pn == 0 {
+            CensusDeepActual::Proven
+        } else if dn == 0 && !matches!(&arena_node, WidePnNode::DepthCutoff) {
+            CensusDeepActual::Refuted
+        } else {
+            CensusDeepActual::Unknown
+        };
+
+        let stage_remaining = self
+            .census_deep_gate_stage_remaining
+            .get(id)
+            .copied()
+            .flatten()
+            .filter(|_| depth > 0);
+        if let Some(remaining) = stage_remaining {
+            let deadline = state
+                .placements_made()
+                .saturating_add(u32::try_from(remaining).unwrap_or(u32::MAX));
+            nodes[id].deadline = Some(deadline);
+
+            let (dtw, dtw_nanos) =
+                crate::tss_census_deep::stage_dtw_evaluation(state, self.claimant, remaining);
+            let dtw_audit = &mut audits[Candidate::StageDtw.index()];
+            dtw_audit.evaluations = dtw_audit.evaluations.saturating_add(1);
+            dtw_audit.evaluation_nanos = dtw_audit.evaluation_nanos.saturating_add(dtw_nanos);
+            if dtw {
+                nodes[id].bits[Candidate::StageDtw.index()] = true;
+            }
+
+            if state.current_player() != self.claimant {
+                let restore_started = Instant::now();
+                let analysis = threats::analyze(state);
+                let shifted_bound = match state.phase() {
+                    TurnPhase::FirstStone => Some(8usize),
+                    TurnPhase::SecondStone { .. } => Some(7usize),
+                    TurnPhase::Opening => None,
+                };
+                let restore = analysis.opp_threat_count > 0
+                    && !analysis.own_win_now
+                    && analysis.min_hitting_set == Some(analysis.b)
+                    && shifted_bound.is_some_and(|bound| bound > remaining);
+                let restore_profile = restore
+                    .then(|| {
+                        crate::tss_census_deep::defender_restore4_profile(state, self.claimant)
+                    })
+                    .unwrap_or_default();
+                let restore_nanos = (restore_started
+                    .elapsed()
+                    .as_nanos()
+                    .min(u128::from(u64::MAX)) as u64)
+                    .max(restore_profile.scan_nanos);
+                let restore_audit = &mut audits[Candidate::DefenderRestore4.index()];
+                restore_audit.evaluations = restore_audit.evaluations.saturating_add(1);
+                restore_audit.evaluation_nanos =
+                    restore_audit.evaluation_nanos.saturating_add(restore_nanos);
+                restore_audit.work_units = restore_audit
+                    .work_units
+                    .saturating_add(restore_profile.sequences_checked);
+                if restore && restore_profile.restored {
+                    nodes[id].bits[Candidate::DefenderRestore4.index()] = true;
+                }
+            }
+
+            let deadline_profile =
+                crate::tss_census_deep::deadline_profile(state, self.claimant, remaining);
+            for candidate in [
+                Candidate::DeadlineEs,
+                Candidate::DeadlineEsPreblock,
+                Candidate::DeadlineEsTriple,
+            ] {
+                audits[candidate.index()].evaluations =
+                    audits[candidate.index()].evaluations.saturating_add(1);
+            }
+            audits[Candidate::DeadlineEs.index()].evaluation_nanos = audits
+                [Candidate::DeadlineEs.index()]
+            .evaluation_nanos
+            .saturating_add(deadline_profile.scan_nanos);
+            audits[Candidate::DeadlineEs.index()].work_units = audits
+                [Candidate::DeadlineEs.index()]
+            .work_units
+            .saturating_add(u64::from(deadline_profile.family_windows));
+            audits[Candidate::DeadlineEsPreblock.index()].evaluation_nanos = audits
+                [Candidate::DeadlineEsPreblock.index()]
+            .evaluation_nanos
+            .saturating_add(
+                deadline_profile
+                    .scan_nanos
+                    .saturating_add(deadline_profile.preblock_nanos),
+            );
+            audits[Candidate::DeadlineEsPreblock.index()].work_units = audits
+                [Candidate::DeadlineEsPreblock.index()]
+            .work_units
+            .saturating_add(u64::from(deadline_profile.family_windows))
+            .saturating_add(deadline_profile.preblock_steps);
+            audits[Candidate::DeadlineEsTriple.index()].evaluation_nanos = audits
+                [Candidate::DeadlineEsTriple.index()]
+            .evaluation_nanos
+            .saturating_add(
+                deadline_profile
+                    .scan_nanos
+                    .saturating_add(deadline_profile.triple_nanos),
+            );
+            audits[Candidate::DeadlineEsTriple.index()].work_units = audits
+                [Candidate::DeadlineEsTriple.index()]
+            .work_units
+            .saturating_add(u64::from(deadline_profile.family_windows))
+            .saturating_add(deadline_profile.triple_states);
+            audits[Candidate::DeadlineEsTriple.index()].capped_evaluations = audits
+                [Candidate::DeadlineEsTriple.index()]
+            .capped_evaluations
+            .saturating_add(u64::from(deadline_profile.triple_capped));
+            if deadline_profile.dtes {
+                nodes[id].bits[Candidate::DeadlineEs.index()] = true;
+            }
+            if deadline_profile.dtes_preblock {
+                nodes[id].bits[Candidate::DeadlineEsPreblock.index()] = true;
+            }
+            if deadline_profile.dtes_triple {
+                nodes[id].bits[Candidate::DeadlineEsTriple.index()] = true;
+            }
+        }
+
+        if stage_remaining.is_some()
+            && state.current_player() == self.claimant
+            && matches!(state.phase(), TurnPhase::FirstStone)
+        {
+            let pair_started = Instant::now();
+            let pair = crate::tss_census_deep::pair_service_profile(state, self.claimant);
+            let nanos = pair_started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+            *pair_scans = (*pair_scans).saturating_add(1);
+            *pair_nanos = (*pair_nanos).saturating_add(nanos);
+            *families_checked = (*families_checked).saturating_add(pair.families_checked);
+            for (candidate, threshold) in [
+                (Candidate::PairServiceC1, 1u8),
+                (Candidate::PairServiceC2, 2u8),
+                (Candidate::PairServiceC3, 3u8),
+            ] {
+                let audit = &mut audits[candidate.index()];
+                audit.evaluations = audit.evaluations.saturating_add(1);
+                audit.evaluation_nanos = audit.evaluation_nanos.saturating_add(nanos);
+                audit.work_units = audit.work_units.saturating_add(pair.families_checked);
+                if pair.census <= threshold && pair.all_families_hit_one {
+                    nodes[id].bits[candidate.index()] = true;
+                }
+            }
+            observed_pair = Some(pair);
+        }
+
+        let mut child_ids = Vec::new();
+        let mut branch_kind = None;
+        let mut branch_len = 0usize;
+        if let WidePnNode::Branch { kind, children } = arena_node {
+            branch_kind = Some(kind);
+            branch_len = children.len();
+            for child in children {
+                let Some(child_id) = self.resolved_child_entry(&child) else {
+                    continue;
+                };
+                child_ids.push(child_id);
+                if nodes.get(child_id).is_some_and(|node| node.visited) {
+                    continue;
+                }
+                match child.mv {
+                    WidePnMove::One(coord) => {
+                        let Ok((_result, delta)) = state.apply_with_delta(Placement { coord })
+                        else {
+                            *traversal_errors = (*traversal_errors).saturating_add(1);
+                            continue;
+                        };
+                        path.push(coord);
+                        self.audit_census_deep_node(
+                            state,
+                            child_id,
+                            nodes,
+                            audits,
+                            traversal_errors,
+                            pair_scans,
+                            pair_nanos,
+                            families_checked,
+                            resolution_memo,
+                            path,
+                        );
+                        path.pop();
+                        state.undo(delta);
+                    }
+                    WidePnMove::Pair(first, second) | WidePnMove::DefenderPair(first, second) => {
+                        let Ok((_first_result, first_delta)) =
+                            state.apply_with_delta(Placement { coord: first })
+                        else {
+                            *traversal_errors = (*traversal_errors).saturating_add(1);
+                            continue;
+                        };
+                        let Ok((_second_result, second_delta)) =
+                            state.apply_with_delta(Placement { coord: second })
+                        else {
+                            state.undo(first_delta);
+                            *traversal_errors = (*traversal_errors).saturating_add(1);
+                            continue;
+                        };
+                        path.push(first);
+                        path.push(second);
+                        self.audit_census_deep_node(
+                            state,
+                            child_id,
+                            nodes,
+                            audits,
+                            traversal_errors,
+                            pair_scans,
+                            pair_nanos,
+                            families_checked,
+                            resolution_memo,
+                            path,
+                        );
+                        path.pop();
+                        path.pop();
+                        state.undo(second_delta);
+                        state.undo(first_delta);
+                    }
+                }
+            }
+        }
+        nodes[id].children = child_ids.clone();
+
+        let composite_started = Instant::now();
+        let pair_base = nodes[id].bits[Candidate::PairServiceC3.index()];
+        match branch_kind {
+            Some(WidePnKind::Universal { .. }) => {
+                let reply_lift = child_ids.iter().any(|&child| {
+                    nodes
+                        .get(child)
+                        .is_some_and(|node| node.bits[Candidate::PairServiceC3.index()])
+                });
+                nodes[id].bits[Candidate::DefenderReplyLift.index()] = reply_lift;
+                nodes[id].bits[Candidate::CensusAttractor.index()] = pair_base
+                    || child_ids.iter().any(|&child| {
+                        nodes
+                            .get(child)
+                            .is_some_and(|node| node.bits[Candidate::CensusAttractor.index()])
+                    });
+            }
+            Some(WidePnKind::Choice) => {
+                let complete = branch_len != 0 && child_ids.len() == branch_len;
+                nodes[id].bits[Candidate::TwoCycleLift.index()] = complete
+                    && child_ids.iter().all(|&child| {
+                        nodes
+                            .get(child)
+                            .is_some_and(|node| node.bits[Candidate::DefenderReplyLift.index()])
+                    });
+                nodes[id].bits[Candidate::CensusAttractor.index()] = pair_base
+                    || complete
+                        && child_ids.iter().all(|&child| {
+                            nodes
+                                .get(child)
+                                .is_some_and(|node| node.bits[Candidate::CensusAttractor.index()])
+                        });
+            }
+            None => {
+                nodes[id].bits[Candidate::CensusAttractor.index()] = pair_base;
+            }
+        }
+        nodes[id].bits[Candidate::CensusAttractor.index()] |= nodes[id].bits
+            [Candidate::DefenderReplyLift.index()]
+            || nodes[id].bits[Candidate::TwoCycleLift.index()];
+        let composite_nanos = composite_started
+            .elapsed()
+            .as_nanos()
+            .min(u128::from(u64::MAX)) as u64;
+        for candidate in [
+            Candidate::DefenderReplyLift,
+            Candidate::TwoCycleLift,
+            Candidate::CensusAttractor,
+        ] {
+            let audit = &mut audits[candidate.index()];
+            audit.evaluations = audit.evaluations.saturating_add(1);
+            audit.evaluation_nanos = audit.evaluation_nanos.saturating_add(composite_nanos);
+            audit.work_units = audit
+                .work_units
+                .saturating_add(u64::try_from(child_ids.len()).unwrap_or(u64::MAX));
+        }
+
+        if pn == 0
+            && crate::tss_census_deep::CANDIDATES
+                .iter()
+                .any(|candidate| candidate.is_bounded() && nodes[id].bits[candidate.index()])
+        {
+            nodes[id].proof_resolution =
+                self.census_deep_min_resolution(state, id, resolution_memo, traversal_errors);
+        }
+
+        if pn == 0 {
+            let expansion_events = self
+                .census_deep_expansion_events
+                .get(id)
+                .copied()
+                .unwrap_or(0);
+            for candidate in crate::tss_census_deep::CANDIDATES {
+                if !nodes[id].bits[candidate.index()] {
+                    continue;
+                }
+                let counterexample = if candidate.is_bounded() {
+                    nodes[id]
+                        .proof_resolution
+                        .zip(nodes[id].deadline)
+                        .is_some_and(|(resolution, deadline)| resolution <= deadline)
+                } else {
+                    true
+                };
+                if counterexample {
+                    crate::tss_census_deep::record_counterexample(
+                        candidate,
+                        state,
+                        self.claimant,
+                        id,
+                        depth,
+                        expansion_events,
+                        observed_pair,
+                        nodes[id].proof_resolution,
+                        nodes[id].deadline,
+                        path,
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn census_deep_min_resolution(
+        &self,
+        state: &mut RustHexoState,
+        id: usize,
+        memo: &mut [Option<Option<u32>>],
+        traversal_errors: &mut u64,
+    ) -> Option<u32> {
+        if let Some(cached) = memo.get(id).copied().flatten() {
+            return cached;
+        }
+        let Some(entry) = self.entries.get(id) else {
+            *traversal_errors = (*traversal_errors).saturating_add(1);
+            return None;
+        };
+        if entry.pn != 0 {
+            if let Some(slot) = memo.get_mut(id) {
+                *slot = Some(None);
+            }
+            return None;
+        }
+        let result = match entry.node.clone() {
+            WidePnNode::ProvenLeaf(leaf) => Some(node_resolution(&leaf)),
+            WidePnNode::ProvenFragment(fragment) => Some(fragment.proof.resolution_t),
+            WidePnNode::Branch {
+                kind: WidePnKind::Choice,
+                children,
+            } => children
+                .iter()
+                .filter(|child| self.child_numbers(child).0 == 0)
+                .filter_map(|child| {
+                    self.census_deep_child_resolution(state, child, memo, traversal_errors)
+                })
+                .min(),
+            WidePnNode::Branch {
+                kind: WidePnKind::Universal { .. },
+                children,
+            } => {
+                if children.is_empty() {
+                    None
+                } else {
+                    let mut maximum = 0u32;
+                    let mut complete = true;
+                    for child in &children {
+                        if self.child_numbers(child).0 != 0 {
+                            complete = false;
+                            break;
+                        }
+                        let Some(resolution) =
+                            self.census_deep_child_resolution(state, child, memo, traversal_errors)
+                        else {
+                            complete = false;
+                            break;
+                        };
+                        maximum = maximum.max(resolution);
+                    }
+                    complete.then_some(maximum)
+                }
+            }
+            WidePnNode::Unexpanded | WidePnNode::DepthCutoff | WidePnNode::Refuted => None,
+        };
+        if let Some(slot) = memo.get_mut(id) {
+            *slot = Some(result);
+        } else {
+            *traversal_errors = (*traversal_errors).saturating_add(1);
+        }
+        result
+    }
+
+    #[cfg(test)]
+    fn census_deep_child_resolution(
+        &self,
+        state: &mut RustHexoState,
+        child: &WidePnChild,
+        memo: &mut [Option<Option<u32>>],
+        traversal_errors: &mut u64,
+    ) -> Option<u32> {
+        let (winner, first_delta, second_delta) = match child.mv {
+            WidePnMove::One(coord) => {
+                let Ok((result, delta)) = state.apply_with_delta(Placement { coord }) else {
+                    *traversal_errors = (*traversal_errors).saturating_add(1);
+                    return None;
+                };
+                (
+                    result.outcome.map(|outcome| outcome.winner),
+                    Some(delta),
+                    None,
+                )
+            }
+            WidePnMove::Pair(first, second) | WidePnMove::DefenderPair(first, second) => {
+                let Ok((_first_result, first_delta)) =
+                    state.apply_with_delta(Placement { coord: first })
+                else {
+                    *traversal_errors = (*traversal_errors).saturating_add(1);
+                    return None;
+                };
+                let Ok((second_result, second_delta)) =
+                    state.apply_with_delta(Placement { coord: second })
+                else {
+                    state.undo(first_delta);
+                    *traversal_errors = (*traversal_errors).saturating_add(1);
+                    return None;
+                };
+                (
+                    second_result.outcome.map(|outcome| outcome.winner),
+                    Some(first_delta),
+                    Some(second_delta),
+                )
+            }
+        };
+        let result = match child.result {
+            WidePnChildResult::ClaimantCompletion if winner == Some(self.claimant) => {
+                Some(state.placements_made())
+            }
+            WidePnChildResult::ClaimantTactical if winner.is_none() => {
+                let analysis = threats::analyze(state);
+                typed_lambda_leaf(
+                    state,
+                    self.claimant,
+                    &analysis,
+                    WidthOptions::vcf_pair_complete(),
+                )
+                .map(|leaf| node_resolution(&leaf))
+            }
+            WidePnChildResult::Pending if winner.is_none() => {
+                self.resolved_child_entry(child).and_then(|child_id| {
+                    self.census_deep_min_resolution(state, child_id, memo, traversal_errors)
+                })
+            }
+            WidePnChildResult::ClaimantCompletion
+            | WidePnChildResult::ClaimantTactical
+            | WidePnChildResult::Pending
+            | WidePnChildResult::Refuted => None,
+        };
+        if let Some(delta) = second_delta {
+            state.undo(delta);
+        }
+        if let Some(delta) = first_delta {
+            state.undo(delta);
+        }
+        result
     }
 
     fn defender_pair_children(&mut self, state: &mut RustHexoState) -> Option<Vec<WidePnChild>> {
@@ -6563,6 +7277,17 @@ impl<'a> NarrowCompatSearch<'a> {
                     return Some(node);
                 }
             }
+
+            #[cfg(test)]
+            crate::tss_census_deep::observe_gate_point(
+                state,
+                claimant,
+                self.root_ply,
+                self.semantic_horizon,
+                depth,
+                None,
+                crate::tss_census_deep::Backend::Narrow,
+            );
 
             let gate_dismissed = if self.interior_census_gate && state.current_player() == claimant
             {
