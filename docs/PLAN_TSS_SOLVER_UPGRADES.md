@@ -1,6 +1,6 @@
 # PLAN: TSS Solver Upgrades — Unified Master Plan (wide-engine era)
 
-Status: **LIVING DOC** (2026-07-16). This is a ground-up rewrite that
+Status: **LIVING DOC** (2026-07-17). This is a ground-up rewrite that
 **supersedes the FINAL (R3 PASS) plan of 2026-07-14**, whose anchor engine —
 the single-pass narrow DFS prover of branch `claude/tss-v2-build` — is no
 longer the normative solver. The superseded document remains readable (with a
@@ -40,9 +40,11 @@ Author: Claude (Fable), under owner rulings of 2026-07-16.
 ## Normative sources
 
 - **Engine**: `WidePnSearch` in `packages/hexfield_eq/rust/src/tss_solver.rs`
-  on branch `claude/tss-vcf-width`, round-9b tip `ac3f455f`, gate-verified at
-  `dba6111d` (`.codex-round9b-gate/GATE.md`); Group-2 round-3 additions live
-  uncommitted in this worktree (see IN-FLIGHT register).
+  on branch `claude/tss-vcf-width`; the efficiency-program consolidation is
+  `b45b9bf0` (`MERGE_RESOLUTION.md`) and the leaf-surface landing is
+  `5172d42d` (`HUNT_REPORT_LEAF_SURFACE.md`). The round-9b baseline remains
+  `ac3f455f`, gate-verified at `dba6111d`
+  (`.codex-round9b-gate/GATE.md`).
 - **Theory**: `docs/PROOF_TSS_DEFENDER_ZONES.md` (rounds 5–8 revision):
   D9–D21, L9′, L10–L17, T3–T11, zones `Z_dir ∪ Z_seed ∪ Z_touch ∪ Z_virgin`
   under (Z2)/(Z4)/(Z5′), §6a forcing-gate calculus, §12 open problems, §12a
@@ -51,8 +53,11 @@ Author: Claude (Fable), under owner rulings of 2026-07-16.
 - **Formalization**: `E:\tss-lean\` (LEDGER.md is the decl-by-decl status
   map). T3/T4/T5/T9 and both dismissal corollaries are kernel-checked
   (`TssZones.T3`, `TssZones.T3_soundDismissal`, `TssZones.T4`, `TssZones.T5`,
-  `TssZones.T9`, `TssZones.T9_soundDismissal`); T10 (DAG unfolding) is in
-  flight. The coming `TssZones/SolverInterface.lean` + `SOLVER_HANDOFF.md`
+  `TssZones.T9`, `TssZones.T9_soundDismissal`). T10 (DAG unfolding) is
+  kernel-checked at Lean commit `69adffc7` and licenses the finished-DAG
+  sharing contract used by the shared-fragment store (`BUILD_SHARED_FRAGMENTS.md`,
+  Rust completion `e4ef021f`). The coming `TssZones/SolverInterface.lean` +
+  `SOLVER_HANDOFF.md`
   will be the **authoritative machine-auditable crosswalk** (Lean decl ↔ doc
   item ↔ U-item); Part III's anchors are a preview and defer to it on
   landing.
@@ -93,6 +98,9 @@ Author: Claude (Fable), under owner rulings of 2026-07-16.
 6. **Ladder discipline.** Every behavioral flag ships default-off and rides
    shadow → verify → consume; certificate-mutation rejection suites are
    mandatory before any consumption; flag-off narrow byte-identity is sacred.
+   The sole exception is R-FIX1 (`2454fa91`): an always-on correctness repair
+   that makes finder evidence match the unchanged verifier contract
+   (`FIX_ZONE_CLOCK.md`, `MERGE_RESOLUTION.md`).
 
 ## IN-FLIGHT register (what will update this doc, and where)
 
@@ -102,10 +110,11 @@ sections its landing updates.
 | Lane | State at writing | Sections to update on landing |
 |---|---|---|
 | **G2R3** (Group-2 round 3): quiet-turn OR edges + ranked unforced defender zones, shadow→verify→consume | **LANDED, all 4 steps GREEN, committed `bfd03ca9`** (headline witness `double_fork_compact` = WIN/409 nodes, strict verifier ACCEPTED, first rung 10k; step-4 shrink `seed_band_radius(d)=8·(d−1)` in production, all prior certs re-verify; post-shrink all-19 gate PASS failures=0 in 442.6 s, orchestrator-reverified) | §I.2 (round outcome), §I.7 (RZOP ranks 1–2 close-out), Part III rows U12, U13, U19, U20, U21; §II.3 A1's shadow-statistics gate (witness zone = 62/478 legal at the k<b node) — fold on next revision pass |
-| **T10 Lean** (DAG unfolding; `E:\tss-lean\`) | Structural/D9/D17-core projections kernel-checked; the full transport (roles, zones, T3/T9 conjunctions through the unfolding) unstated. Discovered semantics: **DAG labels are max-dominant bounds over path copies, NOT per-copy equalities** — this IS the U18/U22 merge-semantics spec | §I.4 (TT/DAG sharing design goes from spec to buildable), Part III rows U18, U22; §II.3 A4's soundness clause |
+| **T10 + shared fragments** | **LANDED.** Lean T10 is kernel-checked at `69adffc7`; the T10-licensed monotone shared-fragment store is built at `e4ef021f`, consolidated at `b45b9bf0`, and remains default-off. Deep TT-saturation value is NULL; the current leaf profile gains no verdict (`BUILD_SHARED_FRAGMENTS.md`; `HUNT_REPORT_SHARED_FRAGMENTS.md`; `HUNT_REPORT_LEAF_SURFACE.md` at `5172d42d`) | §I.4; Part III rows U18, U22; §II.3 A4 |
 | **Leaf-width measurement** (worktree `hunt-leaf-width`, branch `hunt/leaf-width`; report `HUNT_REPORT_LEAF_WIDTH.md`) | **LANDED** (N=1,500 human-corpus attacker nodes, 3 caps, 0 contradictions): wide-only WIN = 6.07% / 8.13% / 9.27% at caps 500/2k/10k — structural width, not budget (a `SolveGoal::Win` full-budget control finds nothing more); warm medians narrow ≈0.07 ms vs wide ≈0.16 ms, wide's cost = p95 tail on exactly the positions it wins; 122 width records (mechanism: count-2 pair-builds / quiet connectors + deep VCFs); ES Φ<1 screen fires 0.024% — does not pay at leaves. Recommendation: cap-500 leaf-width rung via count-2 pair-build widening of the narrow OR-generator, NOT a WidePnSearch port; persistent-solver reuse mandatory (fresh-solve TT-zeroing cliff ≈13 ms) | §II.2 (axis sizing), §II.3 A2 (feature value), §II.5 (budget-envelope retuning), Part III row U8 — fold on next revision pass |
 | **SolverInterface.lean / SOLVER_HANDOFF.md** (Lean campaign final passes) | Specified in `E:\tss-lean\CAMPAIGN.md`; not started | Part III's crosswalk column defers to it wholesale |
 | **NQ2 quiet-locality (hunt/quiet-locality)** | **CLOSED NEGATIVE, `833020ed`**: join-locality restriction of the quiet consume universe is REFUTED (frozen required-remote witness: unique win at `d_stone=6` in no live window, all 537 local alternatives lose; verifier-accepted cert). The complete quiet enumeration at consume nodes is not shrinkable by join/adjacency locality — treat any future locality proposal as guilty until it survives this witness. Salvage: `K_reply` kernel PROVEN (urgent SecondStone: wins-now + cells hitting every defender count-4/5 window; witness 538→1) — candidate for a future gated round | §I.2's quiet-universe wording stands (complete enumeration validated); the witness is a paper-grade sharp example |
+| **Overnight efficiency program** | **LANDED through `5172d42d`.** Lazy frontier, interior census gate, R-FIX1, K_reply consume, the NQ3/NQ5/NQ8 negative verdicts, and the Phase-3 leaf configuration are dispositioned below; merge battery at `b45b9bf0` | §I.4; §II.7; Part III rows U11 and U25–U31; official-profile subsection |
 
 ---
 
@@ -168,9 +177,10 @@ wins. Cumulative vs the round-8b engine (round-9 progress notes,
 `4daf1961`) → **177.7 s** (round-9b gate) — **faster than the reference
 pdspn's 264 s on its hardest position**, at certificate grade. The 512 MiB
 default TT was directly proven (round-8b telemetry, TT-saturation root
-cause) to stop indexing 0l's working set around ~1M nodes; 2 GiB is the
-official deep-solve test profile. That finding is why TT capacity/sharing is
-now a first-class bottleneck (§I.4).
+cause) to stop indexing 0l's working set around ~1M nodes. The efficiency
+program moved the official recommendation to the fully gated 1 GiB lazy-on
+profile (`5f836b70`); the 2 GiB flags-off profile remains the legacy
+comparison (§I.4, `HUNT_REPORT_LAZY_MEMORY_WALL.md`).
 
 **Consolidation outcome** (§I.3): `WideRacer` and its test-only A/B hook are
 deleted. Round-8b had already removed the losing round-5–8 DAG/graph-PN and
@@ -293,49 +303,91 @@ Once G2R3 is folded and gate-green at the tip:
   losing TT variants etc.) and the round-2/3 harness dead ends that did not
   freeze into corpora. Frozen corpora, gate records, and progress memos
   stay.
-- **C4 — single profile, single ladder.** `TSS_RUNBOOK.md` is authoritative:
-  512 MiB ordinary offline default; 2 GiB official deep-solve profile via
-  `TSS_BACKWALK_TT_BYTES=2147483648`; 256 KiB per trainer solve; and the
-  forcing ladder 10k→100k→1M→20M (NO rows stop at 1M). The spare corpus
-  keeps its honest semantics (NO controls; WIN_PENDING only with an
-  exhaustive-oracle or verifier-accepted row).
+- **C4 — official profiles and ladder.** `TSS_RUNBOOK.md` remains the
+  deployment authority. For deep solves, recommend 1 GiB only with
+  `TSS_LAZY_FRONTIER=1`; retain the 2 GiB flags-off profile as the legacy
+  baseline (`5f836b70`, `HUNT_REPORT_LAZY_MEMORY_WALL.md`). Trainer solves
+  retain their 256 KiB ceiling, with the selected leaf configuration in
+  §II.7 (`5172d42d`). The forcing ladder remains 10k→100k→1M→20M (NO rows
+  stop at 1M), retained at consolidation `b45b9bf0`. The checked-in spare
+  gate has only two near-vacuous NO rows;
+  substantive expansion belongs to the paper capstone (`b45b9bf0`, commit
+  message and `MERGE_RESOLUTION.md`).
 - **C5 — paper-quote hygiene.** Any number quoted into the paper re-derives
   from a gate at the exact quoted commit (the round-9b gate at `ac3f455f`
-  discharged this for the current headline set; G2R3's fold must repeat it
-  at its tip).
+  discharged the historical headline set; consolidation `b45b9bf0` and the
+  leaf landing `5172d42d` pin the efficiency-program evidence).
 
-## I.4 The named next bottleneck: TT capacity and U18/U22 DAG sharing
+## I.4 Efficiency-program resolution: sharing, admission, and bounded horizons
 
-Round-8b proved the deep-solve regime is **TT-bound**: 512 MiB stops
-indexing the 0l working set around ~1M nodes; the fix so far is a bigger
-profile (2 GiB), which is a ceiling, not a design. The design answer has two
-coupled halves:
+### U18/U22 shared-fragment store — BUILT, default-off
 
-- **U18 — certificate DAGs** (proof-doc D18/T10). Share repeated subproofs
-  in the certificate arena instead of duplicating them. The soundness
-  contract is now sharper than the old plan knew: T10's in-flight Lean
-  formalization discovered that **DAG labels are max-dominant bounds over
-  all path copies, not per-copy equalities** — a shared node's
-  budget/rank/exposure labels must dominate every incoming path's exact
-  recurrence, and obligations union over reachable descendants while
-  coupling histories stay path-local. That rank-inequality semantics IS the
-  merge-semantics spec for any TT/cache sharing of zone-bearing fragments.
-  Gated on T10's completion (IN-FLIGHT register).
-- **U22 — TT policy + ProvenFragment persistence** (new item; pairs with
-  A4, §II.3). Inside a single deep solve: replacement policy aware of proof
-  obligations (never evict entries pinned by the live frontier's proof
-  DAG); byte-accounted admission for zone-bearing fragments (they are
-  fatter — remeasure before promotion). Across solves: verified
-  sub-certificates minted inside UNKNOWN solves persist in memo/TT across
-  visits and moves, so later solves resume from proven frontiers. Round-6
-  cert-import scaffolding exists (`cfg(test)`) as the starting point. The
-  cross-path sharing half inherits U18's T10 semantics; the
-  within-lineage half (same path re-visited at a later move) needs only the
-  existing exact-key + build-horizon binding discipline (U4/U13).
+The shared-fragment store landed at `e4ef021f` and was consolidated at
+`b45b9bf0`. It stores self-contained verified positive fragments under exact
+position/claimant/profile keys, applies the max-dominant-label and obligation-
+union contract to the reachable DAG, pins live payloads, accounts retained
+bytes, and sends the final certificate through the unchanged strict verifier.
+Lean T10 at `69adffc7` is the soundness license for finished-DAG composition,
+not for arbitrary payload union (`BUILD_SHARED_FRAGMENTS.md`;
+`HUNT_REPORT_SHARED_FRAGMENTS.md`).
 
-Sizing note: this is the only front whose payoff compounds with every other
-front — atlas solves, capstone runs, and leaf-mode cumulative search (A4)
-all hit the same wall.
+Deep-profile TT-saturation value is **NULL**: fragments did not close
+`0l4291i_live` through the completed 1M reduced-TT campaigns at either
+512 MiB or 1 GiB (`e4ef021f`). Leaf value is **none at the current 256 KiB
+profile**: 22 hits in 875 lookups produced a small expansion reduction and
+zero additional hard verdicts, so the recommendation remains
+`TSS_SHARED_FRAGMENTS=0` (`5172d42d`, `HUNT_REPORT_LEAF_SURFACE.md`). The
+monotone contract remains valid evidence — warm UNKNOWN may become a
+strict-verifier-accepted hard verdict — but does not justify default-on.
+
+### Lazy frontier and interior census gate — BUILT
+
+NQ4 discovered that 62.6–67.3% of retained wide entries were never expanded
+(`f30e3fb1`, `HUNT_REPORT_TURN_QUOTIENT.md`). R-LF1 built lazy admission
+behind default-off `TSS_LAZY_FRONTIER` at `86a6418c`; R-LF2 then made
+**1 GiB + `TSS_LAZY_FRONTIER=1`** the official recommended deep profile at
+`5f836b70`. At 512 MiB, the filtered `0l4291i_live` row was **8.4x** faster
+(8.38x exact at `5f836b70`) with lazy admission, but that budget did not
+receive a full 19-row gate and
+is not the official profile (`5f836b70`, `HUNT_REPORT_LAZY_MEMORY_WALL.md`).
+Lazy frontier remains a component of the winning leaf configuration
+(`5172d42d`), where its direct measured value was TT-pressure control rather
+than an extra verdict.
+
+The DTW census bound became the default-off interior census gate at
+`90f559be`. It is inert at the unbounded official corpus profile
+(`semantic_horizon=u32::MAX`; zero evaluations at `90f559be`) and live on
+horizon-bounded solves, saving **79–93%** of forcing-cohort expansions
+(78.9–93.4% exact at `90f559be`) in the R-IG1 campaign
+(`90f559be`, `BUILD_INTERIOR_GATE.md`). It is the other
+efficiency component of the Phase-3 leaf winner (`5172d42d`).
+
+### Correctness and closed experimental lanes
+
+R-FIX1 (`2454fa91`) is always on: the materializer now stamps verifier-exact
+D14 local zone budgets and the assembled certificate horizon. It is the
+program's only unconditional production behavior change; the verifier stayed
+unchanged (`FIX_ZONE_CLOCK.md`; consolidation `b45b9bf0` in
+`MERGE_RESOLUTION.md`). All other efficiency levers remain independently
+flag-gated.
+
+K_reply, support hashing, D6 search-TT folding, broad horizon laddering, and
+b=2 domination are dispositioned individually in Part III (U28–U31 and U11).
+
+### Official deep-solve profiles after the program
+
+- **Recommended:** `TSS_BACKWALK_TT_BYTES=1073741824` (1 GiB) together with
+  asserted `TSS_LAZY_FRONTIER=1`; the full 19-row gate passed at `5f836b70`
+  and was reproduced after consolidation at `b45b9bf0`
+  (`HUNT_REPORT_LAZY_MEMORY_WALL.md`; `MERGE_RESOLUTION.md`).
+- **Legacy comparison:** retain
+  `TSS_BACKWALK_TT_BYTES=2147483648` (2 GiB), flags off, for continuity with
+  the round-9b baseline and regression battery (`ac3f455f`, `dba6111d`,
+  consolidated rerun `b45b9bf0`).
+- **Coverage caveat:** the checked-in spare-corpus gate contains only two
+  near-vacuous NO rows; it is a regression check, not substantive λ²
+  coverage. Real spare-corpus expansion remains a paper-capstone item
+  (`b45b9bf0`, commit message; `MERGE_RESOLUTION.md`).
 
 ## I.5 Capstone measurement spec (RZOP §5, reconciled)
 
@@ -383,8 +435,9 @@ hunt report).
 
 Atlas rungs (each a separate, gateable deliverable):
 
-1. **A-0**: per-family root solves at the deep profile (2 GiB, staged to
-   20M+ rungs as needed), WIN/LOSS/UNKNOWN with certificates archived;
+1. **A-0**: per-family root solves at the recommended 1 GiB lazy-on deep
+   profile (`5f836b70`), staged to 20M+ rungs as needed, with
+   WIN/LOSS/UNKNOWN certificates archived;
    honest UNKNOWN is an acceptable verdict — no bar-lowering.
 2. **A-1**: frontier expansion inside solved families (certified subtree
    persistence is the A4/U22 consumer here — atlas work is exactly "many
@@ -393,10 +446,10 @@ Atlas rungs (each a separate, gateable deliverable):
    opening-book consumption by serve/eval (out of this doc's scope until an
    owner ruling asks for it).
 
-Prerequisite honesty: atlas economics are TT-bound (§I.4) and quiet-width
-bound (§I.2). Do not schedule A-0 at scale before G2R3 folds and U22's
-within-lineage persistence exists; before that, atlas time is mostly re-paying
-the same subtrees.
+Prerequisite honesty: atlas economics remain TT-bound (§I.4) and quiet-width
+bound (§I.2). G2R3 is folded and U22 is built, but the completed fragment
+campaign did not move the deep saturation wall (`e4ef021f`); use the 1 GiB
+lazy-on profile and treat further fragment value as unproved.
 
 ## I.7 RZOP §9 reconciliation (owner ruling 6)
 
@@ -435,26 +488,26 @@ guard, async worker pool, and the park rung (wait-at-leaf first-touch
 consumption, `tss_solver_park_timeout_ms` liveness bail). `tss_zone` runs
 the **horizon ladder** per solve: a tight `+8`-deadline attempt on half the
 node budget first, then the flat `+12` solve only if the tight attempt is
-Unknown. `deep_verify_failed` MUST be 0; every consumption passes the single
+Unknown. This existing leaf sequence is not NQ8's proposed broad deep-solve
+ladder, which is DEAD (U31, `23ffc65b`). `deep_verify_failed` MUST be 0;
+every consumption passes the single
 mint. Deployment is one flag per relaunch at epoch boundaries, and the
 Phase-3 `main_3` relaunch is the landing slot for everything below (owner
 ruling 5).
 
 ## II.2 Improvement axes (owner ruling 2)
 
-1. **Verdict rate at fixed cap.** The wide engine's economics change the
-   leaf equation: G2R3's witness closed in 409 nodes/24 ms where the narrow
-   finder needed 2,884 — but wide turns also cost more per node on wide
-   frontiers. **Sized by the leaf-width measurement (IN-FLIGHT)**: narrow-
-   vs-wide miss rates at caps 500/2k/10k on the human corpus + wall-clock
-   economics decide which engine profile gates leaves at Phase-3 and at what
-   cap.
+1. **Verdict rate at fixed cap.** The leaf-surface campaign has now sized
+   this axis: pair-complete wide PN plus lazy frontier plus the interior
+   census gate is the selected profile, with the exact flags and headline
+   table in §II.7 (`5172d42d`, `HUNT_REPORT_LEAF_SURFACE.md`).
 2. **Cheaper solves → wider gating.** Every Part-I speedup converts directly
    into more gated leaves per second at fixed CPU share (raise
    `tss_solver_sample_16` coverage, or lower the trigger threshold) — the
    preferred spend of Part-I wins, per the mission's "useful at LOW node
    counts."
-3. **Budget envelope re-tuning** (§II.5) — data-gated, never speculative.
+3. **Budget envelope re-tuning** (§II.5) — the solver-side leaf cap/profile
+   is decided; the horizon-height choice remains open (`5172d42d`).
 4. **Sub-verdict yield** (§II.3) — the genuinely new axis: an UNKNOWN leaf
    solve still proved things; stop discarding them.
 
@@ -501,9 +554,10 @@ prerequisite, and an honest cost/benefit sketch.
 - **Soundness.** None required beyond determinism: features change function
   inputs, not targets; the single mint is untouched. [H]-adjacent only in
   that they steer search through the net.
-- **Prerequisite.** Leaf-width measurement sizes which scalars carry signal
-  at leaf caps (IN-FLIGHT); feature-diet lessons from the main_3 board-input
-  review apply (don't ship dead inputs).
+- **Prerequisite.** The leaf-surface campaign selected the solver profile at
+  `5172d42d`, but did not establish NN signal for these scalars; feature-diet
+  lessons from the main_3 board-input review still apply (don't ship dead
+  inputs).
 - **Cost/benefit.** Cheap plumbing; risk is feature bloat, mitigated by the
   measurement gate. Φ's own corpus base-rate honesty: `Φ<1` occurs at 0.02%
   of defender FirstStone nodes — Φ is a *gradient* feature, not a boundary
@@ -544,27 +598,18 @@ prerequisite, and an honest cost/benefit sketch.
 
 ### A4 — ProvenFragment persistence [S; the leaf-side face of U22]
 
-- **What/consumption.** Verified sub-certificates minted inside UNKNOWN
-  solves persist in memo/TT across visits **and across moves**; later solves
-  resume from proven frontiers. "Many shallow searches" become cumulative
-  deep search at unchanged per-leaf budget — the highest-leverage leaf idea
-  in this plan, because it converts the leaf regime's weakness (tiny caps)
-  into amortization.
-- **Soundness.** Within-lineage reuse (same game, later move): exact-key
-  binding + build-horizon binding, already the verified-`Done`-entry
-  discipline of the async memo (binding re-checked at every consumption).
-  **Cross-path sharing** (transpositions): the spec is T10's max-dominant-
-  label DAG semantics (U18) — labels at a shared node must dominate every
-  incoming path; do not ship cross-path sharing before T10 lands
-  (IN-FLIGHT register). Round-6 cert-import scaffolding (`cfg(test)`) is the
-  implementation seed.
-- **Prerequisite.** T10 (for the sharing half); U22's byte-accounted
-  admission (zone-bearing fragments are fatter); memory ceilings per the
-  runbook's solver-memory discipline (≤8192 memo entries, per-solve TT byte
-  caps — persistence must not break the earlyoom budget).
-- **Cost/benefit.** Implementation-heavy (the one genuinely hard leaf item),
-  but it multiplies A1 (certificate availability), the atlas (§I.6), and
-  verdict rate (axis 1) simultaneously.
+- **Built form.** The default-off T10-licensed shared-fragment store persists
+  exact-state verified positive subproofs across solves and supports shared
+  DAG imports under the monotone verdict contract (`e4ef021f`,
+  `BUILD_SHARED_FRAGMENTS.md`; `HUNT_REPORT_SHARED_FRAGMENTS.md`).
+- **Soundness.** Exact key/claimant/profile and horizon checks gate lookup;
+  max-dominant labels and obligation unions are reconstructed; live payloads
+  are pinned; the unchanged strict verifier remains the single mint. Lean
+  T10 at `69adffc7` licenses the finished-DAG composition.
+- **Economics.** Deep saturation value was NULL at `e4ef021f`. At the 256 KiB
+  leaf profile, 22/875 hits yielded no additional hard verdict, so the Phase-3
+  configuration keeps fragments off (`5172d42d`). Reopening requires a
+  leaf-budget size/admission study that demonstrates verdict value.
 
 ## II.4 Lever-2 (proof-value target swap) — status unchanged
 
@@ -575,50 +620,89 @@ deep proofs disagreeing with outcomes often enough to matter. Both labels
 are already captured per row, so no data is lost while it waits. A3's
 auxiliary head is deliberately weaker than Lever-2 and does not pre-empt it.
 
-## II.5 Budget-envelope retuning — a data-gated rung
+## II.5 Budget-envelope retuning — solver profile decided
 
-`tss_solver_node_cap` (2000), `tss_solver_park_timeout_ms` (100),
-`tss_solver_sample_16` (16) were sized against the OLD engine's shadow
-histograms. The wide engine's node economics differ in both directions
-(§II.2 axis 1). Re-tune as ONE rung, after the leaf-width measurement
-lands, from: verdict-rate-vs-cap curves at 500/2k/10k, wall-clock per
-verdict, and park-bail rates at production thread counts. Until then the
-envelope stays frozen — no speculative retunes ride other rungs (ladder
-discipline, invariant 6).
+The campaign selected the h=8 solver-side leaf envelope at commit `5172d42d`:
+pair-complete wide PN, lazy frontier, interior census gate, node cap 500,
+and TT cap 262144 bytes; §II.7 records the exact configuration. The older
+`tss_solver_park_timeout_ms` and `tss_solver_sample_16` deployment controls
+remain runbook-owned. Relative horizon 16 remains an open trainer-side
+decision because it materially raises verdict rate at additional cost
+(`5172d42d`, `HUNT_REPORT_LEAF_SURFACE.md`).
 
 ## II.6 Deployment map (Phase-3)
 
 Phase-3 relaunch order of the NEW items, after the runbook's existing rungs
 (each line = one rung, one relaunch, shadow-first where semantics allow):
 
-1. Wide-engine leaf profile swap (engine choice + envelope retune as sized
-   by §II.5) — shadow mode first (`tss_solver_mode=1` twin-run).
+1. Land the exact §II.7 configuration selected at `5172d42d` — shadow mode
+   first (`tss_solver_mode=1` twin-run).
 2. A3 telemetry counters (pure shadow; no consumption).
 3. A1 shadow: record would-be-masked support vs actual π′ (the
    `win_retained_mass_mean` analogue for zones) — consume only if mass
    actually moves.
 4. A2 features behind a flag (needs a `target_regime`-style note only if
    input schema versioning demands it).
-5. A4 within-lineage persistence; cross-path sharing strictly after T10.
+5. A4/shared fragments stay default-off unless a later leaf-budget study
+   clears the verdict-value gate (`e4ef021f`, `5172d42d`).
 6. A3 consumption (aux head or shaping) if its shadow fire-rate justified
    the head; Lever-2 at its own gate.
 
 Every rung keeps invariants 1–6 and the runbook's watch metrics;
 `deep_verify_failed` stays the hard-stop counter.
 
+## II.7 PHASE-3 LEAF CONFIG
+
+The leaf-surface campaign recommends configuration D at landing commit
+`5172d42d` (`HUNT_REPORT_LEAF_SURFACE.md`):
+
+```text
+width = WidthOptions::vcf_pair_complete()
+TSS_LAZY_FRONTIER=1
+TSS_INTERIOR_CENSUS_GATE=1
+TSS_SHARED_FRAGMENTS=0
+TSS_K_REPLY_CONSUME=0
+goal = SolveGoal::Win
+relative_horizon = 8
+node_cap = 500
+tt_bytes_cap = 262144
+```
+
+Keep one persistent `TssSolver` per real leaf batch/worker; do not reconstruct
+it for every solve (`5172d42d`).
+
+Headline verdict-rate matrix (all cells are 300 solves and all figures are
+from `5172d42d`, `HUNT_REPORT_LEAF_SURFACE.md`):
+
+| relative horizon | cap | narrow A | selected D |
+|---:|---:|---:|---:|
+| 8 | 500 | 5.00% | 5.33% |
+| 8 | 2,000 | 5.00% | 5.33% |
+| 8 | 8,000 | 5.33% | 5.33% |
+| 16 | 500 | 5.33% | 13.00% |
+| 16 | 2,000 | 6.33% | 13.33% |
+| 16 | 8,000 | 7.00% | 13.33% |
+
+At native h=8, D@500 is the recommended production query. The open
+horizon-height question is **h=8 versus h=16**: the h=16 arm roughly doubles
+the measured verdict rate, but choosing that extra trainer-side work was not
+authorized by the campaign (`5172d42d`).
+
 ---
 
 # Part III — U-item status ledger and crosswalk
 
-One row per item. STATUS ∈ {DONE, STRUCK, SUPERSEDED, LIVE, IN-FLIGHT,
-BLOCKED}; "where it lives" names the engine mechanism, campaign round, or
+One row per item. STATUS now also records BUILT, ALWAYS-ON FIX, CLOSED,
+REFUTED, DEAD, and PARKED verdicts from the efficiency program; "where it
+lives" names the engine mechanism, campaign round, or
 Part of this plan that owns it now. Proof anchors cite the proof doc tag and
 the Lean decl where one exists (`TssZones.*`; status per
 `E:\tss-lean\LEDGER.md` at 2026-07-16 — the coming `SolverInterface.lean` /
 `SOLVER_HANDOFF.md` supersedes this column when it lands). Soundness
 classes are the original ones unless re-derived.
 
-**Tallies: 6 DONE, 2 STRUCK, 2 SUPERSEDED, 9 LIVE, 5 IN-FLIGHT (24 rows).**
+**Tallies: 6 DONE, 4 BUILT, 1 ALWAYS-ON FIX, 1 CLOSED, 1 REFUTED, 2 DEAD,
+2 STRUCK, 2 SUPERSEDED, 6 LIVE, 5 IN-FLIGHT, 1 PARKED (31 rows).**
 
 | # | Original intent | Class | STATUS | Where it lives now | Proof anchor |
 |---|---|---|---|---|---|
@@ -629,23 +713,30 @@ classes are the original ones unless re-derived.
 | U5 | P3 same-turn commutation: pair-canonical generation | [S] | **DONE** | Structural in the wide TT via canonical pair dedup (`canonical_frame`/`canonical_coord_key`); note: commutation deliberately disabled on G2R3 zone nodes (separate contract) | P3 (DOMINATION.md); Lean §9 P3 row UNSTATED — formalization backlog |
 | U6 | Interior forced-move guard default-on + λ¹ policy mask | [S] | **LIVE** | Part II / runbook rungs 2–3 (`tss_interior_guard`, `tss_policy_target_sharpen`); A1 extends the mask idea to `k<B` nodes | U3 lemma, T1, T6; loss-delay caveat recorded |
 | U7 | OR-node ordering without child replay | — | **STRUCK** | Already implemented pre-plan (old R1 finding); the wide engine's fork-degree/tau priors supersede the mechanism anyway; DEEP_WIN ordering-regression telemetry residue → capstone (§I.5) | — |
-| U8 | Trigger + regime detector (leaf gating) | [H] | **LIVE** | Part II axis 1–2; absorbs RZOP §6.3's fold (zone-cardinality scheduling from verifier-derived quantities; racer deleted instead of folded). **Gated on the leaf-width measurement (IN-FLIGHT)** | correctness-safety conditions carried from old plan verbatim |
+| U8 | Trigger + regime detector (leaf gating) | [H] | **LIVE** | Part II axis 1–2; the solver profile is now selected by the leaf-surface campaign (`5172d42d`, §II.7). Production trigger/coverage tuning remains runbook-owned; zone-cardinality scheduling may use verifier-derived quantities only | correctness-safety conditions carried from old plan verbatim; `HUNT_REPORT_LEAF_SURFACE.md` |
 | U9 | ES-potential futility check (Cor. 2 integer test) | [S-bounded] | **STRUCK** | Struck 07-16: the ES *global* forever-blocking claim is greedy-refuted (`ES_GLOBAL_BOUNDARY` Thm 1; GAP-RAW open), removing the intended growth path; and corpus data pre-triggers the old kill criterion — `Φ<1` fires at 0.02% of defender FirstStone nodes (<1% bar). Honesty note: the bounded Thm-2 form (first five attacker placements safe) remains mathematically valid; Φ survives as an A2 *feature*, never a futility gate | ES_POTENTIAL Thm 2/Cor 2; refutation ES_GLOBAL_BOUNDARY Thm 1 |
 | U10 | Adversarial fixtures + differential harness; mutation suites are the gate | [T] | **DONE** (institutionalized) | Standard practice: G2R3's 7-mutation suite, round-2's 209/209 differential, hunt fixtures (`hunt_r1b_chain_sharpness` etc.), one-sided matched-horizon differentials. Every new consuming flag repeats it (invariant 6) | mutation testing is the gate; differentials are evidence |
-| U11 | True domination arms P1/P2; sub-hitting dispatch `[UNPROVEN]` | [S]/[UNPROVEN] | **LIVE** (backlog) | Part I backlog; extended by U24 (macromove). RZS/Lemma 12 is a case-split *template* only — its zone-irrelevance step does not survive radius-8; `[UNPROVEN]` label stands until a fresh Hexo lemma passes hostile review | P1/P2 (DOMINATION.md); frontier-inertness Lemma 7 |
+| U11 | Domination: b=1 dispatch and b=2 spare-stone extension | [S b=1]/[OPEN b=2] | **PARKED** (b=2); b=1 READY | b=1 `L-DISPATCH-B1` is proven at `7e240388`, hostile-review confirmed at `17a6c6de`, and ready for Phase-3 dispatch wiring. b=2 is PARKED OPEN-COMPUTATION-LIMITED at `af6f777c`: zero reversals, but no complete d>=4 directional comparison; reopen only with a certified-engine exact reference (or independent theory justification) | `PROOF_DISPATCH_DOMINATION_ROUND1.md` + `REVIEW_DISPATCH_DOMINATION_ROUND1.md` at `17a6c6de`; `EXPERIMENT_DOMINATION_B2.md` at `af6f777c`. **Inline conflict:** report §6.4 says PROOF-ROUND-READY, explicitly superseded by the `af6f777c` commit message's orchestrator ruling |
 | U12 | Ranked zone generator + verifier (`Z_dir ∪ Z_seed ∪ Z_touch ∪ Z_virgin`, (Z2)/(Z4)/(Z5′)) | [S] | **IN-FLIGHT** (landed in G2R3, fold pending) | G2R3 `ranked_unforced_defender_zone`: shadow/verify/consume all green; verifier independently re-derives the union + D9 fallback; witness WIN verifier-accepted. Uniform wrappers this round; exact clocks = U16 | T3/T4/T7, D10–D16; `TssZones.T3`, `T4` PROVEN; `T5` PROVEN; zone-component decls STATED |
 | U13 | Local budget labelling (D14/L11); cache reuse via budget inequalities | [S core; cache needs-derivation] | **IN-FLIGHT** (core) / cache lane LIVE | Core landed in G2R3 (exact stored local `B`, bottom-up D14, verifier-checked). The online-cache-reuse derivation (replacing final-assembly recheck) remains open — final assembly still rechecks all inequalities; failure ⇒ Unknown | D14, L11; `TssZones.L11_*` PROVEN |
 | U14 | Sparse LOSS witnesses (≤3 at b=1, ≤6 at b=2) | [S] | **DONE** (improved) | Wide engine `sparse_loss_witnesses`; caps improved to **3/5** (R4b pinned relatively) | L13; `TssZones.L13_capThree`/`L13_capFive` PROVEN; sharpness fixtures STATED |
 | U15 | Kernel T6 at forced nodes (`K_b`) | [S] | **DONE** | Wide engine exact K2 kernel in canonical defender order, beside `implicit_dispatch`; `mhs>b` hard guard per T6 | T6; Lean `t6Kernel_*` calculus decls landed (full T6 region contract still being stated) |
 | U16 | Exact ranks and exposures (D15/D16 clocks) | [S when checks pass] | **LIVE** (backlog, promoted in value) | Behind a future flag with uniform-B as differential oracle; now also the capstone's uniform-vs-exact delta (§I.5 item 3) AND the only route to settling R2's full-union sharpness (blocked on D16 exposure labels only certificates supply — `hunt/r1b-r2` §3.3) | D15/D16, L11; ledger rows STATED |
 | U17 | Branch-indexed substitution envelopes (D17) | [S] | **LIVE** (backlog) | Unimplemented in engine; **proof basis upgraded**: T9 + both dismissal corollaries now kernel-checked. Still the largest verifier surface; both `+1` transition charges mandatory (R7 pinned); gate on profiles showing whole-subtree unions dominate zone width | D17/T9; `TssZones.T9`, `T9_soundDismissal` PROVEN |
-| U18 | Certificate DAGs (D18/T10) | [S] | **LIVE — PROMOTED to Tier A** | §I.4: TT capacity/sharing is now a first-class bottleneck (512 MiB ≈ 1M-node saturation, round-8b telemetry). Merge semantics spec = T10's max-dominant labels. **Sharing half BLOCKED on Lean T10** (IN-FLIGHT) | D18/T10; `unfoldDAG_*` core kernel-checked, T10 transport pending |
+| U18 | Certificate DAGs (D18/T10) | [S] | **BUILT**, default-off | T10-licensed shared-fragment store: exact-state positive fragments, max-dominant labels, obligation union, pinned/byte-accounted payloads, final strict replay. Deep saturation value NULL (`e4ef021f`); current leaf value none (`5172d42d`) | Lean T10 `69adffc7`; `BUILD_SHARED_FRAGMENTS.md` + `HUNT_REPORT_SHARED_FRAGMENTS.md` at `e4ef021f`; leaf evidence `HUNT_REPORT_LEAF_SURFACE.md` at `5172d42d` |
 | U19 | **NEW** — Quiet-turn OR edges (attacker width) | [H, verifier-gated] | **IN-FLIGHT** (landed in G2R3) | `quiet_turn_or_edges`: complete two-placement attacker turn universe, fired on forcing exhaustion at OR nodes; replayed under (Z4) by the verifier. The plan's first attacker-side item; closes the λ² structural gap (RZOP ranks 1–2 vindicated) | verifier gate is soundness; (Z4) replay; corpus λ² gradient 8.7%→87% |
 | U20 | **NEW** — Seed-radius one-relay shrink (`8·d` → `8·(d−1)`) | [S] | **IN-FLIGHT** (G2R3 step 4) | Production `seed_band_radius` in finder AND verifier; separately gated (chain fixtures keep binding seed at `8(B−1)`, shed at `8(B−2)`; full gate re-run; any previously-verifying cert failing ⇒ STOP+revert+writeup) | L9′ (`8(B−1)` bound; SHARP per `hunt/r1b-r2` §2 — attained in all 364 probe positions at B=2; absolute-pin attempt honestly BLOCKED); R1b OPEN as theory, shrink-evidence unconditional for the implementation |
 | U21 | **NEW** — `Z_virgin` finite test (formerly absorbed) | [S] | **IN-FLIGHT** (inside U12's landing) | The pre-round-3 shipped verifier ABSORBED `Z_virgin` entirely (full-legal fallback where theory licenses the finite `8(E^D−6)` inversion test — `hunt/r1b-r2` §3.1). G2R3's re-derived union computes it under uniform wrappers; the exact-`E^D` refinement belongs to U16 | D16, L12; `TssZones.zVirgin` + completeness under L11 premise STATED; fixed-window sharpness `L12_fixedWindowExposureSeven_sharp` PROVEN |
-| U22 | **NEW** — TT policy + ProvenFragment persistence | [S within-lineage; T10-gated cross-path] | **LIVE** | §I.4 (deep side) + A4 (leaf side); round-6 cert-import scaffolding (`cfg(test)`) is the seed; byte-accounted admission for fat zone fragments; obligation-pinned replacement | exact-key + build-horizon binding (U4/U13); cross-path = T10 |
+| U22 | **NEW** — TT policy + ProvenFragment persistence | [S exact-state; strict-verifier-gated] | **BUILT**, default-off | Same shared-fragment store as U18 under the monotone contract; warm verified-hard improvements are licensed, but the completed campaigns leave deep saturation NULL and the selected leaf config keeps fragments off | `BUILD_SHARED_FRAGMENTS.md` and `HUNT_REPORT_SHARED_FRAGMENTS.md`, completion `e4ef021f`, consolidation `b45b9bf0`; leaf ruling `5172d42d` |
 | U23 | **NEW** — Residual re-attack frontier | [T→H] | **LIVE** | On UNKNOWN, emit the blocking defender reply set as a routing-only field; re-solve only those at deeper caps next pass. Mints nothing. Payoff unlocked by U19 (quiet width now exists to exploit the routing) | none needed (routing only) |
 | U24 | **NEW** — Macromove / class-partition defender collapse | [UNPROVEN → needs fresh lemma] | **LIVE** (backlog) | Extends U11: merge distinct defenses sharing one winning continuation (RZOP T2 ancestry); sound only where absorbed fillers are frontier-inert, which caps the win (honest impact medium/low). Hostile-review the lemma before implementation | DOMINATION.md Lemma 7 (frontier-inertness); Wu & Lin Lemma 12 as architecture template only |
+| U25 | **NEW — Lazy frontier admission** | [S refinement; cap-aware] | **BUILT**, default-off | Discovered by NQ4 (`f30e3fb1`), built at `86a6418c`; official ruling is 1 GiB + `TSS_LAZY_FRONTIER=1` (`5f836b70`), with the filtered 512 MiB bottleneck 8.4x faster (8.38x exact). Component of the winning leaf config (`5172d42d`) | `HUNT_REPORT_TURN_QUOTIENT.md`; `PROOF_LAZY_FRONTIER.md`; `HUNT_REPORT_LAZY_FRONTIER.md`; `HUNT_REPORT_LAZY_MEMORY_WALL.md`; `HUNT_REPORT_LEAF_SURFACE.md` |
+| U26 | **NEW — Interior census gate** | [S bounded-WIN dismissal] | **BUILT**, default-off | DTW census gate built at `90f559be`; inert at the unbounded profile, live 79–93% on horizon-bounded forcing solves (78.9–93.4% exact), and a component of the leaf winner at `5172d42d` | `HUNT_REPORT_PN_INIT.md`; `BUILD_INTERIOR_GATE.md`; `HUNT_REPORT_LEAF_SURFACE.md` |
+| U27 | **NEW — R-FIX1 verifier-exact zone clock** | [S correctness] | **ALWAYS-ON FIX** | Materializer stamps the exact D14 local budget and assembled horizon; verifier unchanged. This is the program's only unconditional production behavior change (`2454fa91`, consolidated `b45b9bf0`) | `HUNT_REPORT_HORIZON_LADDER.md`; `FIX_ZONE_CLOCK.md`; `MERGE_RESOLUTION.md` |
+| U28 | **NEW — K_reply urgent SecondStone kernel/consume** | [S under five-clause trigger] | **CLOSED**, default-off | Kernel proven and shadow-validated across 220,160 fires at `b8b67bf5`; consume is sound but deep economics are negative from trigger/trajectory tax (`c4b496ed`). It is not routed through wide PN, and the narrow leaf probe is about 85x slower than the selected route (`5172d42d`). Reopen only for a justified precomputed-urgency trigger | `PROOF_QUIET_LOCALITY.md` at `833020ed`; `BUILD_K_REPLY_CONSUME.md`; `HUNT_REPORT_LEAF_SURFACE.md` |
+| U29 | **NEW — Certificate support hashing** | [T→S redesign] | **REFUTED** for current format | NQ3 found strict unchanged transfer 0/180 and reuse multiplier 1.000x at every tested radius; current RootBinding/ReplayKey are global. The open successor is the `C_rel` redesign conjecture with eight named obligations (`3cd224fe`) | `HUNT_REPORT_CERT_SUPPORT.md` on `hunt/cert-support` at `3cd224fe` |
+| U30 | **NEW — D6 search-TT folding** | [T] | **DEAD** | NQ5 measured zero duplicate TT entries and zero duplicate expanded states across every cohort; hot-path canonicalization would buy no state saving (`f30e3fb1`) | `HUNT_REPORT_TURN_QUOTIENT.md`, D6 section, at `f30e3fb1` |
+| U31 | **NEW — Broad semantic-horizon laddering** | [H, verifier-gated] | **DEAD** | Every tested schedule lost on both completed forcing cohorts at `23ffc65b`; R-FIX1 repaired the exposed zone-clock bug but explicitly left the economic refutation unchanged (`2454fa91`) | `HUNT_REPORT_HORIZON_LADDER.md`; `FIX_ZONE_CLOCK.md` |
 
 **Carried-forward verbatim analyses.** The old plan's per-item soundness
 analyses that survive the engine change remain normative where this table
@@ -690,7 +781,16 @@ Every number in this doc, with its source of truth:
 | Opening families | top 2 = 36.1%, top 5 = 50.0%, top 10 = 61.1% | same, §4 |
 | Seed-band sharpness | `8(B−1)` attained in 364/364 positions at B=2; shipped `8·d` carries ≥1 removable relay; absolute pin BLOCKED | `HUNT_REPORT_R1B_R2.md` §2, §Absolute-pin (branch `hunt/r1b-r2`, base `dba6111d`) |
 | LOSS caps | 3 (b=1) / 5 (b=2) | proof doc R4a/R4b; Lean `L13_capThree`/`L13_capFive` |
-| Lean status | T3/T4/T5/T9 + dismissal corollaries PROVEN; T10 in flight | `E:\tss-lean\LEDGER.md` (2026-07-16) |
+| Lazy-frontier discovery | 62.6–67.3% of retained wide entries never expanded | `HUNT_REPORT_TURN_QUOTIENT.md`, commit `f30e3fb1` |
+| Lazy official profile / reduced-TT bottleneck | 1 GiB + flag is full-gate recommendation; filtered 512 MiB `0l` row 8.4x faster (8.38x exact) | `HUNT_REPORT_LAZY_MEMORY_WALL.md`, commit `5f836b70`; consolidation rerun `b45b9bf0` |
+| Shared fragments | deep saturation NULL; leaf 22/875 hits and 0 added verdicts | `HUNT_REPORT_SHARED_FRAGMENTS.md`, completion `e4ef021f`; `HUNT_REPORT_LEAF_SURFACE.md`, `5172d42d` |
+| Interior census gate | 79–93% headline (78.9–93.4% exact) on horizon-bounded forcing cohorts; 0 evaluations unbounded | `BUILD_INTERIOR_GATE.md`, commit `90f559be` |
+| K_reply shadow / leaf routing | 220,160 shadow fires; selected wide leaf route about 85x faster than the narrow probe route | shadow `b8b67bf5`; `BUILD_K_REPLY_CONSUME.md` at `c4b496ed`; `HUNT_REPORT_LEAF_SURFACE.md` at `5172d42d` |
+| Leaf headline | D h=8: 5.33% at cap 500; D h=16: 13.33% at cap 2,000 | `HUNT_REPORT_LEAF_SURFACE.md`, commit `5172d42d` |
+| NQ3 current-format transfer | 0/180 unchanged transfer, 1.000x reuse multiplier; 8 successor obligations | `HUNT_REPORT_CERT_SUPPORT.md` on `hunt/cert-support`, commit `3cd224fe` |
+| D6 search-TT folding | 0 duplicate entries and 0 duplicate expanded states across measured cohorts | `HUNT_REPORT_TURN_QUOTIENT.md`, commit `f30e3fb1` |
+| Spare-corpus coverage | 2 near-vacuous checked-in NO rows | consolidation commit message `b45b9bf0`; `MERGE_RESOLUTION.md` |
+| Lean status | T3/T4/T5/T9 + dismissal corollaries PROVEN; T10 kernel-checked | `E:\tss-lean\` commit `69adffc7`; `BUILD_SHARED_FRAGMENTS.md` |
 
 # Known source conflicts (recorded, not hidden)
 
@@ -713,9 +813,19 @@ Every number in this doc, with its source of truth:
    is not refuted; the *strike* rests on the global-layer refutation plus
    the 0.02% empirical fire rate. Recorded in the U9 row to keep the ledger
    honest.
+6. **Domination b=2 adjudication**: `EXPERIMENT_DOMINATION_B2.md` §6.4 at
+   `af6f777c` says PROOF-ROUND-READY, but that same commit's binding message
+   explicitly says the orchestrator ruling supersedes the session reading
+   and parks the lane OPEN-COMPUTATION-LIMITED. U11 records the superseding
+   ruling and the exact reopening condition; it does not erase the report
+   text.
 
 # Change log
 
+- 2026-07-17: Folded the efficiency program through leaf-surface landing
+  `5172d42d`: U18/U22 shared fragments, lazy frontier, interior census gate,
+  R-FIX1, K_reply, NQ3/NQ5/NQ8, domination b=2, official profiles, and the
+  Phase-3 leaf configuration. Documentation-only register update.
 - 2026-07-16: Ground-up rewrite for the wide-engine era (this document).
   Supersedes FINAL (R3 PASS) 07-14. Old doc stubbed in place at
   `hexfield-eq-main-review` worktree with a SUPERSEDED banner.
