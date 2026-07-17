@@ -36,6 +36,8 @@ use crate::tss_core::{
 };
 #[cfg(test)]
 use crate::tss_core::{ClosureDebtStats, IncrEnumStats, ThresholdScaleStats};
+#[cfg(test)]
+use crate::tss_verify::{d6_transform_coord, D6_SYMMETRY_COUNT};
 use crate::tss_verify::{
     CertCommutation, CertEdge, CertNode, CertNodeId, RootBinding, TssCertificate, TssVerifier,
     ZoneInfo, MAX_CERT_COMMUTATIONS, MAX_CERT_DEPTH, MAX_CERT_EDGES, MAX_CERT_NODES,
@@ -550,6 +552,50 @@ pub(crate) fn take_quotient_telemetry_report() -> Option<QuotientTelemetryReport
     LAST_QUOTIENT_REPORT.with(|slot| slot.borrow_mut().take())
 }
 
+/// Shadow record for one complete-edge orbit at an opening-atlas root.
+#[cfg(test)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RootStabilizerOrbitReport {
+    pub(crate) representative: String,
+    pub(crate) members: Vec<String>,
+    pub(crate) descents: u64,
+    pub(crate) expansions: u64,
+    pub(crate) wall_nanos: u64,
+}
+
+/// Test-only Candidate-3 telemetry. Production builds contain neither this
+/// report nor the root-child quotient branch.
+#[cfg(test)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RootStabilizerReport {
+    pub(crate) eligible: bool,
+    pub(crate) complete_binding_checked: bool,
+    pub(crate) stabilizer: Vec<u8>,
+    pub(crate) raw_children: usize,
+    pub(crate) orbit_count: usize,
+    pub(crate) fixed_children: usize,
+    pub(crate) root_generation_nanos: u64,
+    pub(crate) consumed: bool,
+    pub(crate) fail_closed: bool,
+    pub(crate) reason: Option<String>,
+    pub(crate) orbits: Vec<RootStabilizerOrbitReport>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static LAST_ROOT_STABILIZER_REPORT: RefCell<Option<RootStabilizerReport>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_root_stabilizer_report() -> Option<RootStabilizerReport> {
+    LAST_ROOT_STABILIZER_REPORT.with(|slot| slot.borrow_mut().take())
+}
+
+#[cfg(test)]
+fn clear_root_stabilizer_report() {
+    LAST_ROOT_STABILIZER_REPORT.with(|slot| *slot.borrow_mut() = None);
+}
+
 #[cfg(test)]
 fn clear_quotient_telemetry_report() {
     LAST_QUOTIENT_REPORT.with(|slot| *slot.borrow_mut() = None);
@@ -827,6 +873,7 @@ impl TssSolver {
             self.last_k_reply_shadow.clear();
             self.last_wide_root_numbers = None;
             clear_quotient_telemetry_report();
+            clear_root_stabilizer_report();
         }
 
         // Sample the process environment exactly once per public solve. The
@@ -1245,6 +1292,10 @@ impl TssSolver {
         if let Some(telemetry) = search.quotient_telemetry.take() {
             let report = telemetry.finish(&search.entries, &search.by_position, search.tt_hits);
             LAST_QUOTIENT_REPORT.with(|slot| *slot.borrow_mut() = Some(report));
+        }
+        #[cfg(test)]
+        if let Some(telemetry) = search.root_stabilizer_telemetry.take() {
+            LAST_ROOT_STABILIZER_REPORT.with(|slot| *slot.borrow_mut() = Some(telemetry.report));
         }
         drop(search);
         // The solved attempt root was queued first; admit it last so a direct-
@@ -2122,6 +2173,43 @@ enum WidePnMove {
     /// wide pair-canonicalization path; unlike `Pair`, it materializes as an
     /// implicit Universal turn with a checked commutation witness.
     DefenderPair(HexCoord, HexCoord),
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RootStabilizerSemanticBinding {
+    root: RootBinding,
+    claimant: Player,
+    semantic_horizon: u32,
+    depth_cap: usize,
+    width: WidthOptions,
+    // The engine currently has one ruleset. Keeping its identity in the
+    // compared value makes that assumption explicit instead of silently
+    // deriving a subgroup from occupancy alone.
+    rules_profile_identity: &'static str,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum RootStabilizerMoveKey {
+    One((i16, i16)),
+    // The existing complete-turn generator explicitly licenses swapping the
+    // two same-player applications and already deduplicates that pair.
+    Pair((i16, i16), (i16, i16)),
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
+struct RootStabilizerTelemetry {
+    report: RootStabilizerReport,
+    child_orbits: Vec<usize>,
+}
+
+#[cfg(test)]
+struct RootStabilizerDescent {
+    orbit: usize,
+    expansions: u64,
+    started: Instant,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3852,6 +3940,248 @@ fn classify_last_two_turns(state: &RustHexoState) -> Option<u8> {
     Some(flags)
 }
 
+#[cfg(test)]
+const ROOT_STABILIZER_RULES_PROFILE_ID: &str =
+    "hexo-six/opening-center/two-stone-turn/terminal-after-each-placement/v1";
+
+#[cfg(test)]
+fn transform_root_binding(binding: &RootBinding, symmetry: u8) -> Option<RootBinding> {
+    let mut stones = binding
+        .occupancy
+        .iter()
+        .copied()
+        .zip(binding.owners.iter().copied())
+        .map(|(coord, owner)| Some((d6_transform_coord(coord, symmetry)?, owner)))
+        .collect::<Option<Vec<_>>>()?;
+    stones.sort_by_key(|(coord, _)| (coord.q, coord.r));
+    let (occupancy, owners) = stones.into_iter().unzip();
+    let phase = match binding.phase {
+        TurnPhase::Opening => TurnPhase::Opening,
+        TurnPhase::FirstStone => TurnPhase::FirstStone,
+        TurnPhase::SecondStone { first } => TurnPhase::SecondStone {
+            first: d6_transform_coord(first, symmetry)?,
+        },
+    };
+    Some(RootBinding {
+        occupancy,
+        owners,
+        current_player: binding.current_player,
+        phase,
+        placements_made: binding.placements_made,
+        terminal: binding.terminal,
+    })
+}
+
+#[cfg(test)]
+fn transform_root_semantic_binding(
+    binding: &RootStabilizerSemanticBinding,
+    symmetry: u8,
+) -> Option<RootStabilizerSemanticBinding> {
+    Some(RootStabilizerSemanticBinding {
+        root: transform_root_binding(&binding.root, symmetry)?,
+        claimant: binding.claimant,
+        semantic_horizon: binding.semantic_horizon,
+        depth_cap: binding.depth_cap,
+        width: binding.width,
+        rules_profile_identity: binding.rules_profile_identity,
+    })
+}
+
+#[cfg(test)]
+fn d6_composition(left: u8, right: u8) -> Option<u8> {
+    let basis = [HexCoord::new(1, 0), HexCoord::new(0, 1)];
+    let target = basis
+        .iter()
+        .copied()
+        .map(|coord| d6_transform_coord(d6_transform_coord(coord, right)?, left))
+        .collect::<Option<Vec<_>>>()?;
+    (0..D6_SYMMETRY_COUNT).find(|&candidate| {
+        basis
+            .iter()
+            .copied()
+            .zip(target.iter().copied())
+            .all(|(coord, expected)| d6_transform_coord(coord, candidate) == Some(expected))
+    })
+}
+
+#[cfg(test)]
+fn root_stabilizer_subgroup(
+    state: &RustHexoState,
+    claimant: Player,
+    semantic_horizon: u32,
+    depth_cap: usize,
+    width: WidthOptions,
+) -> Result<Vec<u8>, String> {
+    let binding = RootStabilizerSemanticBinding {
+        root: RootBinding::from_state(state),
+        claimant,
+        semantic_horizon,
+        depth_cap,
+        width,
+        rules_profile_identity: ROOT_STABILIZER_RULES_PROFILE_ID,
+    };
+    let stabilizer = (0..D6_SYMMETRY_COUNT)
+        .filter(|&symmetry| {
+            transform_root_semantic_binding(&binding, symmetry).as_ref() == Some(&binding)
+        })
+        .collect::<Vec<_>>();
+    if stabilizer.first().copied() != Some(0) {
+        return Err("identity transform did not fix the complete root binding".to_owned());
+    }
+    for &left in &stabilizer {
+        for &right in &stabilizer {
+            let Some(composed) = d6_composition(left, right) else {
+                return Err(format!(
+                    "could not compose stabilizer transforms {left},{right}"
+                ));
+            };
+            if !stabilizer.contains(&composed) {
+                return Err(format!(
+                    "complete-binding stabilizer is not closed: {left}*{right}={composed}"
+                ));
+            }
+        }
+    }
+    Ok(stabilizer)
+}
+
+#[cfg(test)]
+fn root_stabilizer_move_key(mv: WidePnMove) -> Result<RootStabilizerMoveKey, String> {
+    let coord = |coord: HexCoord| (coord.q, coord.r);
+    match mv {
+        WidePnMove::One(one) => Ok(RootStabilizerMoveKey::One(coord(one))),
+        WidePnMove::Pair(first, second) => {
+            let mut pair = [coord(first), coord(second)];
+            pair.sort_unstable();
+            Ok(RootStabilizerMoveKey::Pair(pair[0], pair[1]))
+        }
+        WidePnMove::DefenderPair(_, _) => {
+            Err("defender-pair edge appeared at a primal claimant Choice root".to_owned())
+        }
+    }
+}
+
+#[cfg(test)]
+fn transform_root_stabilizer_move(
+    mv: WidePnMove,
+    symmetry: u8,
+) -> Result<RootStabilizerMoveKey, String> {
+    let transform = |coord| {
+        d6_transform_coord(coord, symmetry)
+            .ok_or_else(|| format!("coordinate overflow under symmetry {symmetry}: {coord:?}"))
+    };
+    match mv {
+        WidePnMove::One(coord) => root_stabilizer_move_key(WidePnMove::One(transform(coord)?)),
+        WidePnMove::Pair(first, second) => {
+            root_stabilizer_move_key(WidePnMove::Pair(transform(first)?, transform(second)?))
+        }
+        WidePnMove::DefenderPair(_, _) => {
+            Err("defender-pair edge appeared at a primal claimant Choice root".to_owned())
+        }
+    }
+}
+
+#[cfg(test)]
+fn root_stabilizer_move_label(mv: WidePnMove) -> String {
+    match root_stabilizer_move_key(mv) {
+        Ok(RootStabilizerMoveKey::One((q, r))) => format!("({q},{r})"),
+        Ok(RootStabilizerMoveKey::Pair((aq, ar), (bq, br))) => {
+            format!("({aq},{ar})+({bq},{br})")
+        }
+        Err(_) => format!("{mv:?}"),
+    }
+}
+
+#[cfg(test)]
+fn root_stabilizer_partition(
+    children: &[WidePnChild],
+    stabilizer: &[u8],
+) -> Result<(Vec<usize>, Vec<usize>, Vec<RootStabilizerOrbitReport>), String> {
+    let mut by_key = HashMap::new();
+    for (index, child) in children.iter().enumerate() {
+        let key = root_stabilizer_move_key(child.mv)?;
+        if by_key.insert(key.clone(), index).is_some() {
+            return Err(format!("duplicate complete root edge {key:?}"));
+        }
+    }
+
+    let mut images = Vec::with_capacity(children.len());
+    for (index, child) in children.iter().enumerate() {
+        let mut orbit = Vec::with_capacity(stabilizer.len());
+        for &symmetry in stabilizer {
+            let key = transform_root_stabilizer_move(child.mv, symmetry)?;
+            let Some(&image) = by_key.get(&key) else {
+                return Err(format!(
+                    "root child {index} has no generated image under stabilizer {symmetry}: {key:?}"
+                ));
+            };
+            let other = &children[image];
+            if (
+                child.result,
+                child.prior,
+                child.urgent_block,
+                child.first_width_tier,
+            ) != (
+                other.result,
+                other.prior,
+                other.urgent_block,
+                other.first_width_tier,
+            ) {
+                return Err(format!(
+                    "root child metadata is not equivariant: child={index} image={image} symmetry={symmetry}"
+                ));
+            }
+            orbit.push(image);
+        }
+        orbit.sort_unstable();
+        orbit.dedup();
+        images.push(orbit);
+    }
+    for (index, orbit) in images.iter().enumerate() {
+        for &member in orbit {
+            if images.get(member) != Some(orbit) {
+                return Err(format!(
+                    "root orbit failed closure: child={index} member={member}"
+                ));
+            }
+        }
+    }
+
+    let mut child_orbits = vec![usize::MAX; children.len()];
+    let mut representatives = Vec::new();
+    let mut reports = Vec::new();
+    for index in 0..children.len() {
+        if child_orbits[index] != usize::MAX {
+            continue;
+        }
+        let orbit_id = reports.len();
+        let members = &images[index];
+        if members.is_empty() || !members.contains(&index) {
+            return Err(format!("root orbit omitted its seed child {index}"));
+        }
+        for &member in members {
+            if child_orbits[member] != usize::MAX {
+                return Err(format!("overlapping root orbits at child {member}"));
+            }
+            child_orbits[member] = orbit_id;
+        }
+        let representative = members[0];
+        representatives.push(representative);
+        reports.push(RootStabilizerOrbitReport {
+            representative: root_stabilizer_move_label(children[representative].mv),
+            members: members
+                .iter()
+                .map(|&member| root_stabilizer_move_label(children[member].mv))
+                .collect(),
+            ..RootStabilizerOrbitReport::default()
+        });
+    }
+    if child_orbits.iter().any(|&orbit| orbit == usize::MAX) {
+        return Err("root orbit partition did not cover every raw child".to_owned());
+    }
+    Ok((representatives, child_orbits, reports))
+}
+
 /// Wide VCF search keeps a persistent proof-number frontier.  Unlike the
 /// quota-based DFS experiments, expanding a sibling never discards work in an
 /// earlier forcing turn. Claimant pairs are represented as one OR edge, so
@@ -3931,6 +4261,12 @@ struct WidePnSearch<'store> {
     incr_active_parent_snapshot: RefCell<Option<IncrDefenderSnapshot>>,
     #[cfg(test)]
     quotient_telemetry: Option<QuotientTelemetry>,
+    #[cfg(test)]
+    root_stabilizer_enabled: bool,
+    #[cfg(test)]
+    root_stabilizer_consume: bool,
+    #[cfg(test)]
+    root_stabilizer_telemetry: Option<RootStabilizerTelemetry>,
     entries: Vec<WidePnEntry>,
     by_position: HashMap<WidePositionKey, usize>,
     /// Exact prospective identity for lazy defender thunks. This preserves the
@@ -4088,6 +4424,10 @@ impl<'store> WidePnSearch<'store> {
             let report = telemetry.finish(&search.tt, search.tt_hits);
             LAST_QUOTIENT_REPORT.with(|slot| *slot.borrow_mut() = Some(report));
         }
+        #[cfg(test)]
+        if let Some(telemetry) = search.root_stabilizer_telemetry.take() {
+            LAST_ROOT_STABILIZER_REPORT.with(|slot| *slot.borrow_mut() = Some(telemetry.report));
+        }
         AttemptResult {
             cert,
             stats,
@@ -4196,6 +4536,14 @@ impl<'store> WidePnSearch<'store> {
             incr_active_parent_snapshot: RefCell::new(None),
             #[cfg(test)]
             quotient_telemetry: QuotientTelemetry::enabled(),
+            #[cfg(test)]
+            root_stabilizer_enabled: std::env::var_os("TSS_ROOT_STABILIZER_TELEMETRY").is_some()
+                || std::env::var_os("TSS_ROOT_STABILIZER_CONSUME").is_some(),
+            #[cfg(test)]
+            root_stabilizer_consume: std::env::var("TSS_ROOT_STABILIZER_CONSUME").ok().as_deref()
+                == Some("1"),
+            #[cfg(test)]
+            root_stabilizer_telemetry: None,
             entries: Vec::new(),
             by_position: HashMap::new(),
             deferred_by_position: HashMap::new(),
@@ -4225,6 +4573,146 @@ impl<'store> WidePnSearch<'store> {
     fn insert_root(&mut self, state: &RustHexoState) -> usize {
         let prior = self.position_prior(state);
         self.insert_position(WidePositionKey::from_state(state), 0, prior)
+    }
+
+    #[cfg(test)]
+    fn prepare_root_stabilizer(
+        &mut self,
+        state: &RustHexoState,
+        kind: WidePnKind,
+        children: &mut Vec<WidePnChild>,
+        generation_nanos: u64,
+    ) {
+        if !self.root_stabilizer_enabled || self.root_stabilizer_telemetry.is_some() {
+            return;
+        }
+        let mut report = RootStabilizerReport {
+            raw_children: children.len(),
+            root_generation_nanos: generation_nanos,
+            ..RootStabilizerReport::default()
+        };
+        let eligible = self.claimant == state.current_player()
+            && state.placements_made() == 3
+            && matches!(state.phase(), TurnPhase::FirstStone)
+            && state.terminal().is_none()
+            && kind == WidePnKind::Choice
+            && self.width.vcf_pair_complete;
+        report.eligible = eligible;
+        if !eligible {
+            report.reason =
+                Some("not an A-0 primal claimant Choice root with complete-turn width".to_owned());
+            self.root_stabilizer_telemetry = Some(RootStabilizerTelemetry {
+                report,
+                child_orbits: Vec::new(),
+            });
+            return;
+        }
+
+        let stabilizer = match root_stabilizer_subgroup(
+            state,
+            self.claimant,
+            self.semantic_horizon,
+            self.max_depth_cap,
+            self.width,
+        ) {
+            Ok(stabilizer) => {
+                report.complete_binding_checked = true;
+                stabilizer
+            }
+            Err(reason) => {
+                report.fail_closed = true;
+                report.reason = Some(reason);
+                self.root_stabilizer_telemetry = Some(RootStabilizerTelemetry {
+                    report,
+                    child_orbits: Vec::new(),
+                });
+                return;
+            }
+        };
+        report.stabilizer = stabilizer.clone();
+        let partition = if std::env::var_os("TSS_ROOT_STABILIZER_INJECT_INCONSISTENCY").is_some() {
+            Err("injected orbit inconsistency".to_owned())
+        } else {
+            root_stabilizer_partition(children, &stabilizer)
+        };
+        let (representatives, raw_child_orbits, orbits) = match partition {
+            Ok(partition) => partition,
+            Err(reason) => {
+                report.fail_closed = true;
+                report.reason = Some(reason);
+                self.root_stabilizer_telemetry = Some(RootStabilizerTelemetry {
+                    report,
+                    child_orbits: Vec::new(),
+                });
+                return;
+            }
+        };
+        report.orbit_count = orbits.len();
+        report.fixed_children = orbits
+            .iter()
+            .filter(|orbit| orbit.members.len() == 1)
+            .count();
+        report.orbits = orbits;
+
+        let child_orbits = if self.root_stabilizer_consume {
+            let retained = representatives
+                .iter()
+                .map(|&index| children[index].clone())
+                .collect::<Vec<_>>();
+            let retained_orbits = representatives
+                .iter()
+                .map(|&index| raw_child_orbits[index])
+                .collect::<Vec<_>>();
+            report.consumed = retained.len() < children.len();
+            *children = retained;
+            retained_orbits
+        } else {
+            raw_child_orbits
+        };
+        self.root_stabilizer_telemetry = Some(RootStabilizerTelemetry {
+            report,
+            child_orbits,
+        });
+    }
+
+    #[cfg(test)]
+    fn start_root_stabilizer_descent(
+        &self,
+        parent: usize,
+        child: usize,
+    ) -> Option<RootStabilizerDescent> {
+        if self.entries.get(parent)?.depth != 0 {
+            return None;
+        }
+        let telemetry = self.root_stabilizer_telemetry.as_ref()?;
+        let orbit = *telemetry.child_orbits.get(child)?;
+        Some(RootStabilizerDescent {
+            orbit,
+            expansions: self.expansions,
+            started: Instant::now(),
+        })
+    }
+
+    #[cfg(test)]
+    fn finish_root_stabilizer_descent(&mut self, descent: Option<RootStabilizerDescent>) {
+        let Some(descent) = descent else {
+            return;
+        };
+        let Some(telemetry) = self.root_stabilizer_telemetry.as_mut() else {
+            return;
+        };
+        let Some(orbit) = telemetry.report.orbits.get_mut(descent.orbit) else {
+            telemetry.report.fail_closed = true;
+            telemetry.report.reason = Some("root descent referenced an invalid orbit".to_owned());
+            return;
+        };
+        orbit.descents = orbit.descents.saturating_add(1);
+        orbit.expansions = orbit
+            .expansions
+            .saturating_add(self.expansions.saturating_sub(descent.expansions));
+        orbit.wall_nanos = orbit.wall_nanos.saturating_add(
+            u64::try_from(descent.started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+        );
     }
 
     fn insert_position(&mut self, key: WidePositionKey, depth: usize, prior: WidePnPrior) -> usize {
@@ -4898,6 +5386,8 @@ impl<'store> WidePnSearch<'store> {
                     self.set_child_entry(id, child_index, child_id);
                     #[cfg(test)]
                     threshold_residency.pause();
+                    #[cfg(test)]
+                    let root_descent = self.start_root_stabilizer_descent(id, child_index);
                     let outcome = self.work(
                         state,
                         child_id,
@@ -4905,6 +5395,8 @@ impl<'store> WidePnSearch<'store> {
                         child_pn_threshold,
                         child_dn_threshold,
                     );
+                    #[cfg(test)]
+                    self.finish_root_stabilizer_descent(root_descent);
                     #[cfg(test)]
                     threshold_residency.resume();
                     #[cfg(test)]
@@ -5005,6 +5497,8 @@ impl<'store> WidePnSearch<'store> {
                     );
                     #[cfg(test)]
                     threshold_residency.pause();
+                    #[cfg(test)]
+                    let root_descent = self.start_root_stabilizer_descent(id, child_index);
                     let outcome = self.work(
                         state,
                         child_id,
@@ -5012,6 +5506,8 @@ impl<'store> WidePnSearch<'store> {
                         child_pn_threshold,
                         child_dn_threshold,
                     );
+                    #[cfg(test)]
+                    self.finish_root_stabilizer_descent(root_descent);
                     #[cfg(test)]
                     threshold_residency.resume();
                     #[cfg(test)]
@@ -5818,6 +6314,9 @@ impl<'store> WidePnSearch<'store> {
             }
         }
 
+        #[cfg(test)]
+        let root_generation_started =
+            (depth == 0 && self.root_stabilizer_enabled).then(Instant::now);
         let (kind, mut children) = if state.current_player() == self.claimant {
             (WidePnKind::Choice, self.attack_children(state, depth))
         } else {
@@ -5834,6 +6333,11 @@ impl<'store> WidePnSearch<'store> {
             let children = self.defender_boundary_children(state, analysis.b);
             (WidePnKind::Universal { implicit_dispatch }, children)
         };
+        #[cfg(test)]
+        if let Some(started) = root_generation_started {
+            let generation_nanos = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            self.prepare_root_stabilizer(state, kind, &mut children, generation_nanos);
+        }
         #[cfg(test)]
         let closure_pair_profiles = if self.closure_counters
             && kind == WidePnKind::Choice
@@ -6944,6 +7448,12 @@ struct NarrowCompatSearch<'a> {
     k_reply_shadow: Option<&'a mut Vec<KReplyShadowRecord>>,
     #[cfg(test)]
     quotient_telemetry: Option<NarrowQuotientTelemetry>,
+    #[cfg(test)]
+    root_stabilizer_enabled: bool,
+    #[cfg(test)]
+    root_stabilizer_consume: bool,
+    #[cfg(test)]
+    root_stabilizer_telemetry: Option<RootStabilizerTelemetry>,
     interior_census_gate: bool,
     interior_gate_evaluations: u64,
     interior_gate_dismissals: u64,
@@ -7039,6 +7549,127 @@ struct PairContext {
     turn_start_legal: Vec<HexCoord>,
 }
 
+#[cfg(test)]
+#[derive(Clone, Debug)]
+struct AtlasRootEdge {
+    first: HexCoord,
+    second: HexCoord,
+    key: AtlasRootEdgeKey,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum AtlasRootEdgeKey {
+    /// Both applications are legal from the turn start and reach the same
+    /// complete binding without a first-stone terminal.
+    Commutative((i16, i16), (i16, i16)),
+    /// Frontier growth made only this application order legal.
+    Ordered((i16, i16), (i16, i16)),
+}
+
+#[cfg(test)]
+fn atlas_edge_key_transformed(
+    key: &AtlasRootEdgeKey,
+    symmetry: u8,
+) -> Result<AtlasRootEdgeKey, String> {
+    let transform = |coord: (i16, i16)| -> Result<(i16, i16), String> {
+        let transformed = d6_transform_coord(HexCoord::new(coord.0, coord.1), symmetry)
+            .ok_or_else(|| format!("atlas edge overflow under symmetry {symmetry}: {coord:?}"))?;
+        Ok((transformed.q, transformed.r))
+    };
+    match *key {
+        AtlasRootEdgeKey::Commutative(first, second) => {
+            let mut pair = [transform(first)?, transform(second)?];
+            pair.sort_unstable();
+            Ok(AtlasRootEdgeKey::Commutative(pair[0], pair[1]))
+        }
+        AtlasRootEdgeKey::Ordered(first, second) => Ok(AtlasRootEdgeKey::Ordered(
+            transform(first)?,
+            transform(second)?,
+        )),
+    }
+}
+
+#[cfg(test)]
+fn atlas_edge_label(key: &AtlasRootEdgeKey) -> String {
+    match *key {
+        AtlasRootEdgeKey::Commutative((aq, ar), (bq, br)) => {
+            format!("U({aq},{ar})+({bq},{br})")
+        }
+        AtlasRootEdgeKey::Ordered((aq, ar), (bq, br)) => {
+            format!("O({aq},{ar})->({bq},{br})")
+        }
+    }
+}
+
+#[cfg(test)]
+fn atlas_root_partition(
+    edges: &[AtlasRootEdge],
+    stabilizer: &[u8],
+) -> Result<(Vec<usize>, Vec<usize>, Vec<RootStabilizerOrbitReport>), String> {
+    let mut by_key = HashMap::new();
+    for (index, edge) in edges.iter().enumerate() {
+        if by_key.insert(edge.key.clone(), index).is_some() {
+            return Err(format!("duplicate atlas root edge {:?}", edge.key));
+        }
+    }
+    let mut images = Vec::with_capacity(edges.len());
+    for (index, edge) in edges.iter().enumerate() {
+        let mut orbit = Vec::with_capacity(stabilizer.len());
+        for &symmetry in stabilizer {
+            let key = atlas_edge_key_transformed(&edge.key, symmetry)?;
+            let Some(&image) = by_key.get(&key) else {
+                return Err(format!(
+                    "atlas root edge {index} lacks symmetry {symmetry} image {key:?}"
+                ));
+            };
+            orbit.push(image);
+        }
+        orbit.sort_unstable();
+        orbit.dedup();
+        images.push(orbit);
+    }
+    for (index, orbit) in images.iter().enumerate() {
+        for &member in orbit {
+            if images.get(member) != Some(orbit) {
+                return Err(format!(
+                    "atlas root orbit failed closure: edge={index} member={member}"
+                ));
+            }
+        }
+    }
+    let mut child_orbits = vec![usize::MAX; edges.len()];
+    let mut representatives = Vec::new();
+    let mut reports = Vec::new();
+    for index in 0..edges.len() {
+        if child_orbits[index] != usize::MAX {
+            continue;
+        }
+        let members = &images[index];
+        if members.is_empty() || !members.contains(&index) {
+            return Err(format!("atlas root orbit omitted seed edge {index}"));
+        }
+        let orbit_id = reports.len();
+        for &member in members {
+            if child_orbits[member] != usize::MAX {
+                return Err(format!("overlapping atlas root orbit at edge {member}"));
+            }
+            child_orbits[member] = orbit_id;
+        }
+        let representative = members[0];
+        representatives.push(representative);
+        reports.push(RootStabilizerOrbitReport {
+            representative: atlas_edge_label(&edges[representative].key),
+            members: members
+                .iter()
+                .map(|&member| atlas_edge_label(&edges[member].key))
+                .collect(),
+            ..RootStabilizerOrbitReport::default()
+        });
+    }
+    Ok((representatives, child_orbits, reports))
+}
+
 /// Exact Q8 reply-survival kernel from the NQ2 proof. Urgency is deliberately
 /// scoped to the theorem's nonterminal attacker SecondStone position. Defender
 /// windows come from the engine's incrementally maintained exact mirror of all
@@ -7128,6 +7759,12 @@ impl NarrowCompatSearch<'static> {
             k_reply_shadow: None,
             #[cfg(test)]
             quotient_telemetry: NarrowQuotientTelemetry::enabled(),
+            #[cfg(test)]
+            root_stabilizer_enabled: false,
+            #[cfg(test)]
+            root_stabilizer_consume: false,
+            #[cfg(test)]
+            root_stabilizer_telemetry: None,
             interior_census_gate: false,
             interior_gate_evaluations: 0,
             interior_gate_dismissals: 0,
@@ -7175,6 +7812,14 @@ impl<'a> NarrowCompatSearch<'a> {
             k_reply_shadow,
             #[cfg(test)]
             quotient_telemetry: NarrowQuotientTelemetry::enabled(),
+            #[cfg(test)]
+            root_stabilizer_enabled: std::env::var_os("TSS_ROOT_STABILIZER_TELEMETRY").is_some()
+                || std::env::var_os("TSS_ROOT_STABILIZER_CONSUME").is_some(),
+            #[cfg(test)]
+            root_stabilizer_consume: std::env::var("TSS_ROOT_STABILIZER_CONSUME").ok().as_deref()
+                == Some("1"),
+            #[cfg(test)]
+            root_stabilizer_telemetry: None,
             interior_census_gate,
             interior_gate_evaluations: 0,
             interior_gate_dismissals: 0,
@@ -7388,6 +8033,225 @@ impl<'a> NarrowCompatSearch<'a> {
         pn_init_result
     }
 
+    #[cfg(test)]
+    fn generate_atlas_root_edges(
+        &self,
+        state: &mut RustHexoState,
+    ) -> Result<Vec<AtlasRootEdge>, String> {
+        let frame = canonical_frame(state);
+        let mut first_moves = Vec::new();
+        state.write_legal_moves(&mut first_moves);
+        first_moves.sort_by_key(|coord| canonical_coord_key(frame, *coord));
+        let mut raw = Vec::<(HexCoord, HexCoord, bool)>::new();
+        let mut nonterminal = HashSet::<(HexCoord, HexCoord)>::new();
+        for first in first_moves {
+            let (first_result, first_delta) = state
+                .apply_with_delta(Placement { coord: first })
+                .map_err(|error| format!("atlas first edge became illegal: {error}"))?;
+            if first_result.outcome.is_some() {
+                state.undo(first_delta);
+                return Err("atlas root unexpectedly has a first-stone terminal edge".to_owned());
+            }
+            let child_frame = canonical_frame(state);
+            let mut second_moves = Vec::new();
+            state.write_legal_moves(&mut second_moves);
+            second_moves.sort_by_key(|coord| canonical_coord_key(child_frame, *coord));
+            for second in second_moves {
+                let Ok((second_result, second_delta)) =
+                    state.apply_with_delta(Placement { coord: second })
+                else {
+                    continue;
+                };
+                let is_nonterminal = second_result.outcome.is_none();
+                raw.push((first, second, is_nonterminal));
+                if is_nonterminal {
+                    nonterminal.insert((first, second));
+                }
+                state.undo(second_delta);
+            }
+            state.undo(first_delta);
+        }
+
+        let mut unique = HashMap::<AtlasRootEdgeKey, AtlasRootEdge>::new();
+        for (first, second, is_nonterminal) in raw {
+            let first_raw = (first.q, first.r);
+            let second_raw = (second.q, second.r);
+            let commutative = is_nonterminal && nonterminal.contains(&(second, first));
+            let (first, second, key) = if commutative {
+                let first_key = canonical_coord_key(frame, first);
+                let second_key = canonical_coord_key(frame, second);
+                let (oriented_first, oriented_second) = if first_key <= second_key {
+                    (first, second)
+                } else {
+                    (second, first)
+                };
+                let mut pair = [first_raw, second_raw];
+                pair.sort_unstable();
+                (
+                    oriented_first,
+                    oriented_second,
+                    AtlasRootEdgeKey::Commutative(pair[0], pair[1]),
+                )
+            } else {
+                (
+                    first,
+                    second,
+                    AtlasRootEdgeKey::Ordered(first_raw, second_raw),
+                )
+            };
+            unique
+                .entry(key.clone())
+                .or_insert(AtlasRootEdge { first, second, key });
+        }
+        let mut edges = unique.into_values().collect::<Vec<_>>();
+        edges.sort_by_key(|edge| {
+            (
+                canonical_coord_key(frame, edge.first),
+                canonical_coord_key(frame, edge.second),
+                matches!(edge.key, AtlasRootEdgeKey::Ordered(_, _)),
+            )
+        });
+        Ok(edges)
+    }
+
+    #[cfg(test)]
+    fn prove_atlas_root_choice(
+        &mut self,
+        state: &mut RustHexoState,
+        claimant: Player,
+        ply: u32,
+    ) -> Result<Option<CertNodeId>, String> {
+        let generation_started = Instant::now();
+        let mut edges = self.generate_atlas_root_edges(state)?;
+        let generation_nanos =
+            u64::try_from(generation_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let mut report = RootStabilizerReport {
+            eligible: true,
+            raw_children: edges.len(),
+            root_generation_nanos: generation_nanos,
+            ..RootStabilizerReport::default()
+        };
+        let stabilizer = root_stabilizer_subgroup(
+            state,
+            claimant,
+            self.semantic_horizon,
+            self.depth_cap,
+            self.width,
+        )?;
+        report.complete_binding_checked = true;
+        report.stabilizer = stabilizer.clone();
+        let partition = if std::env::var_os("TSS_ROOT_STABILIZER_INJECT_INCONSISTENCY").is_some() {
+            Err("injected orbit inconsistency".to_owned())
+        } else {
+            atlas_root_partition(&edges, &stabilizer)
+        };
+        let (child_orbits, orbits) = match partition {
+            Ok((representatives, raw_child_orbits, orbits)) => {
+                let child_orbits = if self.root_stabilizer_consume {
+                    let retained = representatives
+                        .iter()
+                        .map(|&index| edges[index].clone())
+                        .collect::<Vec<_>>();
+                    let retained_orbits = representatives
+                        .iter()
+                        .map(|&index| raw_child_orbits[index])
+                        .collect::<Vec<_>>();
+                    report.consumed = retained.len() < edges.len();
+                    edges = retained;
+                    retained_orbits
+                } else {
+                    raw_child_orbits
+                };
+                (child_orbits, orbits)
+            }
+            Err(reason) => {
+                report.fail_closed = true;
+                report.reason = Some(reason);
+                (Vec::new(), Vec::new())
+            }
+        };
+        report.orbit_count = orbits.len();
+        report.fixed_children = orbits
+            .iter()
+            .filter(|orbit| orbit.members.len() == 1)
+            .count();
+        report.orbits = orbits;
+        self.root_stabilizer_telemetry = Some(RootStabilizerTelemetry {
+            report,
+            child_orbits,
+        });
+
+        for (edge_index, edge) in edges.into_iter().enumerate() {
+            let started = Instant::now();
+            let nodes_before = self.nodes;
+            let first_applied = state.apply_with_delta(Placement { coord: edge.first });
+            let Ok((first_result, first_delta)) = first_applied else {
+                continue;
+            };
+            if first_result.outcome.is_some() {
+                state.undo(first_delta);
+                continue;
+            }
+            let second_applied = state.apply_with_delta(Placement { coord: edge.second });
+            let Ok((second_result, second_delta)) = second_applied else {
+                state.undo(first_delta);
+                continue;
+            };
+            let completion_ply = ply.saturating_add(2);
+            let child = if second_result
+                .outcome
+                .is_some_and(|outcome| outcome.winner == claimant)
+            {
+                (completion_ply <= self.semantic_horizon)
+                    .then(|| wide_completion_node(state, claimant, edge.second, completion_ply))
+                    .flatten()
+                    .and_then(|node| self.alloc_node(node, 0))
+            } else if second_result.outcome.is_none() {
+                self.prove(state, claimant, completion_ply, None)
+            } else {
+                None
+            };
+            state.undo(second_delta);
+            state.undo(first_delta);
+
+            if let Some(telemetry) = self.root_stabilizer_telemetry.as_mut() {
+                if let Some(&orbit_id) = telemetry.child_orbits.get(edge_index) {
+                    if let Some(orbit) = telemetry.report.orbits.get_mut(orbit_id) {
+                        orbit.descents = orbit.descents.saturating_add(1);
+                        orbit.expansions = orbit
+                            .expansions
+                            .saturating_add(self.nodes.saturating_sub(nodes_before));
+                        orbit.wall_nanos = orbit.wall_nanos.saturating_add(
+                            u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                        );
+                    }
+                }
+            }
+            if let Some(child) = child {
+                let second_choice = self.alloc_node(
+                    CertNode::Choice {
+                        mv: edge.second,
+                        child,
+                    },
+                    1,
+                );
+                if let Some(second_choice) = second_choice {
+                    return Ok(self.alloc_node(
+                        CertNode::Choice {
+                            mv: edge.first,
+                            child: second_choice,
+                        },
+                        1,
+                    ));
+                }
+            }
+            if self.hit_limit {
+                return Ok(None);
+            }
+        }
+        Ok(None)
+    }
+
     fn prove_choice(
         &mut self,
         state: &mut RustHexoState,
@@ -7396,6 +8260,31 @@ impl<'a> NarrowCompatSearch<'a> {
         analysis: &threats::ThreatAnalysis,
         pair: Option<&PairContext>,
     ) -> Option<CertNodeId> {
+        #[cfg(test)]
+        if self.root_stabilizer_enabled
+            && pair.is_none()
+            && ply == self.root_ply
+            && state.placements_made() == 3
+            && state.current_player() == claimant
+            && matches!(state.phase(), TurnPhase::FirstStone)
+            && state.terminal().is_none()
+            && self.width.consumes_quiet_turns()
+        {
+            match self.prove_atlas_root_choice(state, claimant, ply) {
+                Ok(result) => return result,
+                Err(reason) => {
+                    self.root_stabilizer_telemetry = Some(RootStabilizerTelemetry {
+                        report: RootStabilizerReport {
+                            eligible: true,
+                            fail_closed: true,
+                            reason: Some(reason),
+                            ..RootStabilizerReport::default()
+                        },
+                        child_orbits: Vec::new(),
+                    });
+                }
+            }
+        }
         // Descending line count is the static proof-number initialization:
         // completions before four-builds before three-builds.  The coordinate
         // tie break makes the order independent of WindowStore hash iteration.

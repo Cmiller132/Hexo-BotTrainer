@@ -1,0 +1,12 @@
+command=cargo test --release --target x86_64-pc-windows-msvc -p hexfield_eq tss_root_stabilizer_atlas_campaign -- --ignored --test-threads=1 --nocapture
+target_dir=.target-rs
+profile=TSS_BACKWALK_TT_BYTES=1073741824,TSS_LAZY_FRONTIER=1,TSS_INTERIOR_CENSUS_GATE=1,TSS_INCR_DEFENDER=1
+selection=TSS_ROOT_STABILIZER_FAMILIES=1,TSS_ROOT_STABILIZER_TRANSFORMS=1,TSS_ROOT_STABILIZER_CAPS=10000
+started=2026-07-17T16:50:42-04:00
+outer_shell_timeout_seconds=604
+test_process_continued_after_shell_timeout=true
+last_observed_test_cpu_seconds=1076.796875
+stopped_as_orphan=true
+completed_rows=0
+usable_sizing_data=false
+note=No verdict, wall, expansion, or orbit row from this incomplete cell is used in the report.

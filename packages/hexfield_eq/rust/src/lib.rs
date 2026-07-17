@@ -59,6 +59,9 @@ mod tss_pn_init_hunt;
 #[cfg(test)]
 mod tss_leaf_surface_hunt;
 
+#[cfg(test)]
+mod tss_root_stabilizer_hunt;
+
 #[cfg(feature = "python")]
 mod cache;
 #[cfg(feature = "python")]

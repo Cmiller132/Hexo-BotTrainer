@@ -1,0 +1,73 @@
+R-RS1 — CANDIDATE-3 SIZING ROUND (opening-root D6 stabilizer quotient, A-0 atlas)
+
+You are working in
+E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-root-stabilizer
+(branch hunt/root-stabilizer, HEAD = a49e8abd). You CANNOT git-commit.
+Read IDEATION_FINAL.md §4 ("Candidate 3 -- opening-root stabilizer
+quotient") FIRST — it is the binding design. Deliverable:
+HUNT_REPORT_ROOT_STABILIZER.md + shadow implementation + retained raws
++ regen commands.
+
+## The target (from IDEATION_FINAL §4)
+One representative per D6 stabilizer orbit at primal opening-atlas
+claimant Choice roots. Census over the 6,902-game human corpus:
+nontrivial stabilizers cover 62.92% of games (stab-2: 53 families /
+59.23% of games; stab-4: 8 families / 3.69%); game-weighted
+root-child-removal ceiling 32.39%. This round SIZES the lever — it does
+not consume it in production.
+
+## Phases (exact next hunt, IDEATION_FINAL §4)
+1. Shadow-only root telemetry on the ranked A-0 families: stabilizer
+   subgroup, raw children, orbit count, fixed children, root-generation
+   wall, and expansions/wall below each orbit. Suggested harness name:
+   tss_root_stabilizer_atlas_campaign (IDEATION_FINAL's regen section
+   names this command).
+2. Sizing runs: top 10 families at 10k and 100k node caps under the
+   official 1 GiB profile — as defined by the current tip's
+   HUNT_REPORT_PAIRCLASS.md regen commands: TSS_BACKWALK_TT_BYTES=1GiB,
+   TSS_LAZY_FRONTIER=1, TSS_INTERIOR_CENSUS_GATE=1, TSS_INCR_DEFENDER=1
+   (newly wired official; see docs/TSS_RUNBOOK.md). Extend caps ONLY
+   for roots that survive the small rungs.
+3. Quotient consumption (shadow/cfg(test)/env-gated default-off A-B
+   only this round) at primal claimant Choice roots ONLY. Compare all
+   12 transformed roots; strict-verify every hard result.
+4. Report BOTH family-weighted and game-frequency-weighted wall deltas,
+   not only child counts.
+
+## Soundness obligations (binding; IDEATION_FINAL §4 "Soundness obligation")
+- Stabilizer computed from the COMPLETE root binding: owner-labelled
+  occupancy, current player, claimant, phase + pending first stone,
+  placement clock, terminal semantics, rules/profile identity.
+- NEVER prune a Universal node; primal claimant Choice roots only.
+- Orbit complete edge semantics; do NOT identify two ordered pair
+  applications merely because their unordered coordinate sets match,
+  unless the existing complete-turn contract licenses it.
+- Retain one actual raw representative; emit a NORMAL certificate; the
+  verifier trusts no symmetry fact.
+- Differential all 12 transforms; fail CLOSED to the full child list on
+  any stabilizer/orbit inconsistency.
+- Strict verifier (tss_verify.rs) UNTOUCHED — not one line. All new
+  behavior default-off cfg(test)/env-gated.
+
+## Bars
+- STOP bar: if the measured atlas gain is below 5% wall
+  (game-frequency-weighted), report the null honestly and stop — that
+  is a complete round.
+- PROMOTE bar: >=5% game-frequency-weighted atlas wall gain, zero
+  verdict changes vs the unquotiented baseline on every measured root
+  (WIN/LOSS/UNKNOWN identical; certificates strict-verified),
+  fail-closed differential clean on all measured roots.
+- Report per-family attribution (stabilizer, orbits removed, wall
+  before/after, expansions before/after), not just aggregates.
+
+## Rules
+CARGO_TARGET_DIR=.target-rs; --target x86_64-pc-windows-msvc on EVERY
+cargo; --test-threads=1; ONE cargo process host-wide (check
+Get-Process cargo, sleep-300 wait loop). Lean spine lane holds RAM
+priority. RAM gates (relaxed 07-17 + idle-host clause,
+E:\tss-lean\RAM_PROTOCOL.md): cargo availability >= 10 GB AND free
+>= 5 GB; gate-class 1 GiB profiles >= 12 GB availability AND >= 6 GB
+free; record readings. 94gnnol out of scope. Honest partial stop at a
+clean boundary is success. Final message: census + sizing tables,
+per-family attributions, promote/stop verdict vs the 5% bar, files,
+regen commands.
