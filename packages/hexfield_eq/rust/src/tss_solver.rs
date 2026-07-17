@@ -31,6 +31,363 @@ use crate::tss_verify::{
     MAX_CERT_COMMUTATIONS, MAX_CERT_DEPTH, MAX_CERT_EDGES, MAX_CERT_NODES, MAX_CERT_ROOT_STONES,
 };
 
+// Test-only NQ6 census/PN telemetry. The production solver has no field,
+// branch, or callable entry point for this collector.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PnInitTelemetryMode {
+    WidePn,
+    NarrowCompat,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PnInitTelemetryOutcome {
+    Proven,
+    Refuted,
+    Unknown,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(crate) struct PnInitTelemetryNode {
+    pub(crate) serial: u64,
+    pub(crate) parent_serial: Option<u64>,
+    pub(crate) engine_node: u64,
+    pub(crate) mode: PnInitTelemetryMode,
+    pub(crate) depth: u32,
+    pub(crate) h_rem: Option<u32>,
+    pub(crate) phase_code: u8,
+    pub(crate) win_arm: bool,
+    pub(crate) census: Option<u8>,
+    pub(crate) lb_plies: Option<u8>,
+    pub(crate) gate: bool,
+    pub(crate) coordinate_safe: bool,
+    pub(crate) census_scan_nanos: u64,
+    pub(crate) live_ge4: u32,
+    pub(crate) live_ge3: u32,
+    pub(crate) disjoint_two_gap: u32,
+    pub(crate) outcome: PnInitTelemetryOutcome,
+    pub(crate) frozen_state: Option<String>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PnInitTelemetryReport {
+    pub(crate) nodes: Vec<PnInitTelemetryNode>,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct PnInitTelemetrySession {
+    report: PnInitTelemetryReport,
+    wide_last_event: HashMap<usize, u64>,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static PN_INIT_TELEMETRY: std::cell::RefCell<Option<PnInitTelemetrySession>> = const { std::cell::RefCell::new(None) };
+    static PN_INIT_WIDE_STACK: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+    static PN_INIT_NARROW_STACK: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub(crate) fn begin_pn_init_telemetry() {
+    PN_INIT_TELEMETRY.with(|slot| {
+        *slot.borrow_mut() = Some(PnInitTelemetrySession::default());
+    });
+    PN_INIT_WIDE_STACK.with(|stack| stack.borrow_mut().clear());
+    PN_INIT_NARROW_STACK.with(|stack| stack.borrow_mut().clear());
+}
+
+#[cfg(test)]
+pub(crate) fn take_pn_init_telemetry_report() -> Option<PnInitTelemetryReport> {
+    PN_INIT_WIDE_STACK.with(|stack| assert!(stack.borrow().is_empty()));
+    PN_INIT_NARROW_STACK.with(|stack| assert!(stack.borrow().is_empty()));
+    PN_INIT_TELEMETRY.with(|slot| slot.borrow_mut().take().map(|session| session.report))
+}
+
+#[cfg(test)]
+fn pn_init_lb_plies(phase: TurnPhase, census: u8) -> Option<u8> {
+    if census > 5 {
+        return None;
+    }
+    let m = match phase {
+        TurnPhase::FirstStone if census >= 4 => 6 - census,
+        TurnPhase::FirstStone => (7 - census).min(6),
+        TurnPhase::SecondStone { .. } if census >= 3 => 6 - census,
+        TurnPhase::SecondStone { .. } => (7 - census).min(6),
+        TurnPhase::Opening => return None,
+    };
+    let index = usize::from(m.saturating_sub(1));
+    match phase {
+        TurnPhase::FirstStone => [1, 2, 5, 6, 9, 10].get(index).copied(),
+        TurnPhase::SecondStone { .. } => [1, 4, 5, 8, 9, 12].get(index).copied(),
+        TurnPhase::Opening => None,
+    }
+}
+
+#[cfg(test)]
+fn pn_init_coordinate_safe(state: &RustHexoState, h_rem: u32) -> bool {
+    const SAFE: i64 = 16_383;
+    let Some(radius) = i64::from(h_rem)
+        .checked_add(1)
+        .and_then(|x| x.checked_mul(8))
+    else {
+        return false;
+    };
+    let Some(limit) = SAFE.checked_sub(radius) else {
+        return false;
+    };
+    state.board().occupied_cells().iter().all(|coord| {
+        let q = i64::from(coord.q);
+        let r = i64::from(coord.r);
+        q.checked_add(r)
+            .and_then(|sum| sum.checked_neg())
+            .is_some_and(|s| q.abs() <= limit && r.abs() <= limit && s.abs() <= limit)
+    })
+}
+
+#[cfg(test)]
+fn pn_init_frozen_state(state: &RustHexoState) -> String {
+    let mut stones = state
+        .board()
+        .occupied_cells()
+        .iter()
+        .map(|&coord| {
+            let owner = state.board().get(coord).expect("occupied cell has owner");
+            (coord.q, coord.r, owner.index())
+        })
+        .collect::<Vec<_>>();
+    stones.sort_unstable();
+    format!(
+        "placements={} player={} phase={:?} stones={stones:?}",
+        state.placements_made(),
+        state.current_player().index(),
+        state.phase()
+    )
+}
+
+#[cfg(test)]
+fn pn_init_census_features(state: &RustHexoState, attacker: Player) -> (u8, u64, u32, u32, u32) {
+    // Provenance: exact Contract-8.1 recipe copied from hunt-dtw-bounds at
+    // reviewed theorem commit ffdd414ad5197444eef44af4f28da376a5d95507.
+    let started = std::time::Instant::now();
+    let mut census = 0u8;
+    for entry in state.board().windows().entries() {
+        let ac = entry.count(attacker);
+        let dc = entry.count(attacker.other());
+        if ac > 0 && dc == 0 {
+            census = census.max(ac);
+        }
+    }
+    let census_scan_nanos = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+
+    let mut live_ge4 = 0u32;
+    let mut live_ge3 = 0u32;
+    let mut two_gap = Vec::new();
+    for entry in state.board().windows().entries() {
+        let ac = entry.count(attacker);
+        let dc = entry.count(attacker.other());
+        if ac == 0 || dc != 0 {
+            continue;
+        }
+        live_ge3 = live_ge3.saturating_add(u32::from(ac >= 3));
+        live_ge4 = live_ge4.saturating_add(u32::from(ac >= 4));
+        if ac == 4 {
+            let mut empties = entry.empty_cells();
+            empties.sort_unstable_by_key(|coord| (coord.q, coord.r));
+            if empties.len() == 2 {
+                two_gap.push((entry.key(), empties[0], empties[1]));
+            }
+        }
+    }
+    two_gap.sort_unstable_by_key(|(key, _, _)| (key.axis.index(), key.start.q, key.start.r));
+    let mut used = HashSet::new();
+    let mut disjoint_two_gap = 0u32;
+    for (_, left, right) in two_gap {
+        if !used.contains(&left) && !used.contains(&right) {
+            used.insert(left);
+            used.insert(right);
+            disjoint_two_gap = disjoint_two_gap.saturating_add(1);
+        }
+    }
+    (
+        census,
+        census_scan_nanos,
+        live_ge4,
+        live_ge3,
+        disjoint_two_gap,
+    )
+}
+
+#[cfg(test)]
+fn pn_init_record_node(
+    state: &RustHexoState,
+    claimant: Player,
+    root_ply: u32,
+    semantic_horizon: u32,
+    engine_node: u64,
+    mode: PnInitTelemetryMode,
+    parent_serial: Option<u64>,
+) -> Option<u64> {
+    PN_INIT_TELEMETRY.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let session = slot.as_mut()?;
+        let serial = session.report.nodes.len() as u64;
+        let depth = state.placements_made().checked_sub(root_ply)?;
+        let h_rem = semantic_horizon.checked_sub(state.placements_made());
+        let win_arm = state.current_player() == claimant;
+        let supported = matches!(
+            state.phase(),
+            TurnPhase::FirstStone | TurnPhase::SecondStone { .. }
+        );
+        let phase_code = match state.phase() {
+            TurnPhase::Opening => 0,
+            TurnPhase::FirstStone => 1,
+            TurnPhase::SecondStone { .. } => 2,
+        };
+        let should_scan = supported && h_rem.is_some_and(|h| h <= 16);
+        let (feature_census, feature_scan_nanos, live_ge4, live_ge3, disjoint_two_gap) =
+            if should_scan {
+                pn_init_census_features(state, claimant)
+            } else {
+                (0, 0, 0, 0, 0)
+            };
+        let census = win_arm.then_some(feature_census);
+        let census_scan_nanos = if win_arm { feature_scan_nanos } else { 0 };
+        let lb_plies = census.and_then(|c| pn_init_lb_plies(state.phase(), c));
+        let coordinate_safe = h_rem.is_some_and(|h| pn_init_coordinate_safe(state, h));
+        let gate = !state.is_terminal()
+            && win_arm
+            && supported
+            && census.is_some_and(|c| c <= 5)
+            && coordinate_safe
+            && h_rem.is_some_and(|h| h <= 8 && lb_plies.is_some_and(|lb| u32::from(lb) > h));
+        session.report.nodes.push(PnInitTelemetryNode {
+            serial,
+            parent_serial,
+            engine_node,
+            mode,
+            depth,
+            h_rem,
+            phase_code,
+            win_arm,
+            census,
+            lb_plies,
+            gate,
+            coordinate_safe,
+            census_scan_nanos,
+            live_ge4,
+            live_ge3,
+            disjoint_two_gap,
+            outcome: PnInitTelemetryOutcome::Unknown,
+            frozen_state: gate.then(|| pn_init_frozen_state(state)),
+        });
+        Some(serial)
+    })
+}
+
+#[cfg(test)]
+struct PnInitWideWorkGuard {
+    active: bool,
+}
+
+#[cfg(test)]
+impl PnInitWideWorkGuard {
+    fn enter(id: usize) -> Self {
+        let active = PN_INIT_TELEMETRY.with(|slot| slot.borrow().is_some());
+        if active {
+            PN_INIT_WIDE_STACK.with(|stack| stack.borrow_mut().push(id));
+        }
+        Self { active }
+    }
+}
+
+#[cfg(test)]
+impl Drop for PnInitWideWorkGuard {
+    fn drop(&mut self) {
+        if self.active {
+            PN_INIT_WIDE_STACK.with(|stack| {
+                stack
+                    .borrow_mut()
+                    .pop()
+                    .expect("wide telemetry stack underflow");
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+struct PnInitNarrowGuard {
+    serial: Option<u64>,
+}
+
+#[cfg(test)]
+impl PnInitNarrowGuard {
+    fn enter(
+        state: &RustHexoState,
+        claimant: Player,
+        root_ply: u32,
+        semantic_horizon: u32,
+    ) -> Self {
+        let parent_serial = PN_INIT_NARROW_STACK.with(|stack| stack.borrow().last().copied());
+        let engine_node = PN_INIT_TELEMETRY.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .map(|session| session.report.nodes.len() as u64)
+                .unwrap_or(0)
+        });
+        let serial = pn_init_record_node(
+            state,
+            claimant,
+            root_ply,
+            semantic_horizon,
+            engine_node,
+            PnInitTelemetryMode::NarrowCompat,
+            parent_serial,
+        );
+        if let Some(serial) = serial {
+            PN_INIT_NARROW_STACK.with(|stack| stack.borrow_mut().push(serial));
+        }
+        Self { serial }
+    }
+
+    fn finish(&mut self, proven: bool, hit_limit: bool) {
+        let Some(serial) = self.serial.take() else {
+            return;
+        };
+        PN_INIT_TELEMETRY.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let node =
+                &mut slot.as_mut().expect("active narrow telemetry").report.nodes[serial as usize];
+            node.outcome = if proven {
+                PnInitTelemetryOutcome::Proven
+            } else if hit_limit {
+                PnInitTelemetryOutcome::Unknown
+            } else {
+                PnInitTelemetryOutcome::Refuted
+            };
+        });
+        PN_INIT_NARROW_STACK.with(|stack| {
+            let popped = stack.borrow_mut().pop();
+            assert_eq!(popped, Some(serial));
+        });
+    }
+}
+
+#[cfg(test)]
+impl Drop for PnInitNarrowGuard {
+    fn drop(&mut self) {
+        if let Some(serial) = self.serial.take() {
+            PN_INIT_NARROW_STACK.with(|stack| {
+                let popped = stack.borrow_mut().pop();
+                assert_eq!(popped, Some(serial));
+            });
+        }
+    }
+}
+
 /// A second, fixed guard in addition to `SolveCaps::node_cap`.  It bounds stack
 /// depth even when a caller supplies an accidentally enormous node cap.
 const MAX_SEARCH_DEPTH: usize = MAX_CERT_DEPTH;
@@ -397,6 +754,8 @@ impl TssSolver {
         );
         let root = search.insert_root(state);
         search.run(state, root);
+        #[cfg(test)]
+        pn_init_finalize_wide(&search);
         #[cfg(test)]
         if std::env::var_os("TSS_TRACE_PN").is_some() {
             eprintln!(
@@ -1347,6 +1706,65 @@ struct WidePnSearch {
     by_position: HashMap<WidePositionKey, usize>,
 }
 
+#[cfg(test)]
+fn pn_init_record_wide_expansion(search: &WidePnSearch, state: &RustHexoState, id: usize) {
+    let parent_engine = PN_INIT_WIDE_STACK.with(|stack| {
+        let stack = stack.borrow();
+        stack
+            .len()
+            .checked_sub(2)
+            .and_then(|index| stack.get(index).copied())
+    });
+    let parent_serial = PN_INIT_TELEMETRY.with(|slot| {
+        let slot = slot.borrow();
+        let session = slot.as_ref()?;
+        parent_engine.and_then(|parent| session.wide_last_event.get(&parent).copied())
+    });
+    let serial = pn_init_record_node(
+        state,
+        search.claimant,
+        search.root_ply,
+        search.semantic_horizon,
+        id as u64,
+        PnInitTelemetryMode::WidePn,
+        parent_serial,
+    );
+    if let Some(serial) = serial {
+        PN_INIT_TELEMETRY.with(|slot| {
+            slot.borrow_mut()
+                .as_mut()
+                .expect("active wide telemetry")
+                .wide_last_event
+                .insert(id, serial);
+        });
+    }
+}
+
+#[cfg(test)]
+fn pn_init_finalize_wide(search: &WidePnSearch) {
+    PN_INIT_TELEMETRY.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(session) = slot.as_mut() else {
+            return;
+        };
+        for node in &mut session.report.nodes {
+            if node.mode != PnInitTelemetryMode::WidePn {
+                continue;
+            }
+            let Some(entry) = search.entries.get(node.engine_node as usize) else {
+                continue;
+            };
+            node.outcome = if entry.pn == 0 {
+                PnInitTelemetryOutcome::Proven
+            } else if entry.dn == 0 && !matches!(entry.node, WidePnNode::DepthCutoff) {
+                PnInitTelemetryOutcome::Refuted
+            } else {
+                PnInitTelemetryOutcome::Unknown
+            };
+        }
+    });
+}
+
 impl WidePnSearch {
     /// C1 migration mode: preserve the narrow DFS's recursive expansion order
     /// while entering through the wide engine seam.  Reusing the PN frontier
@@ -1703,6 +2121,8 @@ impl WidePnSearch {
         pn_threshold: u32,
         dn_threshold: u32,
     ) -> WidePnStepOutcome {
+        #[cfg(test)]
+        let _pn_init_work_guard = PnInitWideWorkGuard::enter(id);
         let mut any_progress = false;
         let mut yielded_universal_children = Vec::new();
         loop {
@@ -2456,6 +2876,8 @@ impl WidePnSearch {
             return WidePnStepOutcome::Stalled;
         }
         self.expansions += 1;
+        #[cfg(test)]
+        pn_init_record_wide_expansion(self, state, id);
         let depth = usize::try_from(state.placements_made().saturating_sub(self.root_ply))
             .unwrap_or(usize::MAX);
         if depth > self.depth_cap {
@@ -3363,67 +3785,75 @@ impl<'a> NarrowCompatSearch<'a> {
         }
         self.nodes += 1;
 
-        let key = PositionKey::from_state(state);
-        if pair.is_none() {
-            if let Some(node) = self.tt.lookup(&key, claimant) {
-                if node == LOCAL_TT_FAILED && self.width.vcf_pair_complete {
-                    self.tt_hits += 1;
-                    return None;
+        #[cfg(test)]
+        let mut pn_init_guard =
+            PnInitNarrowGuard::enter(state, claimant, self.root_ply, self.semantic_horizon);
+        let pn_init_result = (|| {
+            let key = PositionKey::from_state(state);
+            if pair.is_none() {
+                if let Some(node) = self.tt.lookup(&key, claimant) {
+                    if node == LOCAL_TT_FAILED && self.width.vcf_pair_complete {
+                        self.tt_hits += 1;
+                        return None;
+                    }
+                    if (node as usize) < self.arena.len() {
+                        self.tt_hits += 1;
+                        return Some(node);
+                    }
                 }
-                if (node as usize) < self.arena.len() {
+                if let Some(node) = self.lookup_shared(&key, claimant, depth) {
+                    self.tt.insert(key, claimant, node);
                     self.tt_hits += 1;
+                    self.observe_tt_bytes();
                     return Some(node);
                 }
             }
-            if let Some(node) = self.lookup_shared(&key, claimant, depth) {
-                self.tt.insert(key, claimant, node);
-                self.tt_hits += 1;
-                self.observe_tt_bytes();
-                return Some(node);
+
+            if let Some(outcome) = state.terminal() {
+                let _ = outcome;
+                // A claimant completion is represented at its parent by the typed
+                // OrCompletion leaf; defender-terminal edges are not certifiable.
+                return None;
             }
-        }
 
-        if let Some(outcome) = state.terminal() {
-            let _ = outcome;
-            // A claimant completion is represented at its parent by the typed
-            // OrCompletion leaf; defender-terminal edges are not certifiable.
-            return None;
-        }
+            // Analyze each non-terminal node exactly once.  Universal dispatch
+            // consumes this same immutable result instead of repeating the scan.
+            let analysis = threats::analyze(state);
+            if !matches!(state.phase(), TurnPhase::Opening) {
+                if let Some(winner) = winner_from_analysis(state, &analysis) {
+                    if winner != claimant {
+                        return None;
+                    }
+                    let leaf = typed_lambda_leaf(state, winner, &analysis, self.width)?;
+                    if node_resolution(&leaf) > self.semantic_horizon {
+                        return None;
+                    }
+                    let node = self.alloc_node(leaf, 0)?;
+                    self.remember_proof(key, claimant, node);
+                    return Some(node);
+                }
+            }
 
-        // Analyze each non-terminal node exactly once.  Universal dispatch
-        // consumes this same immutable result instead of repeating the scan.
-        let analysis = threats::analyze(state);
-        if !matches!(state.phase(), TurnPhase::Opening) {
-            if let Some(winner) = winner_from_analysis(state, &analysis) {
-                if winner != claimant {
-                    return None;
+            let node = if state.current_player() == claimant {
+                self.prove_choice(state, claimant, ply, pair)
+            } else {
+                self.prove_universal(state, claimant, ply, &analysis, pair)
+            };
+            let Some(node) = node else {
+                if self.width.vcf_pair_complete && !self.hit_limit && pair.is_none() {
+                    self.tt.insert(key, claimant, LOCAL_TT_FAILED);
+                    self.observe_tt_bytes();
                 }
-                let leaf = typed_lambda_leaf(state, winner, &analysis, self.width)?;
-                if node_resolution(&leaf) > self.semantic_horizon {
-                    return None;
-                }
-                let node = self.alloc_node(leaf, 0)?;
+                return None;
+            };
+            if pair.is_none() {
                 self.remember_proof(key, claimant, node);
-                return Some(node);
             }
-        }
-
-        let node = if state.current_player() == claimant {
-            self.prove_choice(state, claimant, ply, pair)
-        } else {
-            self.prove_universal(state, claimant, ply, &analysis, pair)
-        };
-        let Some(node) = node else {
-            if self.width.vcf_pair_complete && !self.hit_limit && pair.is_none() {
-                self.tt.insert(key, claimant, LOCAL_TT_FAILED);
-                self.observe_tt_bytes();
-            }
-            return None;
-        };
-        if pair.is_none() {
-            self.remember_proof(key, claimant, node);
-        }
-        Some(node)
+            Some(node)
+        })();
+        #[cfg(test)]
+        pn_init_guard.finish(pn_init_result.is_some(), self.hit_limit);
+        pn_init_result
     }
 
     fn prove_choice(

@@ -44,6 +44,9 @@ mod tss_corpus;
 #[cfg(test)]
 mod tss_spare_corpus;
 
+#[cfg(test)]
+mod tss_pn_init_hunt;
+
 #[cfg(feature = "python")]
 mod cache;
 #[cfg(feature = "python")]
