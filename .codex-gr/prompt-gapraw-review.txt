@@ -1,0 +1,76 @@
+R-G1-REV — HOSTILE REVIEW (ultra): break the J refutation and the stealing obstruction
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+(branch hunt/gap-raw, HEAD = 06a1a649). You CANNOT git-commit. You are a
+HOSTILE reviewer: your job is to REFUTE the round-3 documents, not to
+summarize them. A finding survives only if you verify it yourself from
+first principles. Deliverable: GAP_RAW_REVIEW_ROUND3.md with numbered
+findings, each labeled ACCEPT / ERRATUM (with exact fix) / REFUTED (with
+exact counter-argument), and a final per-claim verdict table covering
+every PROVEN/REFUTED/OPEN label in both documents.
+
+Review targets, in order:
+
+1. GAP_RAW_PROOF_ROUND3.md — the canonical Obligation J refutation.
+   Attack every load-bearing step with your own arithmetic:
+   - L9.1: redo the 31-window enumeration around the untranslated gadget
+     yourself. Every blocker containment claim, every window start.
+     One miscounted window breaks the exact profile.
+   - L9.2/L9.3/L9.4: separation distances, disjointness, the exact
+     (0,8,0,0,0,0) profile, Phi = Theta_2 = 8/9, I = empty.
+   - The definitions imported from GAP_RAW_PROOF_ROUND2.md: read round 2
+     IN FULL first. Verify B_2, equation (9), kappa_2, S_2, n_1 are used
+     with EXACTLY their round-2 meanings — a redefinition smuggled into
+     round 3 voids the refutation. Check especially the two sequential
+     Defender kill instances telescoping to 8/9 - k/9 (eq. 13) and the
+     two Attacker instances 0 and 5/9 (eqs. 14-16) against equation (9)
+     as round 2 states it.
+   - Legality: the radius-8 claims (d(c_j, a_j) = 8 exactly — is
+     distance-8 legal or does the rule require < 8? Check the engine
+     predicate), sequential within-turn growth for d_j, and Lemma L9.5's
+     nonterminality claim.
+   - The pigeonhole (12): two defender cells vs three disjoint launch
+     unions — confirm a defender cell cannot intersect two U_j and that
+     ordered-pair edge cases (x_1 = x_2 impossible; x in W_i AND U_j
+     impossible) are covered.
+   - The normative-domain claim: round 2's normative root definition —
+     does it truly admit non-engine-reachable positions, and does the
+     stated J quantify over exactly this domain? If J's domain were
+     engine-reachable-only, the refutation would need a reachability
+     argument — check whether P* or an equivalent is reachable, and
+     whether the document's scoping is honest about this.
+   - L9.6/R3.2/L9.7/L9.8 sharpenings: verify each; these will carry
+     forward into the successor invariant design.
+   - The harness test (gap_raw_hunt.rs, round3_j_canonical_renewal_
+     refutation): read the code; check it implements the SAME position
+     and the SAME account as the document (quotient completeness of the
+     2,016-pair defense enumeration; the surd comparison; the exact
+     worst row). Do NOT run cargo — the slot is held by another lane;
+     code-read only, and say so.
+
+2. STRATEGY_STEALING_HEXO.md — the stealing obstruction.
+   - Verify the rules formalization against the cited engine source
+     lines yourself (read packages/hexo_engine/rust/src/*.rs). Any
+     divergence between §2 and the code is a finding.
+   - S1/S1.1: the frontier update lemma and the exact (8,0) example.
+   - S2: replay the six-placement history against the legality
+     predicate by hand.
+   - S3: the deletion-monotonicity failure — check the four distance
+     computations.
+   - S4: the cadence misalignment — is the (2,0) vs (1,0) role-count
+     argument airtight? Could a cleverer shadow (translation, delayed
+     start, playing the extra stone as a filler) evade BOTH S3 and S4?
+     If you find a coupling the document's impossibility scoping does
+     not exclude, that is a major finding (the doc claims only that
+     the CLASSICAL deletion coupling fails — check it does not
+     overclaim).
+   - The unbounded-board idealization: is it declared honestly, and do
+     any PROVEN claims silently depend on boundedness?
+
+Rules: read GAP_RAW_PROOF_ROUND2.md, GAP_RAW_REVIEW_ROUND2.md, and
+HUNT_REPORT_GAP_RAW.md before judging round 3. No file edits outside
+GAP_RAW_REVIEW_ROUND3.md. No cargo. No production source changes.
+Incremental disk writes; honest partial stop with named remaining
+checks is acceptable. Final message: verdict per document (SOUND /
+SOUND-WITH-ERRATA / BROKEN), the numbered findings list, and exactly
+what a fold-in edit pass must change.

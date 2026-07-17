@@ -324,7 +324,7 @@ six-in-line completion. No such coupling is supplied here.
 After the compulsory opening and the second player's first completed turn, the
 real placement counts are
 
-`|X_F|=1`, `|X_S|=2`, with F to move at FirstStone.`
+`|X_F|=1`, `|X_S|=2`, with F to move at `FirstStone`.
 
 Deleting only F's opening stone changes real-label counts `(F,S)` from `(1,2)`
 to `(0,2)`, hence the role-swapped shadow counts `(opener=S,second=F)` would be
@@ -435,7 +435,9 @@ source predicates and is therefore labeled **PROVEN**, not **VERIFIED**.
 ## 8. Provenance
 
 **Input state.** Branch `hunt/gap-raw`, HEAD
-`283348dce09d42b67e364e0b2f2b63166b6b5f4d`. No commit was created.
+`283348dce09d42b67e364e0b2f2b63166b6b5f4d`. The authoring session
+created no commit; the orchestrator committed this document as
+`06a1a649`, the state the round-3 hostile review examined.
 
 **Required proof corpus read in order and in full.**
 

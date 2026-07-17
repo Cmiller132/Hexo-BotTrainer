@@ -140,7 +140,8 @@ The five Q-axis windows containing both adjacent cells `c_j,d_j` have starts
 `W_0,...,W_7,U_0,U_1,U_2` are pairwise disjoint. Every `U_j` is disjoint from
 all root stones. Moreover `d(c_j,a_j)=8`, and `d(d_j,c_j)=1`.
 
-*Proof.* The `W_i` lie on row 0 in Q-intervals separated by 25 empty cells.
+*Proof.* The `W_i` lie on row 0 in Q-intervals whose closest cells are at
+distance 25, with 24 intervening cells.
 The `U_j` lie on three distinct rows `100,130,160`, while their Q-interval is
 always `[-4,5]`. The old Attacker stones have R-coordinate 0; old blocker
 R-coordinates lie in `[-4,3]`; and the three anchors lie on rows
@@ -548,6 +549,9 @@ No production rule or strict-verifier source is modified.
 | Theorems A2/A2-prime and D2 | **PROVEN, retained** | No premise or proof changed |
 | GAP-REPLACEMENT-INVARIANT | **OPEN** | Exact successor resume point, §19 |
 | Round-3 coordinate/quotient regression | **VERIFIED** | 2,016 quotient pairs plus exact legal minimum row, §20 |
+| Normative-domain statement | **PROVEN by definition** | Round-2 blanket domain, restated §14/§15.2 |
+| Banked K1, K2, beta floor, L1.1, L1.2 | **PROVEN at their round-2 scopes** | Unchanged; used as stated |
+| Route A / Route B successor routes | **OPEN** | Named alternatives under GAP-REPLACEMENT-INVARIANT, §19 |
 
 No round-2 PROVEN or VERIFIED result is downgraded. The two changed
 round-2 OPEN rows are canonical strategy-reachable renewal and J; both are now
@@ -556,7 +560,9 @@ REFUTED by a root in the original normative domain.
 ## 23. Provenance and regeneration
 
 **Input commit:** `283348dce09d42b67e364e0b2f2b63166b6b5f4d` on
-branch `hunt/gap-raw`. No commit was created.
+branch `hunt/gap-raw`. The authoring session created no commit; the
+orchestrator committed this document and the harness case as
+`06a1a649`, the state the round-3 hostile review examined.
 
 **Required corpus read first, in order, and in full:**
 
