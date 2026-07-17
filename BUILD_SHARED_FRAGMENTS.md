@@ -1,7 +1,8 @@
 # G2R9 shared proven fragments: design and soundness contract
 
 Date: 2026-07-17  
-Branch/base: `hunt/turn-quotient` at `86a6418c`  
+Design base: `hunt/turn-quotient` at `86a6418c`; completion checkpoint
+`8615726d`
 Rollout flag: `TSS_SHARED_FRAGMENTS=1` (default off; read once when a
 `TssSolver` is constructed)
 
@@ -203,9 +204,30 @@ Out of scope:
 
 Implementation stops rather than guessing if an exact-state shared node reaches
 different replay states, if a path-local commutation permission would be erased,
-if dominant labels cannot be reconstructed, or if any flag-on/off verdict
-differs. The campaign additionally requires every hard certificate to verify,
-forced-NO rows never to become WIN, a different-root mutation control, and both
-fragment-only and fragment-plus-lazy official corpus gates. Cold and warm work,
-reduced-budget closure, store bytes/entries, and independent fragment lookup/hit
-rates are measurements, not soundness inputs.
+or if dominant labels cannot be reconstructed.
+
+The orchestrator's amended verdict contract distinguishes resource warmth from
+cold behavior. Every flag-off solve must remain identical to its cold baseline,
+and a fragments-on cold solve must have the same verdict as fragments-off cold.
+A warm fragments-on verdict may differ from the corresponding flag-off warm
+verdict only as `UNKNOWN -> WIN` or `UNKNOWN -> LOSS`, and only when the new
+hard verdict carries a certificate accepted by the unchanged strict verifier.
+Loss of a hard verdict, `WIN <-> LOSS`, or an unverified new hard verdict is a
+mandatory stop. Forced-NO rows must never return `WIN` in any mode. A warm solve
+of a different root after seeding remains a cold-contract comparison: its
+verdict must exactly match fresh fragments-on and fresh fragments-off solves.
+
+This amendment does not weaken the proof contract. `UNKNOWN` is a resource
+verdict, not a game-theoretic result. An imported fragment supplies only an
+independently verified sub-proof; T10 licenses its final DAG composition, and
+the strict verifier re-accepts the assembled certificate before the single mint
+can return a hard value. Thus warm `UNKNOWN ->` verified-hard is capacity
+recovered at a fixed budget, equivalent in kind to raising the node cap, rather
+than a contradictory verdict. Every such improvement is reported with its
+root, ladder rung, before/after verdicts, and expansions saved.
+
+The campaign additionally requires every hard certificate to verify, the
+different-root mutation control, and both fragment-only and
+fragment-plus-lazy official corpus gates. Cold and warm work, reduced-budget
+closure, store bytes/entries, and independent fragment lookup/hit rates are
+measurements, not soundness inputs.

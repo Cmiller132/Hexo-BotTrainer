@@ -157,9 +157,32 @@ struct SharedFragmentCase {
 
 struct SharedFragmentRun {
     status: ProofStatus,
+    strict_verified_hard: bool,
     stats: SolveStats,
     store: SharedFragmentStoreSnapshot,
     elapsed_ms: f64,
+}
+
+#[derive(Default)]
+struct SharedFragmentImprovementCensus {
+    count: u64,
+    expansions_saved: i128,
+}
+
+impl SharedFragmentImprovementCensus {
+    fn record(&mut self, expansions_saved: i128) {
+        self.count = self.count.saturating_add(1);
+        self.expansions_saved += expansions_saved;
+    }
+
+    fn print(&self, lane: &str, lazy: bool) {
+        println!(
+            "SF_IMPROVEMENT_CENSUS lane={lane} lazy={} count={} expansions_saved={}",
+            on_off(lazy),
+            self.count,
+            self.expansions_saved,
+        );
+    }
 }
 
 #[derive(Default)]
@@ -694,6 +717,10 @@ fn solve_shared_fragment_once(
     let started = Instant::now();
     let result = solver.solve(&case.state, &case.caps);
     let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
+    let certificate_verified = result
+        .cert
+        .as_ref()
+        .map(|cert| TssVerifier.verify(&case.state, cert, result.status));
     if result.status != ProofStatus::Unknown {
         assert!(
             result.cert.is_some(),
@@ -703,10 +730,19 @@ fn solve_shared_fragment_once(
             on_off(lazy),
             status_name(result.status),
         );
+        assert_eq!(
+            certificate_verified,
+            Some(true),
+            "SF_STOP unverified hard verdict: id={} fragments={} phase={phase} lazy={} status={}",
+            case.id,
+            on_off(fragments),
+            on_off(lazy),
+            status_name(result.status),
+        );
     }
-    if let Some(cert) = result.cert.as_ref() {
+    if certificate_verified.is_some() {
         assert!(
-            TssVerifier.verify(&case.state, cert, result.status),
+            certificate_verified == Some(true),
             "SF_STOP verifier rejection: id={} fragments={} phase={phase} lazy={} status={}",
             case.id,
             on_off(fragments),
@@ -723,6 +759,8 @@ fn solve_shared_fragment_once(
     );
     SharedFragmentRun {
         status: result.status,
+        strict_verified_hard: result.status != ProofStatus::Unknown
+            && certificate_verified == Some(true),
         stats: result.stats,
         store: solver.shared_fragment_store_snapshot(),
         elapsed_ms,
@@ -748,6 +786,45 @@ fn assert_fragment_verdict_identity(
         status_name(left),
         status_name(right),
     );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assert_fragment_warm_contract(
+    cohort: &str,
+    root: &str,
+    rung: u64,
+    horizon: u32,
+    lazy: bool,
+    label: &str,
+    off_status: ProofStatus,
+    on_status: ProofStatus,
+    on_strict_verified_hard: bool,
+    off_expansions: u64,
+    on_expansions: u64,
+) -> Option<i128> {
+    if off_status == on_status {
+        return None;
+    }
+
+    let permitted = off_status == ProofStatus::Unknown
+        && matches!(on_status, ProofStatus::Win | ProofStatus::Loss)
+        && on_strict_verified_hard;
+    assert!(
+        permitted,
+        "SF_STOP warm verdict contract violation: cohort={cohort} root={root} rung={rung} horizon={horizon} lazy={} comparison={label} off={} on={} on_strict_verified_hard={on_strict_verified_hard}",
+        on_off(lazy),
+        status_name(off_status),
+        status_name(on_status),
+    );
+
+    let expansions_saved = i128::from(off_expansions) - i128::from(on_expansions);
+    println!(
+        "SF_MONOTONE_IMPROVEMENT cohort={cohort} root={root} rung={rung} horizon={horizon} lazy={} comparison={label} off_verdict={} on_verdict={} strict_verifier=PASS off_expansions={off_expansions} on_expansions={on_expansions} expansions_saved={expansions_saved}",
+        on_off(lazy),
+        status_name(off_status),
+        status_name(on_status),
+    );
+    Some(expansions_saved)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1136,6 +1213,13 @@ fn shared_fragment_mutation_control(corpus: &[CorpusPosition], tt_bytes_cap: usi
     assert_fragment_verdict_identity(
         &different_case,
         lazy,
+        "fresh-off-vs-fresh-on",
+        fresh_off_result.status,
+        fresh_on_result.status,
+    );
+    assert_fragment_verdict_identity(
+        &different_case,
+        lazy,
         "seeded-different-vs-fresh-on",
         mutated.status,
         fresh_on_result.status,
@@ -1148,7 +1232,7 @@ fn shared_fragment_mutation_control(corpus: &[CorpusPosition], tt_bytes_cap: usi
         fresh_off_result.status,
     );
     println!(
-        "SF_MUTATION lazy={} seed_id={} seed_status={} different_id={} status={} fresh_on_status={} fresh_off_status={} different_nodes={} different_lookups={} different_hits={} different_imports={} store_entries={} store_bytes={} result=PASS",
+        "SF_MUTATION lazy={} seed_id={} seed_status={} different_id={} status={} fresh_on_status={} fresh_off_status={} different_nodes={} different_lookups={} different_hits={} different_imports={} store_entries={} store_bytes={} cold_contract=PASS result=PASS",
         on_off(lazy),
         first_case.id,
         status_name(seeded.status),
@@ -1187,6 +1271,7 @@ fn shared_fragment_soundness_and_warm_campaign() {
         let mut off_warm_total = SharedFragmentAggregate::default();
         let mut on_cold_total = SharedFragmentAggregate::default();
         let mut on_warm_total = SharedFragmentAggregate::default();
+        let mut improvements = SharedFragmentImprovementCensus::default();
 
         for case in &cases {
             let mut off_solver = configured_fragment_solver(false, case.width, case.zone);
@@ -1203,17 +1288,32 @@ fn shared_fragment_soundness_and_warm_campaign() {
             assert_fragment_verdict_identity(
                 case,
                 lazy,
-                "off-cold-vs-on-cold",
+                "off-cold-vs-off-warm-baseline",
                 off_cold.status,
-                on_cold.status,
+                off_warm.status,
             );
             assert_fragment_verdict_identity(
                 case,
                 lazy,
+                "off-cold-vs-on-cold",
+                off_cold.status,
+                on_cold.status,
+            );
+            if let Some(expansions_saved) = assert_fragment_warm_contract(
+                &case.cohort,
+                &case.id,
+                case.caps.node_cap,
+                case.caps.semantic_horizon,
+                lazy,
                 "off-warm-vs-on-warm",
                 off_warm.status,
                 on_warm.status,
-            );
+                on_warm.strict_verified_hard,
+                off_warm.stats.nodes,
+                on_warm.stats.nodes,
+            ) {
+                improvements.record(expansions_saved);
+            }
             assert_eq!(
                 off_cold.store,
                 SharedFragmentStoreSnapshot::default(),
@@ -1246,13 +1346,19 @@ fn shared_fragment_soundness_and_warm_campaign() {
             signed_delta_percent_f64(on_warm_total.elapsed_ms, on_cold_total.elapsed_ms),
             ratio(on_warm_total.fragment_hits, on_warm_total.fragment_lookups),
         );
-        if case_filter.is_none() {
+        improvements.print("soundness_warm", lazy);
+        let mutation = if case_filter.is_none() {
             shared_fragment_mutation_control(&corpus, tt_bytes_cap, lazy);
-        }
+            "PASS"
+        } else {
+            "SKIP_FILTERED"
+        };
         println!(
-            "SF_CAMPAIGN_DONE lazy={} roots={} cold_verdict_identity=PASS warm_verdict_identity=PASS certificates=PASS mutation=PASS",
+            "SF_CAMPAIGN_DONE lazy={} roots={} cold_verdict_identity=PASS flag_off_baseline_identity=PASS warm_monotone_contract=PASS monotone_improvements={} improvement_expansions_saved={} certificates=PASS forcing_no=PASS mutation={mutation}",
             on_off(lazy),
             cases.len(),
+            improvements.count,
+            improvements.expansions_saved,
         );
     }
 }
@@ -1260,9 +1366,37 @@ fn shared_fragment_soundness_and_warm_campaign() {
 struct ReducedFragmentRun {
     final_status: ProofStatus,
     closure_cap: Option<u64>,
-    rungs: Vec<(u64, ProofStatus)>,
+    rungs: Vec<ReducedFragmentRung>,
     aggregate: SharedFragmentAggregate,
     final_store: SharedFragmentStoreSnapshot,
+}
+
+#[derive(Clone, Copy)]
+struct ReducedFragmentRung {
+    cap: u64,
+    status: ProofStatus,
+    strict_verified_hard: bool,
+    expansions: u64,
+}
+
+fn reduced_fragment_case(
+    position: &CorpusPosition,
+    tt_bytes_cap: usize,
+    node_cap: u64,
+) -> SharedFragmentCase {
+    SharedFragmentCase {
+        cohort: "reduced_tt".to_owned(),
+        id: position.id.clone(),
+        state: position.state.clone(),
+        caps: SolveCaps {
+            node_cap,
+            tt_bytes_cap,
+            semantic_horizon: u32::MAX,
+        },
+        width: WidthOptions::vcf_pair_complete(),
+        zone: ZoneSearchCaps::default(),
+        forbid_win: !position.expect_win,
+    }
 }
 
 fn run_reduced_fragment_ladder(
@@ -1282,19 +1416,7 @@ fn run_reduced_fragment_ladder(
     let mut final_store = solver.shared_fragment_store_snapshot();
 
     for (index, &node_cap) in ladder.iter().enumerate() {
-        let case = SharedFragmentCase {
-            cohort: "reduced_tt".to_owned(),
-            id: position.id.clone(),
-            state: position.state.clone(),
-            caps: SolveCaps {
-                node_cap,
-                tt_bytes_cap,
-                semantic_horizon: u32::MAX,
-            },
-            width,
-            zone,
-            forbid_win: !position.expect_win,
-        };
+        let case = reduced_fragment_case(position, tt_bytes_cap, node_cap);
         let phase = if index == 0 {
             "cold"
         } else {
@@ -1331,7 +1453,12 @@ fn run_reduced_fragment_ladder(
         );
         final_status = run.status;
         final_store = run.store;
-        rungs.push((node_cap, run.status));
+        rungs.push(ReducedFragmentRung {
+            cap: node_cap,
+            status: run.status,
+            strict_verified_hard: run.strict_verified_hard,
+            expansions: run.stats.nodes,
+        });
         aggregate.push(&run);
         if run.status == ProofStatus::Win {
             closure_cap = Some(node_cap);
@@ -1351,11 +1478,31 @@ fn run_reduced_fragment_ladder(
     }
 }
 
-fn hard_verdicts_disagree(left: ProofStatus, right: ProofStatus) -> bool {
-    matches!(
-        (left, right),
-        (ProofStatus::Win, ProofStatus::Loss) | (ProofStatus::Loss, ProofStatus::Win)
-    )
+fn run_reduced_flag_off_baseline(
+    position: &CorpusPosition,
+    tt_bytes_cap: usize,
+    node_cap: u64,
+    lazy: bool,
+) -> SharedFragmentRun {
+    let case = reduced_fragment_case(position, tt_bytes_cap, node_cap);
+    let mut solver = configured_fragment_solver(false, case.width, case.zone);
+    let run = solve_shared_fragment_once(&mut solver, &case, false, "fresh_cold_baseline", lazy);
+    assert_eq!(
+        run.store,
+        SharedFragmentStoreSnapshot::default(),
+        "flag-off fragment store changed for reduced baseline {} cap={node_cap}",
+        position.id,
+    );
+    println!(
+        "SF_REDUCED_FLAG_OFF_BASELINE id={} tt_bytes_cap={} cap={node_cap} lazy={} status={} expansions={} ms={:.3} result=PASS",
+        position.id,
+        tt_bytes_cap,
+        on_off(lazy),
+        status_name(run.status),
+        run.stats.nodes,
+        run.elapsed_ms,
+    );
+    run
 }
 
 #[test]
@@ -1382,6 +1529,9 @@ fn shared_fragment_reduced_tt_campaign() {
         .collect::<Vec<_>>();
     let budgets = shared_fragment_reduced_budgets();
     let lazy_guard = LazyFrontierEnvGuard::new();
+    let mut total_improvements = SharedFragmentImprovementCensus::default();
+    let mut warm_comparisons = 0u64;
+    let mut flag_off_baseline_comparisons = 0u64;
 
     for lazy in shared_fragment_lazy_modes(false) {
         lazy_guard.set(lazy);
@@ -1394,36 +1544,92 @@ fn shared_fragment_reduced_tt_campaign() {
                 );
                 let off = run_reduced_fragment_ladder(position, tt_bytes_cap, &ladder, false, lazy);
                 let on = run_reduced_fragment_ladder(position, tt_bytes_cap, &ladder, true, lazy);
-                for &(cap, off_status) in &off.rungs {
-                    if let Some((_, on_status)) = on.rungs.iter().find(|(on_cap, _)| *on_cap == cap)
-                    {
-                        assert!(
-                            !hard_verdicts_disagree(off_status, *on_status),
-                            "SF_STOP reduced-TT hard verdict flip: id={} cap={cap} tt_bytes_cap={tt_bytes_cap} lazy={} off={} on={}",
-                            position.id,
-                            on_off(lazy),
-                            status_name(off_status),
-                            status_name(*on_status),
-                        );
+                let mut improvements = SharedFragmentImprovementCensus::default();
+                for off_rung in &off.rungs {
+                    if let Some(on_rung) = on.rungs.iter().find(|rung| rung.cap == off_rung.cap) {
+                        if off_rung.cap == ladder[0] {
+                            assert_eq!(
+                                off_rung.status,
+                                on_rung.status,
+                                "SF_STOP reduced-TT cold verdict flip: id={} cap={} tt_bytes_cap={tt_bytes_cap} lazy={} off={} on={}",
+                                position.id,
+                                off_rung.cap,
+                                on_off(lazy),
+                                status_name(off_rung.status),
+                                status_name(on_rung.status),
+                            );
+                        } else {
+                            let baseline = run_reduced_flag_off_baseline(
+                                position,
+                                tt_bytes_cap,
+                                off_rung.cap,
+                                lazy,
+                            );
+                            assert_eq!(
+                                baseline.status,
+                                off_rung.status,
+                                "SF_STOP reduced-TT flag-off baseline flip: id={} cap={} tt_bytes_cap={tt_bytes_cap} lazy={} cold={} progressive_warm={}",
+                                position.id,
+                                off_rung.cap,
+                                on_off(lazy),
+                                status_name(baseline.status),
+                                status_name(off_rung.status),
+                            );
+                            flag_off_baseline_comparisons =
+                                flag_off_baseline_comparisons.saturating_add(1);
+                            warm_comparisons = warm_comparisons.saturating_add(1);
+                            if let Some(expansions_saved) = assert_fragment_warm_contract(
+                                "reduced_tt",
+                                &position.id,
+                                off_rung.cap,
+                                u32::MAX,
+                                lazy,
+                                "off-progressive-warm-vs-on-progressive-warm",
+                                off_rung.status,
+                                on_rung.status,
+                                on_rung.strict_verified_hard,
+                                off_rung.expansions,
+                                on_rung.expansions,
+                            ) {
+                                improvements.record(expansions_saved);
+                                total_improvements.record(expansions_saved);
+                            }
+                        }
                     }
                 }
                 let newly_closed = on.closure_cap.is_some() && off.closure_cap.is_none();
+                let closed_earlier = match (off.closure_cap, on.closure_cap) {
+                    (Some(off_cap), Some(on_cap)) => on_cap < off_cap,
+                    (None, Some(_)) => true,
+                    _ => false,
+                };
+                let off_final_cap = off.rungs.last().map_or(0, |rung| rung.cap);
+                let on_final_cap = on.rungs.last().map_or(0, |rung| rung.cap);
                 println!(
-                    "SF_REDUCED_SUMMARY id={} tt_bytes_cap={} lazy={} max_cap={} off_status={} on_status={} off_closure_cap={} on_closure_cap={} newly_closed={} off_nodes={} on_nodes={} node_delta_pct={:.3} off_expansions={} on_expansions={} off_ms={:.3} on_ms={:.3} ms_delta_pct={:.3} on_lookups={} on_hits={} on_hit_rate={:.6} on_imports={} on_store_entries={} on_store_bytes={} on_store_peak_bytes={} on_admissions={} on_replacements={} on_refusals={}",
+                    "SF_REDUCED_SUMMARY id={} tt_bytes_cap={} lazy={} configured_max_cap={} off_final_cap={} on_final_cap={} off_rungs={} on_rungs={} paired_rungs={} off_status={} on_status={} off_closure_cap={} on_closure_cap={} newly_closed={} closed_earlier={} monotone_improvements={} improvement_expansions_saved={} off_ladder_expansions={} on_ladder_expansions={} ladder_work_delta_pct={:.3} off_ladder_ms={:.3} on_ladder_ms={:.3} ladder_ms_delta_pct={:.3} on_lookups={} on_hits={} on_hit_rate={:.6} on_imports={} on_store_entries={} on_store_bytes={} on_store_peak_bytes={} on_admissions={} on_replacements={} on_refusals={}",
                     position.id,
                     tt_bytes_cap,
                     on_off(lazy),
                     ladder.last().copied().unwrap_or_default(),
+                    off_final_cap,
+                    on_final_cap,
+                    off.rungs.len(),
+                    on.rungs.len(),
+                    off.rungs
+                        .iter()
+                        .filter(|off_rung| on.rungs.iter().any(|rung| rung.cap == off_rung.cap))
+                        .count(),
                     status_name(off.final_status),
                     status_name(on.final_status),
                     off.closure_cap.unwrap_or_default(),
                     on.closure_cap.unwrap_or_default(),
                     newly_closed,
+                    closed_earlier,
+                    improvements.count,
+                    improvements.expansions_saved,
                     off.aggregate.nodes,
                     on.aggregate.nodes,
                     signed_delta_percent(on.aggregate.nodes, off.aggregate.nodes),
-                    off.aggregate.nodes,
-                    on.aggregate.nodes,
                     off.aggregate.elapsed_ms,
                     on.aggregate.elapsed_ms,
                     signed_delta_percent_f64(
@@ -1444,14 +1650,36 @@ fn shared_fragment_reduced_tt_campaign() {
                     on.final_store.replacements,
                     on.final_store.refusals,
                 );
+                println!(
+                    "SF_REDUCED_IMPROVEMENT_CENSUS id={} tt_bytes_cap={} lazy={} count={} expansions_saved={}",
+                    position.id,
+                    tt_bytes_cap,
+                    on_off(lazy),
+                    improvements.count,
+                    improvements.expansions_saved,
+                );
             }
         }
     }
+    let warm_contract = if warm_comparisons == 0 {
+        "NOT_EXERCISED"
+    } else {
+        "PASS"
+    };
+    let flag_off_baseline = if flag_off_baseline_comparisons == 0 {
+        "NOT_EXERCISED"
+    } else {
+        "PASS"
+    };
     println!(
-        "SF_REDUCED_DONE rows={} budgets={} max_cap={} result=PASS",
+        "SF_REDUCED_DONE rows={} budgets={} max_cap={} cold_verdict_identity=PASS flag_off_baseline_identity={flag_off_baseline} flag_off_baseline_comparisons={} warm_monotone_contract={warm_contract} warm_comparisons={} monotone_improvements={} improvement_expansions_saved={} certificates=PASS forcing_no=NOT_APPLICABLE_EXPECT_WIN_ONLY result=PASS",
         selected.len(),
         budgets.len(),
         ladder.last().copied().unwrap_or_default(),
+        flag_off_baseline_comparisons,
+        warm_comparisons,
+        total_improvements.count,
+        total_improvements.expansions_saved,
     );
 }
 
