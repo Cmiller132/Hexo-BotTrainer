@@ -489,7 +489,7 @@ fn tss_corpus_check() {
             );
             let incr = result.stats.incr_enum;
             println!(
-                "INCR_ENUM_ROW id={} cap={cap} calls={} plans={} parent={} exact={} mismatch={} residuals={} patch_exact={} patch_mismatch={} root_windows={} root_cells={} root_kernel={} residual_windows={} residual_cells={} residual_kernel={} removed_windows={} total_ms={:.3} root_analysis_ms={:.3} root_enum_ms={:.3} canonical_ms={:.3} fork_ms={:.3} apply_undo_ms={:.3} child_analysis_ms={:.3} child_enum_ms={:.3} key_ms={:.3} fingerprint_ms={:.3} fingerprint_xor={:016x} incr_calls={} fallbacks={} shadow_calls={} shadow_equal={} parent_maint_ms={:.3} incr_plan_ms={:.3} shadow_batch_ms={:.3} snapshot_bytes={} peak_snapshot_bytes={}",
+                "INCR_ENUM_ROW id={} cap={cap} calls={} plans={} parent={} exact={} mismatch={} residuals={} patch_exact={} patch_mismatch={} root_windows={} root_cells={} root_kernel={} residual_windows={} residual_cells={} residual_kernel={} removed_windows={} total_ms={:.3} root_analysis_ms={:.3} root_enum_ms={:.3} canonical_ms={:.3} fork_ms={:.3} apply_undo_ms={:.3} child_analysis_ms={:.3} child_enum_ms={:.3} key_ms={:.3} fingerprint_ms={:.3} fingerprint_xor={:016x} incr_calls={} fallbacks={} shadow_calls={} shadow_equal={} recon_attempts={} recon_success={} parent_maint_ms={:.3} incr_plan_ms={:.3} shadow_batch_ms={:.3} snapshot_bytes={} peak_snapshot_bytes={}",
                 pos.id,
                 incr.calls,
                 incr.plans,
@@ -521,6 +521,8 @@ fn tss_corpus_check() {
                 incr.incremental_fallbacks,
                 incr.shadow_calls,
                 incr.shadow_equal,
+                incr.snapshot_reconstruction_attempts,
+                incr.snapshot_reconstruction_success,
                 incr.parent_maintenance_nanos as f64 / 1e6,
                 incr.incremental_plan_nanos as f64 / 1e6,
                 incr.shadow_batch_nanos as f64 / 1e6,
@@ -620,7 +622,7 @@ fn tss_corpus_check() {
         threshold_total.state_apply_undo_nanos as f64 / 1e6,
     );
     println!(
-        "INCR_ENUM_DONE calls={} plans={} parent={} exact={} mismatch={} residuals={} patch_exact={} patch_mismatch={} root_windows={} root_incidences={} root_cells={} root_kernel={} residual_windows={} residual_incidences={} residual_cells={} residual_kernel={} removed_windows={} root_window_bins={:?} root_cell_bins={:?} root_kernel_bins={:?} residual_window_bins={:?} residual_cell_bins={:?} residual_kernel_bins={:?} total_ms={:.3} root_analysis_ms={:.3} root_enum_ms={:.3} canonical_ms={:.3} fork_ms={:.3} apply_undo_ms={:.3} child_analysis_ms={:.3} child_enum_ms={:.3} key_ms={:.3} fingerprint_ms={:.3} fingerprint_xor={:016x} incr_calls={} fallbacks={} shadow_calls={} shadow_equal={} parent_maint_ms={:.3} incr_plan_ms={:.3} shadow_batch_ms={:.3} snapshot_bytes={} peak_snapshot_bytes={}",
+        "INCR_ENUM_DONE calls={} plans={} parent={} exact={} mismatch={} residuals={} patch_exact={} patch_mismatch={} root_windows={} root_incidences={} root_cells={} root_kernel={} residual_windows={} residual_incidences={} residual_cells={} residual_kernel={} removed_windows={} root_window_bins={:?} root_cell_bins={:?} root_kernel_bins={:?} residual_window_bins={:?} residual_cell_bins={:?} residual_kernel_bins={:?} total_ms={:.3} root_analysis_ms={:.3} root_enum_ms={:.3} canonical_ms={:.3} fork_ms={:.3} apply_undo_ms={:.3} child_analysis_ms={:.3} child_enum_ms={:.3} key_ms={:.3} fingerprint_ms={:.3} fingerprint_xor={:016x} incr_calls={} fallbacks={} shadow_calls={} shadow_equal={} recon_attempts={} recon_success={} parent_maint_ms={:.3} incr_plan_ms={:.3} shadow_batch_ms={:.3} snapshot_bytes={} peak_snapshot_bytes={}",
         incr_enum_total.calls,
         incr_enum_total.plans,
         incr_enum_total.parent_fingerprints,
@@ -659,6 +661,8 @@ fn tss_corpus_check() {
         incr_enum_total.incremental_fallbacks,
         incr_enum_total.shadow_calls,
         incr_enum_total.shadow_equal,
+        incr_enum_total.snapshot_reconstruction_attempts,
+        incr_enum_total.snapshot_reconstruction_success,
         incr_enum_total.parent_maintenance_nanos as f64 / 1e6,
         incr_enum_total.incremental_plan_nanos as f64 / 1e6,
         incr_enum_total.shadow_batch_nanos as f64 / 1e6,

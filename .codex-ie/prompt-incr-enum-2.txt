@@ -1,0 +1,57 @@
+R-IE2 — INCREMENTAL ENUMERATION MEMORY ROUND (make R-IE1's −7.6% production-wireable)
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-incr-enum
+(branch hunt/incr-enum, HEAD = 2f46925e — R-IE1 is COMMITTED; read
+HUNT_REPORT_INCR_ENUM.md first, it is the binding baseline). You CANNOT
+git-commit. Deliverable: HUNT_REPORT_INCR_ENUM_MEM.md + revised
+implementation + retained raws + regen commands.
+
+## The one problem
+R-IE1 met every promote bar (−7.64% official wall, all 31 rows
+search-identical, shadow field-for-field green, leaf −7.34%/−4.88%) but
+stores fixed inline parent snapshots per node: +353.39 MiB accounted
+peak heap payload on the deep profile. That is the ONLY blocker.
+
+## Design directions (weigh, pick, measure — not a closed list)
+1. **Path-local snapshot stack.** df-pn expands a node only while its
+   parent chain is on the current descent path. If the snapshot can
+   live on an O(depth) descent stack instead of O(nodes) storage, the
+   payload collapses by orders of magnitude. Identify every site where
+   an expansion consumes a snapshot whose parent is NOT on the current
+   stack (lazy-frontier reveals? stage refreshes? TT-restored
+   frontiers?) — those fall back to exact batch, which R-IE1 already
+   implements and proved sound. Measure the fallback rate before
+   rejecting this design.
+2. **Compact sidecar encoding.** R-IE1's observed shapes are tiny
+   (means: 2.5 live windows, 4.1 distinct cells, 3.8 kernel cells;
+   maxima 6/4 vs capacity 8/8). A variable-length arena encoding sized
+   to observed shapes instead of fixed capacity.
+3. **Selected-edge reconstruction** — rebuild the parent family from
+   the stored edge on demand, paying recompute only where consumed.
+Hybrids are allowed. Choose by measured peak payload AND wall retention.
+
+## Bars (binding)
+- Same soundness ladder as R-IE1: shadow field-for-field equality
+  corpus-green (abort on first mismatch) BEFORE any consuming timing.
+- Consuming A/B vs the R-IE1 baseline raws: retain at least ~2/3 of the
+  −7.64% deep win (i.e. end ≥ −5%), all rows search-stat identical, no
+  leaf regression.
+- Peak accounted payload target: ≤ 32 MiB on the deep profile (hard
+  report line either way); TT peak unchanged.
+- cfg(test), default-off, production build free of the implementation,
+  strict verifier untouched. If every design misses the bars, an honest
+  measured negative is a complete round — report the memory/wall
+  frontier you found.
+
+## Rules
+CARGO_TARGET_DIR=.target-ie; --target x86_64-pc-windows-msvc on EVERY
+cargo; --test-threads=1. ONE cargo process host-wide — R-CF1 runs cargo
+in another worktree: Get-Process cargo wait-loop (sleep 300) before
+every invocation; design/doc work while waiting; never kill other
+lanes' processes. Lean spine lane holds RAM priority. RAM gates
+(relaxed 07-17 + idle-host clause, E:\tss-lean\RAM_PROTOCOL.md): cargo
+availability >= 10 GB AND free >= 5 GB; gate-class 1 GiB profiles
+>= 12/>= 6; record readings. 94gnnol out of scope. Honest partial stop
+at a clean boundary is success. Final message: chosen design, payload
+and wall numbers vs both baselines, per-bar verdicts, files, regen
+commands.

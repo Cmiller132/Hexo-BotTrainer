@@ -226,6 +226,10 @@ pub(crate) struct IncrEnumStats {
     pub(crate) incremental_fallbacks: u64,
     pub(crate) shadow_calls: u64,
     pub(crate) shadow_equal: u64,
+    /// Selected attacker-pair descents whose still-unexpanded defender child
+    /// needed an ephemeral parent-family reconstruction.
+    pub(crate) snapshot_reconstruction_attempts: u64,
+    pub(crate) snapshot_reconstruction_success: u64,
     pub(crate) parent_maintenance_nanos: u64,
     pub(crate) incremental_plan_nanos: u64,
     pub(crate) shadow_batch_nanos: u64,
@@ -272,6 +276,8 @@ impl IncrEnumStats {
         add!(incremental_fallbacks);
         add!(shadow_calls);
         add!(shadow_equal);
+        add!(snapshot_reconstruction_attempts);
+        add!(snapshot_reconstruction_success);
         add!(parent_maintenance_nanos);
         add!(incremental_plan_nanos);
         add!(shadow_batch_nanos);
