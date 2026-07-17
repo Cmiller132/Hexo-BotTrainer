@@ -1,0 +1,88 @@
+R-G1 — RESEARCH ROUND (Hexo game theory, ultra tier): obligation J + strategy stealing
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+(branch hunt/gap-raw, HEAD = 283348dc). You CANNOT git-commit. This is a
+PROOF round: the deliverables are rigorous mathematics in markdown, at the
+statement-fidelity and honesty standard of GAP_RAW_PROOF_ROUND2.md (which
+survived two hostile reviews — match its conventions: every claim labeled
+PROVEN / VERIFIED / GAP / OPEN, exact coordinates for every construction,
+no status inflation, provenance section).
+
+Read FIRST, in order: GAP_RAW_PROOF_ROUND2.md (fully — §6.2 is your
+target; §4.2, the K1/K2 kernel, the beta floor, and the D2 conditional
+are your banked tools), GAP_RAW_REVIEW_ROUND2.md (what a hostile reviewer
+accepted and why), HUNT_REPORT_GAP_RAW.md (the refutation corpus — every
+prior over-claim died here; do not resurrect one).
+
+## PRIMARY TARGET — Obligation J (§6.2): the perpetual-service defender strategy
+
+For every normative root P0 with Phi(P0) < 1, exhibit ONE pure Defender
+strategy S such that against every legal Attacker continuation, at every
+reached Defender epoch h with position P:
+1. Renewal: the canonical account satisfies B2(h) < 1.
+2. Actual service choice: S's actual sequential two-cell reply is legal
+   and hits every member of I(P); all discretion (covers, nonminimum
+   pairs, order, fillers) resolved inside S's one actual pair.
+3. Unripeness handoff: for the actual handoff Q, every legal ordered
+   Attacker pair returns a Defender epoch with tau <= 2.
+4. Account transition: Defender's two exact kill transitions and every
+   Attacker response are evaluated by equation (9), including n1/9, and
+   establish B2(h') < 1 at the next Defender epoch.
+
+J contains both normative residues: GAP-GLOBAL-RENEWAL (next B2 < 1
+without renewing raw Phi) and GAP-AMORTIZED-ABANDONMENT. A proven J is
+the first perpetual-survival theorem for Hexo — the draw-side heart of
+the game's theory. Take it seriously as such.
+
+Ranked success modes (any one is a complete round; take the strongest
+you can defend):
+(a) Full construction of S with proofs of clauses 1-4.
+(b) A proof of either normative residue in isolation, cleanly stated.
+(c) A reduction of J to a minimal set of sharply-stated sub-lemmas with
+    proofs of all but a named remainder — each sub-lemma independently
+    checkable, no hidden joint quantifiers (the review killed exactly
+    that pattern in round 1; see A2 vs A2').
+(d) An honest refutation of a natural strategy class for J (exact
+    engine-legal counterexample history, harness-checked), narrowing the
+    constructive search space for round 2.
+Do NOT manufacture a weaker theorem and call it J. If you weaken, state
+the exact gap between what you proved and J's four clauses.
+
+## SECONDARY TARGET (bounded: at most ~1/4 of your effort, do it FIRST as a
+self-contained warm-up, then park regardless of state)
+
+STRATEGY STEALING UNDER GROWTH-CONSTRAINED LEGALITY. Classical positional-
+game stealing gives first-player-no-loss via extra-stone monotonicity.
+Hexo's legality rule makes the legal-placement set history-dependent (the
+radius-8 growth constraint), and an extra stone enlarges BOTH players'
+future legal zones — the classical argument does not obviously survive.
+First: read the ACTUAL rules from the engine source in this repo
+(packages/hexfield_eq/rust/src/ and the engine crate it imports — turn
+structure, first-turn placement count, legality/growth rule, win
+condition incl. mid-turn wins, any draw/termination rule) and state the
+game formally as implemented. Then either:
+- prove "Player 1 has a non-losing strategy in Hexo" (repairing or
+  replacing the stealing argument under the growth rule), or
+- exhibit the exact obstruction (where monotonicity fails; what the extra
+  stone breaks), stated sharply enough to be a small theorem itself.
+Deliverable: STRATEGY_STEALING_HEXO.md. If neither closes inside the
+budget, park it with the obstruction named — that is honest and fine.
+
+## Rules
+- Deliverables: GAP_RAW_PROOF_ROUND3.md (J work, resuming ROUND2's
+  numbering and conventions) + STRATEGY_STEALING_HEXO.md + a short final
+  message (verdicts per target, what is PROVEN vs OPEN, files, and the
+  exact resume point for a successor round).
+- Harness: machine checks are ENCOURAGED for counterexamples and finite
+  case analyses — add test-gated cases to
+  packages/hexfield_eq/rust/src/gap_raw_hunt.rs ONLY; production rules
+  and the strict verifier untouched (not one line).
+- Cargo discipline: CARGO_TARGET_DIR=.target-gr; --target
+  x86_64-pc-windows-msvc on EVERY cargo; --test-threads=1; ONE cargo
+  process host-wide — a solver lane (R-RS1) is running long profiles, so
+  wait-loop on Get-Process cargo (sleep 300) and BATCH your harness
+  checks; RAM gates per E:\tss-lean\RAM_PROTOCOL.md (cargo >= 10 GB
+  availability AND >= 5 GB free; record readings). Do NOT build anything
+  in E:\tss-lean (the Lean spine lane owns it).
+- Write incrementally to disk; chunk <= 2h per exec; an honest partial
+  stop at a clean boundary with a named resume point is success.

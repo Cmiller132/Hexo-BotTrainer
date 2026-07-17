@@ -1314,6 +1314,187 @@ mod tests {
         );
     }
 
+    /// Round 3: direct refutation of Obligation J for its canonical account
+    /// `B2 = Theta2`.  This is a normative blanket-game root: the root domain
+    /// in GAP_RAW_PROOF_ROUND2.md requires a finite, nonempty, nonterminal
+    /// position, but does not require an engine-reachable history.
+    ///
+    /// Eight isolated count-two windows give Phi=Theta2=8/9.  Three disjoint
+    /// launch strips are anchored by Defender stones at distance eight.  Any
+    /// two-cell Defender reply kills at most two old windows and meets at most
+    /// two launch strips; an untouched adjacent Attacker pair then creates five
+    /// fresh count-two windows.  Hence the next Defender epoch has
+    /// Theta2 >= 8/9 - 2/9 + 5/9 = 11/9.
+    #[test]
+    #[ignore = "round-3 canonical-renewal refutation; finite quotient"]
+    fn round3_j_canonical_renewal_refutation() {
+        let blocker_offsets: [Cell; 8] = [
+            (0, 1),
+            (1, -1),
+            (-1, 0),
+            (3, -2),
+            (0, -4),
+            (-3, 3),
+            (1, 3),
+            (6, 0),
+        ];
+
+        let mut attackers = BTreeSet::new();
+        let mut defenders = BTreeSet::new();
+        let mut old_windows: Vec<BTreeSet<Cell>> = Vec::new();
+        for i in 0..8i16 {
+            let b = 30 * i;
+            attackers.insert((b, 0));
+            attackers.insert((b + 1, 0));
+            for &(dq, dr) in &blocker_offsets {
+                defenders.insert((b + dq, dr));
+            }
+            old_windows.push((0..=5i16).map(|t| (b + t, 0)).collect());
+        }
+
+        let mut launches: Vec<(Cell, Cell, Cell)> = Vec::new();
+        let mut launch_unions: Vec<BTreeSet<Cell>> = Vec::new();
+        for j in 0..3i16 {
+            let r = 100 + 30 * j;
+            let c = (0, r);
+            let d = (1, r);
+            let anchor = (0, r + 8);
+            defenders.insert(anchor);
+            launches.push((c, d, anchor));
+            launch_unions.push((-4..=5i16).map(|q| (q, r)).collect());
+        }
+
+        let root = Pos {
+            attackers,
+            defenders,
+            to_move: Side::Defender,
+            first_stone: true,
+        };
+        assert_eq!(root.attackers.len(), 16);
+        assert_eq!(root.defenders.len(), 67);
+        assert!(root.attackers.is_disjoint(&root.defenders));
+        assert!(!root.attacker_has_six());
+        assert_eq!(root.profile().n, [0, 0, 8, 0, 0, 0, 0]);
+        assert!(root.profile().phi_lt_one());
+        assert_eq!(theta2_ab(&root), (24, 0)); // 27 * (8/9)
+        assert!(imminent_empty_sets(&root).is_empty());
+
+        let expected_alive: BTreeSet<WinKey> =
+            (0..8i16).map(|i| (0, 30 * i, 0)).collect();
+        assert_eq!(alive_windows(&root).into_iter().collect::<BTreeSet<_>>(), expected_alive);
+
+        let mut protected_sets = old_windows.clone();
+        protected_sets.extend(launch_unions.clone());
+        for i in 0..protected_sets.len() {
+            for j in (i + 1)..protected_sets.len() {
+                assert!(
+                    protected_sets[i].is_disjoint(&protected_sets[j]),
+                    "old-window and launch-strip sets must be pairwise disjoint"
+                );
+            }
+        }
+        for (j, &(c, d, anchor)) in launches.iter().enumerate() {
+            assert!(launch_unions[j].contains(&c));
+            assert!(launch_unions[j].contains(&d));
+            assert!(launch_unions[j].is_disjoint(&root.attackers));
+            assert!(launch_unions[j].is_disjoint(&root.defenders));
+            let dq = (c.0 - anchor.0).abs();
+            let dr = (c.1 - anchor.1).abs();
+            let ds = ((c.0 + c.1) - (anchor.0 + anchor.1)).abs();
+            assert_eq!(dq.max(dr).max(ds), LEGAL_RADIUS);
+        }
+
+        // Quotient-complete defense universe.  A Defender cell can affect the
+        // lower bound only by lying in one of the eight old windows or one of
+        // the three launch unions.  Two outside sentinels represent the cases
+        // with one or two off-union placements.  We deliberately do not impose
+        // Defender legality here, a Defender-favoring over-approximation.
+        let mut quotient_cells: Vec<Cell> = protected_sets
+            .iter()
+            .flat_map(|set| set.iter().copied())
+            .filter(|&cell| !root.occupied(cell))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        quotient_cells.extend([(1000, 1000), (1001, 1000)]);
+        assert_eq!(quotient_cells.len(), 64);
+
+        let mut checked = 0usize;
+        let mut minimum_next = None::<(i128, i128)>;
+        for i in 0..quotient_cells.len() {
+            for j in (i + 1)..quotient_cells.len() {
+                let x1 = quotient_cells[i];
+                let x2 = quotient_cells[j];
+                let killed = old_windows
+                    .iter()
+                    .filter(|window| window.contains(&x1) || window.contains(&x2))
+                    .count();
+                assert!(killed <= 2);
+                let launch_ix = launch_unions
+                    .iter()
+                    .position(|union| !union.contains(&x1) && !union.contains(&x2))
+                    .expect("two cells cannot meet three disjoint launch unions");
+                let (c, d, _) = launches[launch_ix];
+
+                let after_defense = root.apply(x1).apply(x2);
+                assert_eq!(theta2_ab(&after_defense), (3 * (8 - killed) as i128, 0));
+                assert!(after_defense.legal_moves().contains(&c));
+                let after_c = after_defense.apply(c);
+                assert_eq!(theta2_ab(&after_c), theta2_ab(&after_defense));
+                assert!(after_c.legal_moves().contains(&d));
+                let next_epoch = after_c.apply(d);
+                assert_eq!(next_epoch.to_move, Side::Defender);
+                assert!(next_epoch.first_stone);
+                assert!(!next_epoch.attacker_has_six());
+                assert_eq!(
+                    theta2_ab(&next_epoch),
+                    (3 * (13 - killed) as i128, 0),
+                    "five fresh adjacent-pair labels must enter at weight 1/9 each"
+                );
+                assert!(cmp_surd(
+                    theta2_ab(&next_epoch).0,
+                    theta2_ab(&next_epoch).1,
+                    33,
+                    0,
+                ) != Ordering::Less);
+
+                let value = theta2_ab(&next_epoch);
+                match minimum_next {
+                    None => minimum_next = Some(value),
+                    Some(best) if cmp_surd(value.0, value.1, best.0, best.1) == Ordering::Less => {
+                        minimum_next = Some(value)
+                    }
+                    _ => {}
+                }
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 2_016);
+        assert_eq!(minimum_next, Some((33, 0))); // 27 * (11/9)
+
+        // One exact legal worst row attaining the quotient minimum.
+        let x1 = (4, 0);
+        let x2 = (213, 0);
+        assert!(root.legal_moves().contains(&x1));
+        let p1 = root.apply(x1);
+        assert!(p1.legal_moves().contains(&x2));
+        let q = p1.apply(x2);
+        let c = launches[0].0;
+        let d = launches[0].1;
+        assert!(q.legal_moves().contains(&c));
+        let q1 = q.apply(c);
+        assert!(q1.legal_moves().contains(&d));
+        let exact_next = q1.apply(d);
+        let exact_profile = exact_next.profile();
+        assert_eq!(exact_profile.n[1], 26);
+        assert_eq!(exact_profile.n[2], 11);
+        assert_eq!(exact_profile.n[3], 0);
+        assert_eq!(exact_profile.n[4], 0);
+        assert_eq!(exact_profile.n[5], 0);
+        assert_eq!(exact_profile.n[6], 0);
+        assert_eq!(theta2_ab(&exact_next), (33, 0));
+    }
+
     /// Hostile-review section 4.1: one past placement creates a same-axis
     /// heavy trigger cluster; a remote count-three label makes the full future
     /// family have exact hitting number three.
