@@ -1,0 +1,65 @@
+R-T1 — RESEARCH ROUND (ultra): df-pn re-traversal theory — the formal counterpart of R-TS1
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width
+(branch claude/tss-vcf-width, HEAD = d5a2b5fd). You CANNOT git-commit.
+DOC-ONLY round: NO cargo (host-wide slot is held by a wall-sensitive
+measurement job), no Lean builds. Deliverable:
+docs/DFPN_RETRAVERSAL_THEORY.md + a short final message.
+
+## The open problem
+df-pn re-expands interior nodes on every descent; the literature's
+mitigations (1+epsilon thresholds, deepening variants) are heuristic —
+no tight analysis exists of re-expansion overhead as a function of (a)
+threshold increment delta and (b) proof/disproof-number initialization
+scale, especially with HEURISTIC (non-admissible) initialization. You
+have something the literature lacks: an exactly measured instance.
+
+## The measured instance (read these first)
+- HUNT_REPORT_THRESHOLD_SCALE.md (R-TS1, in this worktree): revisit-
+  attributed traversal = 7.01% of wall (13.93% descent-inclusive
+  ceiling) at delta=1; delta=2 blows official wall +85.6% with the
+  hardest row at 3.2x expansions and a saturated TT; delta=4 and a
+  mean-scaled delta each LOSE one h16 leaf verdict; +1 proven optimal
+  on this engine. Retained cfg(test) revisit counters are described
+  there (do not run them — cite their recorded values).
+- The engine's actual descent discipline (read the code, cite lines:
+  packages/hexfield_eq/rust/src/tss_solver.rs): second-best threshold
+  descent, conjunctive budget subtraction, child-progress floor,
+  fork/tau heuristic pn/dn initialization (1..37 priors).
+- IDEATION_FINAL.md §3 (candidate 2) for the algorithm-class context.
+
+## Targets (ranked; any one rigorous result = complete round)
+(a) THEOREMS bounding total re-expansion for an idealized df-pn class
+    that captures our discipline (second-best thresholds, unit vs
+    delta increments, heuristic init scale H) on finite trees/DAGs:
+    upper bounds AND matching/near-matching worst-case families.
+    The known folklore bound (df-pn ~ O(n * depth)-ish re-expansion,
+    and the b^(d/2)-flavored PNS results) is the starting floor —
+    your value-add is the delta- and H-dependence.
+(b) An EXPLANATORY theorem for the delta=2 catastrophe: under what
+    tree statistics does increasing delta strictly increase total
+    work? R-TS1 observed +85.6% — find the mechanism class (deeper
+    overshoot past the optimal frontier? TT-eviction interaction?)
+    and prove it on a family. A theorem of the form "delta>1 helps
+    only if revisit fraction exceeds X(tree params)" would explain
+    why our measured 7% revisit share made +1 optimal.
+(c) The heuristic-init side: non-admissible priors can inflate a
+    cheap subtree's pn above its true cost and starve the cheapest
+    proof line. Prove a bound on the extra work as a function of the
+    init's over-estimation ratio, or construct the worst case.
+    (This feeds agenda 1.3 — certified admissible floors — directly:
+    if admissible init provably caps starvation, that strengthens the
+    case for theorem-backed floors.)
+(d) Honest partial: a precise formalization of the open problem, the
+    known-results map, partial bounds, and the exact obstacle.
+
+## Rules
+Conventions: every claim labeled PROVEN / SKETCH / CONJECTURE / CITED
+(with source); worst-case families given as explicit constructions;
+no status inflation. Engine facts cited by file:line. Literature from
+memory is fine but label it CITED-FROM-MEMORY and flag anything you
+are unsure of for later verification. Incremental disk writes; chunk
+<= 2h per exec; honest partial stop with a named resume point is
+success. Final message: results summary (what is PROVEN vs SKETCH vs
+CONJECTURE), the single most useful implication for this engine, and
+the resume point.
