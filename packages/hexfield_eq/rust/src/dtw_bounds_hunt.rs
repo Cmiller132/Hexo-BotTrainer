@@ -45,8 +45,9 @@ use std::time::Instant;
 
 use hexo_engine::{apply_placement, HexCoord, HexoState, Placement, Player, TurnPhase};
 
-use crate::tss_core::{ProofStatus, SolveCaps, SolveGoal};
+use crate::tss_core::{CertVerify, ProofStatus, SolveCaps, SolveGoal};
 use crate::tss_solver::{TssSolver, WidthOptions};
+use crate::tss_verify::TssVerifier;
 
 type Cell = (i16, i16);
 const AXES: [Cell; 3] = [(1, 0), (0, 1), (1, -1)];
@@ -1150,6 +1151,298 @@ fn dtw_secondstone_regression() {
         witness.phase()
     );
     println!("SECONDSTONE_REGRESSION_DONE");
+}
+
+#[test]
+#[ignore = "hostile LB-1/LB solver boundary checks; --nocapture --test-threads=1"]
+fn dtw_hostile_ply_boundaries() {
+    let store_census = |state: &HexoState, attacker: Player| {
+        state
+            .board()
+            .windows()
+            .entries()
+            .filter(|entry| entry.count(attacker) > 0 && entry.count(attacker.other()) == 0)
+            .map(|entry| entry.count(attacker))
+            .max()
+            .unwrap_or(0)
+    };
+
+    // Every phase/census/LB boundary occurs in a prefix of this one reachable,
+    // nonterminal replay (except SecondStone c=0).  This also cross-checks the
+    // harness enumeration against the production WindowStore entries API.
+    let census_sweep: [Cell; 11] = [
+        (0, 0),
+        (0, 2),
+        (1, 2),
+        (1, 0),
+        (2, 0),
+        (2, 2),
+        (3, 2),
+        (3, 0),
+        (4, 0),
+        (4, 2),
+        (0, 4),
+    ];
+    let expected = [
+        (false, Player::Player1, 0u8, 10u32),
+        (true, Player::Player1, 1, 12),
+        (false, Player::Player0, 1, 10),
+        (true, Player::Player0, 2, 9),
+        (false, Player::Player1, 2, 9),
+        (true, Player::Player1, 3, 5),
+        (false, Player::Player0, 3, 6),
+        (true, Player::Player0, 4, 4),
+        (false, Player::Player1, 4, 2),
+        (true, Player::Player1, 5, 1),
+        (false, Player::Player0, 5, 1),
+    ];
+    for (index, &(secondstone, player, c, lb)) in expected.iter().enumerate() {
+        let state = replay(&census_sweep[..=index]).expect("legal census-boundary prefix");
+        assert_eq!(state.current_player(), player, "prefix {} mover", index + 1);
+        assert_eq!(
+            matches!(state.phase(), TurnPhase::SecondStone { .. }),
+            secondstone,
+            "prefix {} phase",
+            index + 1
+        );
+        let (mine, opp) = stones_of(&state, player);
+        let harness_c = max_cnt(&alive_windows(&mine, &opp));
+        assert_eq!(harness_c, c, "prefix {} harness census", index + 1);
+        assert_eq!(
+            store_census(&state, player),
+            c,
+            "prefix {} WindowStore census",
+            index + 1
+        );
+        let m = if secondstone {
+            if c >= 3 {
+                6 - u32::from(c)
+            } else {
+                (7 - u32::from(c)).min(6)
+            }
+        } else if c >= 4 {
+            6 - u32::from(c)
+        } else {
+            (7 - u32::from(c)).min(6)
+        };
+        assert_eq!(
+            ply_of_mth(player, state.phase(), player, m),
+            lb,
+            "prefix {} LB",
+            index + 1
+        );
+    }
+
+    // Degenerate post-opening root: the current attacker has no touched live
+    // window, while the legal store is already nonempty (216 radius-8 cells).
+    let post_opening = replay(&census_sweep[..1]).expect("opening replay");
+    assert_eq!(store_census(&post_opening, Player::Player1), 0);
+    assert_eq!(post_opening.legal_move_count(), 216);
+
+    // A legal non-collinear pair can advance two unrelated clusters, but it
+    // cannot create a target count-5 window containing both pair cells.
+    let split_prefix: [Cell; 13] = [
+        (0, 0),
+        (1, 1),
+        (2, 1),
+        (5, 5),
+        (8, 8),
+        (3, 1),
+        (10, 11),
+        (6, 7),
+        (7, 7),
+        (10, 12),
+        (10, 13),
+        (6, 8),
+        (7, 8),
+    ];
+    let mut split = replay(&split_prefix).expect("legal split-pair replay");
+    let split_attacker = split.current_player();
+    assert_eq!(split.phase(), TurnPhase::FirstStone);
+    assert_eq!(store_census(&split, split_attacker), 3);
+    for coord in [HexCoord::new(0, 1), HexCoord::new(10, 10)] {
+        let placed = apply_placement(&mut split, Placement { coord }).expect("legal split pair");
+        assert!(placed.outcome.is_none());
+    }
+    let (mine, opp) = stones_of(&split, split_attacker);
+    assert!(alive_windows(&mine, &opp)
+        .iter()
+        .all(|window| window.cnt <= 4));
+
+    // Minimal distance-5 service endpoints both survive the engine's legal
+    // store and phase guards after the attacker pair.
+    replay(&[(0, 0), (1, 0), (2, 0), (-3, 0), (6, 0)])
+        .expect("distance-5 service replay must remain legal and nonterminal");
+
+    let firststone_prefix: [Cell; 37] = [
+        (0, 0),
+        (2, -2),
+        (2, 0),
+        (-2, 2),
+        (-2, 0),
+        (0, -2),
+        (0, 2),
+        (-1, 1),
+        (-3, 3),
+        (-4, 4),
+        (4, -2),
+        (-2, 1),
+        (-2, -1),
+        (-2, 4),
+        (-2, -2),
+        (-3, 1),
+        (-4, 1),
+        (-5, 1),
+        (1, 1),
+        (-1, 3),
+        (5, -3),
+        (1, -2),
+        (1, -1),
+        (-1, -2),
+        (3, -2),
+        (1, -4),
+        (-5, 2),
+        (-1, -1),
+        (-1, 0),
+        (-1, 2),
+        (-1, -3),
+        (-4, 0),
+        (-3, 0),
+        (1, 0),
+        (-5, 0),
+        (1, -3),
+        (1, 2),
+    ];
+    let secondstone_prefix: [Cell; 18] = [
+        (0, 0),
+        (2, 1),
+        (3, 1),
+        (-1, 0),
+        (0, -1),
+        (4, 1),
+        (1, 2),
+        (-1, 1),
+        (1, -1),
+        (1, 3),
+        (1, 4),
+        (-2, 0),
+        (0, -2),
+        (2, 0),
+        (3, -1),
+        (-2, 1),
+        (-1, -2),
+        (4, -2),
+    ];
+
+    let cases = [
+        (
+            "firststone_c3_4c716bfed1924aaf_at_37",
+            replay(&firststone_prefix).expect("legal FirstStone boundary replay"),
+            TurnPhase::FirstStone,
+            3u8,
+            6u32,
+        ),
+        (
+            "secondstone_c3_three_axis_witness",
+            replay(&secondstone_prefix).expect("legal SecondStone boundary replay"),
+            TurnPhase::SecondStone {
+                first: HexCoord::new(4, -2),
+            },
+            3u8,
+            5u32,
+        ),
+        (
+            "firststone_c4_pair_completion",
+            replay(&census_sweep[..9]).expect("legal FirstStone c4 replay"),
+            TurnPhase::FirstStone,
+            4u8,
+            2u32,
+        ),
+        (
+            "secondstone_c5_immediate_completion",
+            replay(&census_sweep[..10]).expect("legal SecondStone c5 replay"),
+            TurnPhase::SecondStone {
+                first: HexCoord::new(4, 2),
+            },
+            5u8,
+            1u32,
+        ),
+        (
+            "firststone_c5_immediate_completion",
+            replay(&census_sweep).expect("legal FirstStone c5 replay"),
+            TurnPhase::FirstStone,
+            5u8,
+            1u32,
+        ),
+    ];
+
+    for (name, state, expected_phase, expected_c, lb_plies) in cases {
+        assert_eq!(state.phase(), expected_phase, "{name}: phase drift");
+        let attacker = state.current_player();
+        let (mine, opp) = stones_of(&state, attacker);
+        assert_eq!(
+            max_cnt(&alive_windows(&mine, &opp)),
+            expected_c,
+            "{name}: census drift"
+        );
+        assert_eq!(store_census(&state, attacker), expected_c);
+        if expected_c == 3 {
+            assert_eq!(
+                state.board().windows().threat_entries(attacker).count(),
+                0,
+                "{name}: threat-only census must miss this c=3 root"
+            );
+        }
+        let base = state.placements_made();
+
+        let solve_at = |h: u32| {
+            let mut solver = TssSolver::default();
+            solver.set_width_options(WidthOptions::vcf_pair_complete());
+            solver.solve_goal(
+                &state,
+                &SolveCaps {
+                    node_cap: ORACLE_NODE_CAP,
+                    tt_bytes_cap: ORACLE_TT_BYTES,
+                    semantic_horizon: base + h,
+                },
+                SolveGoal::Win,
+            )
+        };
+
+        let before = solve_at(lb_plies - 1);
+        println!(
+            "DTW_HOSTILE_BOUNDARY name={name} base={base} phase={:?} c={expected_c} h={} semantic_horizon={} status={:?} nodes={} (non-Win is not a no-win proof)",
+            state.phase(),
+            lb_plies - 1,
+            base + lb_plies - 1,
+            before.status,
+            before.stats.nodes,
+        );
+        assert_ne!(
+            before.status,
+            ProofStatus::Win,
+            "{name}: solver found a win before the proved lower bound"
+        );
+
+        let boundary = solve_at(lb_plies);
+        println!(
+            "DTW_HOSTILE_BOUNDARY name={name} base={base} phase={:?} c={expected_c} h={lb_plies} semantic_horizon={} status={:?} nodes={}",
+            state.phase(),
+            base + lb_plies,
+            boundary.status,
+            boundary.stats.nodes,
+        );
+        assert_eq!(
+            boundary.status,
+            ProofStatus::Win,
+            "{name}: expected positive solve at the permitted boundary"
+        );
+        assert!(TssVerifier.verify(
+            &state,
+            boundary.cert.as_ref().expect("WIN needs certificate"),
+            ProofStatus::Win,
+        ));
+    }
 }
 
 // ==========================================================================

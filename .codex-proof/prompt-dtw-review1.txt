@@ -1,0 +1,82 @@
+DTW census-bound HOSTILE REVIEW. You are the adversarial referee for
+PROOF_DTW_CENSUS_BOUND.md, whose consumer contract is destined for the
+PRODUCTION h=8 leaf gate: a wrong PROVEN skips solves on positions with
+forced wins inside the horizon, silently weakening the trainer. Try to
+BREAK it — construct explicit positions.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-dtw-bounds
+at commit ffdd414a. You CANNOT git-commit. Write the review to
+REVIEW_DTW_CENSUS_BOUND.md in the worktree root — incremental (verdict
+skeleton first).
+
+## Inputs (read in this order)
+1. PROOF_DTW_CENSUS_BOUND.md — under review (its attack-surface section
+   is your starting list, not your limit).
+2. HUNT_REPORT_DTW_BOUNDS.md — the empirical base (386 solved wins,
+   exact-dtw distribution {2,6,10}, the REFUTED lb_triple_heur).
+3. packages/hexfield_eq/rust/src/dtw_bounds_hunt.rs — verify each
+   machine check asserts what the proof cites it for (predicate-to-prose
+   audit), especially the defender-injection monotonicity check and the
+   SecondStone c=3 witness.
+4. Engine ground truth (read-only): hexo_engine rules
+   (is_legal_placement, LEGAL_RADIUS, phase machine) and the production
+   ladder semantics in tss-vcf-width's tss_solver.rs (semantic_horizon
+   respect points) — the contract's h = semantic_horizon - base mapping
+   must match the engine's completion_ply <= semantic_horizon rule
+   EXACTLY (off-by-one here is the classic production defect).
+
+## Named attack surfaces (mandatory, plus your own)
+A. Ply accounting end-to-end: relative-ply vs placements_made vs
+   completion_ply; both phase maps ([1,2,5,6,9,10] / [1,4,5,8,9,12]);
+   the "LB_plies - 1" boundary; Contract 8.2's h derivation. Construct
+   a position at each boundary value and check against a laddered
+   engine solve.
+B. The census definition mismatch risk: proof's window census (max
+   attacker count over defender-free windows, reject c>5) vs the
+   harness census vs what a production WindowStore implementation would
+   compute. Any window the census scan could miss (windows with zero
+   attacker stones but defender-free — irrelevant for c but check the
+   m(c)=6 no-window case)?
+C. Claim A/B applicability: the proof reduces 2D to the one line via
+   pair concentration (Lemma 2.4). Attack the reduction: can the two
+   first placements be NON-collinear in a minimal win (e.g. first
+   placement completes nothing but second begins a different window)?
+   Verify the "win with exactly 6-c placements forces all into one
+   window W" step at each c.
+D. Defender-injection monotonicity (L4): the exhaustive ternary
+   universe argument — confirm the injected-defender configurations the
+   game can reach are a subset of the checked universe (defender stones
+   BETWEEN the pairs, and already-present line hits for c<=1).
+E. The SecondStone c=3 analysis (S3) and the sound T2: is the c=3
+   no-increment case tight (the witness shows increment FALSE), and is
+   the c<=2 increment proof genuinely phase-correct (defender's
+   servicing turn arrives one placement earlier)?
+F. Contract 8.1 step 3's sufficiency claim ("scan only windows touched
+   by an attacker stone") and the i16 predicate: is the stated
+   coordinate-safety condition actually sufficient for every lemma the
+   contract invokes?
+G. The proof's claim that defender service placements are always legal
+   (LEGAL_RADIUS=8): check the degenerate openings (few stones on
+   board) where the legal store is small.
+
+## Machine work allowed
+Rerun any dtw_ test; add [ignore]-gated adversarial checks for
+counterexample candidates (especially boundary-ply engine-ladder
+comparisons in A). CARGO_TARGET_DIR=.target-hunt, one cargo,
+--test-threads=1, single run <=10 min, free RAM >9 GB before cargo
+(powershell "Get-CimInstance Win32_OperatingSystem | % {
+$_.FreePhysicalMemory/1MB }") — TWO other sessions share this host; if
+below, wait and re-check.
+
+## Deliverable
+REVIEW_DTW_CENSUS_BOUND.md: overall verdict (ACCEPT /
+ACCEPT-WITH-EDITS / REJECT); per-claim verdict for every PROVEN row of
+the proof's ledger (CONFIRMED / BROKEN-with-counterexample); findings
+by severity; numbered repair list if not ACCEPT; explicit sign-off or
+objection on Contract 8.1/8.2 as the production implementation spec.
+Final message: verdict, tallies, sharpest findings, files.
+
+## Rules
+No commits. Work only in this worktree; siblings read-only. Do not edit
+the proof document — findings go in the review. Truthfulness outranks
+completeness.
