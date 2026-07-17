@@ -472,7 +472,7 @@ impl TssSolver {
                 for (rank, child) in children.iter().take(32).enumerate() {
                     let child_fields = search.format_trace_child(child);
                     eprintln!("WIDTH_PN_ROOT rank={rank} mv={:?} {child_fields}", child.mv);
-                    if let Some(entry) = child.entry {
+                    if let Some(entry) = search.resolved_child_entry(child) {
                         if let WidePnNode::Branch {
                             children: replies, ..
                         } = &search.entries[entry].node
@@ -977,6 +977,10 @@ struct WidePnChild {
     mv: WidePnMove,
     result: WidePnChildResult,
     entry: Option<usize>,
+    /// Exact key retained in lazy mode until the edge links an arena entry.
+    /// Defender keys virtually represent the eager entry before selection;
+    /// historical attacker-lazy keys remain selection-only.
+    future_key: Option<WideFutureKey>,
     /// Static estimates used until the child position is linked. Completed
     /// attacker turns carry both their fork-derived PN and tau-derived DN so
     /// lazy linking cannot erase the principled ordering signal.
@@ -986,6 +990,42 @@ struct WidePnChild {
     /// also the neutral value for one-placement and defender children, so the
     /// root-only tier prior cannot perturb their established ordering.
     first_width_tier: u8,
+}
+
+#[derive(Clone, Debug)]
+enum WideFutureKey {
+    /// Historical attacker lazy edge: the key participates only when selected.
+    OnSelection(WidePositionKey),
+    /// R-LF1 defender thunk: pre-selection reads virtually observe the eager
+    /// entry represented by the deferred key.
+    Virtual(WidePositionKey),
+}
+
+impl WideFutureKey {
+    fn key(&self) -> &WidePositionKey {
+        match self {
+            Self::OnSelection(key) | Self::Virtual(key) => key,
+        }
+    }
+
+    fn virtual_key(&self) -> Option<&WidePositionKey> {
+        match self {
+            Self::Virtual(key) => Some(key),
+            Self::OnSelection(_) => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WideChildObligation<'a> {
+    Entry(usize),
+    FutureKey(&'a WidePositionKey),
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WideDeferredPosition {
+    depth: usize,
+    prior: WidePnPrior,
 }
 
 fn turn_start_defender_blocks(candidates: &[Candidate]) -> HashSet<HexCoord> {
@@ -1100,6 +1140,46 @@ impl WidePositionKey {
                 push_wide_varint(&mut encoded, outcome.placements);
             }
         }
+        for (q, r, owner) in stones {
+            push_wide_varint(
+                &mut encoded,
+                zigzag_i16(q).saturating_mul(2) | u32::from(owner),
+            );
+            push_wide_varint(&mut encoded, zigzag_i16(r));
+        }
+        Self {
+            bytes: encoded.into_boxed_slice(),
+        }
+    }
+
+    /// Exact nonterminal key after a legal two-stone turn. The wide attacker
+    /// pair gate is deliberately stateless, so constructing the thunk key
+    /// directly avoids cloning/applying the engine state for every retained
+    /// pair.
+    fn after_completed_pair(state: &RustHexoState, first: HexCoord, second: HexCoord) -> Self {
+        debug_assert!(matches!(state.phase(), TurnPhase::FirstStone));
+        let owner = player_code(state.current_player());
+        let mut stones = state
+            .board()
+            .occupied_cells()
+            .iter()
+            .map(|&coord| {
+                (
+                    coord.q,
+                    coord.r,
+                    player_code(state.board().get(coord).expect("occupied cell has owner")),
+                )
+            })
+            .collect::<Vec<_>>();
+        stones.push((first.q, first.r, owner));
+        stones.push((second.q, second.r, owner));
+        stones.sort_unstable();
+
+        let mut encoded = Vec::with_capacity(stones.len().saturating_mul(3).saturating_add(12));
+        encoded.push(player_code(state.current_player().other()));
+        push_wide_varint(&mut encoded, state.placements_made().saturating_add(2));
+        encoded.push(1); // TurnPhase::FirstStone after a completed turn.
+        encoded.push(0); // Retained Pending pairs are nonterminal.
         for (q, r, owner) in stones {
             push_wide_varint(
                 &mut encoded,
@@ -1604,7 +1684,7 @@ impl QuotientTelemetry {
         by_position: &HashMap<WidePositionKey, usize>,
         stage_depth: usize,
     ) {
-        let verdicts = sound_verdicts(entries);
+        let verdicts = sound_verdicts(entries, by_position);
         for (id, entry) in entries.iter().enumerate() {
             if entry.depth > stage_depth {
                 continue;
@@ -1693,6 +1773,7 @@ impl QuotientTelemetry {
 fn child_sound_verdict(
     child: &WidePnChild,
     verdicts: &[Option<QuotientSoundVerdict>],
+    by_position: &HashMap<WidePositionKey, usize>,
 ) -> Option<QuotientSoundVerdict> {
     match child.result {
         WidePnChildResult::ClaimantCompletion | WidePnChildResult::ClaimantTactical => {
@@ -1701,12 +1782,22 @@ fn child_sound_verdict(
         WidePnChildResult::Refuted => Some(QuotientSoundVerdict::Refutation),
         WidePnChildResult::Pending => child
             .entry
+            .or_else(|| {
+                child
+                    .future_key
+                    .as_ref()
+                    .and_then(WideFutureKey::virtual_key)
+                    .and_then(|key| by_position.get(key).copied())
+            })
             .and_then(|id| verdicts.get(id).copied().flatten()),
     }
 }
 
 #[cfg(test)]
-fn sound_verdicts(entries: &[WidePnEntry]) -> Vec<Option<QuotientSoundVerdict>> {
+fn sound_verdicts(
+    entries: &[WidePnEntry],
+    by_position: &HashMap<WidePositionKey, usize>,
+) -> Vec<Option<QuotientSoundVerdict>> {
     let mut verdicts = vec![None; entries.len()];
     let mut ids = (0..entries.len()).collect::<Vec<_>>();
     ids.sort_unstable_by_key(|&id| Reverse(entries[id].depth));
@@ -1718,11 +1809,12 @@ fn sound_verdicts(entries: &[WidePnEntry]) -> Vec<Option<QuotientSoundVerdict>> 
             WidePnNode::Branch { kind, children } => match kind {
                 WidePnKind::Choice => {
                     if children.iter().any(|child| {
-                        child_sound_verdict(child, &verdicts) == Some(QuotientSoundVerdict::Win)
+                        child_sound_verdict(child, &verdicts, by_position)
+                            == Some(QuotientSoundVerdict::Win)
                     }) {
                         Some(QuotientSoundVerdict::Win)
                     } else if children.iter().all(|child| {
-                        child_sound_verdict(child, &verdicts)
+                        child_sound_verdict(child, &verdicts, by_position)
                             == Some(QuotientSoundVerdict::Refutation)
                     }) {
                         Some(QuotientSoundVerdict::Refutation)
@@ -1732,11 +1824,12 @@ fn sound_verdicts(entries: &[WidePnEntry]) -> Vec<Option<QuotientSoundVerdict>> 
                 }
                 WidePnKind::Universal { .. } => {
                     if children.iter().all(|child| {
-                        child_sound_verdict(child, &verdicts) == Some(QuotientSoundVerdict::Win)
+                        child_sound_verdict(child, &verdicts, by_position)
+                            == Some(QuotientSoundVerdict::Win)
                     }) {
                         Some(QuotientSoundVerdict::Win)
                     } else if children.iter().any(|child| {
-                        child_sound_verdict(child, &verdicts)
+                        child_sound_verdict(child, &verdicts, by_position)
                             == Some(QuotientSoundVerdict::Refutation)
                     }) {
                         Some(QuotientSoundVerdict::Refutation)
@@ -1873,6 +1966,10 @@ struct WidePnSearch {
     semantic_horizon: u32,
     depth_cap: usize,
     width: WidthOptions,
+    /// Read once when this solve-local search is created. Default-off keeps the
+    /// historical eager defender-frontier admission path byte-for-byte in the
+    /// decision logic.
+    lazy_frontier: bool,
     expansions: u64,
     tt_hits: u64,
     current_bytes: usize,
@@ -1892,6 +1989,10 @@ struct WidePnSearch {
     quotient_telemetry: Option<QuotientTelemetry>,
     entries: Vec<WidePnEntry>,
     by_position: HashMap<WidePositionKey, usize>,
+    /// Exact prospective identity for lazy defender thunks. This preserves the
+    /// first eager admission's prior/depth and lets a selected attacker thunk
+    /// recover that transposed state without pre-linking an arena/TT entry.
+    deferred_by_position: HashMap<WidePositionKey, WideDeferredPosition>,
 }
 
 impl WidePnSearch {
@@ -2004,6 +2105,7 @@ impl WidePnSearch {
         depth_cap: usize,
         width: WidthOptions,
     ) -> Self {
+        let lazy_frontier = std::env::var("TSS_LAZY_FRONTIER").ok().as_deref() == Some("1");
         Self {
             claimant,
             root_ply,
@@ -2012,6 +2114,7 @@ impl WidePnSearch {
             semantic_horizon,
             depth_cap,
             width,
+            lazy_frontier,
             expansions: 0,
             tt_hits: 0,
             current_bytes: 0,
@@ -2027,6 +2130,7 @@ impl WidePnSearch {
             quotient_telemetry: QuotientTelemetry::enabled(),
             entries: Vec::new(),
             by_position: HashMap::new(),
+            deferred_by_position: HashMap::new(),
         }
     }
 
@@ -2042,6 +2146,13 @@ impl WidePnSearch {
             self.tt_hits = self.tt_hits.saturating_add(1);
             return id;
         }
+        let deferred = self
+            .lazy_frontier
+            .then(|| self.deferred_by_position.remove(&key))
+            .flatten();
+        let (depth, prior) = deferred
+            .map(|deferred| (deferred.depth, deferred.prior))
+            .unwrap_or((depth, prior));
 
         // The retained PN frontier is the search arena, not the transposition
         // index.  A full (or disabled) TT must only stop indexing new keys;
@@ -2075,6 +2186,15 @@ impl WidePnSearch {
             }
         }
         id
+    }
+
+    fn defer_position(&mut self, key: &WidePositionKey, depth: usize, prior: WidePnPrior) {
+        if self.by_position.contains_key(key) {
+            return;
+        }
+        self.deferred_by_position
+            .entry(key.clone())
+            .or_insert(WideDeferredPosition { depth, prior });
     }
 
     fn position_prior(&self, state: &RustHexoState) -> WidePnPrior {
@@ -2421,7 +2541,11 @@ impl WidePnSearch {
 
             let outcome = match child.mv {
                 WidePnMove::One(coord) => {
-                    let linked = child.entry.is_none();
+                    // Historical attacker edges count first linking as local
+                    // progress. A key-bearing defender thunk refines an eager
+                    // edge whose arena link already existed, so admission must
+                    // not add a progress event that eager never reported.
+                    let linked = child.entry.is_none() && matches!(kind, WidePnKind::Choice);
                     let Ok((_result, delta)) = state.apply_with_delta(Placement { coord }) else {
                         self.set_child_refuted(id, child_index);
                         self.refresh(id);
@@ -2432,7 +2556,17 @@ impl WidePnSearch {
                         let depth =
                             usize::try_from(state.placements_made().saturating_sub(self.root_ply))
                                 .unwrap_or(usize::MAX);
-                        self.insert_position(WidePositionKey::from_state(state), depth, child.prior)
+                        let key = child
+                            .future_key
+                            .as_ref()
+                            .map(|future| future.key().clone())
+                            .unwrap_or_else(|| WidePositionKey::from_state(state));
+                        debug_assert_eq!(key, WidePositionKey::from_state(state));
+                        #[cfg(test)]
+                        if std::env::var_os("TSS_LAZY_FRONTIER_VALIDATE_KEYS").is_some() {
+                            assert_eq!(key, WidePositionKey::from_state(state));
+                        }
+                        self.insert_position(key, depth, child.prior)
                     });
                     self.set_child_entry(id, child_index, child_id);
                     let outcome = self.work(
@@ -2457,7 +2591,7 @@ impl WidePnSearch {
                     }
                 }
                 WidePnMove::Pair(first, second) | WidePnMove::DefenderPair(first, second) => {
-                    let linked = child.entry.is_none();
+                    let linked = child.entry.is_none() && matches!(kind, WidePnKind::Choice);
                     let Ok((_first_result, first_delta)) =
                         state.apply_with_delta(Placement { coord: first })
                     else {
@@ -2479,7 +2613,17 @@ impl WidePnSearch {
                         let depth =
                             usize::try_from(state.placements_made().saturating_sub(self.root_ply))
                                 .unwrap_or(usize::MAX);
-                        self.insert_position(WidePositionKey::from_state(state), depth, child.prior)
+                        let key = child
+                            .future_key
+                            .as_ref()
+                            .map(|future| future.key().clone())
+                            .unwrap_or_else(|| WidePositionKey::from_state(state));
+                        debug_assert_eq!(key, WidePositionKey::from_state(state));
+                        #[cfg(test)]
+                        if std::env::var_os("TSS_LAZY_FRONTIER_VALIDATE_KEYS").is_some() {
+                            assert_eq!(key, WidePositionKey::from_state(state));
+                        }
+                        self.insert_position(key, depth, child.prior)
                     });
                     self.set_child_entry(id, child_index, child_id);
                     let outcome = self.work(
@@ -2552,12 +2696,14 @@ impl WidePnSearch {
     fn set_child_entry(&mut self, parent: usize, child: usize, entry: usize) {
         if let WidePnNode::Branch { children, .. } = &mut self.entries[parent].node {
             children[child].entry = Some(entry);
+            children[child].future_key = None;
         }
     }
 
     fn set_child_refuted(&mut self, parent: usize, child: usize) {
         if let WidePnNode::Branch { children, .. } = &mut self.entries[parent].node {
             children[child].result = WidePnChildResult::Refuted;
+            children[child].future_key = None;
         }
     }
 
@@ -2567,12 +2713,33 @@ impl WidePnSearch {
                 (0, PN_INFINITY)
             }
             WidePnChildResult::Refuted => (PN_INFINITY, 0),
-            WidePnChildResult::Pending => child
-                .entry
+            WidePnChildResult::Pending => self
+                .resolved_child_entry(child)
                 .and_then(|id| self.entries.get(id))
                 .map(|entry| (entry.pn, entry.dn))
+                .or_else(|| {
+                    child
+                        .future_key
+                        .as_ref()
+                        .and_then(WideFutureKey::virtual_key)
+                        .and_then(|key| self.deferred_by_position.get(key))
+                        .map(|deferred| (deferred.prior.pn, deferred.prior.dn))
+                })
                 .unwrap_or((child.prior.pn, child.prior.dn)),
         }
+    }
+
+    /// A thunk remains edge-local, but its exact key is also a virtual link to
+    /// a transposition admitted through another parent. Every pre-selection
+    /// read must observe that live entry just as an eagerly linked edge would.
+    fn resolved_child_entry(&self, child: &WidePnChild) -> Option<usize> {
+        child.entry.or_else(|| {
+            child
+                .future_key
+                .as_ref()
+                .and_then(WideFutureKey::virtual_key)
+                .and_then(|key| self.by_position.get(key).copied())
+        })
     }
 
     fn choice_order_pn(&self, child: &WidePnChild) -> u32 {
@@ -2592,7 +2759,7 @@ impl WidePnSearch {
     #[cfg(test)]
     fn format_trace_child(&self, child: &WidePnChild) -> String {
         let (pn, dn) = self.child_numbers(child);
-        let (entry_id, entry_depth, entry_node, cutoff) = match child.entry {
+        let (entry_id, entry_depth, entry_node, cutoff) = match self.resolved_child_entry(child) {
             Some(id) => match self.entries.get(id) {
                 Some(entry) => (
                     id.to_string(),
@@ -2705,7 +2872,7 @@ impl WidePnSearch {
             if child.result != WidePnChildResult::Pending {
                 return;
             }
-            let Some(next_entry) = child.entry else {
+            let Some(next_entry) = self.resolved_child_entry(child) else {
                 return;
             };
             let applied = match child.mv {
@@ -2808,27 +2975,52 @@ impl WidePnSearch {
     /// prove so a qualifying Universal stays sequential through its binary
     /// tail instead of changing policy mid-proof.
     fn has_commitment_fanout(&self, children: &[WidePnChild]) -> bool {
-        let mut unique = [0usize; MIN_COMMITTED_UNIVERSAL_OBLIGATIONS];
-        let mut unique_len = 0usize;
+        let mut unique = Vec::with_capacity(MIN_COMMITTED_UNIVERSAL_OBLIGATIONS);
         for child in children {
             let WidePnChildResult::Pending = child.result else {
                 continue;
             };
-            let Some(entry) = child
-                .entry
-                .filter(|&entry| self.entries.get(entry).is_some())
-            else {
+            let Some(identity) = self.child_obligation_identity(child) else {
                 return false;
             };
-            if unique[..unique_len].contains(&entry) {
+            if unique.contains(&identity) {
                 continue;
             }
-            if unique_len < unique.len() {
-                unique[unique_len] = entry;
-                unique_len += 1;
+            if unique.len() < MIN_COMMITTED_UNIVERSAL_OBLIGATIONS {
+                unique.push(identity);
             }
         }
-        unique_len >= MIN_COMMITTED_UNIVERSAL_OBLIGATIONS
+        unique.len() >= MIN_COMMITTED_UNIVERSAL_OBLIGATIONS
+    }
+
+    fn child_obligation_identity<'a>(
+        &'a self,
+        child: &'a WidePnChild,
+    ) -> Option<WideChildObligation<'a>> {
+        if let Some(entry) = self
+            .resolved_child_entry(child)
+            .filter(|&entry| self.entries.get(entry).is_some())
+        {
+            return Some(WideChildObligation::Entry(entry));
+        }
+        let key = child.future_key.as_ref()?.virtual_key()?;
+        Some(
+            self.by_position
+                .get(key)
+                .copied()
+                .map(WideChildObligation::Entry)
+                .unwrap_or(WideChildObligation::FutureKey(key)),
+        )
+    }
+
+    fn same_child_obligation(&self, left: &WidePnChild, right: &WidePnChild) -> bool {
+        match (
+            self.child_obligation_identity(left),
+            self.child_obligation_identity(right),
+        ) {
+            (Some(left), Some(right)) => left == right,
+            _ => false,
+        }
     }
 
     fn universal_commitment_active(&self, id: usize, children: &[WidePnChild]) -> bool {
@@ -2852,13 +3044,10 @@ impl WidePnSearch {
         yielded: &[usize],
     ) -> Option<usize> {
         let selectable = |index: usize, child: &WidePnChild| {
-            let yielded_same_entry = child.entry.is_some_and(|entry| {
-                yielded.iter().any(|&yielded_index| {
-                    children
-                        .get(yielded_index)
-                        .and_then(|yielded_child| yielded_child.entry)
-                        == Some(entry)
-                })
+            let yielded_same_entry = yielded.iter().any(|&yielded_index| {
+                children
+                    .get(yielded_index)
+                    .is_some_and(|yielded_child| self.same_child_obligation(child, yielded_child))
             });
             !yielded.contains(&index)
                 && !yielded_same_entry
@@ -2947,8 +3136,8 @@ impl WidePnSearch {
     fn child_is_genuinely_refuted(&self, child: &WidePnChild) -> bool {
         match child.result {
             WidePnChildResult::Refuted => true,
-            WidePnChildResult::Pending => child
-                .entry
+            WidePnChildResult::Pending => self
+                .resolved_child_entry(child)
                 .and_then(|id| self.entries.get(id))
                 .is_some_and(|entry| {
                     entry.dn == 0 && !matches!(entry.node, WidePnNode::DepthCutoff)
@@ -2960,8 +3149,8 @@ impl WidePnSearch {
     fn child_is_genuinely_proven(&self, child: &WidePnChild) -> bool {
         match child.result {
             WidePnChildResult::ClaimantCompletion | WidePnChildResult::ClaimantTactical => true,
-            WidePnChildResult::Pending => child
-                .entry
+            WidePnChildResult::Pending => self
+                .resolved_child_entry(child)
                 .and_then(|id| self.entries.get(id))
                 .is_some_and(|entry| entry.pn == 0),
             WidePnChildResult::Refuted => false,
@@ -3180,6 +3369,12 @@ impl WidePnSearch {
                         mv,
                         result,
                         entry: None,
+                        future_key: (self.lazy_frontier && result == WidePnChildResult::Pending)
+                            .then(|| {
+                                WideFutureKey::OnSelection(WidePositionKey::after_completed_pair(
+                                    state, first, second,
+                                ))
+                            }),
                         prior,
                         urgent_block: wide_move_contains_defender_block(mv, &defender_blocks),
                         first_width_tier,
@@ -3252,12 +3447,16 @@ impl WidePnSearch {
                     },
                 )
             };
+            let future_key = (self.lazy_frontier
+                && child_result == Some(WidePnChildResult::Pending))
+            .then(|| WideFutureKey::OnSelection(WidePositionKey::from_state(state)));
             state.undo(delta);
             if let Some(result) = child_result {
                 children.push(WidePnChild {
                     mv: WidePnMove::One(candidate.coord),
                     result,
                     entry: None,
+                    future_key,
                     prior,
                     urgent_block: candidate.defender_block,
                     first_width_tier: 0,
@@ -3295,16 +3494,25 @@ impl WidePnSearch {
             let prior = (child_result == WidePnChildResult::Pending)
                 .then(|| self.position_prior(state))
                 .unwrap_or(WidePnPrior::UNIFORM);
-            let entry = (child_result == WidePnChildResult::Pending).then(|| {
+            let (entry, future_key) = if child_result == WidePnChildResult::Pending {
                 let depth = usize::try_from(state.placements_made().saturating_sub(self.root_ply))
                     .unwrap_or(usize::MAX);
-                self.insert_position(WidePositionKey::from_state(state), depth, prior)
-            });
+                let key = WidePositionKey::from_state(state);
+                if self.lazy_frontier {
+                    self.defer_position(&key, depth, prior);
+                    (None, Some(WideFutureKey::Virtual(key)))
+                } else {
+                    (Some(self.insert_position(key, depth, prior)), None)
+                }
+            } else {
+                (None, None)
+            };
             state.undo(delta);
             children.push(WidePnChild {
                 mv: WidePnMove::One(coord),
                 result: child_result,
                 entry,
+                future_key,
                 prior,
                 urgent_block: false,
                 first_width_tier: 0,
@@ -3341,11 +3549,20 @@ impl WidePnSearch {
             plan.pairs
                 .into_iter()
                 .map(|pair| {
-                    let entry = self.insert_position(pair.final_key, depth, pair.final_prior);
+                    let (entry, future_key) = if self.lazy_frontier {
+                        self.defer_position(&pair.final_key, depth, pair.final_prior);
+                        (None, Some(WideFutureKey::Virtual(pair.final_key)))
+                    } else {
+                        (
+                            Some(self.insert_position(pair.final_key, depth, pair.final_prior)),
+                            None,
+                        )
+                    };
                     WidePnChild {
                         mv: WidePnMove::DefenderPair(pair.first, pair.second),
                         result: WidePnChildResult::Pending,
-                        entry: Some(entry),
+                        entry,
+                        future_key,
                         prior: pair.final_prior,
                         urgent_block: false,
                         first_width_tier: 0,
@@ -3463,7 +3680,7 @@ impl<'a> WideProofMaterializer<'a> {
                         )?
                     }
                     WidePnChildResult::Pending => {
-                        let child_id = child.entry?;
+                        let child_id = self.search.resolved_child_entry(child)?;
                         let proof = self.build(state, child_id);
                         state.undo(delta);
                         self.alloc(
@@ -3547,7 +3764,7 @@ impl<'a> WideProofMaterializer<'a> {
                         )?
                     }
                     WidePnChildResult::Pending => {
-                        let proof = self.build(state, child.entry?);
+                        let proof = self.build(state, self.search.resolved_child_entry(child)?);
                         state.undo(second_delta);
                         state.undo(first_delta);
                         let second_choice = self.alloc(
@@ -3606,7 +3823,7 @@ impl<'a> WideProofMaterializer<'a> {
                 return None;
             };
             let (_result, delta) = state.apply_with_delta(Placement { coord }).ok()?;
-            let proof = self.build(state, child.entry?);
+            let proof = self.build(state, self.search.resolved_child_entry(child)?);
             state.undo(delta);
             edges.push(CertEdge {
                 mv: coord,
@@ -3682,7 +3899,7 @@ impl<'a> WideProofMaterializer<'a> {
                 state.undo(first_delta);
                 return None;
             }
-            let Some(child_id) = child.entry else {
+            let Some(child_id) = self.search.resolved_child_entry(child) else {
                 state.undo(second_delta);
                 state.undo(first_delta);
                 return None;
@@ -6987,6 +7204,7 @@ mod tests {
             mv,
             result: WidePnChildResult::Pending,
             entry: None,
+            future_key: None,
             prior: WidePnPrior::UNIFORM,
             urgent_block: wide_move_contains_defender_block(mv, &defender_blocks),
             first_width_tier: 0,
@@ -7044,6 +7262,7 @@ mod tests {
             mv: WidePnMove::One(HexCoord::new(q, 0)),
             result: WidePnChildResult::Pending,
             entry: None,
+            future_key: None,
             prior: WidePnPrior {
                 pn: pn_from_fork_degree(fork_degree),
                 dn: 1,
@@ -7109,6 +7328,7 @@ mod tests {
             mv: WidePnMove::Pair(HexCoord::new(q, 0), HexCoord::new(q + 1, 0)),
             result: WidePnChildResult::Pending,
             entry: None,
+            future_key: None,
             prior: WidePnPrior {
                 pn: prior_pn,
                 dn: 1,
@@ -7186,6 +7406,7 @@ mod tests {
             mv: WidePnMove::Pair(HexCoord::new(first_q, 0), HexCoord::new(first_q + 1, 0)),
             result: WidePnChildResult::Pending,
             entry: Some(entry),
+            future_key: None,
             prior: WidePnPrior::UNIFORM,
             urgent_block: false,
             first_width_tier,
@@ -7263,6 +7484,7 @@ mod tests {
             mv: WidePnMove::One(HexCoord::new(q, 0)),
             result: WidePnChildResult::Pending,
             entry,
+            future_key: None,
             prior: WidePnPrior {
                 pn: PN_INFINITY,
                 dn: 1,
@@ -7298,6 +7520,7 @@ mod tests {
             mv: WidePnMove::One(HexCoord::new(q, 0)),
             result: WidePnChildResult::Pending,
             entry,
+            future_key: None,
             prior: WidePnPrior {
                 pn: 1,
                 dn: PN_INFINITY,
@@ -7352,6 +7575,7 @@ mod tests {
             mv: WidePnMove::One(HexCoord::new(q, 0)),
             result: WidePnChildResult::Pending,
             entry: Some(entry),
+            future_key: None,
             prior: WidePnPrior::UNIFORM,
             urgent_block: false,
             first_width_tier: 0,
@@ -7435,6 +7659,7 @@ mod tests {
             mv: WidePnMove::One(HexCoord::new(q, 0)),
             result: WidePnChildResult::Pending,
             entry: Some(entry),
+            future_key: None,
             prior: WidePnPrior::UNIFORM,
             urgent_block: false,
             first_width_tier: 0,
@@ -7500,6 +7725,7 @@ mod tests {
                 mv: WidePnMove::One(HexCoord::new(i16::try_from(q).unwrap(), 0)),
                 result: WidePnChildResult::Pending,
                 entry: Some(entry),
+                future_key: None,
                 prior: WidePnPrior::UNIFORM,
                 urgent_block: false,
                 first_width_tier: 0,
@@ -7545,6 +7771,7 @@ mod tests {
             mv: WidePnMove::One(HexCoord::new(q, 0)),
             result,
             entry: None,
+            future_key: None,
             prior: WidePnPrior::UNIFORM,
             urgent_block: false,
             first_width_tier: 0,
@@ -7640,6 +7867,7 @@ mod tests {
                     mv: WidePnMove::One(HexCoord::new(3, 0)),
                     result: WidePnChildResult::Pending,
                     entry: None,
+                    future_key: None,
                     prior: WidePnPrior { pn: 1, dn: 1 },
                     urgent_block: false,
                     first_width_tier: 0,
@@ -7648,6 +7876,7 @@ mod tests {
                     mv: WidePnMove::One(HexCoord::new(6, 0)),
                     result: WidePnChildResult::Pending,
                     entry: None,
+                    future_key: None,
                     prior: WidePnPrior { pn: 2, dn: 1 },
                     urgent_block: false,
                     first_width_tier: 0,
@@ -7724,6 +7953,7 @@ mod tests {
                     mv: WidePnMove::One(moves[depth]),
                     result: WidePnChildResult::Pending,
                     entry,
+                    future_key: None,
                     prior,
                     urgent_block: false,
                     first_width_tier: 0,
@@ -7783,6 +8013,7 @@ mod tests {
             mv: WidePnMove::Pair(HexCoord::new(2, 0), HexCoord::new(3, 0)),
             result: WidePnChildResult::Pending,
             entry: None,
+            future_key: None,
             prior,
             urgent_block: false,
             first_width_tier: 0,
@@ -7814,6 +8045,41 @@ mod tests {
     }
 
     #[test]
+    fn wide_lazy_frontier_distinguishes_virtual_and_selection_only_keys() {
+        let state = RustHexoState::new();
+        let key = WidePositionKey::from_state(&state);
+        let first_prior = WidePnPrior { pn: 9, dn: 4 };
+        let edge_prior = WidePnPrior { pn: 3, dn: 2 };
+        let mut search = WidePnSearch::new(Player::Player0, 0, 10, 1 << 20, 100, 10);
+        search.lazy_frontier = true;
+        search.defer_position(&key, 4, first_prior);
+
+        let child = |future_key| WidePnChild {
+            mv: WidePnMove::One(HexCoord::new(1, 0)),
+            result: WidePnChildResult::Pending,
+            entry: None,
+            future_key: Some(future_key),
+            prior: edge_prior,
+            urgent_block: false,
+            first_width_tier: 0,
+        };
+        let virtual_child = child(WideFutureKey::Virtual(key.clone()));
+        let attacker_child = child(WideFutureKey::OnSelection(key.clone()));
+
+        assert_eq!(search.child_numbers(&virtual_child), (9, 4));
+        assert_eq!(search.child_numbers(&attacker_child), (3, 2));
+        assert!(search.entries.is_empty());
+        assert!(search.by_position.is_empty());
+
+        let id = search.insert_position(key, 99, edge_prior);
+        assert_eq!(search.entries[id].depth, 4);
+        assert_eq!(search.entries[id].prior, first_prior);
+        assert!(search.deferred_by_position.is_empty());
+        assert_eq!(search.child_numbers(&virtual_child), (9, 4));
+        assert_eq!(search.child_numbers(&attacker_child), (3, 2));
+    }
+
+    #[test]
     fn wide_pn_trace_child_format_is_compact_and_structural() {
         let state = RustHexoState::new();
         let prior = WidePnPrior { pn: 7, dn: 2 };
@@ -7825,6 +8091,7 @@ mod tests {
             mv: WidePnMove::One(HexCoord::new(3, -2)),
             result: WidePnChildResult::Pending,
             entry: Some(entry),
+            future_key: None,
             prior,
             urgent_block: true,
             first_width_tier: 0,
@@ -7859,6 +8126,7 @@ mod tests {
                 mv: WidePnMove::One(mv),
                 result: WidePnChildResult::Pending,
                 entry: None,
+                future_key: None,
                 prior,
                 urgent_block: false,
                 first_width_tier: 0,
@@ -7938,6 +8206,7 @@ mod tests {
                 mv: WidePnMove::One(mv),
                 result: WidePnChildResult::Pending,
                 entry: None,
+                future_key: None,
                 prior,
                 urgent_block: false,
                 first_width_tier: 0,

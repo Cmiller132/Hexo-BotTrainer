@@ -7,15 +7,16 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use hexo_engine::{apply_placement, HexCoord, HexoState, Placement, TurnPhase};
+use hexo_engine::{apply_placement, HexCoord, HexoState, Placement, Player, TurnPhase, WindowKey};
 
 use crate::tss_core::{CertVerify, DeepSolve, ProofStatus, SolveCaps, ZoneSearchCaps};
 use crate::tss_solver::{
     take_quotient_telemetry_report, QuotientTelemetryReport, TssSolver, WidthOptions,
 };
-use crate::tss_verify::TssVerifier;
+use crate::tss_verify::{CertNode, TssCertificate, TssVerifier};
 
 const DEFAULT_TT_BYTES: usize = 512 << 20;
+const DEFAULT_LAZY_EQ_TT_BYTES: usize = 2 << 30;
 const HUMAN_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 const HUMAN_MIN_STONES: u32 = 20;
 const DOUBLE_FORK_COMPACT: &[(i16, i16)] = &[
@@ -84,6 +85,57 @@ struct Aggregate {
     losses: u64,
     unknowns: u64,
     telemetry: QuotientTelemetryReport,
+}
+
+#[derive(Default)]
+struct LazyAggregate {
+    roots: u64,
+    nodes: u64,
+    indexed_entries: u64,
+    retained_entries: u64,
+    peak_tt_bytes: u64,
+    tt_hits: u64,
+    elapsed_ms: f64,
+}
+
+impl LazyAggregate {
+    fn push(&mut self, run: &LazyRun) {
+        self.roots = self.roots.saturating_add(1);
+        self.nodes = self.nodes.saturating_add(run.nodes);
+        self.indexed_entries = self
+            .indexed_entries
+            .saturating_add(run.telemetry.indexed_entries);
+        self.retained_entries = self
+            .retained_entries
+            .saturating_add(run.telemetry.retained_entries);
+        self.peak_tt_bytes = self.peak_tt_bytes.saturating_add(run.peak_tt_bytes);
+        self.tt_hits = self.tt_hits.saturating_add(run.tt_hits);
+        self.elapsed_ms += run.elapsed_ms;
+    }
+
+    fn print(&self, cohort: &str, mode: &str) {
+        println!(
+            "LF_EQ_SUMMARY cohort={cohort} mode={mode} roots={} nodes={} indexed_entries={} retained_entries={} peak_tt_bytes={} tt_hits={} ms={:.3}",
+            self.roots,
+            self.nodes,
+            self.indexed_entries,
+            self.retained_entries,
+            self.peak_tt_bytes,
+            self.tt_hits,
+            self.elapsed_ms,
+        );
+    }
+}
+
+struct LazyRun {
+    status: ProofStatus,
+    nodes: u64,
+    peak_tt_bytes: u64,
+    tt_hits: u64,
+    cert: Option<TssCertificate>,
+    cert_bytes: Vec<u8>,
+    telemetry: QuotientTelemetryReport,
+    elapsed_ms: f64,
 }
 
 impl Aggregate {
@@ -392,6 +444,224 @@ fn solve_row(
     (result.status, result.stats.nodes, result.stats.tt_hits)
 }
 
+/// The certificate has no public wire codec. This test-only encoder covers
+/// every field explicitly so R-LF1 compares deterministic bytes as well as the
+/// type's structural equality.
+fn certificate_bytes(cert: &Option<TssCertificate>) -> Vec<u8> {
+    fn put_u32(out: &mut Vec<u8>, value: u32) {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    fn put_len(out: &mut Vec<u8>, value: usize) {
+        out.extend_from_slice(&(value as u64).to_le_bytes());
+    }
+    fn put_player(out: &mut Vec<u8>, player: Player) {
+        out.push(match player {
+            Player::Player0 => 0,
+            Player::Player1 => 1,
+        });
+    }
+    fn put_coord(out: &mut Vec<u8>, coord: HexCoord) {
+        out.extend_from_slice(&coord.q.to_le_bytes());
+        out.extend_from_slice(&coord.r.to_le_bytes());
+    }
+    fn put_window(out: &mut Vec<u8>, window: WindowKey) {
+        put_coord(out, window.start);
+        out.push(window.axis.index());
+    }
+
+    let mut out = Vec::new();
+    let Some(cert) = cert else {
+        out.push(0);
+        return out;
+    };
+    out.push(1);
+    put_len(&mut out, cert.root.occupancy.len());
+    for coord in &cert.root.occupancy {
+        put_coord(&mut out, *coord);
+    }
+    put_len(&mut out, cert.root.owners.len());
+    for owner in &cert.root.owners {
+        put_player(&mut out, *owner);
+    }
+    put_player(&mut out, cert.root.current_player);
+    match cert.root.phase {
+        TurnPhase::Opening => out.push(0),
+        TurnPhase::FirstStone => out.push(1),
+        TurnPhase::SecondStone { first } => {
+            out.push(2);
+            put_coord(&mut out, first);
+        }
+    }
+    put_u32(&mut out, cert.root.placements_made);
+    match cert.root.terminal {
+        None => out.push(0),
+        Some(outcome) => {
+            out.push(1);
+            put_player(&mut out, outcome.winner);
+            put_u32(&mut out, outcome.placements);
+        }
+    }
+    put_player(&mut out, cert.claimant);
+    put_u32(&mut out, cert.root_node);
+    put_len(&mut out, cert.nodes.len());
+    for node in &cert.nodes {
+        match node {
+            CertNode::OrCompletion {
+                mv,
+                witness,
+                completion_ply,
+            } => {
+                out.push(0);
+                put_coord(&mut out, *mv);
+                put_window(&mut out, *witness);
+                put_u32(&mut out, *completion_ply);
+            }
+            CertNode::Win {
+                witness,
+                count,
+                budget,
+                resolution_ply,
+            } => {
+                out.push(1);
+                put_window(&mut out, *witness);
+                out.push(*count);
+                out.push(*budget);
+                put_u32(&mut out, *resolution_ply);
+            }
+            CertNode::Loss {
+                witnesses,
+                resolution_ply,
+            } => {
+                out.push(2);
+                put_len(&mut out, witnesses.len());
+                for witness in witnesses {
+                    put_window(&mut out, *witness);
+                }
+                put_u32(&mut out, *resolution_ply);
+            }
+            CertNode::Choice { mv, child } => {
+                out.push(3);
+                put_coord(&mut out, *mv);
+                put_u32(&mut out, *child);
+            }
+            CertNode::Universal {
+                edges,
+                implicit_dispatch,
+                zone,
+                commutations,
+            } => {
+                out.push(4);
+                put_len(&mut out, edges.len());
+                for edge in edges {
+                    put_coord(&mut out, edge.mv);
+                    put_u32(&mut out, edge.child);
+                }
+                out.push(u8::from(*implicit_dispatch));
+                match zone {
+                    None => out.push(0),
+                    Some(zone) => {
+                        out.push(1);
+                        put_u32(&mut out, zone.d);
+                        put_u32(&mut out, zone.build_horizon);
+                    }
+                }
+                put_len(&mut out, commutations.len());
+                for item in commutations {
+                    put_coord(&mut out, item.first);
+                    put_coord(&mut out, item.omitted_second);
+                    put_u32(&mut out, item.first_child);
+                    put_u32(&mut out, item.mirror_child);
+                }
+            }
+        }
+    }
+    put_u32(&mut out, cert.semantic_horizon);
+    out
+}
+
+fn solve_lazy_row(
+    id: &str,
+    state: &HexoState,
+    caps: &SolveCaps,
+    width: WidthOptions,
+    zone: ZoneSearchCaps,
+    lazy: bool,
+) -> LazyRun {
+    if lazy {
+        std::env::set_var("TSS_LAZY_FRONTIER", "1");
+    } else {
+        std::env::remove_var("TSS_LAZY_FRONTIER");
+    }
+    let mut solver = TssSolver::default();
+    solver.set_width_options(width);
+    solver.set_zone_options(zone);
+    let started = Instant::now();
+    let result = solver.solve(state, caps);
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
+    if let Some(cert) = result.cert.as_ref() {
+        assert!(
+            TssVerifier.verify(state, cert, result.status),
+            "R-LF1 certificate verification failed for {id} lazy={lazy}"
+        );
+    }
+    let telemetry = take_quotient_telemetry_report().unwrap_or_default();
+    let cert_bytes = certificate_bytes(&result.cert);
+    LazyRun {
+        status: result.status,
+        nodes: result.stats.nodes,
+        peak_tt_bytes: result.stats.peak_tt_bytes,
+        tt_hits: result.stats.tt_hits,
+        cert: result.cert,
+        cert_bytes,
+        telemetry,
+        elapsed_ms,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compare_lazy_row(
+    cohort: &str,
+    id: &str,
+    state: &HexoState,
+    caps: SolveCaps,
+    width: WidthOptions,
+    zone: ZoneSearchCaps,
+    off_aggregate: &mut LazyAggregate,
+    on_aggregate: &mut LazyAggregate,
+) {
+    let off = solve_lazy_row(id, state, &caps, width, zone, false);
+    let on = solve_lazy_row(id, state, &caps, width, zone, true);
+    let context = format!(
+        "cohort={cohort} id={id} cap={} horizon={} tt_bytes_cap={}",
+        caps.node_cap, caps.semantic_horizon, caps.tt_bytes_cap
+    );
+    assert_eq!(off.status, on.status, "R-LF1 verdict mismatch: {context}");
+    assert_eq!(off.cert, on.cert, "R-LF1 certificate mismatch: {context}");
+    assert_eq!(
+        off.cert_bytes, on.cert_bytes,
+        "R-LF1 certificate-byte mismatch: {context}"
+    );
+    assert_eq!(off.nodes, on.nodes, "R-LF1 node mismatch: {context}");
+    println!(
+        "LF_EQ_ROW cohort={cohort} id={id} status={} nodes={} cert_bytes={} off_indexed={} on_indexed={} off_retained={} on_retained={} off_peak_tt_bytes={} on_peak_tt_bytes={} off_tt_hits={} on_tt_hits={} off_ms={:.3} on_ms={:.3}",
+        status_name(on.status),
+        on.nodes,
+        on.cert_bytes.len(),
+        off.telemetry.indexed_entries,
+        on.telemetry.indexed_entries,
+        off.telemetry.retained_entries,
+        on.telemetry.retained_entries,
+        off.peak_tt_bytes,
+        on.peak_tt_bytes,
+        off.tt_hits,
+        on.tt_hits,
+        off.elapsed_ms,
+        on.elapsed_ms,
+    );
+    off_aggregate.push(&off);
+    on_aggregate.push(&on);
+}
+
 #[test]
 #[ignore = "NQ4 measurement campaign; release-only, serialized, <=10 minutes"]
 fn turn_quotient_campaign() {
@@ -525,4 +795,94 @@ fn turn_quotient_campaign() {
     human_aggregate.print("human_100_cap10000");
     all.print("forcing_all_rungs");
     println!("TQ_DONE result=PASS anomalies=0");
+}
+
+#[test]
+#[ignore = "R-LF1 equivalence campaign; release-only and serialized"]
+fn lazy_frontier_equivalence_campaign() {
+    let tt_bytes_cap = std::env::var("TSS_LAZY_FRONTIER_TT_BYTES")
+        .ok()
+        .map(|value| value.parse().expect("numeric lazy-frontier TT bytes"))
+        .unwrap_or(DEFAULT_LAZY_EQ_TT_BYTES);
+    std::env::set_var("TSS_TURN_QUOTIENT_TELEMETRY", "1");
+    std::env::remove_var("TSS_LAZY_FRONTIER");
+
+    let corpus = forcing_corpus();
+    for cap in [10_000u64, 100_000] {
+        let cohort = format!("forcing_{cap}");
+        let mut off = LazyAggregate::default();
+        let mut on = LazyAggregate::default();
+        for position in &corpus {
+            compare_lazy_row(
+                &cohort,
+                &position.id,
+                &position.state,
+                SolveCaps {
+                    node_cap: cap,
+                    tt_bytes_cap,
+                    semantic_horizon: u32::MAX,
+                },
+                WidthOptions::vcf_pair_complete(),
+                ZoneSearchCaps::default(),
+                &mut off,
+                &mut on,
+            );
+        }
+        off.print(&cohort, "off");
+        on.print(&cohort, "on");
+    }
+
+    let compact = replay(DOUBLE_FORK_COMPACT);
+    let mut compact_off = LazyAggregate::default();
+    let mut compact_on = LazyAggregate::default();
+    compare_lazy_row(
+        "double_fork_compact",
+        "double_fork_compact",
+        &compact,
+        SolveCaps {
+            node_cap: 100_000,
+            tt_bytes_cap,
+            semantic_horizon: 45,
+        },
+        WidthOptions::round3_consume(),
+        ZoneSearchCaps {
+            enabled: true,
+            stale_area_filter: false,
+            count2_threshold: true,
+            pair_commutation: false,
+        },
+        &mut compact_off,
+        &mut compact_on,
+    );
+    compact_off.print("double_fork_compact", "off");
+    compact_on.print("double_fork_compact", "on");
+
+    let games = human_games();
+    let roots = human_roots(&games, 20);
+    assert_eq!(roots.len(), 20, "human sample must contain 20 roots");
+    let mut human_off = LazyAggregate::default();
+    let mut human_on = LazyAggregate::default();
+    for (rank, root) in roots.iter().enumerate() {
+        let state = replay(&games[root.game].moves[..root.prefix]);
+        compare_lazy_row(
+            "human_20_cap10000",
+            &format!("human_{rank:03}_g{}_p{}", root.game, root.prefix),
+            &state,
+            SolveCaps {
+                node_cap: 10_000,
+                tt_bytes_cap,
+                semantic_horizon: u32::MAX,
+            },
+            WidthOptions::vcf_pair_complete(),
+            ZoneSearchCaps::default(),
+            &mut human_off,
+            &mut human_on,
+        );
+    }
+    human_off.print("human_20_cap10000", "off");
+    human_on.print("human_20_cap10000", "on");
+
+    std::env::remove_var("TSS_LAZY_FRONTIER");
+    std::env::remove_var("TSS_TURN_QUOTIENT_TELEMETRY");
+    println!("LF_EQ_DONE result=PASS node_identity=exact certificate_bytes=exact");
 }
