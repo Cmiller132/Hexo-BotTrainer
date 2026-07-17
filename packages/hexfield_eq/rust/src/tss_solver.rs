@@ -18,7 +18,9 @@ use std::mem::size_of;
 use std::sync::Arc;
 
 #[cfg(test)]
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+#[cfg(test)]
+use std::rc::Rc;
 use std::time::Instant;
 
 use hexo_engine::{
@@ -27,12 +29,12 @@ use hexo_engine::{
 };
 
 use crate::threats_shared as threats;
-#[cfg(test)]
-use crate::tss_core::ClosureDebtStats;
 use crate::tss_core::{
     seed_band_radius, CertVerify, DeepResult, DeepSolve, ProofStatus, SolveCaps, SolveGoal,
     SolveStats, ZoneSearchCaps,
 };
+#[cfg(test)]
+use crate::tss_core::{ClosureDebtStats, ThresholdScaleStats};
 use crate::tss_verify::{
     CertCommutation, CertEdge, CertNode, CertNodeId, RootBinding, TssCertificate, TssVerifier,
     ZoneInfo, MAX_CERT_COMMUTATIONS, MAX_CERT_DEPTH, MAX_CERT_EDGES, MAX_CERT_NODES,
@@ -1157,6 +1159,8 @@ impl TssSolver {
             live_ge3_seed_nanos: search.live_ge3_seed_nanos.get(),
             #[cfg(test)]
             closure_debt: *search.closure_stats.borrow(),
+            #[cfg(test)]
+            threshold_scale: *search.threshold_stats.borrow(),
             ..SolveStats::default()
         };
         let mut promotions = Vec::new();
@@ -1493,6 +1497,7 @@ impl CapResumeSession {
                 live_ge3_seed_scans: self.search.live_ge3_seed_scans.get(),
                 live_ge3_seed_nanos: self.search.live_ge3_seed_nanos.get(),
                 closure_debt: *self.search.closure_stats.borrow(),
+                threshold_scale: *self.search.threshold_stats.borrow(),
                 ..SolveStats::default()
             },
         };
@@ -1755,6 +1760,7 @@ fn merge_stats(total: &mut SolveStats, part: SolveStats) {
             .live_ge3_seed_nanos
             .saturating_add(part.live_ge3_seed_nanos);
         total.closure_debt.merge(part.closure_debt);
+        total.threshold_scale.merge(part.threshold_scale);
     }
 }
 
@@ -1971,6 +1977,29 @@ fn winner_from_analysis(
 const PN_INFINITY: u32 = 1_000_000_000;
 
 #[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThresholdDelta {
+    One,
+    Two,
+    Four,
+    MeanSiblingPrior,
+}
+
+#[cfg(test)]
+impl ThresholdDelta {
+    fn from_env() -> Option<Self> {
+        let value = std::env::var("TSS_THRESHOLD_DELTA").ok()?;
+        Some(match value.as_str() {
+            "1" => Self::One,
+            "2" => Self::Two,
+            "4" => Self::Four,
+            "mean" => Self::MeanSiblingPrior,
+            _ => panic!("TSS_THRESHOLD_DELTA must be one of 1, 2, 4, mean"),
+        })
+    }
+}
+
+#[cfg(test)]
 static WIDE_GEN_PAIR_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(test)]
 static WIDE_GEN_DEFENDER_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -2180,6 +2209,106 @@ struct ClosurePairChildProfile {
     selected: bool,
     linked: bool,
     expanded: bool,
+}
+
+#[cfg(test)]
+struct ThresholdResidencyGuard {
+    enabled: bool,
+    stats: Rc<RefCell<ThresholdScaleStats>>,
+    expansion_clock: Rc<Cell<u64>>,
+    start_expansions: u64,
+    active_since: Option<Instant>,
+    exclusive_nanos: u64,
+}
+
+#[cfg(test)]
+impl ThresholdResidencyGuard {
+    fn disabled(stats: Rc<RefCell<ThresholdScaleStats>>, expansion_clock: Rc<Cell<u64>>) -> Self {
+        Self {
+            enabled: false,
+            stats,
+            expansion_clock,
+            start_expansions: 0,
+            active_since: None,
+            exclusive_nanos: 0,
+        }
+    }
+
+    fn enabled(stats: Rc<RefCell<ThresholdScaleStats>>, expansion_clock: Rc<Cell<u64>>) -> Self {
+        let start_expansions = expansion_clock.get();
+        Self {
+            enabled: true,
+            stats,
+            expansion_clock,
+            start_expansions,
+            active_since: Some(Instant::now()),
+            exclusive_nanos: 0,
+        }
+    }
+
+    fn pause(&mut self) {
+        if let Some(started) = self.active_since.take() {
+            self.exclusive_nanos = self
+                .exclusive_nanos
+                .saturating_add(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX));
+        }
+    }
+
+    fn resume(&mut self) {
+        if self.enabled {
+            debug_assert!(self.active_since.is_none());
+            self.active_since = Some(Instant::now());
+        }
+    }
+
+    fn state_started(&self) -> Option<Instant> {
+        self.enabled.then(Instant::now)
+    }
+
+    fn record_state_elapsed(&self, started: Option<Instant>) {
+        let Some(started) = started else {
+            return;
+        };
+        let nanos = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let mut stats = self.stats.borrow_mut();
+        stats.state_apply_undo_nanos = stats.state_apply_undo_nanos.saturating_add(nanos);
+    }
+
+    fn record_threshold_cross(&self) {
+        if self.enabled {
+            let mut stats = self.stats.borrow_mut();
+            stats.threshold_cross_returns = stats.threshold_cross_returns.saturating_add(1);
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ThresholdResidencyGuard {
+    fn drop(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        self.pause();
+        let expansions = self
+            .expansion_clock
+            .get()
+            .saturating_sub(self.start_expansions);
+        let bin = match expansions {
+            0 => 0,
+            1 => 1,
+            2 => 2,
+            3..=4 => 3,
+            5..=8 => 4,
+            9..=16 => 5,
+            17..=32 => 6,
+            _ => 7,
+        };
+        let mut stats = self.stats.borrow_mut();
+        stats.residencies = stats.residencies.saturating_add(1);
+        stats.residency_expansions = stats.residency_expansions.saturating_add(expansions);
+        stats.residency_expansion_bins[bin] = stats.residency_expansion_bins[bin].saturating_add(1);
+        stats.descent_nanos = stats.descent_nanos.saturating_add(self.exclusive_nanos);
+    }
 }
 
 fn turn_start_defender_blocks(candidates: &[Candidate]) -> HashSet<HexCoord> {
@@ -3176,6 +3305,18 @@ struct WidePnSearch<'store> {
     #[cfg(test)]
     closure_last_pair_children: RefCell<Vec<ClosurePairChildProfile>>,
     #[cfg(test)]
+    threshold_counters: bool,
+    #[cfg(test)]
+    threshold_delta: Option<ThresholdDelta>,
+    #[cfg(test)]
+    threshold_stats: Rc<RefCell<ThresholdScaleStats>>,
+    #[cfg(test)]
+    threshold_expansion_clock: Rc<Cell<u64>>,
+    #[cfg(test)]
+    threshold_entry_visits: Vec<u64>,
+    #[cfg(test)]
+    threshold_last_selected: Vec<Option<usize>>,
+    #[cfg(test)]
     quotient_telemetry: Option<QuotientTelemetry>,
     entries: Vec<WidePnEntry>,
     by_position: HashMap<WidePositionKey, usize>,
@@ -3416,6 +3557,19 @@ impl<'store> WidePnSearch<'store> {
             closure_last_pair_node: std::cell::Cell::new(ClosurePairNodeProfile::default()),
             #[cfg(test)]
             closure_last_pair_children: RefCell::new(Vec::new()),
+            #[cfg(test)]
+            threshold_counters: std::env::var("TSS_THRESHOLD_COUNTERS").ok().as_deref()
+                == Some("1"),
+            #[cfg(test)]
+            threshold_delta: ThresholdDelta::from_env(),
+            #[cfg(test)]
+            threshold_stats: Rc::new(RefCell::new(ThresholdScaleStats::default())),
+            #[cfg(test)]
+            threshold_expansion_clock: Rc::new(Cell::new(0)),
+            #[cfg(test)]
+            threshold_entry_visits: Vec::new(),
+            #[cfg(test)]
+            threshold_last_selected: Vec::new(),
             #[cfg(test)]
             quotient_telemetry: QuotientTelemetry::enabled(),
             entries: Vec::new(),
@@ -3763,6 +3917,94 @@ impl<'store> WidePnSearch<'store> {
         outcome
     }
 
+    #[cfg(test)]
+    fn start_threshold_residency(&mut self, id: usize) -> ThresholdResidencyGuard {
+        if !self.threshold_counters {
+            return ThresholdResidencyGuard::disabled(
+                Rc::clone(&self.threshold_stats),
+                Rc::clone(&self.threshold_expansion_clock),
+            );
+        }
+        if self.threshold_entry_visits.len() <= id {
+            self.threshold_entry_visits.resize(id + 1, 0);
+        }
+        let prior_visits = self.threshold_entry_visits[id];
+        self.threshold_entry_visits[id] = prior_visits.saturating_add(1);
+        {
+            let mut stats = self.threshold_stats.borrow_mut();
+            stats.recursive_node_visits = stats.recursive_node_visits.saturating_add(1);
+            if prior_visits != 0 {
+                stats.expanded_node_revisits = stats.expanded_node_revisits.saturating_add(1);
+            }
+        }
+        ThresholdResidencyGuard::enabled(
+            Rc::clone(&self.threshold_stats),
+            Rc::clone(&self.threshold_expansion_clock),
+        )
+    }
+
+    #[cfg(test)]
+    fn record_threshold_selection(&mut self, parent: usize, child: usize) {
+        if !self.threshold_counters {
+            return;
+        }
+        if self.threshold_last_selected.len() <= parent {
+            self.threshold_last_selected.resize(parent + 1, None);
+        }
+        if let Some(previous) = self.threshold_last_selected[parent] {
+            let mut stats = self.threshold_stats.borrow_mut();
+            stats.same_parent_reselections = stats.same_parent_reselections.saturating_add(1);
+            if previous != child {
+                stats.sibling_switches = stats.sibling_switches.saturating_add(1);
+            }
+        }
+        self.threshold_last_selected[parent] = Some(child);
+    }
+
+    #[cfg(test)]
+    fn selected_threshold_delta(
+        &self,
+        kind: WidePnKind,
+        children: &[WidePnChild],
+        selected: usize,
+    ) -> u32 {
+        match self.threshold_delta {
+            None | Some(ThresholdDelta::One) => 1,
+            Some(ThresholdDelta::Two) => 2,
+            Some(ThresholdDelta::Four) => 4,
+            Some(ThresholdDelta::MeanSiblingPrior) => {
+                let mut sum = 0u64;
+                let mut count = 0u64;
+                for (index, child) in children.iter().enumerate() {
+                    if index == selected {
+                        continue;
+                    }
+                    let prior = match kind {
+                        WidePnKind::Choice => child.prior.pn,
+                        WidePnKind::Universal { .. } => child.prior.dn,
+                    };
+                    sum = sum.saturating_add(u64::from(prior));
+                    count = count.saturating_add(1);
+                }
+                if count == 0 {
+                    1
+                } else {
+                    u32::try_from(sum / count).unwrap_or(PN_INFINITY).max(1)
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn threshold_increment(&self, value: u32, delta: u32) -> u32 {
+        let incremented = value.saturating_add(delta);
+        if self.threshold_delta.is_some() {
+            incremented.min(PN_INFINITY)
+        } else {
+            incremented
+        }
+    }
+
     /// Threshold-bounded proof-number descent (df-pn scheduling). The node
     /// keeps driving its selected child while its own numbers stay below the
     /// caller-supplied thresholds, so consecutive expansions land at the
@@ -3785,6 +4027,20 @@ impl<'store> WidePnSearch<'store> {
     ) -> WidePnStepOutcome {
         #[cfg(test)]
         let _pn_init_work_guard = PnInitWideWorkGuard::enter(id);
+        #[cfg(test)]
+        let mut threshold_residency = self.start_threshold_residency(id);
+        #[cfg(test)]
+        let pn_threshold = if self.threshold_delta.is_some() {
+            pn_threshold.min(PN_INFINITY)
+        } else {
+            pn_threshold
+        };
+        #[cfg(test)]
+        let dn_threshold = if self.threshold_delta.is_some() {
+            dn_threshold.min(PN_INFINITY)
+        } else {
+            dn_threshold
+        };
         let mut any_progress = false;
         let mut yielded_universal_children = Vec::new();
         loop {
@@ -3795,7 +4051,12 @@ impl<'store> WidePnSearch<'store> {
                 };
             }
             if matches!(self.entries[id].node, WidePnNode::Unexpanded) {
-                match self.expand(state, id) {
+                #[cfg(test)]
+                threshold_residency.pause();
+                let expansion_outcome = self.expand(state, id);
+                #[cfg(test)]
+                threshold_residency.resume();
+                match expansion_outcome {
                     WidePnStepOutcome::Progress => {
                         any_progress = true;
                         if !matches!(self.entries[id].node, WidePnNode::Branch { .. }) {
@@ -3819,6 +4080,8 @@ impl<'store> WidePnSearch<'store> {
             if self.entries[id].pn >= pn_threshold || self.entries[id].dn >= dn_threshold {
                 // Thresholds crossed: the parent re-decides. Any expansion or
                 // refutation made here already counts as progress.
+                #[cfg(test)]
+                threshold_residency.record_threshold_cross();
                 return WidePnStepOutcome::Progress;
             }
             if self.expansions >= self.node_cap || self.expansions >= self.soft_expansion_cap {
@@ -3871,11 +4134,15 @@ impl<'store> WidePnSearch<'store> {
             };
             #[cfg(test)]
             self.record_closure_pair_selected(id, child_index);
+            #[cfg(test)]
+            self.record_threshold_selection(id, child_index);
             let (kind, child, child_pn_threshold, child_dn_threshold, _root_children_unlinked) = {
                 let WidePnNode::Branch { kind, children } = &self.entries[id].node else {
                     return WidePnStepOutcome::Stalled;
                 };
                 let (child_pn, child_dn) = self.child_numbers(&children[child_index]);
+                #[cfg(test)]
+                let threshold_delta = self.selected_threshold_delta(*kind, children, child_index);
                 let (child_pn_threshold, child_dn_threshold) = match kind {
                     WidePnKind::Choice => {
                         let mut second_pn = u32::MAX;
@@ -3884,20 +4151,34 @@ impl<'store> WidePnSearch<'store> {
                                 second_pn = second_pn.min(self.child_numbers(other).0);
                             }
                         }
-                        let pn_t = pn_threshold
-                            .min(second_pn.saturating_add(1))
-                            .max(child_pn.saturating_add(1));
+                        #[cfg(test)]
+                        let second_pn_limit = self.threshold_increment(second_pn, threshold_delta);
+                        #[cfg(not(test))]
+                        let second_pn_limit = second_pn.saturating_add(1);
+                        #[cfg(test)]
+                        let child_pn_floor = self.threshold_increment(child_pn, 1);
+                        #[cfg(not(test))]
+                        let child_pn_floor = child_pn.saturating_add(1);
+                        #[cfg(test)]
+                        let child_dn_floor = self.threshold_increment(child_dn, 1);
+                        #[cfg(not(test))]
+                        let child_dn_floor = child_dn.saturating_add(1);
+                        let pn_t = pn_threshold.min(second_pn_limit).max(child_pn_floor);
                         let dn_t = dn_threshold
                             .saturating_sub(self.entries[id].dn.saturating_sub(child_dn))
-                            .max(child_dn.saturating_add(1));
+                            .max(child_dn_floor);
                         (pn_t, dn_t)
                     }
                     WidePnKind::Universal { .. } => {
                         let committed = self.entries[id].universal_obligation == Some(child_index);
+                        #[cfg(test)]
+                        let child_dn_floor = self.threshold_increment(child_dn, 1);
+                        #[cfg(not(test))]
+                        let child_dn_floor = child_dn.saturating_add(1);
                         let dn_t = if committed {
                             // Commitment domains drive the obligation to a
                             // verdict; sibling DN must not unseat it.
-                            dn_threshold.max(child_dn.saturating_add(1))
+                            dn_threshold.max(child_dn_floor)
                         } else {
                             let mut second_dn = u32::MAX;
                             for (rank, other) in children.iter().enumerate() {
@@ -3905,16 +4186,30 @@ impl<'store> WidePnSearch<'store> {
                                     second_dn = second_dn.min(self.child_numbers(other).1);
                                 }
                             }
-                            dn_threshold
-                                .min(second_dn.saturating_add(1))
-                                .max(child_dn.saturating_add(1))
+                            #[cfg(test)]
+                            let second_dn_limit =
+                                self.threshold_increment(second_dn, threshold_delta);
+                            #[cfg(not(test))]
+                            let second_dn_limit = second_dn.saturating_add(1);
+                            dn_threshold.min(second_dn_limit).max(child_dn_floor)
                         };
+                        #[cfg(test)]
+                        let child_pn_floor = self.threshold_increment(child_pn, 1);
+                        #[cfg(not(test))]
+                        let child_pn_floor = child_pn.saturating_add(1);
                         let pn_t = pn_threshold
                             .saturating_sub(self.entries[id].pn.saturating_sub(child_pn))
-                            .max(child_pn.saturating_add(1));
+                            .max(child_pn_floor);
                         (pn_t, dn_t)
                     }
                 };
+                #[cfg(test)]
+                if self.threshold_delta.is_some() {
+                    debug_assert!(child_pn_threshold > child_pn);
+                    debug_assert!(child_dn_threshold > child_dn);
+                    debug_assert!(child_pn_threshold <= PN_INFINITY);
+                    debug_assert!(child_dn_threshold <= PN_INFINITY);
+                }
                 (
                     *kind,
                     children[child_index].clone(),
@@ -3949,7 +4244,12 @@ impl<'store> WidePnSearch<'store> {
                     // edge whose arena link already existed, so admission must
                     // not add a progress event that eager never reported.
                     let linked = child.entry.is_none() && matches!(kind, WidePnKind::Choice);
-                    let Ok((_result, delta)) = state.apply_with_delta(Placement { coord }) else {
+                    #[cfg(test)]
+                    let state_started = threshold_residency.state_started();
+                    let applied = state.apply_with_delta(Placement { coord });
+                    #[cfg(test)]
+                    threshold_residency.record_state_elapsed(state_started);
+                    let Ok((_result, delta)) = applied else {
                         self.set_child_refuted(id, child_index);
                         self.refresh(id);
                         any_progress = true;
@@ -3972,6 +4272,8 @@ impl<'store> WidePnSearch<'store> {
                         self.insert_position(key, depth, child.prior)
                     });
                     self.set_child_entry(id, child_index, child_id);
+                    #[cfg(test)]
+                    threshold_residency.pause();
                     let outcome = self.work(
                         state,
                         child_id,
@@ -3979,7 +4281,13 @@ impl<'store> WidePnSearch<'store> {
                         child_pn_threshold,
                         child_dn_threshold,
                     );
+                    #[cfg(test)]
+                    threshold_residency.resume();
+                    #[cfg(test)]
+                    let state_started = threshold_residency.state_started();
                     state.undo(delta);
+                    #[cfg(test)]
+                    threshold_residency.record_state_elapsed(state_started);
                     match outcome {
                         WidePnStepOutcome::DepthCutoff {
                             depth,
@@ -3995,18 +4303,28 @@ impl<'store> WidePnSearch<'store> {
                 }
                 WidePnMove::Pair(first, second) | WidePnMove::DefenderPair(first, second) => {
                     let linked = child.entry.is_none() && matches!(kind, WidePnKind::Choice);
-                    let Ok((_first_result, first_delta)) =
-                        state.apply_with_delta(Placement { coord: first })
-                    else {
+                    #[cfg(test)]
+                    let state_started = threshold_residency.state_started();
+                    let first_applied = state.apply_with_delta(Placement { coord: first });
+                    #[cfg(test)]
+                    threshold_residency.record_state_elapsed(state_started);
+                    let Ok((_first_result, first_delta)) = first_applied else {
                         self.set_child_refuted(id, child_index);
                         self.refresh(id);
                         any_progress = true;
                         continue;
                     };
-                    let Ok((_second_result, second_delta)) =
-                        state.apply_with_delta(Placement { coord: second })
-                    else {
+                    #[cfg(test)]
+                    let state_started = threshold_residency.state_started();
+                    let second_applied = state.apply_with_delta(Placement { coord: second });
+                    #[cfg(test)]
+                    threshold_residency.record_state_elapsed(state_started);
+                    let Ok((_second_result, second_delta)) = second_applied else {
+                        #[cfg(test)]
+                        let state_started = threshold_residency.state_started();
                         state.undo(first_delta);
+                        #[cfg(test)]
+                        threshold_residency.record_state_elapsed(state_started);
                         self.set_child_refuted(id, child_index);
                         self.refresh(id);
                         any_progress = true;
@@ -4038,6 +4356,8 @@ impl<'store> WidePnSearch<'store> {
                         self.entries.get(child_id).map(|entry| &entry.node),
                         Some(WidePnNode::Unexpanded)
                     );
+                    #[cfg(test)]
+                    threshold_residency.pause();
                     let outcome = self.work(
                         state,
                         child_id,
@@ -4045,6 +4365,8 @@ impl<'store> WidePnSearch<'store> {
                         child_pn_threshold,
                         child_dn_threshold,
                     );
+                    #[cfg(test)]
+                    threshold_residency.resume();
                     #[cfg(test)]
                     if closure_was_unexpanded
                         && !matches!(
@@ -4054,8 +4376,12 @@ impl<'store> WidePnSearch<'store> {
                     {
                         self.record_closure_pair_expanded(id, child_index);
                     }
+                    #[cfg(test)]
+                    let state_started = threshold_residency.state_started();
                     state.undo(second_delta);
                     state.undo(first_delta);
+                    #[cfg(test)]
+                    threshold_residency.record_state_elapsed(state_started);
                     match outcome {
                         WidePnStepOutcome::DepthCutoff {
                             depth,
@@ -4735,6 +5061,9 @@ impl<'store> WidePnSearch<'store> {
         self.expansions += 1;
         #[cfg(test)]
         {
+            if self.threshold_counters {
+                self.threshold_expansion_clock.set(self.expansions);
+            }
             if let Some(telemetry) = self.quotient_telemetry.as_mut() {
                 telemetry.observe_expand(id, state);
             }

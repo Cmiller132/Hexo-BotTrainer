@@ -167,6 +167,11 @@ struct Cell {
     stage_refreshes: u64,
     live_ge3_seed_scans: u64,
     live_ge3_seed_nanos: u64,
+    threshold_visits: u64,
+    threshold_crosses: u64,
+    threshold_reselections: u64,
+    threshold_sibling_switches: u64,
+    threshold_descent_nanos: u64,
     shared_reconfigs_max: u64,
     fragment_reconfigs_max: u64,
     shared_slots_max: u64,
@@ -461,6 +466,21 @@ fn run_cell(
             cell.live_ge3_seed_nanos = cell
                 .live_ge3_seed_nanos
                 .saturating_add(result.stats.live_ge3_seed_nanos);
+            cell.threshold_visits = cell
+                .threshold_visits
+                .saturating_add(result.stats.threshold_scale.recursive_node_visits);
+            cell.threshold_crosses = cell
+                .threshold_crosses
+                .saturating_add(result.stats.threshold_scale.threshold_cross_returns);
+            cell.threshold_reselections = cell
+                .threshold_reselections
+                .saturating_add(result.stats.threshold_scale.same_parent_reselections);
+            cell.threshold_sibling_switches = cell
+                .threshold_sibling_switches
+                .saturating_add(result.stats.threshold_scale.sibling_switches);
+            cell.threshold_descent_nanos = cell
+                .threshold_descent_nanos
+                .saturating_add(result.stats.threshold_scale.descent_nanos);
 
             let reuse = solver.leaf_surface_reuse_snapshot();
             cell.shared_reconfigs_max =
@@ -788,4 +808,69 @@ fn closure_debt_live_ge3_leaf_ab() {
         assert_eq!(contradictions, 0, "live_ge3 leaf status contradiction");
     }
     println!("CLOSURE_LEAF_DONE result=PASS");
+}
+
+#[test]
+#[ignore = "prior-scale threshold selected Phase-3 D cells; serialized release-only"]
+fn threshold_scale_leaf_ab() {
+    let batches = load_batches();
+    let old_delta = std::env::var_os("TSS_THRESHOLD_DELTA");
+    let old_counters = std::env::var_os("TSS_THRESHOLD_COUNTERS");
+    std::env::set_var("TSS_THRESHOLD_COUNTERS", "1");
+    println!(
+        "THRESHOLD_LEAF_MODE config=D_WIDE_LAZY_GATE cap=500 horizons=8,16 tt_bytes={} cap_resume=off shared_fragments=off k_reply=off",
+        TT_BYTES
+    );
+    for horizon in [8u32, 16] {
+        let mut baseline_status = None::<Vec<ProofStatus>>;
+        for arm in ["1", "2", "4", "mean"] {
+            std::env::set_var("TSS_THRESHOLD_DELTA", arm);
+            let cell = run_cell(&batches, Config::D, 500, horizon, None);
+            let mut regressions = 0u64;
+            let mut improvements = 0u64;
+            let mut contradictions = 0u64;
+            if let Some(baseline) = &baseline_status {
+                for (&base, &now) in baseline.iter().zip(&cell.status) {
+                    match (base, now) {
+                        (ProofStatus::Win, ProofStatus::Unknown)
+                        | (ProofStatus::Loss, ProofStatus::Unknown) => regressions += 1,
+                        (ProofStatus::Unknown, ProofStatus::Win)
+                        | (ProofStatus::Unknown, ProofStatus::Loss) => improvements += 1,
+                        (ProofStatus::Win, ProofStatus::Loss)
+                        | (ProofStatus::Loss, ProofStatus::Win) => contradictions += 1,
+                        _ => {}
+                    }
+                }
+            } else {
+                baseline_status = Some(cell.status.clone());
+            }
+            let wall_ns = cell.solve_ns.iter().copied().sum::<u64>();
+            println!(
+                "THRESHOLD_LEAF_ROW arm={arm} horizon={horizon} cap=500 verdicts={} regressions={regressions} improvements={improvements} contradictions={contradictions} expansions={} tt_hits={} stage_refreshes={} sibling_switches={} reselections={} threshold_crosses={} visits={} descent_ms={:.3} verified={} wall_ms={:.3}",
+                cell.wins + cell.losses,
+                cell.expansions,
+                cell.tt_hits,
+                cell.stage_refreshes,
+                cell.threshold_sibling_switches,
+                cell.threshold_reselections,
+                cell.threshold_crosses,
+                cell.threshold_visits,
+                cell.threshold_descent_nanos as f64 / 1e6,
+                cell.verified,
+                wall_ns as f64 / 1e6,
+            );
+            assert_eq!(contradictions, 0, "threshold leaf status contradiction");
+        }
+    }
+    if let Some(value) = old_delta {
+        std::env::set_var("TSS_THRESHOLD_DELTA", value);
+    } else {
+        std::env::remove_var("TSS_THRESHOLD_DELTA");
+    }
+    if let Some(value) = old_counters {
+        std::env::set_var("TSS_THRESHOLD_COUNTERS", value);
+    } else {
+        std::env::remove_var("TSS_THRESHOLD_COUNTERS");
+    }
+    println!("THRESHOLD_LEAF_DONE result=PASS");
 }

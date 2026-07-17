@@ -161,6 +161,61 @@ pub(crate) struct ClosureDebtStats {
     pub(crate) avoidable_dedup_nanos: u64,
 }
 
+/// Test-only accounting for the prior-scale threshold hunt. These values are
+/// observational only and are never consulted by the search.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ThresholdScaleStats {
+    pub(crate) recursive_node_visits: u64,
+    pub(crate) expanded_node_revisits: u64,
+    pub(crate) threshold_cross_returns: u64,
+    pub(crate) same_parent_reselections: u64,
+    pub(crate) sibling_switches: u64,
+    pub(crate) residencies: u64,
+    pub(crate) residency_expansions: u64,
+    /// Expansion deltas in bins 0, 1, 2, 3-4, 5-8, 9-16, 17-32, 33+.
+    pub(crate) residency_expansion_bins: [u64; 8],
+    /// Exclusive time in `WidePnSearch::work`, with expansion and recursive
+    /// child time paused so every wall interval is counted at most once.
+    pub(crate) descent_nanos: u64,
+    /// Apply/undo time on descent edges; this is a subset of `descent_nanos`.
+    pub(crate) state_apply_undo_nanos: u64,
+}
+
+#[cfg(test)]
+impl ThresholdScaleStats {
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.recursive_node_visits = self
+            .recursive_node_visits
+            .saturating_add(other.recursive_node_visits);
+        self.expanded_node_revisits = self
+            .expanded_node_revisits
+            .saturating_add(other.expanded_node_revisits);
+        self.threshold_cross_returns = self
+            .threshold_cross_returns
+            .saturating_add(other.threshold_cross_returns);
+        self.same_parent_reselections = self
+            .same_parent_reselections
+            .saturating_add(other.same_parent_reselections);
+        self.sibling_switches = self.sibling_switches.saturating_add(other.sibling_switches);
+        self.residencies = self.residencies.saturating_add(other.residencies);
+        self.residency_expansions = self
+            .residency_expansions
+            .saturating_add(other.residency_expansions);
+        for (target, value) in self
+            .residency_expansion_bins
+            .iter_mut()
+            .zip(other.residency_expansion_bins)
+        {
+            *target = target.saturating_add(value);
+        }
+        self.descent_nanos = self.descent_nanos.saturating_add(other.descent_nanos);
+        self.state_apply_undo_nanos = self
+            .state_apply_undo_nanos
+            .saturating_add(other.state_apply_undo_nanos);
+    }
+}
+
 #[cfg(test)]
 impl ClosureDebtStats {
     pub(crate) fn merge(&mut self, other: Self) {
@@ -242,6 +297,8 @@ pub struct SolveStats {
     pub(crate) live_ge3_seed_nanos: u64,
     #[cfg(test)]
     pub(crate) closure_debt: ClosureDebtStats,
+    #[cfg(test)]
+    pub(crate) threshold_scale: ThresholdScaleStats,
 }
 
 /// A deep solve's outcome: a typed status, an optional replayable certificate

@@ -1,0 +1,199 @@
+RAM_GATE kind=gate_class_1gib arm=2 timestamp=2026-07-17T11:56:18.2125117-04:00 free_physical_gib=14.306 standby_normal_gib=4.669 availability_gib=18.975
+ENV TSS_BACKWALK_TT_BYTES=1073741824
+ENV TSS_CORPUS_EXPECT_CAP_RESUME=0
+ENV TSS_CORPUS_EXPECT_CLOSURE_COUNTERS=0
+ENV TSS_CORPUS_EXPECT_INTERIOR_CENSUS_GATE=1
+ENV TSS_CORPUS_EXPECT_K_REPLY_CONSUME=0
+ENV TSS_CORPUS_EXPECT_LAZY_FRONTIER=1
+ENV TSS_CORPUS_EXPECT_LIVE_GE3_SEED=0
+ENV TSS_CORPUS_EXPECT_SHARED_FRAGMENTS=0
+ENV TSS_CORPUS_EXPECT_THRESHOLD_COUNTERS=1
+ENV TSS_CORPUS_EXPECT_THRESHOLD_DELTA=2
+ENV TSS_INTERIOR_CENSUS_GATE=1
+ENV TSS_LAZY_FRONTIER=1
+ENV TSS_THRESHOLD_COUNTERS=1
+ENV TSS_THRESHOLD_DELTA=2
+    Finished `release` profile [optimized] target(s) in 0.07s
+     Running unittests rust\src\lib.rs (.target-codex\x86_64-pc-windows-msvc\release\deps\hexfield_eq-de26e3778420c4c2.exe)
+
+running 1 test
+test tss_corpus::tss_corpus_check ... CORPUS_MODE shared_fragments=off lazy_frontier=on interior_gate=on k_reply_consume=off cap_resume=off live_ge3_seed=off closure_counters=off threshold_counters=on threshold_delta=2 tt_bytes_cap=1073741824
+CORPUS id=0hz3hty cap=10000 status=WIN expect=WIN nodes=3201 expansions=3200 tt_entries=3191 tt_hits=3 tt_bytes_cap=1073741824 peak_tt_bytes=382086 stage_refreshes=19 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=158.3
+CLOSURE_ROW id=0hz3hty cap=10000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=0hz3hty cap=10000 visits=5367 revisits=2176 threshold_crosses=4505 reselections=4612 sibling_switches=4049 residencies=5367 residency_expansions=17396 expansion_bins=[1078, 3399, 149, 305, 111, 167, 111, 47] descent_ms=31.970 state_ms=23.640
+FRAGMENT_PROFILE id=0hz3hty cap=10000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=56 defender_ms=56 regen_ms=10 expand_ms=115 refresh_ms=6 insert_ms=0
+CORPUS id=0l4291i_live cap=10000 status=UNKNOWN expect=WIN nodes=10000 expansions=9999 tt_entries=9986 tt_hits=262 tt_bytes_cap=1073741824 peak_tt_bytes=2178764 stage_refreshes=27 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=1360.2
+CLOSURE_ROW id=0l4291i_live cap=10000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=0l4291i_live cap=10000 visits=23958 revisits=13972 threshold_crosses=22991 reselections=21086 sibling_switches=15338 residencies=23958 residency_expansions=90432 expansion_bins=[1838, 14452, 1649, 2826, 1611, 951, 336, 295] descent_ms=168.780 state_ms=136.215
+FRAGMENT_PROFILE id=0l4291i_live cap=10000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=936 defender_ms=324 regen_ms=192 expand_ms=1271 refresh_ms=36 insert_ms=4
+CORPUS id=0l4291i_live cap=100000 status=UNKNOWN expect=WIN nodes=100000 expansions=99999 tt_entries=99963 tt_hits=1823 tt_bytes_cap=1073741824 peak_tt_bytes=26154390 stage_refreshes=75 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=13258.9
+CLOSURE_ROW id=0l4291i_live cap=100000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=0l4291i_live cap=100000 visits=197366 revisits=97403 threshold_crosses=183349 reselections=171161 sibling_switches=125490 residencies=197366 residency_expansions=1989956 expansion_bins=[15378, 124495, 12172, 15802, 9968, 8526, 4665, 6360] descent_ms=1427.567 state_ms=1073.089
+FRAGMENT_PROFILE id=0l4291i_live cap=100000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=7806 defender_ms=3713 regen_ms=1540 expand_ms=11634 refresh_ms=1431 insert_ms=45
+CORPUS id=0l4291i_live cap=1000000 status=UNKNOWN expect=WIN nodes=1000000 expansions=999999 tt_entries=999959 tt_hits=28484 tt_bytes_cap=1073741824 peak_tt_bytes=299480193 stage_refreshes=83 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=107279.0
+CLOSURE_ROW id=0l4291i_live cap=1000000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=0l4291i_live cap=1000000 visits=1778199 revisits=778240 threshold_crosses=1657787 reselections=1559312 sibling_switches=1245179 residencies=1778199 residency_expansions=29300735 expansion_bins=[235031, 1145882, 86704, 90428, 61335, 70848, 39862, 48109] descent_ms=13346.344 state_ms=9114.894
+FRAGMENT_PROFILE id=0l4291i_live cap=1000000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=55589 defender_ms=43254 regen_ms=10775 expand_ms=100102 refresh_ms=6008 insert_ms=756
+CORPUS id=0l4291i_live cap=20000000 status=WIN expect=WIN nodes=6054589 expansions=6054588 tt_entries=3586248 tt_hits=102725 tt_bytes_cap=1073741824 peak_tt_bytes=1073741810 stage_refreshes=83 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=627745.5
+CLOSURE_ROW id=0l4291i_live cap=20000000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=0l4291i_live cap=20000000 visits=9708510 revisits=3653962 threshold_crosses=9196167 reselections=8406473 sibling_switches=6867767 residencies=9708510 residency_expansions=183705980 expansion_bins=[812217, 6725439, 471511, 492727, 351292, 397596, 212678, 245050] descent_ms=75054.505 state_ms=51442.445
+FRAGMENT_PROFILE id=0l4291i_live cap=20000000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=327972 defender_ms=295526 regen_ms=63483 expand_ms=631973 refresh_ms=17476 insert_ms=4074
+CORPUS id=8is963b cap=10000 status=LOSS expect=NO nodes=1 expansions=0 tt_entries=0 tt_hits=0 tt_bytes_cap=1073741824 peak_tt_bytes=0 stage_refreshes=0 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=0.0
+CLOSURE_ROW id=8is963b cap=10000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=8is963b cap=10000 visits=0 revisits=0 threshold_crosses=0 reselections=0 sibling_switches=0 residencies=0 residency_expansions=0 expansion_bins=[0, 0, 0, 0, 0, 0, 0, 0] descent_ms=0.000 state_ms=0.000
+FRAGMENT_PROFILE id=8is963b cap=10000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=327972 defender_ms=295526 regen_ms=63483 expand_ms=631973 refresh_ms=17476 insert_ms=4074
+CORPUS id=94gnnol cap=10000 status=UNKNOWN expect=NO nodes=10000 expansions=9999 tt_entries=9982 tt_hits=103 tt_bytes_cap=1073741824 peak_tt_bytes=2211644 stage_refreshes=35 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=1201.7
+CLOSURE_ROW id=94gnnol cap=10000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=94gnnol cap=10000 visits=21883 revisits=11901 threshold_crosses=20470 reselections=18704 sibling_switches=12997 residencies=21883 residency_expansions=118864 expansion_bins=[1257, 13047, 1819, 2585, 1520, 906, 394, 355] descent_ms=153.892 state_ms=120.922
+FRAGMENT_PROFILE id=94gnnol cap=10000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=328688 defender_ms=295808 regen_ms=63623 expand_ms=632980 refresh_ms=17504 insert_ms=4080
+CORPUS id=94gnnol cap=100000 status=UNKNOWN expect=NO nodes=100000 expansions=99999 tt_entries=99967 tt_hits=1998 tt_bytes_cap=1073741824 peak_tt_bytes=25867226 stage_refreshes=67 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=12401.4
+CLOSURE_ROW id=94gnnol cap=100000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=94gnnol cap=100000 visits=219634 revisits=119667 threshold_crosses=200265 reselections=190525 sibling_switches=134304 residencies=219634 residency_expansions=2118817 expansion_bins=[30332, 125456, 13952, 16189, 10677, 9733, 5535, 7760] descent_ms=1536.922 state_ms=1139.398
+FRAGMENT_PROFILE id=94gnnol cap=100000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=334993 defender_ms=299092 regen_ms=64785 expand_ms=642679 refresh_ms=18569 insert_ms=4126
+CORPUS id=94gnnol cap=1000000 status=UNKNOWN expect=NO nodes=1000000 expansions=999999 tt_entries=999959 tt_hits=25938 tt_bytes_cap=1073741824 peak_tt_bytes=292535386 stage_refreshes=83 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=125543.0
+CLOSURE_ROW id=94gnnol cap=1000000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=94gnnol cap=1000000 visits=2480148 revisits=1480189 threshold_crosses=2260965 reselections=2203969 sibling_switches=1612796 residencies=2480148 residency_expansions=29612843 expansion_bins=[619128, 1278946, 138885, 138814, 90115, 96005, 51280, 66975] descent_ms=18697.021 state_ms=12917.512
+FRAGMENT_PROFILE id=94gnnol cap=1000000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=391115 defender_ms=336309 regen_ms=75655 expand_ms=737125 refresh_ms=29842 insert_ms=4814
+CORPUS id=acly7kb cap=10000 status=WIN expect=WIN nodes=75 expansions=74 tt_entries=70 tt_hits=0 tt_bytes_cap=1073741824 peak_tt_bytes=18072 stage_refreshes=11 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=9.7
+CLOSURE_ROW id=acly7kb cap=10000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=acly7kb cap=10000 visits=95 revisits=25 threshold_crosses=55 reselections=67 sibling_switches=56 residencies=95 residency_expansions=299 expansion_bins=[0, 63, 17, 8, 1, 4, 0, 2] descent_ms=0.645 state_ms=0.495
+FRAGMENT_PROFILE id=acly7kb cap=10000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=391120 defender_ms=336312 regen_ms=75656 expand_ms=737133 refresh_ms=29842 insert_ms=4814
+CORPUS id=dy3dg99 cap=10000 status=LOSS expect=NO nodes=1 expansions=0 tt_entries=0 tt_hits=0 tt_bytes_cap=1073741824 peak_tt_bytes=0 stage_refreshes=0 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=0.0
+CLOSURE_ROW id=dy3dg99 cap=10000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=dy3dg99 cap=10000 visits=0 revisits=0 threshold_crosses=0 reselections=0 sibling_switches=0 residencies=0 residency_expansions=0 expansion_bins=[0, 0, 0, 0, 0, 0, 0, 0] descent_ms=0.000 state_ms=0.000
+FRAGMENT_PROFILE id=dy3dg99 cap=10000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=391120 defender_ms=336312 regen_ms=75656 expand_ms=737133 refresh_ms=29842 insert_ms=4814
+CORPUS id=g2xx6wl cap=10000 status=WIN expect=WIN nodes=4180 expansions=4179 tt_entries=4171 tt_hits=0 tt_bytes_cap=1073741824 peak_tt_bytes=1515393 stage_refreshes=17 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=586.3
+CLOSURE_ROW id=g2xx6wl cap=10000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=g2xx6wl cap=10000 visits=5603 revisits=1432 threshold_crosses=5367 reselections=4779 sibling_switches=4215 residencies=5603 residency_expansions=29571 expansion_bins=[151, 4528, 158, 374, 58, 217, 51, 66] descent_ms=45.365 state_ms=30.635
+FRAGMENT_PROFILE id=g2xx6wl cap=10000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=391432 defender_ms=336514 regen_ms=75714 expand_ms=737653 refresh_ms=29849 insert_ms=4817
+CORPUS id=hu01jk4 cap=10000 status=WIN expect=WIN nodes=389 expansions=388 tt_entries=381 tt_hits=0 tt_bytes_cap=1073741824 peak_tt_bytes=147047 stage_refreshes=17 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=97.5
+CLOSURE_ROW id=hu01jk4 cap=10000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=hu01jk4 cap=10000 visits=591 revisits=210 threshold_crosses=344 reselections=438 sibling_switches=395 residencies=591 residency_expansions=2984 expansion_bins=[0, 395, 36, 69, 32, 19, 24, 16] descent_ms=4.290 state_ms=3.162
+FRAGMENT_PROFILE id=hu01jk4 cap=10000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=391502 defender_ms=336525 regen_ms=75728 expand_ms=737734 refresh_ms=29849 insert_ms=4817
+CORPUS id=jh7yo7y cap=10000 status=WIN expect=WIN nodes=2206 expansions=2205 tt_entries=2195 tt_hits=11 tt_bytes_cap=1073741824 peak_tt_bytes=347330 stage_refreshes=21 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=243.0
+CLOSURE_ROW id=jh7yo7y cap=10000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=jh7yo7y cap=10000 visits=3725 revisits=1530 threshold_crosses=3258 reselections=3010 sibling_switches=2397 residencies=3725 residency_expansions=17755 expansion_bins=[68, 2634, 204, 403, 218, 88, 66, 44] descent_ms=25.791 state_ms=20.420
+FRAGMENT_PROFILE id=jh7yo7y cap=10000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=391664 defender_ms=336567 regen_ms=75760 expand_ms=737940 refresh_ms=29851 insert_ms=4818
+CORPUS id=jnzzmcm cap=10000 status=WIN expect=WIN nodes=9829 expansions=9828 tt_entries=9817 tt_hits=12 tt_bytes_cap=1073741824 peak_tt_bytes=2230534 stage_refreshes=25 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=907.6
+CLOSURE_ROW id=jnzzmcm cap=10000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=jnzzmcm cap=10000 visits=13845 revisits=4028 threshold_crosses=12109 reselections=12240 sibling_switches=10476 residencies=13845 residency_expansions=91403 expansion_bins=[1159, 10567, 599, 499, 90, 506, 144, 281] descent_ms=102.780 state_ms=72.004
+FRAGMENT_PROFILE id=jnzzmcm cap=10000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=392071 defender_ms=336885 regen_ms=75823 expand_ms=738676 refresh_ms=29874 insert_ms=4823
+CORPUS id=l9mxn59 cap=10000 status=UNKNOWN expect=NO nodes=225 expansions=224 tt_entries=207 tt_hits=2 tt_bytes_cap=1073741824 peak_tt_bytes=27202 stage_refreshes=37 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=14.3
+CLOSURE_ROW id=l9mxn59 cap=10000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=l9mxn59 cap=10000 visits=706 revisits=499 threshold_crosses=315 reselections=551 sibling_switches=267 residencies=706 residency_expansions=2314 expansion_bins=[91, 319, 88, 120, 25, 18, 45, 0] descent_ms=4.466 state_ms=3.868
+FRAGMENT_PROFILE id=l9mxn59 cap=10000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=392078 defender_ms=336888 regen_ms=75824 expand_ms=738685 refresh_ms=29874 insert_ms=4823
+CORPUS id=l9mxn59 cap=100000 status=UNKNOWN expect=NO nodes=225 expansions=224 tt_entries=207 tt_hits=2 tt_bytes_cap=1073741824 peak_tt_bytes=27202 stage_refreshes=37 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=14.1
+CLOSURE_ROW id=l9mxn59 cap=100000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=l9mxn59 cap=100000 visits=706 revisits=499 threshold_crosses=315 reselections=551 sibling_switches=267 residencies=706 residency_expansions=2314 expansion_bins=[91, 319, 88, 120, 25, 18, 45, 0] descent_ms=4.331 state_ms=3.776
+FRAGMENT_PROFILE id=l9mxn59 cap=100000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=392084 defender_ms=336890 regen_ms=75826 expand_ms=738694 refresh_ms=29875 insert_ms=4823
+CORPUS id=l9mxn59 cap=1000000 status=UNKNOWN expect=NO nodes=225 expansions=224 tt_entries=207 tt_hits=2 tt_bytes_cap=1073741824 peak_tt_bytes=27202 stage_refreshes=37 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=14.1
+CLOSURE_ROW id=l9mxn59 cap=1000000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=l9mxn59 cap=1000000 visits=706 revisits=499 threshold_crosses=315 reselections=551 sibling_switches=267 residencies=706 residency_expansions=2314 expansion_bins=[91, 319, 88, 120, 25, 18, 45, 0] descent_ms=4.374 state_ms=3.809
+FRAGMENT_PROFILE id=l9mxn59 cap=1000000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=392090 defender_ms=336893 regen_ms=75827 expand_ms=738703 refresh_ms=29875 insert_ms=4823
+CORPUS id=lz60mfb cap=10000 status=UNKNOWN expect=WIN nodes=10000 expansions=9999 tt_entries=9970 tt_hits=271 tt_bytes_cap=1073741824 peak_tt_bytes=2174636 stage_refreshes=59 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=913.0
+CLOSURE_ROW id=lz60mfb cap=10000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=lz60mfb cap=10000 visits=18628 revisits=8658 threshold_crosses=14783 reselections=15547 sibling_switches=11860 residencies=18628 residency_expansions=200158 expansion_bins=[2496, 11833, 838, 978, 938, 555, 362, 628] descent_ms=144.249 state_ms=110.343
+FRAGMENT_PROFILE id=lz60mfb cap=10000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=392509 defender_ms=337170 regen_ms=75900 expand_ms=739408 refresh_ms=29926 insert_ms=4829
+CORPUS id=lz60mfb cap=100000 status=UNKNOWN expect=WIN nodes=100000 expansions=99999 tt_entries=99970 tt_hits=1087 tt_bytes_cap=1073741824 peak_tt_bytes=22789672 stage_refreshes=59 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=8382.6
+CLOSURE_ROW id=lz60mfb cap=100000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=lz60mfb cap=100000 visits=150627 revisits=50657 threshold_crosses=132067 reselections=125810 sibling_switches=106087 residencies=150627 residency_expansions=2248917 expansion_bins=[10792, 109313, 5005, 6961, 8974, 2759, 2461, 4362] descent_ms=1138.479 state_ms=831.499
+FRAGMENT_PROFILE id=lz60mfb cap=100000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=396404 defender_ms=340185 regen_ms=76587 expand_ms=746419 refresh_ms=30069 insert_ms=4870
+CORPUS id=lz60mfb cap=1000000 status=WIN expect=WIN nodes=108558 expansions=108557 tt_entries=108528 tt_hits=1093 tt_bytes_cap=1073741824 peak_tt_bytes=24764712 stage_refreshes=59 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=9592.2
+CLOSURE_ROW id=lz60mfb cap=1000000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=lz60mfb cap=1000000 visits=162123 revisits=53595 threshold_crosses=142532 reselections=135463 sibling_switches=114660 residencies=162123 residency_expansions=2447426 expansion_bins=[11046, 118370, 5337, 7421, 9699, 2940, 2613, 4697] descent_ms=1254.206 state_ms=914.450
+FRAGMENT_PROFILE id=lz60mfb cap=1000000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=400749 defender_ms=343534 regen_ms=77354 expand_ms=754226 refresh_ms=30225 insert_ms=4916
+CORPUS id=mvp2lvc cap=10000 status=UNKNOWN expect=NO nodes=10000 expansions=9999 tt_entries=9972 tt_hits=489 tt_bytes_cap=1073741824 peak_tt_bytes=1947724 stage_refreshes=55 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=1175.3
+CLOSURE_ROW id=mvp2lvc cap=10000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=mvp2lvc cap=10000 visits=22398 revisits=12426 threshold_crosses=15640 reselections=17831 sibling_switches=12694 residencies=22398 residency_expansions=123358 expansion_bins=[2403, 13976, 1442, 1616, 1184, 801, 348, 628] descent_ms=164.863 state_ms=124.881
+FRAGMENT_PROFILE id=mvp2lvc cap=10000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=401516 defender_ms=343719 regen_ms=77509 expand_ms=755186 refresh_ms=30267 insert_ms=4922
+CORPUS id=mvp2lvc cap=100000 status=UNKNOWN expect=NO nodes=26843 expansions=26842 tt_entries=26808 tt_hits=631 tt_bytes_cap=1073741824 peak_tt_bytes=6170524 stage_refreshes=69 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=2712.0
+CLOSURE_ROW id=mvp2lvc cap=100000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=mvp2lvc cap=100000 visits=49109 revisits=22301 threshold_crosses=37501 reselections=40364 sibling_switches=30928 residencies=49109 residency_expansions=564768 expansion_bins=[4418, 32592, 2829, 3263, 2259, 1557, 676, 1515] descent_ms=368.622 state_ms=271.927
+FRAGMENT_PROFILE id=mvp2lvc cap=100000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=402970 defender_ms=344403 regen_ms=77783 expand_ms=757350 refresh_ms=30425 insert_ms=4933
+CORPUS id=mvp2lvc cap=1000000 status=UNKNOWN expect=NO nodes=26843 expansions=26842 tt_entries=26808 tt_hits=631 tt_bytes_cap=1073741824 peak_tt_bytes=6170524 stage_refreshes=69 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=2670.7
+CLOSURE_ROW id=mvp2lvc cap=1000000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=mvp2lvc cap=1000000 visits=49109 revisits=22301 threshold_crosses=37501 reselections=40364 sibling_switches=30928 residencies=49109 residency_expansions=564768 expansion_bins=[4418, 32592, 2829, 3263, 2259, 1557, 676, 1515] descent_ms=361.504 state_ms=265.352
+FRAGMENT_PROFILE id=mvp2lvc cap=1000000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=404407 defender_ms=345075 regen_ms=78050 expand_ms=759483 refresh_ms=30582 insert_ms=4945
+CORPUS id=xsnfyll cap=10000 status=WIN expect=WIN nodes=82 expansions=81 tt_entries=74 tt_hits=1 tt_bytes_cap=1073741824 peak_tt_bytes=7156 stage_refreshes=15 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=4.7
+CLOSURE_ROW id=xsnfyll cap=10000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=xsnfyll cap=10000 visits=162 revisits=88 threshold_crosses=93 reselections=119 sibling_switches=71 residencies=162 residency_expansions=307 expansion_bins=[3, 114, 19, 18, 4, 2, 1, 1] descent_ms=1.047 state_ms=0.905
+FRAGMENT_PROFILE id=xsnfyll cap=10000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=404409 defender_ms=345076 regen_ms=78050 expand_ms=759486 refresh_ms=30582 insert_ms=4945
+CORPUS id=zrugh2x cap=10000 status=UNKNOWN expect=WIN nodes=10000 expansions=9999 tt_entries=9978 tt_hits=562 tt_bytes_cap=1073741824 peak_tt_bytes=1908660 stage_refreshes=45 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=1061.1
+CLOSURE_ROW id=zrugh2x cap=10000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=zrugh2x cap=10000 visits=37719 revisits=27741 threshold_crosses=34782 reselections=33511 sibling_switches=20290 residencies=37719 residency_expansions=113228 expansion_bins=[8969, 17575, 3136, 3583, 1995, 1466, 724, 271] descent_ms=231.974 state_ms=194.635
+FRAGMENT_PROFILE id=zrugh2x cap=10000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=405006 defender_ms=345260 regen_ms=78161 expand_ms=760274 refresh_ms=30616 insert_ms=4950
+CORPUS id=zrugh2x cap=100000 status=WIN expect=WIN nodes=34790 expansions=34789 tt_entries=34767 tt_hits=1418 tt_bytes_cap=1073741824 peak_tt_bytes=6693254 stage_refreshes=45 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=3294.1
+CLOSURE_ROW id=zrugh2x cap=100000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=zrugh2x cap=100000 visits=88613 revisits=53846 threshold_crosses=79962 reselections=75699 sibling_switches=53579 residencies=88613 residency_expansions=404593 expansion_bins=[14177, 47910, 7705, 7736, 5119, 3248, 1575, 1143] descent_ms=590.345 state_ms=475.305
+FRAGMENT_PROFILE id=zrugh2x cap=100000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=406819 defender_ms=346012 regen_ms=78498 expand_ms=762868 refresh_ms=30667 insert_ms=4967
+CORPUS id=strongloss_a_prefix6 cap=10000 status=UNKNOWN expect=WIN nodes=10000 expansions=9999 tt_entries=9991 tt_hits=4167 tt_bytes_cap=1073741824 peak_tt_bytes=963106 stage_refreshes=17 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=785.5
+CLOSURE_ROW id=strongloss_a_prefix6 cap=10000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=strongloss_a_prefix6 cap=10000 visits=27515 revisits=17524 threshold_crosses=27429 reselections=23874 sibling_switches=21108 residencies=27515 residency_expansions=55987 expansion_bins=[7465, 15124, 1600, 1304, 1257, 486, 223, 56] descent_ms=205.735 state_ms=157.244
+FRAGMENT_PROFILE id=strongloss_a_prefix6 cap=10000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=407270 defender_ms=346118 regen_ms=78594 expand_ms=763433 refresh_ms=30674 insert_ms=4972
+CORPUS id=strongloss_a_prefix6 cap=100000 status=WIN expect=WIN nodes=16293 expansions=16292 tt_entries=16282 tt_hits=5501 tt_bytes_cap=1073741824 peak_tt_bytes=1599364 stage_refreshes=23 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=1129.8
+CLOSURE_ROW id=strongloss_a_prefix6 cap=100000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=strongloss_a_prefix6 cap=100000 visits=38454 revisits=22172 threshold_crosses=38070 reselections=33877 sibling_switches=30256 residencies=38454 residency_expansions=98689 expansion_bins=[9407, 22375, 1811, 1741, 1842, 739, 317, 222] descent_ms=293.627 state_ms=223.228
+FRAGMENT_PROFILE id=strongloss_a_prefix6 cap=100000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=407800 defender_ms=346351 regen_ms=78705 expand_ms=764209 refresh_ms=30713 insert_ms=4980
+CORPUS id=strongloss_b_prefix8 cap=10000 status=WIN expect=WIN nodes=1100 expansions=1099 tt_entries=1093 tt_hits=279 tt_bytes_cap=1073741824 peak_tt_bytes=104462 stage_refreshes=13 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=69.1
+CLOSURE_ROW id=strongloss_b_prefix8 cap=10000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=strongloss_b_prefix8 cap=10000 visits=2299 revisits=1206 threshold_crosses=2245 reselections=1986 sibling_switches=1744 residencies=2299 residency_expansions=4829 expansion_bins=[375, 1472, 182, 142, 83, 20, 13, 12] descent_ms=17.823 state_ms=14.332
+FRAGMENT_PROFILE id=strongloss_b_prefix8 cap=10000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=407832 defender_ms=346369 regen_ms=78712 expand_ms=764258 refresh_ms=30714 insert_ms=4981
+CORPUS id=hayes_20260712_turn16 cap=10000 status=UNKNOWN expect=WIN nodes=10000 expansions=9999 tt_entries=9983 tt_hits=289 tt_bytes_cap=1073741824 peak_tt_bytes=1570566 stage_refreshes=33 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=1032.4
+CLOSURE_ROW id=hayes_20260712_turn16 cap=10000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=hayes_20260712_turn16 cap=10000 visits=29087 revisits=19104 threshold_crosses=27426 reselections=25938 sibling_switches=16338 residencies=29087 residency_expansions=98295 expansion_bins=[3351, 15671, 2327, 2682, 2664, 1642, 599, 151] descent_ms=188.742 state_ms=157.953
+FRAGMENT_PROFILE id=hayes_20260712_turn16 cap=10000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=408455 defender_ms=346551 regen_ms=78840 expand_ms=765072 refresh_ms=30737 insert_ms=4986
+CORPUS id=hayes_20260712_turn16 cap=100000 status=WIN expect=WIN nodes=11144 expansions=11143 tt_entries=11127 tt_hits=298 tt_bytes_cap=1073741824 peak_tt_bytes=1753746 stage_refreshes=33 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=1178.2
+CLOSURE_ROW id=hayes_20260712_turn16 cap=100000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=hayes_20260712_turn16 cap=100000 visits=31021 revisits=19894 threshold_crosses=29020 reselections=27571 sibling_switches=17754 residencies=31021 residency_expansions=110342 expansion_bins=[3447, 17014, 2392, 2811, 2785, 1752, 630, 190] descent_ms=205.159 state_ms=169.385
+FRAGMENT_PROFILE id=hayes_20260712_turn16 cap=100000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=409159 defender_ms=346758 regen_ms=78984 expand_ms=765990 refresh_ms=30762 insert_ms=4993
+CORPUS id=hayes_20260712_placement31 cap=10000 status=UNKNOWN expect=WIN nodes=10000 expansions=9999 tt_entries=9983 tt_hits=289 tt_bytes_cap=1073741824 peak_tt_bytes=1570570 stage_refreshes=33 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=1042.1
+CLOSURE_ROW id=hayes_20260712_placement31 cap=10000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=hayes_20260712_placement31 cap=10000 visits=29087 revisits=19104 threshold_crosses=27426 reselections=25938 sibling_switches=16338 residencies=29087 residency_expansions=98295 expansion_bins=[3351, 15671, 2327, 2682, 2664, 1642, 599, 151] descent_ms=190.913 state_ms=160.915
+FRAGMENT_PROFILE id=hayes_20260712_placement31 cap=10000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=409787 defender_ms=346942 regen_ms=79114 expand_ms=766810 refresh_ms=30784 insert_ms=4997
+CORPUS id=hayes_20260712_placement31 cap=100000 status=WIN expect=WIN nodes=11144 expansions=11143 tt_entries=11127 tt_hits=298 tt_bytes_cap=1073741824 peak_tt_bytes=1753750 stage_refreshes=33 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=1191.0
+CLOSURE_ROW id=hayes_20260712_placement31 cap=100000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=hayes_20260712_placement31 cap=100000 visits=31021 revisits=19894 threshold_crosses=29020 reselections=27571 sibling_switches=17754 residencies=31021 residency_expansions=110342 expansion_bins=[3447, 17014, 2392, 2811, 2785, 1752, 630, 190] descent_ms=203.890 state_ms=169.574
+FRAGMENT_PROFILE id=hayes_20260712_placement31 cap=100000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=410500 defender_ms=347152 regen_ms=79260 expand_ms=767742 refresh_ms=30810 insert_ms=5002
+CORPUS_FRAGMENTS lookups=0 hits=0 hit_rate_pct=0.000 imports=0 max_store_entries=0 max_store_bytes=0
+CLOSURE_DONE evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000 stage_refreshes=1334 seed_scans=0 seed_ms=0.000
+THRESHOLD_DONE visits=15228014 revisits=6536743 threshold_crosses=14244074 reselections=13249492 sibling_switches=10538649 residencies=15228014 residency_expansions=254348279 expansion_bins=[1807475, 9938876, 770290, 810401, 573614, 608538, 327728, 391092] descent_ms=116170.221 state_ms=80348.211
+CORPUS_DONE failures=0 shared_fragments=off lazy_frontier=on interior_gate=on k_reply_consume=off cap_resume=off resume_wall_ms=0.000 resume_reentries=0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 140 filtered out; finished in 927.59s
+
+EXIT_CODE=0

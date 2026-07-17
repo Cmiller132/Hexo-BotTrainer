@@ -20,7 +20,9 @@ use std::time::Instant;
 
 use hexo_engine::{apply_placement, HexCoord, HexoState, Placement, Player, TurnPhase};
 
-use crate::tss_core::{CertVerify, ClosureDebtStats, DeepSolve, ProofStatus, SolveCaps, SolveGoal};
+use crate::tss_core::{
+    CertVerify, ClosureDebtStats, DeepSolve, ProofStatus, SolveCaps, SolveGoal, ThresholdScaleStats,
+};
 use crate::tss_solver::{
     round3_shadow_certificate, CapResumeError, CapResumeSession, TssSolver, WidthOptions,
 };
@@ -189,6 +191,8 @@ fn tss_corpus_check() {
     let cap_resume = std::env::var("TSS_CAP_RESUME").ok().as_deref() == Some("1");
     let live_ge3_seed = std::env::var("TSS_LIVE_GE3_SEED").ok().as_deref() == Some("1");
     let closure_counters = std::env::var("TSS_CLOSURE_COUNTERS").ok().as_deref() == Some("1");
+    let threshold_counters = std::env::var("TSS_THRESHOLD_COUNTERS").ok().as_deref() == Some("1");
+    let threshold_delta = std::env::var("TSS_THRESHOLD_DELTA").unwrap_or_else(|_| "off".to_owned());
     if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_SHARED_FRAGMENTS") {
         assert_eq!(
             expected,
@@ -238,8 +242,21 @@ fn tss_corpus_check() {
             "TSS_CLOSURE_COUNTERS does not match gate expectation",
         );
     }
+    if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_THRESHOLD_COUNTERS") {
+        assert_eq!(
+            expected,
+            if threshold_counters { "1" } else { "0" },
+            "TSS_THRESHOLD_COUNTERS does not match gate expectation",
+        );
+    }
+    if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_THRESHOLD_DELTA") {
+        assert_eq!(
+            expected, threshold_delta,
+            "TSS_THRESHOLD_DELTA does not match gate expectation",
+        );
+    }
     println!(
-        "CORPUS_MODE shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={} cap_resume={} live_ge3_seed={} closure_counters={} tt_bytes_cap={tt_bytes_cap}",
+        "CORPUS_MODE shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={} cap_resume={} live_ge3_seed={} closure_counters={} threshold_counters={} threshold_delta={} tt_bytes_cap={tt_bytes_cap}",
         if shared_fragments { "on" } else { "off" },
         if lazy_frontier { "on" } else { "off" },
         if interior_gate { "on" } else { "off" },
@@ -247,6 +264,8 @@ fn tss_corpus_check() {
         if cap_resume { "on" } else { "off" },
         if live_ge3_seed { "on" } else { "off" },
         if closure_counters { "on" } else { "off" },
+        if threshold_counters { "on" } else { "off" },
+        threshold_delta,
     );
     let selected_ids = std::env::var("TSS_CORPUS_ID").ok().map(|value| {
         let mut ids = value
@@ -287,6 +306,7 @@ fn tss_corpus_check() {
     let mut resume_total_ms = 0.0f64;
     let mut resume_total_reentries = 0u64;
     let mut closure_total = ClosureDebtStats::default();
+    let mut threshold_total = ThresholdScaleStats::default();
     let mut stage_refresh_total = 0u64;
     let mut live_ge3_seed_scans = 0u64;
     let mut live_ge3_seed_nanos = 0u64;
@@ -408,6 +428,7 @@ fn tss_corpus_check() {
             live_ge3_seed_nanos =
                 live_ge3_seed_nanos.saturating_add(result.stats.live_ge3_seed_nanos);
             closure_total.merge(result.stats.closure_debt);
+            threshold_total.merge(result.stats.threshold_scale);
             let closure = result.stats.closure_debt;
             println!(
                 "CLOSURE_ROW id={} cap={cap} evaluated={} accepted={} retained={} selected={} linked={} expanded={} winning_choices={} winning_rank_bins={:?} reveal_evaluated={} reveal_prefix={} pair_ms={:.3} gate_ms={:.3} second_ms={:.3} eval_ms={:.3} dedup_ms={:.3} avoid_second_ms={:.3} avoid_eval_ms={:.3} avoid_dedup_ms={:.3}",
@@ -430,6 +451,21 @@ fn tss_corpus_check() {
                 closure.avoidable_second_candidate_nanos as f64 / 1e6,
                 closure.avoidable_pair_evaluation_nanos as f64 / 1e6,
                 closure.avoidable_dedup_nanos as f64 / 1e6,
+            );
+            let threshold = result.stats.threshold_scale;
+            println!(
+                "THRESHOLD_ROW id={} cap={cap} visits={} revisits={} threshold_crosses={} reselections={} sibling_switches={} residencies={} residency_expansions={} expansion_bins={:?} descent_ms={:.3} state_ms={:.3}",
+                pos.id,
+                threshold.recursive_node_visits,
+                threshold.expanded_node_revisits,
+                threshold.threshold_cross_returns,
+                threshold.same_parent_reselections,
+                threshold.sibling_switches,
+                threshold.residencies,
+                threshold.residency_expansions,
+                threshold.residency_expansion_bins,
+                threshold.descent_nanos as f64 / 1e6,
+                threshold.state_apply_undo_nanos as f64 / 1e6,
             );
             if let Some((pn, dn, stage_depth, advances, reentries)) = resume_meta {
                 println!(
@@ -509,6 +545,19 @@ fn tss_corpus_check() {
         stage_refresh_total,
         live_ge3_seed_scans,
         live_ge3_seed_nanos as f64 / 1e6,
+    );
+    println!(
+        "THRESHOLD_DONE visits={} revisits={} threshold_crosses={} reselections={} sibling_switches={} residencies={} residency_expansions={} expansion_bins={:?} descent_ms={:.3} state_ms={:.3}",
+        threshold_total.recursive_node_visits,
+        threshold_total.expanded_node_revisits,
+        threshold_total.threshold_cross_returns,
+        threshold_total.same_parent_reselections,
+        threshold_total.sibling_switches,
+        threshold_total.residencies,
+        threshold_total.residency_expansions,
+        threshold_total.residency_expansion_bins,
+        threshold_total.descent_nanos as f64 / 1e6,
+        threshold_total.state_apply_undo_nanos as f64 / 1e6,
     );
     println!(
         "CORPUS_DONE failures={} shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={} cap_resume={} resume_wall_ms={resume_total_ms:.3} resume_reentries={resume_total_reentries}",

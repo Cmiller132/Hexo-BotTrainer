@@ -1,0 +1,40 @@
+RAM_GATE kind=cargo timestamp=2026-07-17T11:46:29.7759267-04:00 free_physical_gib=14.052 standby_normal_gib=3.337 availability_gib=17.388
+ENV TSS_BACKWALK_TT_BYTES=1073741824
+ENV TSS_CORPUS_EXPECT_CAP_RESUME=0
+ENV TSS_CORPUS_EXPECT_CLOSURE_COUNTERS=0
+ENV TSS_CORPUS_EXPECT_INTERIOR_CENSUS_GATE=1
+ENV TSS_CORPUS_EXPECT_K_REPLY_CONSUME=0
+ENV TSS_CORPUS_EXPECT_LAZY_FRONTIER=1
+ENV TSS_CORPUS_EXPECT_LIVE_GE3_SEED=0
+ENV TSS_CORPUS_EXPECT_SHARED_FRAGMENTS=0
+ENV TSS_CORPUS_EXPECT_THRESHOLD_COUNTERS=1
+ENV TSS_CORPUS_EXPECT_THRESHOLD_DELTA=off
+ENV TSS_CORPUS_ID=mvp2lvc,xsnfyll
+ENV TSS_CORPUS_MAX_CAP=10000
+ENV TSS_INTERIOR_CENSUS_GATE=1
+ENV TSS_LAZY_FRONTIER=1
+ENV TSS_THRESHOLD_COUNTERS=1
+    Finished `release` profile [optimized] target(s) in 0.06s
+     Running unittests rust\src\lib.rs (.target-codex\x86_64-pc-windows-msvc\release\deps\hexfield_eq-de26e3778420c4c2.exe)
+
+running 1 test
+test tss_corpus::tss_corpus_check ... CORPUS_MODE shared_fragments=off lazy_frontier=on interior_gate=on k_reply_consume=off cap_resume=off live_ge3_seed=off closure_counters=off threshold_counters=on threshold_delta=off tt_bytes_cap=1073741824
+CORPUS id=mvp2lvc cap=10000 status=UNKNOWN expect=NO nodes=10000 expansions=9999 tt_entries=9972 tt_hits=93 tt_bytes_cap=1073741824 peak_tt_bytes=1948056 stage_refreshes=55 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=1214.7
+CLOSURE_ROW id=mvp2lvc cap=10000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=mvp2lvc cap=10000 visits=23534 revisits=13562 threshold_crosses=16748 reselections=19084 sibling_switches=13030 residencies=23534 residency_expansions=123441 expansion_bins=[2067, 14923, 1613, 1851, 1373, 707, 401, 599] descent_ms=167.432 state_ms=129.139
+FRAGMENT_PROFILE id=mvp2lvc cap=10000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=793 defender_ms=185 regen_ms=160 expand_ms=986 refresh_ms=53 insert_ms=3
+CORPUS id=xsnfyll cap=10000 status=WIN expect=WIN nodes=82 expansions=81 tt_entries=74 tt_hits=1 tt_bytes_cap=1073741824 peak_tt_bytes=7156 stage_refreshes=15 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=4.9
+CLOSURE_ROW id=xsnfyll cap=10000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=xsnfyll cap=10000 visits=168 revisits=94 threshold_crosses=99 reselections=125 sibling_switches=73 residencies=168 residency_expansions=307 expansion_bins=[6, 118, 19, 17, 4, 2, 1, 1] descent_ms=1.151 state_ms=0.998
+FRAGMENT_PROFILE id=xsnfyll cap=10000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=795 defender_ms=186 regen_ms=160 expand_ms=989 refresh_ms=53 insert_ms=3
+CORPUS_FRAGMENTS lookups=0 hits=0 hit_rate_pct=0.000 imports=0 max_store_entries=0 max_store_bytes=0
+CLOSURE_DONE evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000 stage_refreshes=70 seed_scans=0 seed_ms=0.000
+THRESHOLD_DONE visits=23702 revisits=13656 threshold_crosses=16847 reselections=19209 sibling_switches=13103 residencies=23702 residency_expansions=123748 expansion_bins=[2073, 15041, 1632, 1868, 1377, 709, 402, 600] descent_ms=168.583 state_ms=130.137
+CORPUS_DONE failures=0 shared_fragments=off lazy_frontier=on interior_gate=on k_reply_consume=off cap_resume=off resume_wall_ms=0.000 resume_reentries=0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 140 filtered out; finished in 1.22s
+
+EXIT_CODE=0
