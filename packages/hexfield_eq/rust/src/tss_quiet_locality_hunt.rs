@@ -20,15 +20,16 @@ use std::fmt::Write as _;
 use std::io::Write as _;
 
 use hexo_engine::{
-    apply_placement, hex_distance, HexCoord, HexoState, Placement, Player, TurnPhase, WindowKey,
+    apply_placement, hex_distance, Axis, HexCoord, HexoState, Placement, Player, TurnPhase,
+    WindowKey,
 };
 
 use crate::threats_shared as threats;
 use crate::tss_core::{CertVerify, DeepSolve, ProofStatus, SolveCaps, SolveGoal};
 use crate::tss_solver::{round3_shadow_certificate, TssSolver, WidthOptions};
 use crate::tss_verify::{
-    d6_transform_coord, CertNode, CertNodeId, RootBinding, TssCertificate, TssVerifier,
-    MAX_CERT_DEPTH,
+    d6_remap_certificate, d6_transform_coord, CertNode, CertNodeId, RootBinding, TssCertificate,
+    TssVerifier, D6_SYMMETRY_COUNT, MAX_CERT_DEPTH,
 };
 
 // ------------------------------------------------------------------------
@@ -591,8 +592,9 @@ fn count_forcing_threats(state: &HexoState, claimant: Player) -> usize {
 /// Faithful replica of the engine's `turn_forces_small_defender_reply`
 /// (private in `tss_solver`). `state` is the post-turn position with the
 /// DEFENDER to move. Returns true when the attacker's turn forces a tight
-/// defender reply (a win now, or an exactly-b hitting obligation). The engine's
-/// `quiet_turn_or_edges` machinery fires exactly when this is FALSE.
+/// defender reply (a win now, or an exactly-b hitting obligation). The shadow
+/// census labels a completed SecondStone turn quiet exactly when this is false;
+/// the consume fallback itself is not gated by this predicate.
 fn engine_turn_forces_small_reply(state: &HexoState, claimant: Player) -> bool {
     let a = threats::analyze(state);
     let winner = if a.own_win_now {
@@ -898,10 +900,11 @@ struct SolveOutcome {
 }
 
 /// Solve width profile. `vcf_pair_complete` is the fast established wide engine
-/// (the profile the leaf-width records were mined with); `round3_consume`
-/// additionally enumerates the FULL legal quiet-turn universe at unforced
-/// attacker OR nodes -- correct but ~2 orders of magnitude heavier because the
-/// branching explodes to the full frontier. Locality measurement and the
+/// (the profile the leaf-width records were mined with); after the ordinary
+/// attacker frontier fails, `round3_consume` additionally enumerates the full
+/// legal fallback without consulting the quiet predicate. It is ~2 orders of
+/// magnitude heavier because branching can explode to the full frontier.
+/// Locality measurement and the
 /// `|legal|` universe count are position properties, identical either way, so
 /// the corpus sweeps use the fast profile and consume is reserved for
 /// specimens that genuinely need it.
@@ -909,10 +912,10 @@ struct SolveOutcome {
 enum SolveMode {
     Vcf,
     Consume,
-    /// Try the fast VCF profile first; only if it does not WIN (no pure-forcing
-    /// win exists) fall back to consume. This targets the quiet-REQUIRED class
-    /// (positions like double_fork_compact whose only win needs a quiet move)
-    /// while spending the heavy consume search only where it can matter.
+    /// Try the fast VCF profile first; if it does not return a certified WIN
+    /// under the configured limits, fall back to consume. This heuristically
+    /// targets candidate quiet-required positions without interpreting a VCF
+    /// miss as proof that no pure-forcing win exists.
     TwoStage,
 }
 
@@ -1397,6 +1400,251 @@ fn quiet_locality_human() {
 // TEST 4: adversarial remote defensive-tempo counterexamples.
 // ------------------------------------------------------------------------
 
+fn urgent_defender_empty_sets(state: &HexoState, attacker: Player) -> Vec<Vec<HexCoord>> {
+    let defender = attacker.other();
+    let mut threats = state
+        .board()
+        .windows()
+        .entries()
+        .filter(|entry| entry.active_player() == Some(defender) && entry.count(defender) >= 4)
+        .map(|entry| {
+            let mut empties = entry.empty_cells();
+            empties.sort_by_key(|cell| (cell.q, cell.r));
+            empties
+        })
+        .collect::<Vec<_>>();
+    threats.sort_by_key(|empties| {
+        empties
+            .first()
+            .map(|cell| (empties.len(), cell.q, cell.r))
+            .unwrap_or((0, 0, 0))
+    });
+    threats
+}
+
+fn reply_kernel_parts(
+    state: &HexoState,
+    attacker: Player,
+) -> (Vec<HexCoord>, Vec<HexCoord>, Vec<HexCoord>) {
+    let threats = urgent_defender_empty_sets(state, attacker);
+    let mut legal = Vec::new();
+    state.write_legal_moves(&mut legal);
+
+    let mut win_now = Vec::new();
+    for &cell in &legal {
+        let mut child = state.clone();
+        let result = apply_placement(&mut child, Placement { coord: cell })
+            .expect("enumerated reply-kernel move is legal");
+        if result
+            .outcome
+            .is_some_and(|outcome| outcome.winner == attacker)
+        {
+            win_now.push(cell);
+        }
+    }
+    let block_all = legal
+        .iter()
+        .copied()
+        .filter(|cell| threats.iter().all(|empties| empties.contains(cell)))
+        .collect::<Vec<_>>();
+    let mut kernel = win_now.clone();
+    kernel.extend(block_all.iter().copied());
+    kernel.sort_by_key(|cell| (cell.q, cell.r));
+    kernel.dedup();
+    (win_now, block_all, kernel)
+}
+
+fn assert_every_reply_kernel_omission_loses(state: &HexoState) {
+    let attacker = state.current_player();
+    assert!(matches!(state.phase(), TurnPhase::SecondStone { .. }));
+    let defender = attacker.other();
+    let threats = urgent_defender_empty_sets(state, attacker);
+    assert!(!threats.is_empty(), "fixture must be urgent");
+    let (_, _, kernel) = reply_kernel_parts(state, attacker);
+    let mut legal = Vec::new();
+    state.write_legal_moves(&mut legal);
+    for cell in legal {
+        if kernel.contains(&cell) {
+            continue;
+        }
+        let missed = threats
+            .iter()
+            .find(|empties| !empties.contains(&cell))
+            .expect("non-kernel non-win move misses an urgent window");
+        let mut child = state.clone();
+        let attack = apply_placement(&mut child, Placement { coord: cell })
+            .expect("enumerated attacker completion");
+        assert!(attack.outcome.is_none(), "Win1 move omitted from kernel");
+        assert_eq!(child.current_player(), defender);
+        assert!(matches!(child.phase(), TurnPhase::FirstStone));
+        let mut won = false;
+        for &reply in missed {
+            let result = apply_placement(&mut child, Placement { coord: reply })
+                .expect("urgent defender completion remains legal");
+            if let Some(outcome) = result.outcome {
+                assert_eq!(outcome.winner, defender);
+                won = true;
+                break;
+            }
+        }
+        assert!(won, "defender did not complete the missed urgent window");
+    }
+}
+
+#[test]
+#[ignore = "NQ2 Q8: urgent reply-kernel adversarial phase matrix"]
+fn quiet_locality_adversarial_reply_kernel() {
+    // One count-four window with two distinct empties. Every omitted SecondStone
+    // completion lets the defender fill both cells in its next two-stone turn.
+    let count_four = [
+        (0, 0),
+        (0, 2),
+        (1, 2),
+        (-1, 2),
+        (-3, -1),
+        (2, 2),
+        (3, 2),
+        (1, -3),
+        (4, -1),
+        (-3, 3),
+        (4, -3),
+        (5, 1),
+    ];
+    let state = replay_moves(&count_four).expect("count-four Q8 replay");
+    assert_eq!(
+        state.phase(),
+        TurnPhase::SecondStone {
+            first: HexCoord::new(5, 1)
+        }
+    );
+    let threats = urgent_defender_empty_sets(&state, Player::Player0);
+    assert_eq!(
+        threats,
+        vec![vec![HexCoord::new(4, 2), HexCoord::new(5, 2)]]
+    );
+    let (win_now, block_all, kernel) = reply_kernel_parts(&state, Player::Player0);
+    assert!(win_now.is_empty());
+    assert_eq!(block_all, vec![HexCoord::new(4, 2), HexCoord::new(5, 2)]);
+    assert_eq!(kernel, block_all);
+    assert_every_reply_kernel_omission_loses(&state);
+
+    // Four overlapping urgent windows (two count-five and two shifted
+    // count-four windows) have one common empty, so their exact intersection is
+    // a singleton.
+    let overlap = [
+        (0, 0),
+        (-3, 2),
+        (-2, 2),
+        (-4, 2),
+        (2, -4),
+        (-1, 2),
+        (0, 2),
+        (-4, -1),
+        (-3, -3),
+        (1, 2),
+        (2, -3),
+        (4, -3),
+        (5, -1),
+        (2, -2),
+        (2, -1),
+        (5, 2),
+        (4, 4),
+        (2, 0),
+        (2, 1),
+        (-2, 5),
+    ];
+    let state = replay_moves(&overlap).expect("overlap Q8 replay");
+    assert_eq!(
+        state.phase(),
+        TurnPhase::SecondStone {
+            first: HexCoord::new(-2, 5)
+        }
+    );
+    assert_eq!(urgent_defender_empty_sets(&state, Player::Player0).len(), 4);
+    let (win_now, block_all, kernel) = reply_kernel_parts(&state, Player::Player0);
+    assert!(win_now.is_empty());
+    assert_eq!(block_all, vec![HexCoord::new(2, 2)]);
+    assert_eq!(kernel, block_all);
+    assert_every_reply_kernel_omission_loses(&state);
+
+    // Disjoint defender threats have empty BlockAll, but the stored first stone
+    // has created an attacker count-five. Its immediate completion must survive
+    // through the Win1 arm of the union.
+    let disjoint_win_now = [
+        (0, 0),
+        (0, 2),
+        (0, 3),
+        (1, 0),
+        (2, 5),
+        (0, 4),
+        (-3, 1),
+        (2, 0),
+        (3, 5),
+        (0, 5),
+        (-3, 2),
+        (3, 0),
+        (4, 5),
+        (0, 6),
+        (-3, 3),
+        (5, 5),
+        (-4, -2),
+        (-3, 4),
+        (-3, 5),
+        (4, 0),
+    ];
+    let state = replay_moves(&disjoint_win_now).expect("disjoint Win1 Q8 replay");
+    assert_eq!(
+        state.phase(),
+        TurnPhase::SecondStone {
+            first: HexCoord::new(4, 0)
+        }
+    );
+    let (win_now, block_all, kernel) = reply_kernel_parts(&state, Player::Player0);
+    assert!(urgent_defender_empty_sets(&state, Player::Player0).len() >= 2);
+    assert!(block_all.is_empty());
+    let completion = HexCoord::new(5, 0);
+    assert!(win_now.contains(&completion));
+    assert!(kernel.contains(&completion));
+    assert_every_reply_kernel_omission_loses(&state);
+
+    // Phase guard: the same predicate is not complete at FirstStone because the
+    // attacker may spend its first placement outside K_reply and win with its
+    // stored second placement before the defender receives a turn.
+    let first_stone = [
+        (0, 0),
+        (0, 3),
+        (1, 3),
+        (1, 0),
+        (2, 0),
+        (2, 3),
+        (3, 3),
+        (3, 0),
+        (-1, 3),
+        (-1, 0),
+        (5, -2),
+    ];
+    let mut state = replay_moves(&first_stone).expect("FirstStone guard replay");
+    assert!(matches!(state.phase(), TurnPhase::FirstStone));
+    let (_, _, raw_kernel) = reply_kernel_parts(&state, Player::Player0);
+    let first = HexCoord::new(4, 0);
+    assert!(!raw_kernel.contains(&first));
+    let result =
+        apply_placement(&mut state, Placement { coord: first }).expect("winning pair first");
+    assert!(result.outcome.is_none());
+    assert_eq!(state.phase(), TurnPhase::SecondStone { first });
+    let result = apply_placement(
+        &mut state,
+        Placement {
+            coord: HexCoord::new(5, 0),
+        },
+    )
+    .expect("winning pair second");
+    assert_eq!(
+        result.outcome.map(|outcome| outcome.winner),
+        Some(Player::Player0)
+    );
+}
+
 #[test]
 #[ignore = "NQ2 quiet-locality: overlap-family remote-seed counterexample"]
 fn quiet_locality_adversarial_family_geometry() {
@@ -1436,7 +1684,12 @@ fn quiet_locality_adversarial_family_geometry() {
         })
         .map(|(window, _)| *window)
         .collect::<Vec<_>>();
-    assert!(!born.is_empty());
+    assert_eq!(before.len(), 44, "old-live census drift");
+    assert_eq!(born.len(), 16, "born delta-five census drift");
+    assert!(born.contains(&WindowKey {
+        start: HexCoord::new(5, 0),
+        axis: Axis::R,
+    }));
     assert!(born
         .iter()
         .any(|new_window| before.iter().any(|(old, _)| new_window.intersects(*old))));
@@ -1453,6 +1706,7 @@ fn quiet_locality_adversarial_family_geometry() {
 #[test]
 #[ignore = "NQ2 quiet-locality: targeted required-remote quiet-win search"]
 fn quiet_locality_adversarial_required_remote() {
+    const FROZEN_ID: &str = "trapped_origin_diag_build6";
     let cap: u64 = std::env::var("QL_ADV_CAP")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -1593,10 +1847,86 @@ fn quiet_locality_adversarial_required_remote() {
                 .find_map(|(candidate, _, is_hit)| (*candidate == name).then_some(*is_hit))
                 .expect("named candidate")
         };
+        let candidate_size = |name: &str| {
+            candidates
+                .iter()
+                .find_map(|(candidate, size, _)| (*candidate == name).then_some(*size))
+                .expect("named candidate")
+        };
         assert!(!hit("join_live"), "{} unexpectedly joins live", case.id);
         assert!(!hit("join_adj2"), "{} unexpectedly hits join_adj2", case.id);
         assert!(!hit("join_adj1"), "{} unexpectedly hits join_adj1", case.id);
         assert!(d_stone > 1);
+        if case.id == FROZEN_ID {
+            let frozen_replay = [
+                (0, 0),
+                (-1, 0),
+                (1, -1),
+                (1, 0),
+                (2, 0),
+                (2, -2),
+                (3, -3),
+                (3, 0),
+                (4, 6),
+                (4, -4),
+                (5, -5),
+                (1, 3),
+                (2, 3),
+                (2, 1),
+                (5, 5),
+                (3, 3),
+                (0, 4),
+                (6, 2),
+                (-1, 5),
+                (0, 5),
+                (0, 6),
+                (7, 6),
+                (1, 6),
+                (5, 7),
+                (6, 7),
+                (6, 6),
+                (3, 6),
+                (7, 7),
+                (5, 6),
+                (-1, 6),
+                (1, 4),
+                (6, 5),
+                (7, 4),
+                (7, 3),
+                (7, 5),
+                (6, 0),
+            ];
+            assert_eq!(replay.as_slice(), frozen_replay.as_slice());
+            assert_eq!(root.placements_made(), 36);
+            assert_eq!(
+                root.phase(),
+                TurnPhase::SecondStone {
+                    first: HexCoord::new(6, 0)
+                }
+            );
+            assert_eq!(remote, HexCoord::new(6, -6));
+            assert_eq!(legal.len(), 538);
+            assert_eq!(d_stone, 6);
+            for (name, size) in [
+                ("join_live", 141usize),
+                ("join_adj2", 75),
+                ("join_adj1", 38),
+                ("adj_stone_k2", 93),
+                ("adj_stone_k1", 39),
+            ] {
+                assert_eq!(candidate_size(name), size, "{name} census drift");
+                assert!(!hit(name), "frozen remote entered {name}");
+            }
+            let threats = urgent_defender_empty_sets(&root, claimant);
+            assert_eq!(
+                threats,
+                vec![vec![remote], vec![remote, HexCoord::new(7, -7)],]
+            );
+            let (win_now, block_all, kernel) = reply_kernel_parts(&root, claimant);
+            assert!(win_now.is_empty());
+            assert_eq!(block_all, vec![remote]);
+            assert_eq!(kernel, vec![remote]);
+        }
         structural += 1;
 
         // Exact finite elimination: every other legal completion is
@@ -1631,6 +1961,9 @@ fn quiet_locality_adversarial_required_remote() {
             continue;
         }
         assert_eq!(alternatives_eliminated + 1, legal.len());
+        if case.id == FROZEN_ID {
+            assert_eq!(alternatives_eliminated, 537);
+        }
 
         let mut post = root.clone();
         let post_result = apply_placement(&mut post, Placement { coord: remote })
@@ -1666,6 +1999,13 @@ fn quiet_locality_adversarial_required_remote() {
             result.stats.nodes,
             result.cert.as_ref().map_or(0, |cert| cert.nodes.len()),
         );
+        if case.id == FROZEN_ID {
+            assert_eq!(
+                result.status,
+                ProofStatus::Loss,
+                "frozen continuation drift"
+            );
+        }
         if result.status == ProofStatus::Unknown {
             solver_unknown += 1;
             continue;
@@ -1677,6 +2017,7 @@ fn quiet_locality_adversarial_required_remote() {
 
         let mut cert = result.cert.expect("hard result carries certificate");
         assert!(TssVerifier.verify(&post, &cert, ProofStatus::Loss));
+        assert!(TssVerifier.verify_with_dispatch_oracle(&post, &cert, ProofStatus::Loss));
         assert_eq!(cert.claimant, claimant);
         let old_root = cert.root_node;
         let parent_root = u32::try_from(cert.nodes.len()).expect("certificate node id");
@@ -1687,6 +2028,106 @@ fn quiet_locality_adversarial_required_remote() {
         cert.root_node = parent_root;
         cert.root = RootBinding::from_state(&root);
         assert!(TssVerifier.verify(&root, &cert, ProofStatus::Win));
+        assert!(TssVerifier.verify_with_dispatch_oracle(&root, &cert, ProofStatus::Win));
+        if case.id == FROZEN_ID {
+            assert_eq!(cert.semantic_horizon, 36u32.saturating_add(horizon_slack));
+
+            // Close the claimed D6 family on this exact witness: replay, phase,
+            // locality census, unique alternative elimination, quiet gate, and
+            // the complete remapped certificate all survive every symmetry.
+            for symmetry in 0..D6_SYMMETRY_COUNT {
+                let transformed_replay = d6_moves(&replay, symmetry).expect("D6 replay mapping");
+                let transformed_root =
+                    replay_moves(&transformed_replay).expect("D6 witness replay");
+                let transformed_remote =
+                    d6_transform_coord(remote, symmetry).expect("D6 remote mapping");
+                let transformed_first = d6_transform_coord(HexCoord::new(6, 0), symmetry)
+                    .expect("D6 stored-first mapping");
+                assert_eq!(
+                    transformed_root.phase(),
+                    TurnPhase::SecondStone {
+                        first: transformed_first
+                    }
+                );
+                let transformed_cert =
+                    d6_remap_certificate(&cert, symmetry).expect("D6 certificate mapping");
+                assert_eq!(
+                    transformed_cert.root,
+                    RootBinding::from_state(&transformed_root)
+                );
+                assert!(TssVerifier.verify(&transformed_root, &transformed_cert, ProofStatus::Win));
+
+                let mut transformed_legal = Vec::new();
+                transformed_root.write_legal_moves(&mut transformed_legal);
+                assert_eq!(transformed_legal.len(), 538);
+                assert!(transformed_legal.contains(&transformed_remote));
+                let transformed_live = live_attacker_windows(&transformed_root, claimant);
+                let transformed_families = build_families(&transformed_live);
+                let transformed_stones = attacker_stones(&transformed_root, claimant);
+                let transformed_distance = transformed_stones
+                    .iter()
+                    .map(|stone| i32::from(hex_distance(transformed_remote, *stone)))
+                    .min()
+                    .expect("transformed claimant stones");
+                assert_eq!(transformed_distance, 6);
+                let transformed_candidates = candidate_universes(
+                    &transformed_legal,
+                    transformed_remote,
+                    &transformed_live,
+                    &transformed_families,
+                    &transformed_stones,
+                );
+                for (name, size) in [
+                    ("join_live", 141usize),
+                    ("join_adj2", 75),
+                    ("join_adj1", 38),
+                    ("adj_stone_k2", 93),
+                    ("adj_stone_k1", 39),
+                ] {
+                    let (_, actual_size, actual_hit) = transformed_candidates
+                        .iter()
+                        .find(|(candidate, _, _)| *candidate == name)
+                        .expect("transformed named candidate");
+                    assert_eq!(*actual_size, size, "D6 {name} census drift");
+                    assert!(!*actual_hit, "D6 remote entered {name}");
+                }
+                let (_, transformed_block_all, transformed_kernel) =
+                    reply_kernel_parts(&transformed_root, claimant);
+                assert_eq!(transformed_block_all, vec![transformed_remote]);
+                assert_eq!(transformed_kernel, vec![transformed_remote]);
+
+                for &alternative in &transformed_legal {
+                    if alternative == transformed_remote {
+                        continue;
+                    }
+                    let mut child = transformed_root.clone();
+                    let attack = apply_placement(&mut child, Placement { coord: alternative })
+                        .expect("D6 alternative legal");
+                    assert!(attack.outcome.is_none());
+                    let defense = apply_placement(
+                        &mut child,
+                        Placement {
+                            coord: transformed_remote,
+                        },
+                    )
+                    .expect("D6 remote defense legal");
+                    assert_eq!(
+                        defense.outcome.map(|outcome| outcome.winner),
+                        Some(defender)
+                    );
+                }
+                let mut transformed_post = transformed_root.clone();
+                let result = apply_placement(
+                    &mut transformed_post,
+                    Placement {
+                        coord: transformed_remote,
+                    },
+                )
+                .expect("D6 remote attacker block");
+                assert!(result.outcome.is_none());
+                assert!(!engine_turn_forces_small_reply(&transformed_post, claimant));
+            }
+        }
 
         eprintln!(
             "QL_ADV_WITNESS schema=1 id={} claimant={} phase=SecondStone remote=[{},{}] d_stone={} quiet=true legal={} eliminated={} candidates={} horizon={} cert_nodes={} replay={}",
@@ -1715,8 +2156,5 @@ fn quiet_locality_adversarial_required_remote() {
         solver_hard_nonloss,
         usize::from(witness.is_some()),
     );
-    assert!(
-        witness.is_some(),
-        "no required-remote quiet-win witness verified"
-    );
+    assert_eq!(witness, Some(FROZEN_ID), "frozen witness did not verify");
 }

@@ -1,0 +1,68 @@
+NQ2 HOSTILE REVIEW — referee PROOF_QUIET_LOCALITY.md. The document
+REFUTES the quiet-locality conjecture (frozen witness) and PROVES a
+salvage kernel Q8 (K_reply) that is a candidate for production
+consumption in a future Group-2 round. Your review guards that
+consumption: a wrong REFUTED wastes a real optimization; a wrong Q8
+PROVEN would prune a winning move in production. Attack both
+directions.
+
+You are working in
+E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-quiet-locality at
+commit 833020ed. You CANNOT git-commit. Write the review to
+REVIEW_QUIET_LOCALITY.md in the worktree root — incremental (verdict
+skeleton first).
+
+## Inputs
+1. PROOF_QUIET_LOCALITY.md — under review.
+2. HUNT_REPORT_QUIET_LOCALITY.md — the (now-refuted) empirical law and
+   definitions; check the proof's Q0 production-reading correction
+   against the actual engine.
+3. packages/hexfield_eq/rust/src/tss_quiet_locality_hunt.rs — the
+   adversarial harness; predicate-to-prose audit of both ignored tests.
+4. Engine ground truth (read-only): tss-vcf-width's tss_solver.rs
+   quiet_turn_or_edges consume path — verify Q0's claims (quiet as a
+   post-SecondStone edge property; unconditional consume fallback) and
+   that the witness replay uses production semantics.
+
+## Named attack surfaces
+A. The frozen witness (§2): replay it independently. Is the root
+   reachable and legal? Is the unique-win claim genuinely exhaustive
+   over all 538 completions (cap/horizon large enough that the 537
+   losses are proven losses, not Unknowns)? Is the winning move's
+   d_stone=6 / no-live-window classification computed by the same
+   census the conjecture uses? Is the certificate independently
+   verifier-accepted?
+B. Q8 K_reply kernel: the PROVEN one-turn argument — is 'urgent'
+   defined position-computably (defender count-4/5 window exists)? Does
+   the kernel's completeness proof cover BOTH the win-now case and the
+   block case at every urgent node shape (multiple disjoint defender
+   threats, overlapping threats, threats created by the attacker's own
+   first placement in the pair)? Is it phase-exact (SecondStone with a
+   stored first coordinate)? Construct adversarial urgent positions.
+C. Q6's consequence wording: does the document anywhere still permit an
+   exhaustion-based no-win inference from a restricted universe?
+D. Scope honesty: the Q0 reading correction — confirm the refutation
+   refutes the conjecture AS THE HUNT MEANT IT and as any production
+   consumption would have implemented it (not a strawman variant).
+E. The counterexample-family section (§2.5): are the claimed invariances
+   (geometry/ownership) actually proven or just asserted?
+
+## Machine work allowed
+Rerun the two ignored tests; add [ignore]-gated adversarial checks
+(especially B's urgent-node constructions). CARGO_TARGET_DIR=.target-hunt,
+one cargo, --test-threads=1, single run <=10 min, free RAM >9 GB before
+cargo (powershell "Get-CimInstance Win32_OperatingSystem | % {
+$_.FreePhysicalMemory/1MB }"); THREE other sessions may share this host
+— if below, wait and re-check.
+
+## Deliverable
+REVIEW_QUIET_LOCALITY.md: overall verdict (ACCEPT / ACCEPT-WITH-EDITS /
+REJECT); per-claim verdicts for the full Q0-Q9 ledger (CONFIRMED /
+BROKEN-with-refutation); explicit sign-off or objection on Q8 as a
+future production pre-filter spec; findings by severity; numbered
+repair list if not ACCEPT. Final message: verdict, tallies, sharpest
+findings, files.
+
+## Rules
+No commits. Work only in this worktree; siblings read-only. Do not edit
+the proof document. Truthfulness outranks completeness.
