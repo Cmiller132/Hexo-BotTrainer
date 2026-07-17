@@ -141,6 +141,22 @@ struct Aggregate {
     pn: PnReplayAggregate,
 }
 
+#[derive(Default)]
+struct LiveAggregate {
+    roots: u64,
+    wins: u64,
+    losses: u64,
+    unknowns: u64,
+    nodes: u64,
+    expansions: u64,
+    tt_entries: u64,
+    tt_hits: u64,
+    wall_nanos: u128,
+    gate_evaluations: u64,
+    gate_dismissals: u64,
+    gate_nanos: u64,
+}
+
 fn status_name(status: ProofStatus) -> &'static str {
     match status {
         ProofStatus::Win => "WIN",
@@ -661,6 +677,92 @@ fn solve_row(
     result.status
 }
 
+fn solve_live_row(
+    id: &str,
+    group: &str,
+    state: &HexoState,
+    caps: SolveCaps,
+    width: WidthOptions,
+    zone: ZoneSearchCaps,
+    aggregate: &mut LiveAggregate,
+) -> ProofStatus {
+    let mut solver = TssSolver::default();
+    solver.set_width_options(width);
+    solver.set_zone_options(zone);
+    let started = Instant::now();
+    let result = solver.solve_goal(state, &caps, SolveGoal::Win);
+    let elapsed = started.elapsed();
+    if let Some(cert) = result.cert.as_ref() {
+        assert!(
+            TssVerifier.verify(state, cert, result.status),
+            "live certificate verification failed for {id}"
+        );
+    }
+    assert_ne!(
+        result.status,
+        ProofStatus::Loss,
+        "live WIN-only solve returned LOSS"
+    );
+    aggregate.roots = aggregate.roots.saturating_add(1);
+    aggregate.nodes = aggregate.nodes.saturating_add(result.stats.nodes);
+    aggregate.expansions = aggregate.expansions.saturating_add(result.stats.expansions);
+    aggregate.tt_entries = aggregate.tt_entries.saturating_add(result.stats.tt_entries);
+    aggregate.tt_hits = aggregate.tt_hits.saturating_add(result.stats.tt_hits);
+    aggregate.wall_nanos = aggregate.wall_nanos.saturating_add(elapsed.as_nanos());
+    aggregate.gate_evaluations = aggregate
+        .gate_evaluations
+        .saturating_add(result.stats.interior_gate_evaluations);
+    aggregate.gate_dismissals = aggregate
+        .gate_dismissals
+        .saturating_add(result.stats.interior_gate_dismissals);
+    aggregate.gate_nanos = aggregate
+        .gate_nanos
+        .saturating_add(result.stats.interior_gate_nanos);
+    match result.status {
+        ProofStatus::Win => aggregate.wins = aggregate.wins.saturating_add(1),
+        ProofStatus::Loss => aggregate.losses = aggregate.losses.saturating_add(1),
+        ProofStatus::Unknown => aggregate.unknowns = aggregate.unknowns.saturating_add(1),
+    }
+    println!(
+        "IG_ROW group={group} id={id} cap={} horizon={} status={} nodes={} expansions={} tt_entries={} tt_hits={} gate_evals={} gate_dismissals={} gate_us={:.3} ms={:.3}",
+        caps.node_cap,
+        caps.semantic_horizon,
+        status_name(result.status),
+        result.stats.nodes,
+        result.stats.expansions,
+        result.stats.tt_entries,
+        result.stats.tt_hits,
+        result.stats.interior_gate_evaluations,
+        result.stats.interior_gate_dismissals,
+        result.stats.interior_gate_nanos as f64 / 1_000.0,
+        elapsed.as_secs_f64() * 1e3,
+    );
+    result.status
+}
+
+fn print_live_aggregate(group: &str, aggregate: &LiveAggregate) {
+    let mode = if std::env::var_os("TSS_INTERIOR_CENSUS_GATE").is_some_and(|value| value == "1") {
+        "on"
+    } else {
+        "off"
+    };
+    println!(
+        "IG_SUMMARY mode={mode} group={group} roots={} verdicts={}/{}/{} nodes={} expansions={} tt_entries={} tt_hits={} gate_evals={} gate_dismissals={} gate_ms={:.3} wall_ms={:.3}",
+        aggregate.roots,
+        aggregate.wins,
+        aggregate.losses,
+        aggregate.unknowns,
+        aggregate.nodes,
+        aggregate.expansions,
+        aggregate.tt_entries,
+        aggregate.tt_hits,
+        aggregate.gate_evaluations,
+        aggregate.gate_dismissals,
+        aggregate.gate_nanos as f64 / 1e6,
+        aggregate.wall_nanos as f64 / 1e6,
+    );
+}
+
 fn percentile(values: &mut [u64], numerator: usize, denominator: usize) -> u64 {
     if values.is_empty() {
         return 0;
@@ -893,4 +995,89 @@ fn pn_init_campaign() {
     }
     print_aggregate(&format!("human_{human_n}_cap10000"), &mut human_aggregate);
     println!("PNI_DONE result=PASS anomalies=0 soundness_findings=0");
+}
+
+#[test]
+#[ignore = "R-IG1 live on/off campaign; release-only, serialized, <=10 minutes"]
+fn interior_gate_live_campaign() {
+    let tt_bytes_cap = std::env::var("TSS_PN_INIT_TT_BYTES")
+        .ok()
+        .map(|value| value.parse().expect("numeric TT bytes"))
+        .unwrap_or(DEFAULT_TT_BYTES);
+    let human_n = std::env::var("TSS_PN_INIT_HUMAN_N")
+        .ok()
+        .map(|value| value.parse().expect("numeric human sample"))
+        .unwrap_or(100usize);
+    let corpus = forcing_corpus();
+
+    for cap in [10_000u64, 100_000] {
+        let group = format!("forcing_{cap}");
+        let mut aggregate = LiveAggregate::default();
+        for position in &corpus {
+            let status = solve_live_row(
+                &position.id,
+                &group,
+                &position.state,
+                SolveCaps {
+                    node_cap: cap,
+                    tt_bytes_cap,
+                    semantic_horizon: position.state.placements_made() + RELATIVE_HORIZON,
+                },
+                WidthOptions::vcf_pair_complete(),
+                ZoneSearchCaps::default(),
+                &mut aggregate,
+            );
+            assert!(
+                position.expect_win || status != ProofStatus::Win,
+                "forcing NO row {} became WIN",
+                position.id
+            );
+        }
+        print_live_aggregate(&group, &aggregate);
+    }
+
+    let compact = replay(DOUBLE_FORK_COMPACT);
+    let mut compact_aggregate = LiveAggregate::default();
+    solve_live_row(
+        "double_fork_compact",
+        "double_fork_compact",
+        &compact,
+        SolveCaps {
+            node_cap: 100_000,
+            tt_bytes_cap,
+            semantic_horizon: 45,
+        },
+        WidthOptions::round3_consume(),
+        ZoneSearchCaps {
+            enabled: true,
+            stale_area_filter: false,
+            count2_threshold: true,
+            pair_commutation: false,
+        },
+        &mut compact_aggregate,
+    );
+    print_live_aggregate("double_fork_compact", &compact_aggregate);
+
+    let games = human_games();
+    let roots = human_roots(&games, human_n);
+    assert_eq!(roots.len(), human_n, "human sample size drift");
+    let mut human_aggregate = LiveAggregate::default();
+    for (rank, root) in roots.iter().enumerate() {
+        let state = replay(&games[root.game].moves[..root.prefix]);
+        solve_live_row(
+            &format!("human_{rank:03}_g{}_p{}", root.game, root.prefix),
+            &format!("human_{human_n}_cap10000"),
+            &state,
+            SolveCaps {
+                node_cap: 10_000,
+                tt_bytes_cap,
+                semantic_horizon: state.placements_made() + RELATIVE_HORIZON,
+            },
+            WidthOptions::vcf_pair_complete(),
+            ZoneSearchCaps::default(),
+            &mut human_aggregate,
+        );
+    }
+    print_live_aggregate(&format!("human_{human_n}_cap10000"), &human_aggregate);
+    println!("IG_DONE result=PASS certificates=VERIFIED forcing_anomalies=0");
 }

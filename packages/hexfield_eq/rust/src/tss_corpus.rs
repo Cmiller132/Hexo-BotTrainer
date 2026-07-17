@@ -235,14 +235,19 @@ fn tss_corpus_check() {
             let result = solver.solve(&pos.state, &caps);
             let ms = t0.elapsed().as_secs_f64() * 1e3;
             println!(
-                "CORPUS id={} cap={cap} status={} expect={} nodes={} tt_hits={} tt_bytes_cap={} peak_tt_bytes={} ms={ms:.1}",
+                "CORPUS id={} cap={cap} status={} expect={} nodes={} expansions={} tt_entries={} tt_hits={} tt_bytes_cap={} peak_tt_bytes={} gate_evals={} gate_dismissals={} gate_us={:.3} ms={ms:.1}",
                 pos.id,
                 status_name(result.status),
                 if pos.expect_win { "WIN" } else { "NO" },
                 result.stats.nodes,
+                result.stats.expansions,
+                result.stats.tt_entries,
                 result.stats.tt_hits,
                 tt_bytes_cap,
                 result.stats.peak_tt_bytes,
+                result.stats.interior_gate_evaluations,
+                result.stats.interior_gate_dismissals,
+                result.stats.interior_gate_nanos as f64 / 1_000.0,
             );
             let (pair_ms, defender_ms, regen_ms, expand_ms, refresh_ms, insert_ms) =
                 crate::tss_solver::wide_gen_profile();

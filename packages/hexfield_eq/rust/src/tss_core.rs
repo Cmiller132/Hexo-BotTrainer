@@ -141,8 +141,13 @@ pub enum SolveGoal {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SolveStats {
     pub nodes: u64,
+    pub expansions: u64,
     pub tt_hits: u64,
+    pub tt_entries: u64,
     pub peak_tt_bytes: u64,
+    pub interior_gate_evaluations: u64,
+    pub interior_gate_dismissals: u64,
+    pub interior_gate_nanos: u64,
 }
 
 /// A deep solve's outcome: a typed status, an optional replayable certificate

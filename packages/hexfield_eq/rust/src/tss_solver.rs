@@ -15,6 +15,7 @@
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
+use std::time::Instant;
 
 use hexo_engine::{
     apply_placement, hex_distance, Axis, HexCoord, HexoState as RustHexoState, Placement, Player,
@@ -107,8 +108,7 @@ pub(crate) fn take_pn_init_telemetry_report() -> Option<PnInitTelemetryReport> {
     PN_INIT_TELEMETRY.with(|slot| slot.borrow_mut().take().map(|session| session.report))
 }
 
-#[cfg(test)]
-fn pn_init_lb_plies(phase: TurnPhase, census: u8) -> Option<u8> {
+fn interior_census_lb_plies(phase: TurnPhase, census: u8) -> Option<u8> {
     if census > 5 {
         return None;
     }
@@ -127,13 +127,12 @@ fn pn_init_lb_plies(phase: TurnPhase, census: u8) -> Option<u8> {
     }
 }
 
-#[cfg(test)]
-fn pn_init_coordinate_safe(state: &RustHexoState, h_rem: u32) -> bool {
+fn interior_census_coordinate_safe(state: &RustHexoState, h_rem: i64) -> bool {
     const SAFE: i64 = 16_383;
-    let Some(radius) = i64::from(h_rem)
-        .checked_add(1)
-        .and_then(|x| x.checked_mul(8))
-    else {
+    if h_rem < 0 {
+        return false;
+    }
+    let Some(radius) = h_rem.checked_add(1).and_then(|x| x.checked_mul(8)) else {
         return false;
     };
     let Some(limit) = SAFE.checked_sub(radius) else {
@@ -144,8 +143,64 @@ fn pn_init_coordinate_safe(state: &RustHexoState, h_rem: u32) -> bool {
         let r = i64::from(coord.r);
         q.checked_add(r)
             .and_then(|sum| sum.checked_neg())
-            .is_some_and(|s| q.abs() <= limit && r.abs() <= limit && s.abs() <= limit)
+            .and_then(|s| Some((q.checked_abs()?, r.checked_abs()?, s.checked_abs()?)))
+            .is_some_and(|(q_abs, r_abs, s_abs)| q_abs <= limit && r_abs <= limit && s_abs <= limit)
     })
+}
+
+#[derive(Clone, Copy, Debug)]
+struct InteriorCensusGateEvaluation {
+    dismiss: bool,
+    nanos: u64,
+}
+
+/// Evaluate Contract 8.1/8.2 for one interior claimant-owned bounded WIN arm.
+/// `None` means the node is outside the proved/elected scope and no census was
+/// scanned. A non-dismissing `Some` is still a measured live evaluation.
+fn evaluate_interior_census_gate(
+    state: &RustHexoState,
+    claimant: Player,
+    root_ply: u32,
+    semantic_horizon: u32,
+) -> Option<InteriorCensusGateEvaluation> {
+    if state.is_terminal()
+        || state.current_player() != claimant
+        || state.placements_made() <= root_ply
+        || !matches!(
+            state.phase(),
+            TurnPhase::FirstStone | TurnPhase::SecondStone { .. }
+        )
+    {
+        return None;
+    }
+
+    // Contract 8.2 requires widened, checked absolute-to-relative arithmetic.
+    let base_wide = i64::from(state.placements_made());
+    let semantic_wide = i64::from(semantic_horizon);
+    let h_rem = semantic_wide.checked_sub(base_wide)?;
+    if !(0..=8).contains(&h_rem) || !interior_census_coordinate_safe(state, h_rem) {
+        return None;
+    }
+
+    let started = Instant::now();
+    let mut census = 0u8;
+    let mut invariant_ok = true;
+    for entry in state.board().windows().entries() {
+        let ac = entry.count(claimant);
+        let dc = entry.count(claimant.other());
+        if ac > 5 || dc > 5 {
+            invariant_ok = false;
+        }
+        if ac > 0 && dc == 0 {
+            census = census.max(ac);
+        }
+    }
+    let lb_plies = invariant_ok
+        .then(|| interior_census_lb_plies(state.phase(), census))
+        .flatten();
+    let dismiss = lb_plies.is_some_and(|lb| i64::from(lb) > h_rem);
+    let nanos = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+    Some(InteriorCensusGateEvaluation { dismiss, nanos })
 }
 
 #[cfg(test)]
@@ -256,8 +311,10 @@ fn pn_init_record_node(
             };
         let census = win_arm.then_some(feature_census);
         let census_scan_nanos = if win_arm { feature_scan_nanos } else { 0 };
-        let lb_plies = census.and_then(|c| pn_init_lb_plies(state.phase(), c));
-        let coordinate_safe = h_rem.is_some_and(|h| pn_init_coordinate_safe(state, h));
+        let lb_plies = census.and_then(|c| interior_census_lb_plies(state.phase(), c));
+        let coordinate_safe = h_rem
+            .map(i64::from)
+            .is_some_and(|h| interior_census_coordinate_safe(state, h));
         let gate = !state.is_terminal()
             && win_arm
             && supported
@@ -555,6 +612,10 @@ impl TssSolver {
         #[cfg(test)]
         self.last_narrow_signatures.clear();
 
+        // Read once per solve. Search hot paths receive only this boolean.
+        let interior_census_gate =
+            std::env::var_os("TSS_INTERIOR_CENSUS_GATE").is_some_and(|value| value == "1");
+
         let effective_tt_cap = if self.tt_enabled {
             caps.tt_bytes_cap
         } else {
@@ -631,6 +692,7 @@ impl TssSolver {
                 caps.semantic_horizon,
                 self.zone,
                 self.width,
+                interior_census_gate,
             );
             #[cfg(test)]
             if let Some(signature) = attempt.tt_signature.as_ref() {
@@ -655,6 +717,7 @@ impl TssSolver {
                 caps.semantic_horizon,
                 self.zone,
                 self.width,
+                interior_census_gate,
             );
             #[cfg(test)]
             if let Some(signature) = attempt.tt_signature.as_ref() {
@@ -692,6 +755,7 @@ impl TssSolver {
         semantic_horizon: u32,
         zone: ZoneSearchCaps,
         width: WidthOptions,
+        interior_census_gate: bool,
     ) -> AttemptResult {
         if !width.vcf_pair_complete
             || (width.consumes_quiet_turns() && width.consumes_ranked_zone())
@@ -717,6 +781,7 @@ impl TssSolver {
                 zone,
                 width,
                 MAX_SEARCH_DEPTH,
+                interior_census_gate,
             );
         }
         let depth_cap = wide_search_final_depth(state.placements_made(), semantic_horizon);
@@ -729,6 +794,7 @@ impl TssSolver {
             semantic_horizon,
             depth_cap,
             width,
+            interior_census_gate,
         )
     }
 
@@ -741,6 +807,7 @@ impl TssSolver {
         semantic_horizon: u32,
         depth_cap: usize,
         width: WidthOptions,
+        interior_census_gate: bool,
     ) -> AttemptResult {
         let shared_bytes = self.shared_tt.current_bytes;
         let mut search = WidePnSearch::new_with_width(
@@ -752,6 +819,7 @@ impl TssSolver {
             depth_cap,
             width,
         );
+        search.interior_census_gate = interior_census_gate;
         let root = search.insert_root(state);
         search.run(state, root);
         #[cfg(test)]
@@ -799,8 +867,13 @@ impl TssSolver {
         }
         let stats = SolveStats {
             nodes: search.expansions,
+            expansions: search.expansions,
             tt_hits: search.tt_hits,
+            tt_entries: (search.by_position.len() + self.shared_tt.entry_count()) as u64,
             peak_tt_bytes: shared_bytes.saturating_add(search.peak_bytes) as u64,
+            interior_gate_evaluations: search.interior_gate_evaluations,
+            interior_gate_dismissals: search.interior_gate_dismissals,
+            interior_gate_nanos: search.interior_gate_nanos,
         };
         let cert = search
             .materialize(state, root)
@@ -923,8 +996,19 @@ fn unknown<C>(stats: SolveStats) -> DeepResult<C> {
 
 fn merge_stats(total: &mut SolveStats, part: SolveStats) {
     total.nodes = total.nodes.saturating_add(part.nodes);
+    total.expansions = total.expansions.saturating_add(part.expansions);
     total.tt_hits = total.tt_hits.saturating_add(part.tt_hits);
+    total.tt_entries = total.tt_entries.max(part.tt_entries);
     total.peak_tt_bytes = total.peak_tt_bytes.max(part.peak_tt_bytes);
+    total.interior_gate_evaluations = total
+        .interior_gate_evaluations
+        .saturating_add(part.interior_gate_evaluations);
+    total.interior_gate_dismissals = total
+        .interior_gate_dismissals
+        .saturating_add(part.interior_gate_dismissals);
+    total.interior_gate_nanos = total
+        .interior_gate_nanos
+        .saturating_add(part.interior_gate_nanos);
 }
 
 fn status_for_claimant(root_player: Player, claimant: Player) -> ProofStatus {
@@ -1687,6 +1771,10 @@ struct WidePnSearch {
     semantic_horizon: u32,
     depth_cap: usize,
     width: WidthOptions,
+    interior_census_gate: bool,
+    interior_gate_evaluations: u64,
+    interior_gate_dismissals: u64,
+    interior_gate_nanos: u64,
     expansions: u64,
     tt_hits: u64,
     current_bytes: usize,
@@ -1782,6 +1870,7 @@ impl WidePnSearch {
         zone: ZoneSearchCaps,
         width: WidthOptions,
         depth_cap: usize,
+        interior_census_gate: bool,
     ) -> AttemptResult {
         debug_assert!(
             !width.vcf_pair_complete
@@ -1801,16 +1890,12 @@ impl WidePnSearch {
             zone,
             width,
             depth_cap,
+            interior_census_gate,
         );
         let proof = search.prove(&mut work, claimant, root_ply, None);
 
         debug_assert_eq!(entry_key, PositionKey::from_state(&work));
 
-        let stats = SolveStats {
-            nodes: search.nodes,
-            tt_hits: search.tt_hits,
-            peak_tt_bytes: search.peak_tt_bytes as u64,
-        };
         let cert = proof.and_then(|root| {
             let (nodes, root_node) = compact_certificate(&search.arena, root)?;
             if search.can_admit_compact(&entry_key, &nodes) {
@@ -1829,8 +1914,14 @@ impl WidePnSearch {
             Some(cert)
         });
         let stats = SolveStats {
+            nodes: search.nodes,
+            expansions: search.nodes,
+            tt_hits: search.tt_hits,
+            tt_entries: search.tt_entry_count() as u64,
             peak_tt_bytes: search.peak_tt_bytes as u64,
-            ..stats
+            interior_gate_evaluations: search.interior_gate_evaluations,
+            interior_gate_dismissals: search.interior_gate_dismissals,
+            interior_gate_nanos: search.interior_gate_nanos,
         };
         AttemptResult {
             cert,
@@ -1876,6 +1967,10 @@ impl WidePnSearch {
             semantic_horizon,
             depth_cap,
             width,
+            interior_census_gate: false,
+            interior_gate_evaluations: 0,
+            interior_gate_dismissals: 0,
+            interior_gate_nanos: 0,
             expansions: 0,
             tt_hits: 0,
             current_bytes: 0,
@@ -2926,6 +3021,25 @@ impl WidePnSearch {
             }
         }
 
+        if self.interior_census_gate && state.current_player() == self.claimant {
+            if let Some(evaluation) = evaluate_interior_census_gate(
+                state,
+                self.claimant,
+                self.root_ply,
+                self.semantic_horizon,
+            ) {
+                self.interior_gate_evaluations = self.interior_gate_evaluations.saturating_add(1);
+                self.interior_gate_nanos =
+                    self.interior_gate_nanos.saturating_add(evaluation.nanos);
+                if evaluation.dismiss {
+                    self.interior_gate_dismissals = self.interior_gate_dismissals.saturating_add(1);
+                    self.entries[id].node = WidePnNode::Refuted;
+                    self.refresh(id);
+                    return WidePnStepOutcome::Progress;
+                }
+            }
+        }
+
         let (kind, mut children) = if state.current_player() == self.claimant {
             (WidePnKind::Choice, self.attack_children(state, depth))
         } else {
@@ -3679,6 +3793,10 @@ struct NarrowCompatSearch<'a> {
     zone: ZoneSearchCaps,
     width: WidthOptions,
     depth_cap: usize,
+    interior_census_gate: bool,
+    interior_gate_evaluations: u64,
+    interior_gate_dismissals: u64,
+    interior_gate_nanos: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -3707,6 +3825,10 @@ impl NarrowCompatSearch<'static> {
             zone: ZoneSearchCaps::default(),
             width: WidthOptions::default(),
             depth_cap: MAX_SEARCH_DEPTH,
+            interior_census_gate: false,
+            interior_gate_evaluations: 0,
+            interior_gate_dismissals: 0,
+            interior_gate_nanos: 0,
         }
     }
 }
@@ -3722,6 +3844,7 @@ impl<'a> NarrowCompatSearch<'a> {
         zone: ZoneSearchCaps,
         width: WidthOptions,
         depth_cap: usize,
+        interior_census_gate: bool,
     ) -> Self {
         let tt = BoundedTt::new(tt_bytes_cap, hash_mask);
         let peak_tt_bytes = tt.current_bytes.saturating_add(shared_tt.current_bytes);
@@ -3742,7 +3865,20 @@ impl<'a> NarrowCompatSearch<'a> {
             zone,
             width,
             depth_cap,
+            interior_census_gate,
+            interior_gate_evaluations: 0,
+            interior_gate_dismissals: 0,
+            interior_gate_nanos: 0,
         }
+    }
+
+    fn tt_entry_count(&self) -> usize {
+        self.tt.entry_count()
+            + self
+                .shared_tt
+                .as_ref()
+                .map(|shared| shared.entry_count())
+                .unwrap_or(0)
     }
 
     #[cfg(test)]
@@ -3834,8 +3970,30 @@ impl<'a> NarrowCompatSearch<'a> {
                 }
             }
 
+            let gate_dismissed = if self.interior_census_gate && state.current_player() == claimant
+            {
+                evaluate_interior_census_gate(state, claimant, self.root_ply, self.semantic_horizon)
+                    .is_some_and(|evaluation| {
+                        self.interior_gate_evaluations =
+                            self.interior_gate_evaluations.saturating_add(1);
+                        self.interior_gate_nanos =
+                            self.interior_gate_nanos.saturating_add(evaluation.nanos);
+                        if evaluation.dismiss {
+                            self.interior_gate_dismissals =
+                                self.interior_gate_dismissals.saturating_add(1);
+                        }
+                        evaluation.dismiss
+                    })
+            } else {
+                false
+            };
+
             let node = if state.current_player() == claimant {
-                self.prove_choice(state, claimant, ply, pair)
+                if gate_dismissed {
+                    None
+                } else {
+                    self.prove_choice(state, claimant, ply, pair)
+                }
             } else {
                 self.prove_universal(state, claimant, ply, &analysis, pair)
             };
@@ -5867,6 +6025,10 @@ impl BoundedTt {
             .then_some(entry.node)
     }
 
+    fn entry_count(&self) -> usize {
+        self.slots.iter().flatten().count()
+    }
+
     fn insert(&mut self, key: PositionKey, claimant: Player, node: CertNodeId) {
         if self.slots.is_empty() {
             return;
@@ -6183,6 +6345,10 @@ impl SharedProofCache {
             .then(|| entry.proof.clone())
     }
 
+    fn entry_count(&self) -> usize {
+        self.slots.iter().flatten().count()
+    }
+
     fn could_admit_minimal(&self, key: &PositionKey) -> bool {
         self.could_admit_heap(key, allocation_bytes(1, size_of::<CertNode>()))
     }
@@ -6487,6 +6653,76 @@ mod tests {
             .unwrap();
         }
         state
+    }
+
+    #[test]
+    fn interior_census_phase_tables_match_contract_8_1() {
+        let first = [10, 10, 9, 6, 2, 1];
+        let second = [12, 12, 9, 5, 4, 1];
+        for census in 0..=5u8 {
+            assert_eq!(
+                interior_census_lb_plies(TurnPhase::FirstStone, census),
+                Some(first[census as usize])
+            );
+            assert_eq!(
+                interior_census_lb_plies(
+                    TurnPhase::SecondStone {
+                        first: HexCoord::ZERO,
+                    },
+                    census,
+                ),
+                Some(second[census as usize])
+            );
+        }
+        assert_eq!(interior_census_lb_plies(TurnPhase::FirstStone, 6), None);
+        assert_eq!(interior_census_lb_plies(TurnPhase::Opening, 0), None);
+    }
+
+    #[test]
+    fn interior_census_secondstone_c3_uses_strict_ply_five_boundary() {
+        let state = replay(&[
+            (0, 0),
+            (2, 1),
+            (3, 1),
+            (-1, 0),
+            (0, -1),
+            (4, 1),
+            (1, 2),
+            (-1, 1),
+            (1, -1),
+            (1, 3),
+            (1, 4),
+            (-2, 0),
+            (0, -2),
+            (2, 0),
+            (3, -1),
+            (-2, 1),
+            (-1, -2),
+            (4, -2),
+        ]);
+        assert!(matches!(state.phase(), TurnPhase::SecondStone { .. }));
+        assert_eq!(
+            pn_init_census_features(&state, state.current_player()).0,
+            3,
+            "binding reachable witness must retain exact census c=3"
+        );
+        let root_ply = state.placements_made() - 1;
+        let through_four = evaluate_interior_census_gate(
+            &state,
+            state.current_player(),
+            root_ply,
+            state.placements_made() + 4,
+        )
+        .expect("eligible c=3 SecondStone evaluation");
+        assert!(through_four.dismiss);
+        let through_five = evaluate_interior_census_gate(
+            &state,
+            state.current_player(),
+            root_ply,
+            state.placements_made() + 5,
+        )
+        .expect("eligible c=3 SecondStone evaluation");
+        assert!(!through_five.dismiss, "LB == h must not gate");
     }
 
     fn cache_test_leaf() -> CertNode {
@@ -8095,6 +8331,7 @@ mod tests {
             u32::MAX,
             64,
             WidthOptions::vcf_pair_complete(),
+            false,
         );
         let cert = attempt.cert.expect("xsnfyll continuation must prove");
         assert!(attempt.stats.nodes < 10_000);
@@ -9222,6 +9459,7 @@ mod tests {
                 ZoneSearchCaps::default(),
                 WidthOptions::default(),
                 MAX_SEARCH_DEPTH,
+                false,
             );
             let root = context
                 .prove(&mut work, claimant, descendant_root.placements_made(), None)
