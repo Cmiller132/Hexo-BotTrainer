@@ -51,6 +51,9 @@ mod tss_spare_corpus;
 mod tss_k_reply_shadow;
 
 #[cfg(test)]
+mod tss_kernel_taxonomy;
+
+#[cfg(test)]
 mod tss_turn_quotient_hunt;
 
 #[cfg(test)]

@@ -1,0 +1,11 @@
+R-KT1 cargo launch readings, 2026-07-17 America/New_York
+All launch checks reported cargo_pids=none; the installed wait loop was therefore not entered.
+
+2026-07-17T12:13:23.0472077-04:00 unit-first-capture-attempt free_gib=15.293 standby_gib=2.867 availability_gib=18.159 required_availability_gib=10 required_free_gib=5
+2026-07-17T12:13:44.2041887-04:00 unit-retry free_gib=15.267 standby_gib=2.870 availability_gib=18.137 required_availability_gib=10 required_free_gib=5
+2026-07-17T12:14:16.1925206-04:00 production-build free_gib=15.208 standby_gib=3.058 availability_gib=18.267 required_availability_gib=10 required_free_gib=5
+2026-07-17T12:14:42.5652617-04:00 fast-shadow-off free_gib=15.218 standby_gib=3.096 availability_gib=18.314 required_availability_gib=10 required_free_gib=5
+2026-07-17T12:15:03.1606758-04:00 fast-shadow-on free_gib=15.304 standby_gib=3.106 availability_gib=18.411 required_availability_gib=10 required_free_gib=5
+2026-07-17T12:15:39.9262136-04:00 full-18-profile free_gib=15.298 standby_gib=3.111 availability_gib=18.409 required_availability_gib=12 required_free_gib=6
+
+The first unit attempt ended before compilation completed because PowerShell promoted Cargo's ordinary stderr progress to NativeCommandError. No cargo/rustc child remained. The retry used non-terminating native stderr capture and passed; both launch readings are retained above and in KERNEL_TAXONOMY_UNIT_RAW.log.

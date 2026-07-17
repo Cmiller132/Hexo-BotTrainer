@@ -1088,6 +1088,10 @@ impl TssSolver {
         let root = search.insert_root(state);
         search.run(state, root);
         #[cfg(test)]
+        if crate::tss_kernel_taxonomy::enabled() {
+            search.audit_kernel_taxonomy(state, root);
+        }
+        #[cfg(test)]
         {
             self.last_wide_root_numbers = Some((search.entries[root].pn, search.entries[root].dn));
         }
@@ -5229,6 +5233,163 @@ impl<'store> WidePnSearch<'store> {
             }
         }
         self.defender_children(state, defender_budget)
+    }
+
+    #[cfg(test)]
+    fn audit_kernel_taxonomy(&self, root_state: &RustHexoState, root: usize) {
+        let started = Instant::now();
+        let mut work = root_state.clone();
+        let mut visited = vec![false; self.entries.len()];
+        let mut traversal_errors = 0u64;
+        self.audit_kernel_taxonomy_node(&mut work, root, &mut visited, &mut traversal_errors);
+        let nanos = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+        crate::tss_kernel_taxonomy::record_audit(nanos, traversal_errors);
+    }
+
+    #[cfg(test)]
+    fn audit_kernel_taxonomy_node(
+        &self,
+        state: &mut RustHexoState,
+        id: usize,
+        visited: &mut [bool],
+        traversal_errors: &mut u64,
+    ) {
+        let Some(seen) = visited.get_mut(id) else {
+            *traversal_errors = (*traversal_errors).saturating_add(1);
+            return;
+        };
+        if *seen {
+            return;
+        }
+        *seen = true;
+        let Some(entry) = self.entries.get(id) else {
+            *traversal_errors = (*traversal_errors).saturating_add(1);
+            return;
+        };
+        let WidePnNode::Branch { kind, children } = &entry.node else {
+            return;
+        };
+
+        if matches!(kind, WidePnKind::Universal { .. }) {
+            let verdict = |child: &WidePnChild| {
+                if self.child_is_genuinely_proven(child) {
+                    crate::tss_kernel_taxonomy::ReplyVerdict::DefenderFails
+                } else if self.child_is_genuinely_refuted(child) {
+                    crate::tss_kernel_taxonomy::ReplyVerdict::DefenderRefutes
+                } else {
+                    crate::tss_kernel_taxonomy::ReplyVerdict::Unknown
+                }
+            };
+            match state.phase() {
+                TurnPhase::SecondStone { .. }
+                    if !children.is_empty()
+                        && children
+                            .iter()
+                            .all(|child| matches!(child.mv, WidePnMove::One(_))) =>
+                {
+                    let replies = children
+                        .iter()
+                        .filter_map(|child| match child.mv {
+                            WidePnMove::One(coord) => Some((coord, verdict(child))),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    crate::tss_kernel_taxonomy::observe_secondstone(state, self.claimant, replies);
+                }
+                TurnPhase::FirstStone
+                    if !children.is_empty()
+                        && children
+                            .iter()
+                            .all(|child| matches!(child.mv, WidePnMove::DefenderPair(_, _))) =>
+                {
+                    let pairs = children
+                        .iter()
+                        .filter_map(|child| match child.mv {
+                            WidePnMove::DefenderPair(left, right) => {
+                                Some((left, right, verdict(child)))
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    crate::tss_kernel_taxonomy::observe_firststone_pairs(
+                        state,
+                        self.claimant,
+                        pairs,
+                    );
+                }
+                TurnPhase::FirstStone
+                    if !children.is_empty()
+                        && children
+                            .iter()
+                            .all(|child| matches!(child.mv, WidePnMove::One(_))) =>
+                {
+                    let replies = children
+                        .iter()
+                        .filter_map(|child| match child.mv {
+                            WidePnMove::One(coord) => Some((coord, verdict(child))),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    crate::tss_kernel_taxonomy::observe_firststone_uncompressed(
+                        state,
+                        self.claimant,
+                        replies,
+                    );
+                }
+                _ => {
+                    let class = if children.is_empty() {
+                        "AND_UNSUPPORTED_EMPTY"
+                    } else if matches!(state.phase(), TurnPhase::Opening) {
+                        "AND_UNSUPPORTED_OPENING"
+                    } else {
+                        "AND_UNSUPPORTED_MOVE_SHAPE"
+                    };
+                    crate::tss_kernel_taxonomy::observe_unsupported(
+                        state,
+                        self.claimant,
+                        class,
+                        children.len(),
+                    );
+                }
+            }
+        }
+
+        for child in children {
+            let Some(child_id) = self.resolved_child_entry(child) else {
+                continue;
+            };
+            if visited.get(child_id).copied().unwrap_or(false) {
+                continue;
+            }
+            match child.mv {
+                WidePnMove::One(coord) => {
+                    let Ok((_result, delta)) = state.apply_with_delta(Placement { coord }) else {
+                        *traversal_errors = (*traversal_errors).saturating_add(1);
+                        continue;
+                    };
+                    self.audit_kernel_taxonomy_node(state, child_id, visited, traversal_errors);
+                    state.undo(delta);
+                }
+                WidePnMove::Pair(first, second) | WidePnMove::DefenderPair(first, second) => {
+                    let Ok((_first_result, first_delta)) =
+                        state.apply_with_delta(Placement { coord: first })
+                    else {
+                        *traversal_errors = (*traversal_errors).saturating_add(1);
+                        continue;
+                    };
+                    let Ok((_second_result, second_delta)) =
+                        state.apply_with_delta(Placement { coord: second })
+                    else {
+                        state.undo(first_delta);
+                        *traversal_errors = (*traversal_errors).saturating_add(1);
+                        continue;
+                    };
+                    self.audit_kernel_taxonomy_node(state, child_id, visited, traversal_errors);
+                    state.undo(second_delta);
+                    state.undo(first_delta);
+                }
+            }
+        }
     }
 
     fn defender_pair_children(&mut self, state: &mut RustHexoState) -> Option<Vec<WidePnChild>> {

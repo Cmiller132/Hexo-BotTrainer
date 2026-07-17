@@ -1,0 +1,79 @@
+R-KT1 — FORCED-REPLY KERNEL TAXONOMY, round 1 (owner-selected flagship; hunt + shadow; NO Lean this round)
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-kernel-taxonomy
+(branch hunt/kernel-taxonomy, HEAD = 369e6969). You CANNOT git-commit.
+Deliverables: TAXONOMY_KERNEL_REPLY.md (the class grid + conjectures) +
+HUNT_REPORT_KERNEL_TAXONOMY.md (shadow results + verdicts) + cfg(test)
+shadow instrumentation + retained raw logs.
+
+Read first (binding context):
+- E:\tss-lean\RESEARCH_AGENDA.md section 1.1 — the program statement.
+- docs/PROOF_TSS_DEFENDER_ZONES.md — the zone grammar (normative).
+- docs/TSS_SOLVER_PROOF.md — engine semantics.
+- BUILD_K_REPLY_CONSUME.md + the K_reply passages of
+  docs/PLAN_TSS_SOLVER_UPGRADES.md — the proven prototype (urgent
+  SecondStone, 538->1; shadow 220,160 fires, 0 counterexamples; G2R8
+  consumption sound but ~67ms/fire trigger tax -> +181% forcing wall,
+  flag TSS_K_REPLY_CONSUME stays off). Imitate that shadow methodology.
+- HUNT_REPORT_CAP_RESUME.md — current official baselines and profile.
+
+## Goal
+Generalize the single proven reply kernel into a TAXONOMY of
+defender-context classes, each with a conjectured reply kernel,
+shadow-validated corpus-wide. Every surviving class is a future certified
+AND-node width cut (<=37 -> <=k) and goes to the Lean proof queue.
+
+## Phase A — taxonomy design
+Derive a class grid from the zone grammar: candidate axes = urgency
+class, gate adjacency, touched vs virgin exposure zone, escape phase,
+plus any axes the grammar genuinely supports (do not invent axes the
+engine cannot decide from position state it already maintains). For each
+class record: (1) the conjectured kernel K (construction rule for the
+reply set, target |K| <= k); (2) a one-paragraph domination rationale —
+why an out-of-K defense should be dominated by an in-K one; (3) a sketch
+of an O(1) incremental trigger — what state maintained on make/unmake
+would decide class membership without rescanning (design only, no
+wiring). Classes whose rationale you cannot state honestly get marked
+NO-CONJECTURE and skipped in Phase B — that is taxonomy data, not
+failure.
+
+## Phase B — shadow validation (G2R7 semantics, corpus-wide)
+Default-off cfg(test) instrumentation behind TSS_KERNEL_TAXONOMY_SHADOW=1:
+at each AND node, classify the context, compute the conjectured K, and
+log a COUNTEREXAMPLE whenever an out-of-kernel defense is load-bearing
+(the out-of-K reply refutes while every in-K reply fails for the
+defender — same semantics as the G2R7 K_reply shadow). Per class report:
+fires, counterexamples (retain full specimens), collapse ratio (|K| vs
+enumerated width), and that class's share of defender-enumeration work
+(so each class's economic value is known). Run the official 1 GiB
+lazy+gate corpus profile (flags per HUNT_REPORT_CAP_RESUME.md;
+TSS_CAP_RESUME off for comparability). Shadow ONLY — no consumption
+wiring, no width restriction anywhere; production byte-identity when the
+flag is off (verify via the fast subset); strict verifier untouched.
+94gnnol is out of scope (owner ruling).
+
+## Phase C — verdicts
+Rank surviving classes (0 counterexamples AND material width share AND
+plausible cheap trigger) as the ordered Lean proof queue. For refuted
+classes, record the counterexample specimens and, where visible, the
+narrower sub-class the counterexample suggests. State honestly if the
+taxonomy collapses to only the already-proven class — a well-measured
+null is a complete round.
+
+## Rules
+CARGO_TARGET_DIR=.target-kernel; --target x86_64-pc-windows-msvc on
+EVERY cargo command; --test-threads=1. ONE cargo process host-wide is
+law and ANOTHER LANE (R-TS1) runs cargo in a different worktree: before
+every cargo invocation check for existing cargo processes (Get-Process
+cargo) and WAIT in a sleep-300 loop while any exists — do Phase-A
+design/doc work while waiting; NEVER kill or disturb other lanes'
+processes. RAM gates (relaxed 07-17 protocol): before any cargo,
+availability (= FreePhysicalMemory + standby cache via Get-Counter
+'\Memory\Standby Cache Normal Priority Bytes') >= 10 GB AND
+free-physical >= 5 GB; before each gate-class 1 GiB corpus profile,
+availability >= 12 GB AND free-physical >= 6 GB. Record both readings
+each time. cfg(test)-gated default-off instrumentation only; this
+worktree only; honest partial stop at a clean boundary is success.
+Final message: taxonomy summary (classes, conjectures), per-class shadow
+numbers, survivor ranking for the proof queue, files written, exact
+regen commands.

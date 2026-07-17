@@ -182,6 +182,11 @@ fn load_forcing_lines() -> Vec<ForcingLine> {
 fn tss_corpus_check() {
     let corpus = load_corpus();
     let tt_bytes_cap = test_tt_bytes_cap();
+    let kernel_taxonomy_shadow = crate::tss_kernel_taxonomy::enabled();
+    if kernel_taxonomy_shadow {
+        crate::tss_kernel_taxonomy::reset();
+        println!("KERNEL_TAXONOMY_MODE shadow=on consumption=off");
+    }
     let shared_fragments = std::env::var("TSS_SHARED_FRAGMENTS").ok().as_deref() == Some("1");
     let lazy_frontier = std::env::var("TSS_LAZY_FRONTIER").ok().as_deref() == Some("1");
     let interior_gate = std::env::var("TSS_INTERIOR_CENSUS_GATE").ok().as_deref() == Some("1");
@@ -317,6 +322,9 @@ fn tss_corpus_check() {
                 tt_bytes_cap,
                 semantic_horizon: u32::MAX,
             };
+            if kernel_taxonomy_shadow {
+                crate::tss_kernel_taxonomy::set_context(&pos.id, *cap);
+            }
             let t0 = Instant::now();
             let (result, resume_meta) = if let Some(solver) = resume_solver.as_ref() {
                 if resume_session.is_none() && !resume_unsupported {
@@ -510,6 +518,9 @@ fn tss_corpus_check() {
         live_ge3_seed_scans,
         live_ge3_seed_nanos as f64 / 1e6,
     );
+    if kernel_taxonomy_shadow {
+        crate::tss_kernel_taxonomy::print_report();
+    }
     println!(
         "CORPUS_DONE failures={} shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={} cap_resume={} resume_wall_ms={resume_total_ms:.3} resume_reentries={resume_total_reentries}",
         failures.len(),
