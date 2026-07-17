@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use hexo_engine::{apply_placement, HexCoord, HexoState, Placement, Player, TurnPhase};
 
-use crate::tss_core::{CertVerify, DeepSolve, ProofStatus, SolveCaps, SolveGoal};
+use crate::tss_core::{CertVerify, ClosureDebtStats, DeepSolve, ProofStatus, SolveCaps, SolveGoal};
 use crate::tss_solver::{
     round3_shadow_certificate, CapResumeError, CapResumeSession, TssSolver, WidthOptions,
 };
@@ -187,6 +187,8 @@ fn tss_corpus_check() {
     let interior_gate = std::env::var("TSS_INTERIOR_CENSUS_GATE").ok().as_deref() == Some("1");
     let k_reply_consume = std::env::var("TSS_K_REPLY_CONSUME").ok().as_deref() == Some("1");
     let cap_resume = std::env::var("TSS_CAP_RESUME").ok().as_deref() == Some("1");
+    let live_ge3_seed = std::env::var("TSS_LIVE_GE3_SEED").ok().as_deref() == Some("1");
+    let closure_counters = std::env::var("TSS_CLOSURE_COUNTERS").ok().as_deref() == Some("1");
     if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_SHARED_FRAGMENTS") {
         assert_eq!(
             expected,
@@ -222,13 +224,29 @@ fn tss_corpus_check() {
             "TSS_CAP_RESUME does not match gate expectation",
         );
     }
+    if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_LIVE_GE3_SEED") {
+        assert_eq!(
+            expected,
+            if live_ge3_seed { "1" } else { "0" },
+            "TSS_LIVE_GE3_SEED does not match gate expectation",
+        );
+    }
+    if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_CLOSURE_COUNTERS") {
+        assert_eq!(
+            expected,
+            if closure_counters { "1" } else { "0" },
+            "TSS_CLOSURE_COUNTERS does not match gate expectation",
+        );
+    }
     println!(
-        "CORPUS_MODE shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={} cap_resume={} tt_bytes_cap={tt_bytes_cap}",
+        "CORPUS_MODE shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={} cap_resume={} live_ge3_seed={} closure_counters={} tt_bytes_cap={tt_bytes_cap}",
         if shared_fragments { "on" } else { "off" },
         if lazy_frontier { "on" } else { "off" },
         if interior_gate { "on" } else { "off" },
         if k_reply_consume { "on" } else { "off" },
         if cap_resume { "on" } else { "off" },
+        if live_ge3_seed { "on" } else { "off" },
+        if closure_counters { "on" } else { "off" },
     );
     let selected_ids = std::env::var("TSS_CORPUS_ID").ok().map(|value| {
         let mut ids = value
@@ -268,6 +286,10 @@ fn tss_corpus_check() {
     let mut max_fragment_store_bytes = 0u64;
     let mut resume_total_ms = 0.0f64;
     let mut resume_total_reentries = 0u64;
+    let mut closure_total = ClosureDebtStats::default();
+    let mut stage_refresh_total = 0u64;
+    let mut live_ge3_seed_scans = 0u64;
+    let mut live_ge3_seed_nanos = 0u64;
     for pos in &corpus {
         if selected_ids
             .as_ref()
@@ -363,7 +385,7 @@ fn tss_corpus_check() {
             max_fragment_store_bytes =
                 max_fragment_store_bytes.max(result.stats.fragment_store_bytes);
             println!(
-                "CORPUS id={} cap={cap} status={} expect={} nodes={} expansions={} tt_entries={} tt_hits={} tt_bytes_cap={} peak_tt_bytes={} gate_evals={} gate_dismissals={} gate_us={:.3} ms={ms:.1}",
+                "CORPUS id={} cap={cap} status={} expect={} nodes={} expansions={} tt_entries={} tt_hits={} tt_bytes_cap={} peak_tt_bytes={} stage_refreshes={} gate_evals={} gate_dismissals={} gate_us={:.3} seed_scans={} seed_ms={:.3} ms={ms:.1}",
                 pos.id,
                 status_name(result.status),
                 if pos.expect_win { "WIN" } else { "NO" },
@@ -373,9 +395,41 @@ fn tss_corpus_check() {
                 result.stats.tt_hits,
                 tt_bytes_cap,
                 result.stats.peak_tt_bytes,
+                result.stats.stage_refreshes,
                 result.stats.interior_gate_evaluations,
                 result.stats.interior_gate_dismissals,
                 result.stats.interior_gate_nanos as f64 / 1_000.0,
+                result.stats.live_ge3_seed_scans,
+                result.stats.live_ge3_seed_nanos as f64 / 1_000_000.0,
+            );
+            stage_refresh_total = stage_refresh_total.saturating_add(result.stats.stage_refreshes);
+            live_ge3_seed_scans =
+                live_ge3_seed_scans.saturating_add(result.stats.live_ge3_seed_scans);
+            live_ge3_seed_nanos =
+                live_ge3_seed_nanos.saturating_add(result.stats.live_ge3_seed_nanos);
+            closure_total.merge(result.stats.closure_debt);
+            let closure = result.stats.closure_debt;
+            println!(
+                "CLOSURE_ROW id={} cap={cap} evaluated={} accepted={} retained={} selected={} linked={} expanded={} winning_choices={} winning_rank_bins={:?} reveal_evaluated={} reveal_prefix={} pair_ms={:.3} gate_ms={:.3} second_ms={:.3} eval_ms={:.3} dedup_ms={:.3} avoid_second_ms={:.3} avoid_eval_ms={:.3} avoid_dedup_ms={:.3}",
+                pos.id,
+                closure.pairs_evaluated,
+                closure.pairs_accepted,
+                closure.pairs_retained,
+                closure.pairs_selected,
+                closure.pairs_linked,
+                closure.pairs_expanded,
+                closure.winning_choice_nodes,
+                closure.winning_rank_bins,
+                closure.reveal_pair_evaluated,
+                closure.reveal_pair_prefix,
+                closure.pair_generation_nanos as f64 / 1e6,
+                closure.gate_build_nanos as f64 / 1e6,
+                closure.second_candidate_nanos as f64 / 1e6,
+                closure.pair_evaluation_nanos as f64 / 1e6,
+                closure.dedup_nanos as f64 / 1e6,
+                closure.avoidable_second_candidate_nanos as f64 / 1e6,
+                closure.avoidable_pair_evaluation_nanos as f64 / 1e6,
+                closure.avoidable_dedup_nanos as f64 / 1e6,
             );
             if let Some((pn, dn, stage_depth, advances, reentries)) = resume_meta {
                 println!(
@@ -431,6 +485,30 @@ fn tss_corpus_check() {
     };
     println!(
         "CORPUS_FRAGMENTS lookups={fragment_lookups} hits={fragment_hits} hit_rate_pct={fragment_hit_rate:.3} imports={fragment_imports} max_store_entries={max_fragment_store_entries} max_store_bytes={max_fragment_store_bytes}"
+    );
+    println!(
+        "CLOSURE_DONE evaluated={} accepted={} retained={} selected={} linked={} expanded={} winning_choices={} winning_rank_bins={:?} reveal_evaluated={} reveal_prefix={} pair_ms={:.3} gate_ms={:.3} second_ms={:.3} eval_ms={:.3} dedup_ms={:.3} avoid_second_ms={:.3} avoid_eval_ms={:.3} avoid_dedup_ms={:.3} stage_refreshes={} seed_scans={} seed_ms={:.3}",
+        closure_total.pairs_evaluated,
+        closure_total.pairs_accepted,
+        closure_total.pairs_retained,
+        closure_total.pairs_selected,
+        closure_total.pairs_linked,
+        closure_total.pairs_expanded,
+        closure_total.winning_choice_nodes,
+        closure_total.winning_rank_bins,
+        closure_total.reveal_pair_evaluated,
+        closure_total.reveal_pair_prefix,
+        closure_total.pair_generation_nanos as f64 / 1e6,
+        closure_total.gate_build_nanos as f64 / 1e6,
+        closure_total.second_candidate_nanos as f64 / 1e6,
+        closure_total.pair_evaluation_nanos as f64 / 1e6,
+        closure_total.dedup_nanos as f64 / 1e6,
+        closure_total.avoidable_second_candidate_nanos as f64 / 1e6,
+        closure_total.avoidable_pair_evaluation_nanos as f64 / 1e6,
+        closure_total.avoidable_dedup_nanos as f64 / 1e6,
+        stage_refresh_total,
+        live_ge3_seed_scans,
+        live_ge3_seed_nanos as f64 / 1e6,
     );
     println!(
         "CORPUS_DONE failures={} shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={} cap_resume={} resume_wall_ms={resume_total_ms:.3} resume_reentries={resume_total_reentries}",

@@ -164,6 +164,9 @@ struct Cell {
     gate_evaluations: u64,
     gate_dismissals: u64,
     gate_nanos: u64,
+    stage_refreshes: u64,
+    live_ge3_seed_scans: u64,
+    live_ge3_seed_nanos: u64,
     shared_reconfigs_max: u64,
     fragment_reconfigs_max: u64,
     shared_slots_max: u64,
@@ -449,6 +452,15 @@ fn run_cell(
             cell.gate_nanos = cell
                 .gate_nanos
                 .saturating_add(result.stats.interior_gate_nanos);
+            cell.stage_refreshes = cell
+                .stage_refreshes
+                .saturating_add(result.stats.stage_refreshes);
+            cell.live_ge3_seed_scans = cell
+                .live_ge3_seed_scans
+                .saturating_add(result.stats.live_ge3_seed_scans);
+            cell.live_ge3_seed_nanos = cell
+                .live_ge3_seed_nanos
+                .saturating_add(result.stats.live_ge3_seed_nanos);
 
             let reuse = solver.leaf_surface_reuse_snapshot();
             cell.shared_reconfigs_max =
@@ -531,13 +543,16 @@ fn print_cell(config: Config, cap: u64, horizon: u32, cell: &Cell) {
         batch_total_ns as f64 / 1_000_000.0,
     );
     println!(
-        "LEAF_SURFACE_TT config={} cap={} horizon={} nodes={} expansions={} tt_hits={} tt_entries_max={} peak_tt_bytes={} pressure={:.6} evictions={} admission_rejections={}",
+        "LEAF_SURFACE_TT config={} cap={} horizon={} nodes={} expansions={} tt_hits={} stage_refreshes={} seed_scans={} seed_ms={:.3} tt_entries_max={} peak_tt_bytes={} pressure={:.6} evictions={} admission_rejections={}",
         config.name(),
         cap,
         horizon,
         cell.nodes,
         cell.expansions,
         cell.tt_hits,
+        cell.stage_refreshes,
+        cell.live_ge3_seed_scans,
+        cell.live_ge3_seed_nanos as f64 / 1_000_000.0,
         cell.tt_entries_max,
         cell.peak_tt_bytes,
         cell.peak_tt_bytes as f64 / TT_BYTES as f64,
@@ -702,4 +717,75 @@ fn leaf_surface_campaign() {
             + k_off.verified
             + k_on.verified,
     );
+}
+
+fn run_live_ge3_leaf_arm(batches: &[Batch], enabled: bool, horizon: u32) -> Cell {
+    let old = std::env::var_os("TSS_LIVE_GE3_SEED");
+    if enabled {
+        std::env::set_var("TSS_LIVE_GE3_SEED", "1");
+    } else {
+        std::env::remove_var("TSS_LIVE_GE3_SEED");
+    }
+    let cell = run_cell(batches, Config::D, 500, horizon, None);
+    if let Some(value) = old {
+        std::env::set_var("TSS_LIVE_GE3_SEED", value);
+    } else {
+        std::env::remove_var("TSS_LIVE_GE3_SEED");
+    }
+    cell
+}
+
+#[test]
+#[ignore = "closure-debt live_ge3 selected Phase-3 D cells; serialized release-only"]
+fn closure_debt_live_ge3_leaf_ab() {
+    let batches = load_batches();
+    println!(
+        "CLOSURE_LEAF_MODE config=D_WIDE_LAZY_GATE cap=500 horizons=8,16 tt_bytes={} cap_resume=off shared_fragments=off k_reply=off",
+        TT_BYTES
+    );
+    for horizon in [8u32, 16] {
+        let off = run_live_ge3_leaf_arm(&batches, false, horizon);
+        let on = run_live_ge3_leaf_arm(&batches, true, horizon);
+        let mut regressions = 0u64;
+        let mut improvements = 0u64;
+        let mut contradictions = 0u64;
+        for (&off_status, &on_status) in off.status.iter().zip(&on.status) {
+            match (off_status, on_status) {
+                (ProofStatus::Win, ProofStatus::Unknown)
+                | (ProofStatus::Loss, ProofStatus::Unknown) => regressions += 1,
+                (ProofStatus::Unknown, ProofStatus::Win)
+                | (ProofStatus::Unknown, ProofStatus::Loss) => improvements += 1,
+                (ProofStatus::Win, ProofStatus::Loss) | (ProofStatus::Loss, ProofStatus::Win) => {
+                    contradictions += 1
+                }
+                _ => {}
+            }
+        }
+        let off_ns = off.solve_ns.iter().copied().sum::<u64>();
+        let on_ns = on.solve_ns.iter().copied().sum::<u64>();
+        println!(
+            "CLOSURE_LEAF_AB horizon={horizon} cap=500 off_verdicts={} on_verdicts={} regressions={regressions} improvements={improvements} contradictions={contradictions} off_expansions={} on_expansions={} off_tt_hits={} on_tt_hits={} off_stage_refreshes={} on_stage_refreshes={} off_verified={} on_verified={} off_wall_ms={:.3} on_wall_ms={:.3} wall_delta_pct={:.6} on_seed_scans={} on_seed_ms={:.3}",
+            off.wins + off.losses,
+            on.wins + on.losses,
+            off.expansions,
+            on.expansions,
+            off.tt_hits,
+            on.tt_hits,
+            off.stage_refreshes,
+            on.stage_refreshes,
+            off.verified,
+            on.verified,
+            off_ns as f64 / 1e6,
+            on_ns as f64 / 1e6,
+            if off_ns == 0 {
+                0.0
+            } else {
+                (on_ns as f64 / off_ns as f64 - 1.0) * 100.0
+            },
+            on.live_ge3_seed_scans,
+            on.live_ge3_seed_nanos as f64 / 1e6,
+        );
+        assert_eq!(contradictions, 0, "live_ge3 leaf status contradiction");
+    }
+    println!("CLOSURE_LEAF_DONE result=PASS");
 }

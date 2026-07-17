@@ -138,6 +138,77 @@ pub enum SolveGoal {
 }
 
 /// Per-solve diagnostics (telemetry only — never consulted for soundness).
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ClosureDebtStats {
+    pub(crate) pairs_evaluated: u64,
+    pub(crate) pairs_accepted: u64,
+    pub(crate) pairs_retained: u64,
+    pub(crate) pairs_selected: u64,
+    pub(crate) pairs_linked: u64,
+    pub(crate) pairs_expanded: u64,
+    pub(crate) winning_choice_nodes: u64,
+    pub(crate) winning_rank_bins: [u64; 8],
+    pub(crate) reveal_pair_evaluated: u64,
+    pub(crate) reveal_pair_prefix: u64,
+    pub(crate) pair_generation_nanos: u64,
+    pub(crate) gate_build_nanos: u64,
+    pub(crate) second_candidate_nanos: u64,
+    pub(crate) pair_evaluation_nanos: u64,
+    pub(crate) dedup_nanos: u64,
+    pub(crate) avoidable_second_candidate_nanos: u64,
+    pub(crate) avoidable_pair_evaluation_nanos: u64,
+    pub(crate) avoidable_dedup_nanos: u64,
+}
+
+#[cfg(test)]
+impl ClosureDebtStats {
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.pairs_evaluated = self.pairs_evaluated.saturating_add(other.pairs_evaluated);
+        self.pairs_accepted = self.pairs_accepted.saturating_add(other.pairs_accepted);
+        self.pairs_retained = self.pairs_retained.saturating_add(other.pairs_retained);
+        self.pairs_selected = self.pairs_selected.saturating_add(other.pairs_selected);
+        self.pairs_linked = self.pairs_linked.saturating_add(other.pairs_linked);
+        self.pairs_expanded = self.pairs_expanded.saturating_add(other.pairs_expanded);
+        self.winning_choice_nodes = self
+            .winning_choice_nodes
+            .saturating_add(other.winning_choice_nodes);
+        for (target, value) in self
+            .winning_rank_bins
+            .iter_mut()
+            .zip(other.winning_rank_bins)
+        {
+            *target = target.saturating_add(value);
+        }
+        self.reveal_pair_evaluated = self
+            .reveal_pair_evaluated
+            .saturating_add(other.reveal_pair_evaluated);
+        self.reveal_pair_prefix = self
+            .reveal_pair_prefix
+            .saturating_add(other.reveal_pair_prefix);
+        self.pair_generation_nanos = self
+            .pair_generation_nanos
+            .saturating_add(other.pair_generation_nanos);
+        self.gate_build_nanos = self.gate_build_nanos.saturating_add(other.gate_build_nanos);
+        self.second_candidate_nanos = self
+            .second_candidate_nanos
+            .saturating_add(other.second_candidate_nanos);
+        self.pair_evaluation_nanos = self
+            .pair_evaluation_nanos
+            .saturating_add(other.pair_evaluation_nanos);
+        self.dedup_nanos = self.dedup_nanos.saturating_add(other.dedup_nanos);
+        self.avoidable_second_candidate_nanos = self
+            .avoidable_second_candidate_nanos
+            .saturating_add(other.avoidable_second_candidate_nanos);
+        self.avoidable_pair_evaluation_nanos = self
+            .avoidable_pair_evaluation_nanos
+            .saturating_add(other.avoidable_pair_evaluation_nanos);
+        self.avoidable_dedup_nanos = self
+            .avoidable_dedup_nanos
+            .saturating_add(other.avoidable_dedup_nanos);
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SolveStats {
     pub nodes: u64,
@@ -163,6 +234,14 @@ pub struct SolveStats {
     pub interior_gate_evaluations: u64,
     pub interior_gate_dismissals: u64,
     pub interior_gate_nanos: u64,
+    #[cfg(test)]
+    pub(crate) stage_refreshes: u64,
+    #[cfg(test)]
+    pub(crate) live_ge3_seed_scans: u64,
+    #[cfg(test)]
+    pub(crate) live_ge3_seed_nanos: u64,
+    #[cfg(test)]
+    pub(crate) closure_debt: ClosureDebtStats,
 }
 
 /// A deep solve's outcome: a typed status, an optional replayable certificate

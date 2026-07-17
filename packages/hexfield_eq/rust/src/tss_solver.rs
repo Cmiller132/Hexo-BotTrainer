@@ -27,6 +27,8 @@ use hexo_engine::{
 };
 
 use crate::threats_shared as threats;
+#[cfg(test)]
+use crate::tss_core::ClosureDebtStats;
 use crate::tss_core::{
     seed_band_radius, CertVerify, DeepResult, DeepSolve, ProofStatus, SolveCaps, SolveGoal,
     SolveStats, ZoneSearchCaps,
@@ -1147,6 +1149,14 @@ impl TssSolver {
             interior_gate_evaluations: search.interior_gate_evaluations,
             interior_gate_dismissals: search.interior_gate_dismissals,
             interior_gate_nanos: search.interior_gate_nanos,
+            #[cfg(test)]
+            stage_refreshes: search.stage_refreshes,
+            #[cfg(test)]
+            live_ge3_seed_scans: search.live_ge3_seed_scans.get(),
+            #[cfg(test)]
+            live_ge3_seed_nanos: search.live_ge3_seed_nanos.get(),
+            #[cfg(test)]
+            closure_debt: *search.closure_stats.borrow(),
             ..SolveStats::default()
         };
         let mut promotions = Vec::new();
@@ -1479,6 +1489,10 @@ impl CapResumeSession {
                 interior_gate_evaluations: self.search.interior_gate_evaluations,
                 interior_gate_dismissals: self.search.interior_gate_dismissals,
                 interior_gate_nanos: self.search.interior_gate_nanos,
+                stage_refreshes: self.search.stage_refreshes,
+                live_ge3_seed_scans: self.search.live_ge3_seed_scans.get(),
+                live_ge3_seed_nanos: self.search.live_ge3_seed_nanos.get(),
+                closure_debt: *self.search.closure_stats.borrow(),
                 ..SolveStats::default()
             },
         };
@@ -1731,6 +1745,17 @@ fn merge_stats(total: &mut SolveStats, part: SolveStats) {
     total.interior_gate_nanos = total
         .interior_gate_nanos
         .saturating_add(part.interior_gate_nanos);
+    #[cfg(test)]
+    {
+        total.stage_refreshes = total.stage_refreshes.saturating_add(part.stage_refreshes);
+        total.live_ge3_seed_scans = total
+            .live_ge3_seed_scans
+            .saturating_add(part.live_ge3_seed_scans);
+        total.live_ge3_seed_nanos = total
+            .live_ge3_seed_nanos
+            .saturating_add(part.live_ge3_seed_nanos);
+        total.closure_debt.merge(part.closure_debt);
+    }
 }
 
 fn status_for_claimant(root_player: Player, claimant: Player) -> ProofStatus {
@@ -2134,6 +2159,27 @@ enum WideChildObligation<'a> {
 struct WideDeferredPosition {
     depth: usize,
     prior: WidePnPrior,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+struct ClosurePairNodeProfile {
+    evaluated: u64,
+    second_candidate_nanos: u64,
+    pair_evaluation_nanos: u64,
+    dedup_nanos: u64,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+struct ClosurePairChildProfile {
+    evaluation_ordinal: u64,
+    second_candidate_nanos: u64,
+    pair_evaluation_nanos: u64,
+    dedup_nanos: u64,
+    selected: bool,
+    linked: bool,
+    expanded: bool,
 }
 
 fn turn_start_defender_blocks(candidates: &[Candidate]) -> HashSet<HexCoord> {
@@ -3112,6 +3158,24 @@ struct WidePnSearch<'store> {
     #[cfg(test)]
     stage_refreshes: u64,
     #[cfg(test)]
+    live_ge3_seed: bool,
+    #[cfg(test)]
+    live_ge3_seed_scans: std::cell::Cell<u64>,
+    #[cfg(test)]
+    live_ge3_seed_nanos: std::cell::Cell<u64>,
+    #[cfg(test)]
+    closure_counters: bool,
+    #[cfg(test)]
+    closure_stats: RefCell<ClosureDebtStats>,
+    #[cfg(test)]
+    closure_pair_nodes: HashMap<usize, ClosurePairNodeProfile>,
+    #[cfg(test)]
+    closure_pair_children: HashMap<(usize, usize), ClosurePairChildProfile>,
+    #[cfg(test)]
+    closure_last_pair_node: std::cell::Cell<ClosurePairNodeProfile>,
+    #[cfg(test)]
+    closure_last_pair_children: RefCell<Vec<ClosurePairChildProfile>>,
+    #[cfg(test)]
     quotient_telemetry: Option<QuotientTelemetry>,
     entries: Vec<WidePnEntry>,
     by_position: HashMap<WidePositionKey, usize>,
@@ -3335,6 +3399,24 @@ impl<'store> WidePnSearch<'store> {
             #[cfg(test)]
             stage_refreshes: 0,
             #[cfg(test)]
+            live_ge3_seed: std::env::var("TSS_LIVE_GE3_SEED").ok().as_deref() == Some("1"),
+            #[cfg(test)]
+            live_ge3_seed_scans: std::cell::Cell::new(0),
+            #[cfg(test)]
+            live_ge3_seed_nanos: std::cell::Cell::new(0),
+            #[cfg(test)]
+            closure_counters: std::env::var("TSS_CLOSURE_COUNTERS").ok().as_deref() == Some("1"),
+            #[cfg(test)]
+            closure_stats: RefCell::new(ClosureDebtStats::default()),
+            #[cfg(test)]
+            closure_pair_nodes: HashMap::new(),
+            #[cfg(test)]
+            closure_pair_children: HashMap::new(),
+            #[cfg(test)]
+            closure_last_pair_node: std::cell::Cell::new(ClosurePairNodeProfile::default()),
+            #[cfg(test)]
+            closure_last_pair_children: RefCell::new(Vec::new()),
+            #[cfg(test)]
             quotient_telemetry: QuotientTelemetry::enabled(),
             entries: Vec::new(),
             by_position: HashMap::new(),
@@ -3429,17 +3511,48 @@ impl<'store> WidePnSearch<'store> {
         #[cfg(test)]
         let _gen_timer = WideGenTimer::start(&WIDE_GEN_PRIOR_NANOS);
         if state.current_player() == self.claimant {
-            WidePnPrior {
-                pn: pn_from_fork_degree(attacker_fork_degree(state, self.claimant)),
-                dn: 1,
-            }
+            let pn = pn_from_fork_degree(attacker_fork_degree(state, self.claimant));
+            #[cfg(test)]
+            let pn = if self.live_ge3_seed {
+                self.live_ge3_seed_prior(state)
+            } else {
+                pn
+            };
+            WidePnPrior { pn, dn: 1 }
         } else {
             let analysis = threats::analyze(state);
+            #[cfg(test)]
+            let pn = if self.live_ge3_seed {
+                self.live_ge3_seed_prior(state)
+            } else {
+                1
+            };
+            #[cfg(not(test))]
+            let pn = 1;
             WidePnPrior {
-                pn: 1,
+                pn,
                 dn: dn_from_tau(analysis.min_hitting_set),
             }
         }
+    }
+
+    #[cfg(test)]
+    fn live_ge3_seed_prior(&self, state: &RustHexoState) -> u32 {
+        let started = Instant::now();
+        let live_ge3 = state
+            .board()
+            .windows()
+            .entries()
+            .filter(|entry| {
+                entry.count(self.claimant) >= 3 && entry.count(self.claimant.other()) == 0
+            })
+            .count();
+        let nanos = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.live_ge3_seed_scans
+            .set(self.live_ge3_seed_scans.get().saturating_add(1));
+        self.live_ge3_seed_nanos
+            .set(self.live_ge3_seed_nanos.get().saturating_add(nanos));
+        pn_from_fork_degree(live_ge3)
     }
 
     /// The immutable first-placement width class is a root bootstrap only.
@@ -3452,8 +3565,15 @@ impl<'store> WidePnSearch<'store> {
     fn completed_turn_prior(&self, state: &RustHexoState) -> WidePnPrior {
         debug_assert_ne!(state.current_player(), self.claimant);
         let analysis = threats::analyze(state);
+        let pn = pn_from_fork_degree(analysis.opp_threat_count);
+        #[cfg(test)]
+        let pn = if self.live_ge3_seed {
+            self.live_ge3_seed_prior(state)
+        } else {
+            pn
+        };
         WidePnPrior {
-            pn: pn_from_fork_degree(analysis.opp_threat_count),
+            pn,
             dn: dn_from_tau(analysis.min_hitting_set),
         }
     }
@@ -3749,6 +3869,8 @@ impl<'store> WidePnSearch<'store> {
                     WidePnStepOutcome::Stalled
                 };
             };
+            #[cfg(test)]
+            self.record_closure_pair_selected(id, child_index);
             let (kind, child, child_pn_threshold, child_dn_threshold, _root_children_unlinked) = {
                 let WidePnNode::Branch { kind, children } = &self.entries[id].node else {
                     return WidePnStepOutcome::Stalled;
@@ -3907,6 +4029,15 @@ impl<'store> WidePnSearch<'store> {
                         self.insert_position(key, depth, child.prior)
                     });
                     self.set_child_entry(id, child_index, child_id);
+                    #[cfg(test)]
+                    if linked {
+                        self.record_closure_pair_linked(id, child_index);
+                    }
+                    #[cfg(test)]
+                    let closure_was_unexpanded = matches!(
+                        self.entries.get(child_id).map(|entry| &entry.node),
+                        Some(WidePnNode::Unexpanded)
+                    );
                     let outcome = self.work(
                         state,
                         child_id,
@@ -3914,6 +4045,15 @@ impl<'store> WidePnSearch<'store> {
                         child_pn_threshold,
                         child_dn_threshold,
                     );
+                    #[cfg(test)]
+                    if closure_was_unexpanded
+                        && !matches!(
+                            self.entries.get(child_id).map(|entry| &entry.node),
+                            Some(WidePnNode::Unexpanded)
+                        )
+                    {
+                        self.record_closure_pair_expanded(id, child_index);
+                    }
                     state.undo(second_delta);
                     state.undo(first_delta);
                     match outcome {
@@ -3978,6 +4118,42 @@ impl<'store> WidePnSearch<'store> {
         if let WidePnNode::Branch { children, .. } = &mut self.entries[parent].node {
             children[child].entry = Some(entry);
             children[child].future_key = None;
+        }
+    }
+
+    #[cfg(test)]
+    fn record_closure_pair_selected(&mut self, parent: usize, child: usize) {
+        let Some(profile) = self.closure_pair_children.get_mut(&(parent, child)) else {
+            return;
+        };
+        if !profile.selected {
+            profile.selected = true;
+            let stats = self.closure_stats.get_mut();
+            stats.pairs_selected = stats.pairs_selected.saturating_add(1);
+        }
+    }
+
+    #[cfg(test)]
+    fn record_closure_pair_linked(&mut self, parent: usize, child: usize) {
+        let Some(profile) = self.closure_pair_children.get_mut(&(parent, child)) else {
+            return;
+        };
+        if !profile.linked {
+            profile.linked = true;
+            let stats = self.closure_stats.get_mut();
+            stats.pairs_linked = stats.pairs_linked.saturating_add(1);
+        }
+    }
+
+    #[cfg(test)]
+    fn record_closure_pair_expanded(&mut self, parent: usize, child: usize) {
+        let Some(profile) = self.closure_pair_children.get_mut(&(parent, child)) else {
+            return;
+        };
+        if !profile.expanded {
+            profile.expanded = true;
+            let stats = self.closure_stats.get_mut();
+            stats.pairs_expanded = stats.pairs_expanded.saturating_add(1);
         }
     }
 
@@ -4476,7 +4652,74 @@ impl<'store> WidePnSearch<'store> {
         };
         self.entries[id].pn = numbers.0;
         self.entries[id].dn = numbers.1;
+        #[cfg(test)]
+        if self.closure_counters && previous.0 != 0 && numbers.0 == 0 {
+            self.record_closure_winning_rank(id);
+        }
         previous != numbers
+    }
+
+    #[cfg(test)]
+    fn record_closure_winning_rank(&mut self, id: usize) {
+        let winning_index = match &self.entries[id].node {
+            WidePnNode::Branch {
+                kind: WidePnKind::Choice,
+                children,
+            } => children
+                .iter()
+                .position(|child| self.child_numbers(child).0 == 0),
+            _ => None,
+        };
+        let Some(winning_index) = winning_index else {
+            return;
+        };
+        let rank = winning_index.saturating_add(1);
+        let bin = match rank {
+            1 => 0,
+            2 => 1,
+            3 => 2,
+            4 => 3,
+            5..=8 => 4,
+            9..=16 => 5,
+            17..=32 => 6,
+            _ => 7,
+        };
+        let mut stats = self.closure_stats.borrow_mut();
+        stats.winning_choice_nodes = stats.winning_choice_nodes.saturating_add(1);
+        stats.winning_rank_bins[bin] = stats.winning_rank_bins[bin].saturating_add(1);
+        let Some(node_profile) = self.closure_pair_nodes.get(&id).copied() else {
+            return;
+        };
+        let Some(child_profile) = self
+            .closure_pair_children
+            .get(&(id, winning_index))
+            .copied()
+        else {
+            return;
+        };
+        stats.reveal_pair_evaluated = stats
+            .reveal_pair_evaluated
+            .saturating_add(node_profile.evaluated);
+        stats.reveal_pair_prefix = stats
+            .reveal_pair_prefix
+            .saturating_add(child_profile.evaluation_ordinal);
+        stats.avoidable_second_candidate_nanos =
+            stats.avoidable_second_candidate_nanos.saturating_add(
+                node_profile
+                    .second_candidate_nanos
+                    .saturating_sub(child_profile.second_candidate_nanos),
+            );
+        stats.avoidable_pair_evaluation_nanos =
+            stats.avoidable_pair_evaluation_nanos.saturating_add(
+                node_profile
+                    .pair_evaluation_nanos
+                    .saturating_sub(child_profile.pair_evaluation_nanos),
+            );
+        stats.avoidable_dedup_nanos = stats.avoidable_dedup_nanos.saturating_add(
+            node_profile
+                .dedup_nanos
+                .saturating_sub(child_profile.dedup_nanos),
+        );
     }
 
     fn refresh(&mut self, id: usize) {
@@ -4609,12 +4852,32 @@ impl<'store> WidePnSearch<'store> {
             let children = self.defender_boundary_children(state, analysis.b);
             (WidePnKind::Universal { implicit_dispatch }, children)
         };
+        #[cfg(test)]
+        let closure_pair_profiles = if self.closure_counters
+            && kind == WidePnKind::Choice
+            && matches!(state.phase(), TurnPhase::FirstStone)
+        {
+            Some((
+                self.closure_last_pair_node.get(),
+                std::mem::take(&mut *self.closure_last_pair_children.borrow_mut()),
+            ))
+        } else {
+            None
+        };
         children.shrink_to_fit();
         self.entries[id].node = if children.is_empty() {
             WidePnNode::Refuted
         } else {
             WidePnNode::Branch { kind, children }
         };
+        #[cfg(test)]
+        if let Some((node_profile, child_profiles)) = closure_pair_profiles {
+            self.closure_pair_nodes.insert(id, node_profile);
+            for (child_index, profile) in child_profiles.into_iter().enumerate() {
+                self.closure_pair_children
+                    .insert((id, child_index), profile);
+            }
+        }
         self.refresh(id);
         WidePnStepOutcome::Progress
     }
@@ -4640,13 +4903,46 @@ impl<'store> WidePnSearch<'store> {
         first: HexCoord,
         second: HexCoord,
     ) -> Option<(WidePnChildResult, WidePnPrior)> {
-        gate.evaluate_pair(first, second, self.semantic_horizon)
+        let (result, prior) = gate.evaluate_pair(first, second, self.semantic_horizon)?;
+        #[cfg(test)]
+        let prior = if self.live_ge3_seed {
+            let started = Instant::now();
+            let live_ge3 = gate.live_ge3_after_pair(first, second);
+            let nanos = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            self.live_ge3_seed_scans
+                .set(self.live_ge3_seed_scans.get().saturating_add(1));
+            self.live_ge3_seed_nanos
+                .set(self.live_ge3_seed_nanos.get().saturating_add(nanos));
+            WidePnPrior {
+                pn: pn_from_fork_degree(live_ge3),
+                dn: prior.dn,
+            }
+        } else {
+            prior
+        };
+        Some((result, prior))
     }
 
     fn attack_pair_children(&self, state: &mut RustHexoState, _depth: usize) -> Vec<WidePnChild> {
         #[cfg(test)]
         let _gen_timer = WideGenTimer::start(&WIDE_GEN_PAIR_NANOS);
+        #[cfg(test)]
+        let closure_started = self.closure_counters.then(Instant::now);
+        #[cfg(test)]
+        let gate_started = self.closure_counters.then(Instant::now);
         let gate = WideTurnGate::build(state, self.claimant);
+        #[cfg(test)]
+        let gate_build_nanos = gate_started
+            .map(|started| u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX))
+            .unwrap_or(0);
+        #[cfg(test)]
+        let mut pair_profile = ClosurePairNodeProfile::default();
+        #[cfg(test)]
+        let mut pair_child_profiles = Vec::new();
+        #[cfg(test)]
+        let mut accepted = 0u64;
+        #[cfg(test)]
+        let mut retained = 0u64;
         let first_candidates = ordered_threat_creating_moves_with_width(
             state,
             self.claimant,
@@ -4669,32 +4965,77 @@ impl<'store> WidePnSearch<'store> {
             {
                 #[cfg(test)]
                 let _regen_timer = WideGenTimer::start(&WIDE_GEN_PRIOR_NANOS);
+                #[cfg(test)]
+                let second_started = self.closure_counters.then(Instant::now);
                 gate.second_candidates(
                     first,
                     &first_candidates,
                     &mut second_coords,
                     &mut second_seen,
                 );
+                #[cfg(test)]
+                if let Some(started) = second_started {
+                    pair_profile.second_candidate_nanos =
+                        pair_profile.second_candidate_nanos.saturating_add(
+                            u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                        );
+                }
             }
             for &second in &second_coords {
                 // Stateless classification from the turn-start window
                 // snapshot: no engine applies in the pair double loop.
+                #[cfg(test)]
+                let evaluation_started = self.closure_counters.then(Instant::now);
                 let evaluated = self.evaluate_wide_pair_at_gate(&gate, first, second);
+                #[cfg(test)]
+                if let Some(started) = evaluation_started {
+                    pair_profile.evaluated = pair_profile.evaluated.saturating_add(1);
+                    pair_profile.pair_evaluation_nanos =
+                        pair_profile.pair_evaluation_nanos.saturating_add(
+                            u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                        );
+                }
                 if let Some((result, prior)) = evaluated {
+                    #[cfg(test)]
+                    if self.closure_counters {
+                        accepted = accepted.saturating_add(1);
+                    }
                     // Deduplicate the two legal orders by their actual
                     // unordered coordinate pair. Candidate membership is not
                     // monotone: a defender-block coordinate can disappear
                     // after the other stone, so coordinate-order pruning can
                     // incorrectly discard the only generated ordering.
-                    let first_key = raw_coord_key(first);
-                    let second_key = raw_coord_key(second);
-                    let pair_key = if first_key <= second_key {
-                        (first_key, second_key)
-                    } else {
-                        (second_key, first_key)
+                    #[cfg(test)]
+                    let dedup_started = self.closure_counters.then(Instant::now);
+                    let inserted = {
+                        let first_key = raw_coord_key(first);
+                        let second_key = raw_coord_key(second);
+                        let pair_key = if first_key <= second_key {
+                            (first_key, second_key)
+                        } else {
+                            (second_key, first_key)
+                        };
+                        seen_pairs.insert(pair_key)
                     };
-                    if !seen_pairs.insert(pair_key) {
+                    #[cfg(test)]
+                    if let Some(started) = dedup_started {
+                        pair_profile.dedup_nanos = pair_profile.dedup_nanos.saturating_add(
+                            u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                        );
+                    }
+                    if !inserted {
                         continue;
+                    }
+                    #[cfg(test)]
+                    if self.closure_counters {
+                        retained = retained.saturating_add(1);
+                        pair_child_profiles.push(ClosurePairChildProfile {
+                            evaluation_ordinal: pair_profile.evaluated,
+                            second_candidate_nanos: pair_profile.second_candidate_nanos,
+                            pair_evaluation_nanos: pair_profile.pair_evaluation_nanos,
+                            dedup_nanos: pair_profile.dedup_nanos,
+                            ..ClosurePairChildProfile::default()
+                        });
                     }
                     let mv = WidePnMove::Pair(first, second);
                     children.push(WidePnChild {
@@ -4713,6 +5054,30 @@ impl<'store> WidePnSearch<'store> {
                     });
                 }
             }
+        }
+        #[cfg(test)]
+        if self.closure_counters {
+            let pair_generation_nanos = closure_started
+                .map(|started| u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX))
+                .unwrap_or(0);
+            let mut stats = self.closure_stats.borrow_mut();
+            stats.pairs_evaluated = stats.pairs_evaluated.saturating_add(pair_profile.evaluated);
+            stats.pairs_accepted = stats.pairs_accepted.saturating_add(accepted);
+            stats.pairs_retained = stats.pairs_retained.saturating_add(retained);
+            stats.pair_generation_nanos = stats
+                .pair_generation_nanos
+                .saturating_add(pair_generation_nanos);
+            stats.gate_build_nanos = stats.gate_build_nanos.saturating_add(gate_build_nanos);
+            stats.second_candidate_nanos = stats
+                .second_candidate_nanos
+                .saturating_add(pair_profile.second_candidate_nanos);
+            stats.pair_evaluation_nanos = stats
+                .pair_evaluation_nanos
+                .saturating_add(pair_profile.pair_evaluation_nanos);
+            stats.dedup_nanos = stats.dedup_nanos.saturating_add(pair_profile.dedup_nanos);
+            drop(stats);
+            self.closure_last_pair_node.set(pair_profile);
+            *self.closure_last_pair_children.borrow_mut() = pair_child_profiles;
         }
         children
     }
@@ -4881,12 +5246,32 @@ impl<'store> WidePnSearch<'store> {
             plan.pairs
                 .into_iter()
                 .map(|pair| {
+                    #[cfg(test)]
+                    let final_prior = if self.live_ge3_seed {
+                        let (_, first_delta) = state
+                            .apply_with_delta(Placement { coord: pair.first })
+                            .expect("validated defender-pair first move");
+                        let (_, second_delta) = state
+                            .apply_with_delta(Placement { coord: pair.second })
+                            .expect("validated defender-pair second move");
+                        let prior = WidePnPrior {
+                            pn: self.live_ge3_seed_prior(state),
+                            dn: pair.final_prior.dn,
+                        };
+                        state.undo(second_delta);
+                        state.undo(first_delta);
+                        prior
+                    } else {
+                        pair.final_prior
+                    };
+                    #[cfg(not(test))]
+                    let final_prior = pair.final_prior;
                     let (entry, future_key) = if self.lazy_frontier {
-                        self.defer_position(&pair.final_key, depth, pair.final_prior);
+                        self.defer_position(&pair.final_key, depth, final_prior);
                         (None, Some(WideFutureKey::Virtual(pair.final_key)))
                     } else {
                         (
-                            Some(self.insert_position(pair.final_key, depth, pair.final_prior)),
+                            Some(self.insert_position(pair.final_key, depth, final_prior)),
                             None,
                         )
                     };
@@ -4895,7 +5280,7 @@ impl<'store> WidePnSearch<'store> {
                         result: WidePnChildResult::Pending,
                         entry,
                         future_key,
-                        prior: pair.final_prior,
+                        prior: final_prior,
                         urgent_block: false,
                         first_width_tier: 0,
                     }
@@ -6800,6 +7185,8 @@ struct WideTurnGate {
     weak_windows_by_cell: HashMap<HexCoord, Vec<WidePairWindow>>,
     /// Empties of every live defender >=4 window (the hit/block sets).
     defender_threats: Vec<Vec<HexCoord>>,
+    #[cfg(test)]
+    live_claimant_windows: Vec<WidePairWindow>,
     /// `placements_made` at turn start.
     start_placements: u32,
 }
@@ -6809,6 +7196,8 @@ impl WideTurnGate {
         let mut windows_by_cell: HashMap<HexCoord, Vec<WidePairWindow>> = HashMap::new();
         let mut weak_windows_by_cell: HashMap<HexCoord, Vec<WidePairWindow>> = HashMap::new();
         let mut defender_threats = Vec::new();
+        #[cfg(test)]
+        let mut live_claimant_windows = Vec::new();
         for entry in state.board().windows().entries() {
             let Some(owner) = entry.active_player() else {
                 continue;
@@ -6822,6 +7211,8 @@ impl WideTurnGate {
                         strength: count,
                         empties: empties.clone(),
                     };
+                    #[cfg(test)]
+                    live_claimant_windows.push(window.clone());
                     let sink = if count >= 2 {
                         &mut windows_by_cell
                     } else {
@@ -6839,8 +7230,23 @@ impl WideTurnGate {
             windows_by_cell,
             weak_windows_by_cell,
             defender_threats,
+            #[cfg(test)]
+            live_claimant_windows,
             start_placements: state.placements_made(),
         }
+    }
+
+    #[cfg(test)]
+    fn live_ge3_after_pair(&self, first: HexCoord, second: HexCoord) -> usize {
+        self.live_claimant_windows
+            .iter()
+            .filter(|window| {
+                window.strength
+                    + u8::from(window.empties.contains(&first))
+                    + u8::from(window.empties.contains(&second))
+                    >= 3
+            })
+            .count()
     }
 
     /// The second-ply candidate coordinates after the claimant plays `first`,
