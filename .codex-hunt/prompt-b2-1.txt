@@ -1,0 +1,54 @@
+DOMINATION b=2 EXPERIMENT ROUND — execute the reviewed §7 protocol with
+repairs 2–6 applied.
+
+Context: L-DISPATCH-B1 + L-DRQ are PROVEN and hostile-review CONFIRMED
+in this worktree (PROOF_DISPATCH_DOMINATION_ROUND1.md — read in full;
+REVIEW_DISPATCH_DOMINATION_ROUND1.md — repairs 2–6 BIND this
+experiment round; repairs 1+7 already applied to the proof doc). The
+b=1 dispatch-arm consumption is eligible behind its fence. The open
+question is b=2: does a domination pattern extend dispatch-arm
+consumption to budget-2 nodes? The review established that d=1,2 are
+NON-DISCRIMINATING (covered successors are analytically Unknown through
+d=2), so any discriminating experiment must reach d>=3. Owner
+directive: the campaign goal is a dramatically more efficient solver;
+this round decides whether a b=2 proof round is worth launching.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-domination
+(branch hunt/domination @17a6c6de). You CANNOT git-commit. Deliverable:
+EXPERIMENT_DOMINATION_B2.md (worktree root, incremental) + test-gated
+harness additions (this worktree already has the domination hunt
+harness — extend it; register under #[cfg(test)]). No production code
+changes.
+
+## Work order
+1. Read the §7 experiment protocol and restate it in the report WITH
+   repairs 2–6 folded in, each repair cited by number and quoted. Any
+   ambiguity after folding = state your resolution explicitly before
+   running.
+2. Implement and run the repaired protocol at d>=3 (and deeper if
+   budget allows). Corpora: the domination hunt's existing generators
+   plus the 19-corpus rows where b=2 nodes actually occur (measure and
+   report where they occur first).
+3. Classify outcomes per the protocol's taxonomy: dominated /
+   non-dominated with witness / analytically-Unknown. Every
+   non-domination witness gets frozen (deterministic seed + position
+   dump) — witnesses are the round's most valuable output either way.
+4. Verdict: (a) a b=2 domination pattern holds empirically at d>=3
+   with zero counterexamples over the corpus → state the exact
+   conjecture a proof round would owe (with the same fence discipline
+   as b=1: consumer branches on the computed mhs/budget pair); or
+   (b) counterexample found → the b=2 extension is DEAD; freeze the
+   witness and say so plainly. No middle verdict without naming
+   exactly what additional data would settle it.
+
+## Rules
+CARGO_TARGET_DIR=.target-hunt; ONE cargo process; --test-threads=1;
+single run <=10 min (downscope + document); free RAM >9 GB before every
+cargo (powershell "Get-CimInstance Win32_OperatingSystem | % {
+$_.FreePhysicalMemory/1MB }") — THREE other sessions share this 31 GB
+host (Lean lane priority; a heavy ULTRA build runs concurrently — be
+patient at the RAM gate); if below, wait and re-check. No commits. This
+worktree only; siblings read-only. rustfmt --edition 2021 only on files
+you edit. Truthfulness outranks completeness. Final message: repaired
+protocol summary, d>=3 results table, frozen witnesses if any, verdict
+(proof round / dead), files, regen commands.

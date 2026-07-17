@@ -42,7 +42,7 @@
 //!   * `dom_hunt_directed`  — a few hand-scripted legal sequences that force
 //!     junction / counterfork / relay shapes, adjudicated the same way.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::time::Instant;
 
 use hexo_engine::{
@@ -52,6 +52,8 @@ use hexo_engine::{
 
 use crate::threats_shared as threats;
 use crate::tss_core::{ProofStatus, SolveCaps, SolveGoal};
+use crate::tss_reference;
+use crate::tss_reference_fast::{self, FastOrderingHint, FastReferenceConfig};
 use crate::tss_solver::{TssSolver, WidthOptions};
 
 // ==========================================================================
@@ -1277,6 +1279,819 @@ fn directed_scripts() -> Vec<(&'static str, Vec<(i16, i16)>)> {
 fn parse_cell(s: &str) -> HexCoord {
     let mut it = s.split(',').map(|t| t.trim().parse::<i16>().expect("i16"));
     HexCoord::new(it.next().unwrap(), it.next().unwrap())
+}
+
+// ==========================================================================
+// B2 EXACT EXPERIMENT -- repaired Section 7 protocol.
+//
+// These runners deliberately stay in this #[cfg(test)] module.  The dry
+// inventory discovers every corpus row/prefix at which a genuine defensive
+// FirstStone node occurs.  The exact runner evaluates one frozen first action
+// and one stopped depth per invocation.  Solving at P+u with d+1 plies is the
+// exhaustive second-stone aggregation F_d(u): the defender remains the mover
+// at SecondStone, so minimax ranges over every legal v (including cells newly
+// legalized by u) before the d-ply completed-child horizon.
+// ==========================================================================
+
+fn coord_key(c: HexCoord) -> (i16, i16) {
+    (c.q, c.r)
+}
+
+fn b2_h(state: &HexoState, node: &DefNode) -> Vec<HexCoord> {
+    let mut h = full_coverers(state, node, &node.hitters);
+    h.sort_by_key(|&c| coord_key(c));
+    h
+}
+
+fn b2_pair_covers(state: &HexoState, node: &DefNode, a: HexCoord, b: HexCoord) -> bool {
+    node.threats.iter().all(|&w| {
+        let empties = window_empties(state, w);
+        empties.contains(&a) || empties.contains(&b)
+    })
+}
+
+fn b2_split_firsts(state: &HexoState, node: &DefNode, h: &[HexCoord]) -> Vec<HexCoord> {
+    let mut split = BTreeSet::new();
+    for (i, &a) in node.hitters.iter().enumerate() {
+        if h.contains(&a) {
+            continue;
+        }
+        for &b in node.hitters.iter().skip(i + 1) {
+            if !h.contains(&b) && b2_pair_covers(state, node, a, b) {
+                split.insert(coord_key(a));
+                split.insert(coord_key(b));
+            }
+        }
+    }
+    split
+        .into_iter()
+        .map(|(q, r)| HexCoord::new(q, r))
+        .collect()
+}
+
+fn b2_hitting_sets(state: &HexoState, node: &DefNode) -> Vec<(HexCoord, HexCoord)> {
+    let mut pairs = Vec::new();
+    for (i, &a) in node.hitters.iter().enumerate() {
+        for &b in node.hitters.iter().skip(i + 1) {
+            if b2_pair_covers(state, node, a, b) {
+                pairs.push((a, b));
+            }
+        }
+    }
+    pairs
+}
+
+fn b2_position_dump(moves: &[(i16, i16)], prefix: usize) -> String {
+    moves[..prefix]
+        .iter()
+        .map(|&(q, r)| format!("[{q},{r}]"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn b2_coord_dump(cells: &[HexCoord]) -> String {
+    cells
+        .iter()
+        .map(|c| format!("[{},{}]", c.q, c.r))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn b2_pair_dump(pairs: &[(HexCoord, HexCoord)]) -> String {
+    pairs
+        .iter()
+        .map(|(a, b)| format!("[[{},{}],[{},{}]]", a.q, a.r, b.q, b.r))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+struct B2ForcingGame {
+    id: String,
+    moves: Vec<(i16, i16)>,
+}
+
+fn b2_forcing_corpus() -> Vec<B2ForcingGame> {
+    let text = include_str!("../corpus/forcing_corpus_moves.txt");
+    let mut lines = text.lines();
+    let mut games = Vec::new();
+    while let Some(header) = lines.next() {
+        if !header.starts_with("POS ") {
+            continue;
+        }
+        let mut id = None;
+        let mut nstones = None;
+        for field in header.split_whitespace().skip(1) {
+            let (key, value) = field.split_once('=').expect("forcing k=v field");
+            match key {
+                "id" => id = Some(value.to_string()),
+                "nstones" => nstones = Some(value.parse::<usize>().expect("forcing nstones")),
+                _ => {}
+            }
+        }
+        let nstones = nstones.expect("forcing row nstones");
+        let mut moves = Vec::with_capacity(nstones);
+        for _ in 0..nstones {
+            let mut fields = lines.next().expect("forcing stone").split_whitespace();
+            moves.push((
+                fields.next().unwrap().parse().unwrap(),
+                fields.next().unwrap().parse().unwrap(),
+            ));
+        }
+        assert_eq!(lines.next().map(str::trim), Some("END"));
+        games.push(B2ForcingGame {
+            id: id.expect("forcing row id"),
+            moves,
+        });
+    }
+    games
+}
+
+#[test]
+#[ignore = "b=2 first occurrence in the checked-in 19-row forcing corpus"]
+fn dom_hunt_b2_forcing_inventory() {
+    let games = b2_forcing_corpus();
+    assert_eq!(games.len(), 19, "forcing corpus row count changed");
+    let mut rows_with_b2 = 0usize;
+    let mut records = Vec::new();
+    for game in &games {
+        let mut state = HexoState::new();
+        let mut first = None;
+        let mut count = 0usize;
+        for prefix in 0..=game.moves.len() {
+            if let Some(node) = classify_def_node(&state) {
+                if node.first_stone && matches!(node.min_hitting_set, Some(1 | 2)) {
+                    count += 1;
+                    if first.is_none() {
+                        let h = b2_h(&state, &node);
+                        let split = b2_split_firsts(&state, &node, &h);
+                        let pairs = b2_hitting_sets(&state, &node);
+                        first = Some((
+                            prefix,
+                            node.min_hitting_set.unwrap(),
+                            node.legal.len(),
+                            h.len(),
+                            split.len(),
+                            pairs.len(),
+                        ));
+                        records.push(format!(
+                            "{{\"kind\":\"forcing-b2-first\",\"id\":\"{}\",\"prefix\":{},\"mhs\":{},\"legal\":{},\"h\":{},\"h_cells\":[{}],\"split_firsts\":{},\"split_cells\":[{}],\"hitting_sets\":{},\"hitting_set_cells\":[{}],\"position\":[{}]}}",
+                            game.id,
+                            prefix,
+                            node.min_hitting_set.unwrap(),
+                            node.legal.len(),
+                            h.len(),
+                            b2_coord_dump(&h),
+                            split.len(),
+                            b2_coord_dump(&split),
+                            pairs.len(),
+                            b2_pair_dump(&pairs),
+                            b2_position_dump(&game.moves, prefix)
+                        ));
+                    }
+                }
+            }
+            if prefix == game.moves.len() || state.is_terminal() {
+                break;
+            }
+            let (q, r) = game.moves[prefix];
+            apply_placement(
+                &mut state,
+                Placement {
+                    coord: HexCoord::new(q, r),
+                },
+            )
+            .expect("legal forcing-corpus replay");
+        }
+        if let Some((prefix, mhs, legal, h, split, pairs)) = first {
+            rows_with_b2 += 1;
+            println!(
+                "B2_FORCING id={} b2_nodes={} first_prefix={} first_mhs={} first_legal={} first_h={} first_split={} first_hsets={}",
+                game.id, count, prefix, mhs, legal, h, split, pairs
+            );
+        } else {
+            println!("B2_FORCING id={} b2_nodes=0 first=NONE", game.id);
+        }
+    }
+    if let Ok(path) = std::env::var("TSS_DOM_B2_FORCING_MANIFEST") {
+        let mut text = records.join("\n");
+        text.push('\n');
+        std::fs::write(&path, text)
+            .unwrap_or_else(|e| panic!("write forcing manifest {path}: {e}"));
+    }
+    println!(
+        "B2_FORCING_SUMMARY rows={} rows_with_b2={} rows_without_b2={}",
+        games.len(),
+        rows_with_b2,
+        games.len() - rows_with_b2
+    );
+}
+
+#[test]
+#[ignore = "b=2 repaired-protocol corpus inventory; --nocapture"]
+fn dom_hunt_b2_inventory() {
+    let games = load_corpus();
+    let mut rows_with_b2 = 0usize;
+    let mut total_b2 = 0usize;
+    let mut total_k1 = 0usize;
+    let mut total_k1_split = 0usize;
+    let mut total_k2 = 0usize;
+    let mut total_k2_multi = 0usize;
+    let mut records = Vec::new();
+
+    for game in games.iter().filter(|g| matches!(g.winner, -1 | 1)) {
+        let mut state = HexoState::new();
+        let mut row_nodes = Vec::new();
+        for prefix in 0..game.moves.len() {
+            if let Some(node) = classify_def_node(&state) {
+                if node.first_stone && matches!(node.min_hitting_set, Some(1 | 2)) {
+                    let h = b2_h(&state, &node);
+                    let split = b2_split_firsts(&state, &node, &h);
+                    let pairs = b2_hitting_sets(&state, &node);
+                    let k1 = node.min_hitting_set == Some(1);
+                    let k1_split = k1 && !split.is_empty();
+                    let k2 = node.min_hitting_set == Some(2);
+                    let k2_multi = k2 && pairs.len() >= 2;
+                    total_b2 += 1;
+                    total_k1 += usize::from(k1);
+                    total_k1_split += usize::from(k1_split);
+                    total_k2 += usize::from(k2);
+                    total_k2_multi += usize::from(k2_multi);
+                    let mut legal: Vec<_> = node.legal.iter().copied().collect();
+                    legal.sort_by_key(|&c| coord_key(c));
+                    let record = format!(
+                        "{{\"kind\":\"b2-parent\",\"game_hash\":\"{}\",\"prefix\":{},\"player\":{},\"mhs\":{},\"threats\":{},\"legal\":{},\"hitters\":{},\"h\":{},\"h_cells\":[{}],\"split_firsts\":{},\"split_cells\":[{}],\"hitting_sets\":{},\"hitting_set_cells\":[{}],\"position\":[{}]}}",
+                        game.game_hash,
+                        prefix,
+                        node.defender.index(),
+                        node.min_hitting_set.unwrap(),
+                        node.threats.len(),
+                        legal.len(),
+                        node.hitters.len(),
+                        h.len(),
+                        b2_coord_dump(&h),
+                        split.len(),
+                        b2_coord_dump(&split),
+                        pairs.len(),
+                        b2_pair_dump(&pairs),
+                        b2_position_dump(&game.moves, prefix)
+                    );
+                    records.push(record);
+                    row_nodes.push((
+                        prefix,
+                        node.min_hitting_set.unwrap(),
+                        legal.len(),
+                        h.len(),
+                        split.len(),
+                        pairs.len(),
+                    ));
+                }
+            }
+
+            let (q, r) = game.moves[prefix];
+            let result = apply_placement(
+                &mut state,
+                Placement {
+                    coord: HexCoord::new(q, r),
+                },
+            )
+            .expect("legal corpus replay during b2 inventory");
+            if result.outcome.is_some() {
+                break;
+            }
+        }
+        if let Some(first) = row_nodes.first() {
+            rows_with_b2 += 1;
+            println!(
+                "B2_ROW hash={} nodes={} first_prefix={} first_mhs={} first_legal={} first_h={} first_split={} first_hsets={}",
+                game.game_hash,
+                row_nodes.len(),
+                first.0,
+                first.1,
+                first.2,
+                first.3,
+                first.4,
+                first.5
+            );
+        }
+    }
+
+    if let Ok(path) = std::env::var("TSS_DOM_B2_MANIFEST") {
+        let mut text = records.join("\n");
+        text.push('\n');
+        std::fs::write(&path, text).unwrap_or_else(|e| panic!("write manifest {path}: {e}"));
+        println!("B2_MANIFEST path={path} rows={}", records.len());
+    }
+    println!(
+        "B2_INVENTORY corpus_rows={} b2_nodes={} k1={} k1_with_split={} k2={} k2_multi={} seed=7766554433221100",
+        rows_with_b2, total_b2, total_k1, total_k1_split, total_k2, total_k2_multi
+    );
+}
+
+#[test]
+#[ignore = "DRQ/P2 eligible-pair manifest counts for repaired b2 controls"]
+fn dom_hunt_b2_control_inventory() {
+    #[derive(Clone)]
+    struct AuditParent {
+        legal: usize,
+        hash: String,
+        prefix: usize,
+        state: HexoState,
+    }
+    fn retain_first_four(parents: &mut Vec<AuditParent>, item: AuditParent) {
+        parents.push(item);
+        parents.sort_by(|a, b| {
+            (a.legal, a.hash.as_str(), a.prefix).cmp(&(b.legal, b.hash.as_str(), b.prefix))
+        });
+        parents.truncate(4);
+    }
+
+    let games = load_corpus();
+    let mut k1 = Vec::new();
+    let mut k2 = Vec::new();
+    for game in games.iter().filter(|g| matches!(g.winner, -1 | 1)) {
+        let mut state = HexoState::new();
+        for prefix in 0..game.moves.len() {
+            if let Some(node) = classify_def_node(&state) {
+                if node.first_stone {
+                    let h = b2_h(&state, &node);
+                    if node.min_hitting_set == Some(1)
+                        && !b2_split_firsts(&state, &node, &h).is_empty()
+                    {
+                        retain_first_four(
+                            &mut k1,
+                            AuditParent {
+                                legal: node.legal.len(),
+                                hash: game.game_hash.clone(),
+                                prefix,
+                                state: state.clone(),
+                            },
+                        );
+                    } else if node.min_hitting_set == Some(2)
+                        && b2_hitting_sets(&state, &node).len() >= 2
+                    {
+                        retain_first_four(
+                            &mut k2,
+                            AuditParent {
+                                legal: node.legal.len(),
+                                hash: game.game_hash.clone(),
+                                prefix,
+                                state: state.clone(),
+                            },
+                        );
+                    }
+                }
+            }
+            let (q, r) = game.moves[prefix];
+            let result = apply_placement(
+                &mut state,
+                Placement {
+                    coord: HexCoord::new(q, r),
+                },
+            )
+            .expect("legal corpus replay during control inventory");
+            if result.outcome.is_some() {
+                break;
+            }
+        }
+    }
+
+    let mut drq_pairs = 0usize;
+    for parent in &k1 {
+        let node = classify_def_node(&parent.state).unwrap();
+        let mut eligible_here = 0usize;
+        for h in b2_h(&parent.state, &node) {
+            let (after_h, winner) = child_after(&parent.state, h);
+            assert!(winner.is_none());
+            let mut legal = Vec::new();
+            after_h.write_legal_moves(&mut legal);
+            let dead = legal
+                .into_iter()
+                .filter(|&c| cell_dead(&after_h, c))
+                .count();
+            eligible_here += dead.saturating_mul(dead.saturating_sub(1)) / 2;
+        }
+        drq_pairs += eligible_here;
+        println!(
+            "B2_DRQ_CONTROL hash={} prefix={} eligible_pairs={}",
+            parent.hash, parent.prefix, eligible_here
+        );
+    }
+
+    let mut p2_pairs = 0usize;
+    for parent in &k2 {
+        let node = classify_def_node(&parent.state).unwrap();
+        let mut eligible_here = 0usize;
+        for &first in &node.hitters {
+            let (after_first, winner) = child_after(&parent.state, first);
+            if winner.is_none() {
+                if let Some(second_node) = classify_def_node(&after_first) {
+                    eligible_here += detect_p2(&after_first, &second_node).len();
+                }
+            }
+        }
+        p2_pairs += eligible_here;
+        println!(
+            "B2_P2_CONTROL hash={} prefix={} eligible_pairs={}",
+            parent.hash, parent.prefix, eligible_here
+        );
+    }
+    println!(
+        "B2_CONTROL_SUMMARY k1_parents={} drq_eligible_pairs={} k2_parents={} p2_eligible_pairs={} drq_status={} p2_status={}",
+        k1.len(),
+        drq_pairs,
+        k2.len(),
+        p2_pairs,
+        if drq_pairs == 0 { "NOT_TESTED" } else { "ELIGIBLE" },
+        if p2_pairs == 0 { "NOT_TESTED" } else { "ELIGIBLE" }
+    );
+}
+
+fn b2_fast_config() -> FastReferenceConfig {
+    let tt_bytes_cap = envn64("TSS_REFERENCE_FAST_TT_BYTES", 512 << 20) as usize;
+    let d6_canonical = std::env::var("TSS_REFERENCE_FAST_D6")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE"))
+        .unwrap_or(true);
+    FastReferenceConfig {
+        tt_bytes_cap,
+        d6_canonical,
+        ordering_hint: FastOrderingHint::None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum B2Bounded {
+    Complete(ProofStatus),
+    Incomplete,
+}
+
+fn b2_stock_bounded(
+    state: &mut HexoState,
+    root: Player,
+    plies_left: u32,
+    nodes: &mut u64,
+    node_cap: u64,
+    deadline: std::time::Instant,
+) -> B2Bounded {
+    if *nodes >= node_cap || std::time::Instant::now() >= deadline {
+        return B2Bounded::Incomplete;
+    }
+    *nodes = nodes.saturating_add(1);
+    if let Some(winner) = tss_reference::direct_winner(state) {
+        return B2Bounded::Complete(if winner == root {
+            ProofStatus::Win
+        } else {
+            ProofStatus::Loss
+        });
+    }
+    if plies_left == 0 {
+        return B2Bounded::Complete(ProofStatus::Unknown);
+    }
+    let mut moves = tss_reference::legal_moves(state);
+    if moves.is_empty() {
+        return B2Bounded::Complete(ProofStatus::Unknown);
+    }
+
+    let mover = state.current_player();
+    moves.sort_by_key(|&coord| {
+        (
+            std::cmp::Reverse(b2_direct_extension_length(state, mover, coord)),
+            coord.q,
+            coord.r,
+        )
+    });
+    let maximizing = state.current_player() == root;
+    let mut saw_unknown = false;
+    let mut saw_incomplete = false;
+    for coord in moves {
+        let (_result, delta) = state
+            .apply_with_delta(Placement { coord })
+            .expect("stock legal enumerator produced an illegal placement");
+        let child = b2_stock_bounded(state, root, plies_left - 1, nodes, node_cap, deadline);
+        state.undo(delta);
+        match child {
+            B2Bounded::Complete(ProofStatus::Win) if maximizing => {
+                return B2Bounded::Complete(ProofStatus::Win);
+            }
+            B2Bounded::Complete(ProofStatus::Loss) if !maximizing => {
+                return B2Bounded::Complete(ProofStatus::Loss);
+            }
+            B2Bounded::Complete(ProofStatus::Unknown) => saw_unknown = true,
+            B2Bounded::Incomplete => saw_incomplete = true,
+            B2Bounded::Complete(_) => {}
+        }
+    }
+    if saw_incomplete {
+        B2Bounded::Incomplete
+    } else if saw_unknown {
+        B2Bounded::Complete(ProofStatus::Unknown)
+    } else if maximizing {
+        B2Bounded::Complete(ProofStatus::Loss)
+    } else {
+        B2Bounded::Complete(ProofStatus::Win)
+    }
+}
+
+fn b2_offset_coord(start: HexCoord, dq: i32, dr: i32, offset: i32) -> Option<HexCoord> {
+    Some(HexCoord {
+        q: i16::try_from(i32::from(start.q) + dq * offset).ok()?,
+        r: i16::try_from(i32::from(start.r) + dr * offset).ok()?,
+    })
+}
+
+fn b2_direct_extension_length(state: &HexoState, player: Player, coord: HexCoord) -> u8 {
+    const AXES: [(i32, i32); 3] = [(1, 0), (0, 1), (1, -1)];
+    let mut best = 1u8;
+    for (dq, dr) in AXES {
+        let mut length = 1u8;
+        for sign in [-1, 1] {
+            for distance in 1..6 {
+                let Some(cell) = b2_offset_coord(coord, dq * sign, dr * sign, distance) else {
+                    break;
+                };
+                if state.board().get(cell) != Some(player) {
+                    break;
+                }
+                length = length.saturating_add(1);
+            }
+        }
+        best = best.max(length);
+    }
+    best
+}
+
+#[test]
+#[ignore = "b=2 stock/fast attacker-Loss qualification; --nocapture"]
+fn dom_hunt_b2_q0() {
+    let games = load_corpus();
+    let per_bucket = envn("TSS_DOM_B2_Q0_PER_BUCKET", 4);
+    let node_cap = envn64("TSS_DOM_B2_Q0_NODE_CAP", 1_000_000);
+    let deadline_ms = envn64("TSS_DOM_B2_DEADLINE_MS", 540_000);
+    let overall_deadline = Instant::now() + std::time::Duration::from_millis(deadline_ms);
+    let mut counts = [[0usize; 2]; 2];
+    let mut rows = Vec::new();
+
+    'games: for game in games.iter().filter(|g| matches!(g.winner, -1 | 1)) {
+        let mut state = HexoState::new();
+        for prefix in 0..game.moves.len() {
+            if Instant::now() >= overall_deadline {
+                break 'games;
+            }
+            let phase_index = match state.phase() {
+                TurnPhase::FirstStone => Some(0usize),
+                TurnPhase::SecondStone { .. } => Some(1usize),
+                TurnPhase::Opening => None,
+            };
+            if let Some(phase_index) = phase_index {
+                let player_index = state.current_player().index();
+                if counts[player_index][phase_index] < per_bucket
+                    && threats::analyze(&state).forced_loss()
+                {
+                    for depth in 1..=4u32 {
+                        if counts[player_index][phase_index] >= per_bucket {
+                            break;
+                        }
+                        let mut working = state.clone();
+                        let mut nodes = 0u64;
+                        let stock = b2_stock_bounded(
+                            &mut working,
+                            state.current_player(),
+                            depth,
+                            &mut nodes,
+                            node_cap,
+                            overall_deadline,
+                        );
+                        if stock == B2Bounded::Complete(ProofStatus::Loss) {
+                            let fast = tss_reference_fast::solve(&state, depth, b2_fast_config());
+                            assert_eq!(
+                                fast.status,
+                                ProofStatus::Loss,
+                                "fast reference missed stock Loss qualification row"
+                            );
+                            counts[player_index][phase_index] += 1;
+                            let row = format!(
+                                "Q0_LOSS {{\"game_hash\":\"{}\",\"prefix\":{},\"position\":[{}],\"player\":{},\"phase\":\"{}\",\"depth\":{},\"stock_nodes\":{},\"fast_nodes\":{},\"fast_tt_hits\":{}}}",
+                                game.game_hash,
+                                prefix,
+                                b2_position_dump(&game.moves, prefix),
+                                player_index,
+                                if phase_index == 0 { "FirstStone" } else { "SecondStone" },
+                                depth,
+                                nodes,
+                                fast.nodes,
+                                fast.tt_hits
+                            );
+                            println!("{row}");
+                            rows.push(row);
+                        }
+                        if stock == B2Bounded::Incomplete {
+                            println!(
+                                "Q0_INCOMPLETE hash={} prefix={} player={} phase={} depth={} nodes={}",
+                                game.game_hash, prefix, player_index, phase_index, depth, nodes
+                            );
+                        }
+                    }
+                }
+            }
+            let (q, r) = game.moves[prefix];
+            let result = apply_placement(
+                &mut state,
+                Placement {
+                    coord: HexCoord::new(q, r),
+                },
+            )
+            .expect("legal corpus replay during Q0");
+            if result.outcome.is_some() {
+                break;
+            }
+        }
+        if counts.iter().flatten().all(|&n| n >= per_bucket) {
+            break;
+        }
+    }
+    println!(
+        "Q0_SUMMARY p0_first={} p0_second={} p1_first={} p1_second={} required_each={} rows={} complete={}",
+        counts[0][0],
+        counts[0][1],
+        counts[1][0],
+        counts[1][1],
+        per_bucket,
+        rows.len(),
+        counts.iter().flatten().all(|&n| n >= per_bucket)
+    );
+    assert!(
+        counts.iter().flatten().all(|&n| n >= per_bucket),
+        "Q0 Loss qualification shortfall blocks use of b2 attacker-Loss rows"
+    );
+}
+
+#[test]
+#[ignore = "one exact b=2 F_d(first) case; --nocapture"]
+fn dom_hunt_b2_exact() {
+    let hash = std::env::var("TSS_DOM_B2_HASH").expect("TSS_DOM_B2_HASH");
+    let prefix: usize = envn("TSS_DOM_B2_PREFIX", usize::MAX);
+    let first = parse_cell(&std::env::var("TSS_DOM_B2_FIRST").expect("TSS_DOM_B2_FIRST"));
+    let depth: u32 = envn("TSS_DOM_B2_DEPTH", 3) as u32;
+    assert!(
+        depth >= 3,
+        "covered comparisons are discriminatory only at d>=3"
+    );
+
+    let games = load_corpus();
+    let game = games
+        .iter()
+        .find(|g| g.game_hash == hash)
+        .expect("b2 hash not found");
+    let state = replay_prefix(&game.moves, prefix);
+    let node = classify_def_node(&state).expect("not a defensive node");
+    assert!(node.first_stone, "b2 parent must be FirstStone");
+    assert_eq!(
+        node.min_hitting_set,
+        Some(1),
+        "primary experiment is K1 spare pruning"
+    );
+    assert!(
+        node.legal.contains(&first),
+        "frozen first action is not legal"
+    );
+    assert!(
+        node.hitters.contains(&first),
+        "non-hitter first is P3-dominated by an H-first alias"
+    );
+
+    let h = b2_h(&state, &node);
+    let split = b2_split_firsts(&state, &node, &h);
+    let role = if h.contains(&first) {
+        "H"
+    } else if split.contains(&first) {
+        "SPLIT"
+    } else {
+        "PARTIAL_NO_SPLIT"
+    };
+    let support_delta = new_support_cells(first, &node.support).len();
+    let dead = cell_dead(&state, first);
+    let quiet = touches_no_alive_for(&state, first, node.defender);
+    let g3 = counter_threat_cells(&state, node.defender, &node.legal).contains(&first);
+
+    let (after_first, winner) = child_after(&state, first);
+    assert!(
+        winner.is_none(),
+        "!own_win_now b2 parent produced a terminal first stone"
+    );
+    assert!(matches!(after_first.phase(), TurnPhase::SecondStone { .. }));
+    let config = b2_fast_config();
+    let started = Instant::now();
+    let result = tss_reference_fast::solve_for_player(
+        &after_first,
+        node.attacker,
+        depth.saturating_add(1),
+        config,
+    );
+    let wall = started.elapsed().as_secs_f64();
+    println!(
+        "B2_EXACT {{\"game_hash\":\"{}\",\"prefix\":{},\"position\":[{}],\"first\":[{},{}],\"role\":\"{}\",\"depth_after_pair\":{},\"status_for_attacker\":\"{}\",\"def_rank\":{},\"nodes\":{},\"tt_hits\":{},\"tt_entries\":{},\"tt_bytes\":{},\"tt_clears\":{},\"d6\":{},\"wall_s\":{:.6},\"dead\":{},\"quiet\":{},\"g3\":{},\"support_delta\":{},\"h_count\":{},\"split_first_count\":{}}}",
+        hash,
+        prefix,
+        b2_position_dump(&game.moves, prefix),
+        first.q,
+        first.r,
+        role,
+        depth,
+        status_name(result.status),
+        match result.status { ProofStatus::Win => 0, ProofStatus::Unknown => 1, ProofStatus::Loss => 2 },
+        result.nodes,
+        result.tt_hits,
+        result.tt_entries,
+        result.tt_accounted_bytes,
+        result.tt_clears,
+        config.d6_canonical,
+        wall,
+        dead,
+        quiet,
+        g3,
+        support_delta,
+        h.len(),
+        split.len()
+    );
+}
+
+#[test]
+#[ignore = "one exact completed b=2 macromove case; --nocapture"]
+fn dom_hunt_b2_pair_exact() {
+    let hash = std::env::var("TSS_DOM_B2_HASH").expect("TSS_DOM_B2_HASH");
+    let prefix: usize = envn("TSS_DOM_B2_PREFIX", usize::MAX);
+    let first = parse_cell(&std::env::var("TSS_DOM_B2_FIRST").expect("TSS_DOM_B2_FIRST"));
+    let second = parse_cell(&std::env::var("TSS_DOM_B2_SECOND").expect("TSS_DOM_B2_SECOND"));
+    let depth: u32 = envn("TSS_DOM_B2_DEPTH", 3) as u32;
+    assert!(
+        depth >= 3,
+        "covered comparisons are discriminatory only at d>=3"
+    );
+
+    let games = load_corpus();
+    let game = games
+        .iter()
+        .find(|g| g.game_hash == hash)
+        .expect("b2 hash not found");
+    let state = replay_prefix(&game.moves, prefix);
+    let node = classify_def_node(&state).expect("not a defensive node");
+    assert!(node.first_stone, "b2 parent must be FirstStone");
+    assert!(
+        node.legal.contains(&first),
+        "first action is not legal at turn start"
+    );
+
+    let h = b2_h(&state, &node);
+    let coverage = if h.contains(&first) || h.contains(&second) {
+        "H_CONTAINING"
+    } else {
+        "SPLIT"
+    };
+    assert!(
+        b2_pair_covers(&state, &node, first, second),
+        "exact candidate must cover the complete initial threat family"
+    );
+    let (after_first, first_winner) = child_after(&state, first);
+    assert!(
+        first_winner.is_none(),
+        "first action terminated unexpectedly"
+    );
+    let second_support = support_set(&after_first);
+    let mut after_pair = after_first;
+    let result = apply_placement(&mut after_pair, Placement { coord: second })
+        .expect("second action is not legal after first");
+    assert!(
+        result.outcome.is_none(),
+        "covered b2 pair terminated unexpectedly"
+    );
+    assert_eq!(after_pair.current_player(), node.attacker);
+    assert_eq!(after_pair.phase(), TurnPhase::FirstStone);
+
+    let first_delta = new_support_cells(first, &node.support).len();
+    let second_delta = new_support_cells(second, &second_support).len();
+    let config = b2_fast_config();
+    let exact = tss_reference_fast::solve_for_player(&after_pair, node.attacker, depth, config);
+    println!(
+        "B2_PAIR {{\"game_hash\":\"{}\",\"prefix\":{},\"position\":[{}],\"pair\":[[{},{}],[{},{}]],\"coverage\":\"{}\",\"depth\":{},\"status_for_attacker\":\"{}\",\"def_rank\":{},\"nodes\":{},\"tt_hits\":{},\"tt_entries\":{},\"tt_bytes\":{},\"tt_clears\":{},\"d6\":{},\"first_support_delta\":{},\"second_support_delta\":{}}}",
+        hash,
+        prefix,
+        b2_position_dump(&game.moves, prefix),
+        first.q,
+        first.r,
+        second.q,
+        second.r,
+        coverage,
+        depth,
+        status_name(exact.status),
+        match exact.status { ProofStatus::Win => 0, ProofStatus::Unknown => 1, ProofStatus::Loss => 2 },
+        exact.nodes,
+        exact.tt_hits,
+        exact.tt_entries,
+        exact.tt_accounted_bytes,
+        exact.tt_clears,
+        config.d6_canonical,
+        first_delta,
+        second_delta
+    );
 }
 
 #[test]
