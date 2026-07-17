@@ -1,0 +1,82 @@
+C-REL ROUND 1 — RELATIVE CERTIFICATE REDESIGN (design + obligations; ULTRA)
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-cert-support
+(HEAD 3cd224fe = the NQ3 landing; HUNT_REPORT_CERT_SUPPORT.md and
+cert_support_hunt.rs are the primary artifacts — READ THE REPORT IN
+FULL FIRST; its C_rel conjecture and its listed obligations are your
+brief). You CANNOT git-commit. Deliverable: DESIGN_C_REL.md.
+
+## Context you must honor
+- NQ3 REFUTED support-hashing as posed: strict certificates bind the
+  complete position by design; 0/180 cross-position transfers; end-to-end
+  multiplier exactly 1.000x. That refutation stands — you are NOT
+  relitigating it.
+- The salvage evidence: certificate bodies are compact, and shadow
+  rebinding transferred 78-96% of bodies to nearby positions. The C_rel
+  conjecture: a certificate format whose validity is RELATIVE to an
+  explicitly-declared support/interface could make solves warm-start
+  each other soundly.
+- The sharpest known threat to any locality assumption in this game is
+  the NQ2 frozen required-remote witness (a position whose unique win at
+  stone-distance 6 sits in NO live window — remote defensive value).
+  Your design must confront it explicitly: either the interface
+  declaration captures such remote dependencies, or you show why C_rel
+  soundness does not need locality at all.
+- The design targets the CONSOLIDATED engine, not this worktree's older
+  code: read the current strict verifier + certificate format in the
+  read-only sibling E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width
+  (HEAD 6ef67cfe; tss_verify.rs is the normative strict verifier — it
+  may NEVER be weakened; any C_rel checker is a NEW additive layer whose
+  acceptance implies nothing unless discharged to a strict-equivalent
+  soundness argument).
+- The wall-clock decomposition (IDEATION_FINAL.md in that sibling) says
+  generation is 79% of official deep wall and every solve starts cold.
+  C_rel's prize is killing the cold start; its cost model must beat
+  "just re-search" including interface-computation and rebind costs.
+
+## What round 1 must produce (DESIGN_C_REL.md)
+1. FORMAT: the exact relative-certificate data model — what a support/
+   interface declaration contains (windows? threat sets? zone bindings?
+   occupancy predicates?), what the body binds, what rebinding means
+   operationally, and the precise statement "if interface I holds at
+   position P, then body B's verdict is sound at P".
+2. OBLIGATIONS: take every obligation listed in
+   HUNT_REPORT_CERT_SUPPORT.md (the conjecture's recorded list) and
+   disposition each into exactly one of:
+   (a) PROOF-SKETCHED — the lemma statement at full strength + the
+       argument outline + where it would live (paper doc vs Lean spine);
+   (b) REFUTATION-RISK — the concrete counterexample shape that would
+       kill it + the cheapest experiment that would surface it (exact
+       test design, no runs needed this round);
+   (c) DISSOLVED — a design change that makes the obligation moot, with
+       the trade-off stated.
+   Add any NEW obligations your format creates; hiding one is failure.
+3. VERIFIER CONTRACT: how C_rel acceptance relates to the strict
+   verifier. Preferred shape: a C_rel cert + a target position
+   deterministically materializes a candidate strict cert, and the
+   UNCHANGED strict verifier has the final word (monotone-contract
+   style: warm results only ever upgrade UNKNOWN, never overturn).
+   If you propose anything stronger, state the full soundness burden.
+4. ECONOMICS: a cost model with the measured numbers you can cite from
+   the retained reports (rebind rates, body sizes, generation shares).
+   Name the profile where C_rel plausibly pays (repeated trainer
+   queries? atlas neighborhoods? cap-ladder siblings?) and the profile
+   where it cannot.
+5. HUNT LADDER: the staged experimental plan (shadow-only rebind
+   against the consolidated engine first; each stage with its kill
+   criterion and its RAM/runtime class). Round 1 runs NOTHING; the
+   ladder is for later rounds.
+6. VERDICT: your honest assessment — is C_rel a real project or does
+   the design collapse under its own obligations? A reasoned "this
+   dies at obligation N" is a fully successful round.
+
+## Rules
+This round is DESIGN ONLY: no production code changes, no cargo unless
+strictly necessary for reading generated docs (and then only with free
+RAM >9 GB checked immediately before, CARGO_TARGET_DIR=.target-hunt,
+--target x86_64-pc-windows-msvc, one cargo, small tests only — NO
+gate-class or corpus profiles this round; two other lanes are running
+and the Lean lane has RAM priority). Siblings read-only. No commits.
+Cite file+commit for every number you quote. Final message: verdict,
+obligation scoreboard (a/b/c counts), the single biggest refutation
+risk, files written.
