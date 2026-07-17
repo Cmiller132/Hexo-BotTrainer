@@ -1,0 +1,80 @@
+NQ3 MACHINE HUNT — CERTIFICATE SUPPORT LOCALITY (the frame question).
+Goal: measure, precisely and adversarially, how LOCAL solver
+certificates actually are, to size the biggest prospective TT-efficiency
+lever we have: if a certificate's validity depends only on a bounded
+SUPPORT (the cells it reads), then TT/fragment keys can hash the support
+instead of the whole position, and a proven fragment transfers to EVERY
+position that agrees on that support — a cross-position reuse multiplier
+for both the deep corpus solver and the 256 KiB trainer leaf solver.
+This hunt produces measurements + a sharpened conjecture; a proof round
+follows. Owner directive: the campaign goal is a dramatically more
+efficient solver; measurement honesty is what makes the follow-on proof
+land.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-cert-support
+(branch hunt/cert-support @2430fc47 — the C1-unified engine). You
+CANNOT git-commit. Deliverable: HUNT_REPORT_CERT_SUPPORT.md (worktree
+root, incremental) + a test-gated harness module (pattern:
+packages/hexfield_eq/rust/src/dtw_bounds_hunt.rs — register under
+#[cfg(test)] in lib.rs).
+
+## Definitions to implement (state them exactly in the report)
+- READ SUPPORT of a certificate: the set of board cells that any
+  verifier check touches — window contents at every node's position
+  delta, zone cells, quiet/defender edges, budget/role/exposure
+  witnesses, D6 image cells. Derive it from the actual verifier code
+  (tss_solver.rs / tss_core.rs verification paths), not from intuition;
+  document per-check contributions.
+- FRAME CELLS: cells in the support that are EMPTY at the root (the
+  certificate asserts their emptiness at use time).
+- SUPPORT RADIUS: max hex distance from the certificate's root-active
+  region (stones placed by the cert's line + root stones it reads).
+
+## Measurements (deterministic seeds, record everything)
+1. For every official 19-corpus WIN row at its ladder rung (10k/100k
+   caps fine; NOT the 2 GiB profile) + double_fork_compact: extract the
+   certificate, compute |support|, |frame|, support radius, and the
+   fraction of the root's stones OUTSIDE the support. Table per row.
+2. Same for 200 deterministic human-corpus deep-solve roots (leaf-width
+   hunt's sampling recipe; 30k-cap WIN screens) — distributions
+   (median/p90/max) of support size vs board population.
+3. TRANSFER EXPERIMENT (the money measurement): for certs from (1)-(2),
+   mutate the root by adding K={1,2,4,8} random legal stone pairs
+   OUTSIDE the support (both colors, balanced turn parity, seeded); run
+   the strict verifier on the UNCHANGED certificate against the mutated
+   root. Report acceptance rate per K. Every rejection: diagnose WHY
+   (which check reads outside the claimed support) — each such case
+   either shrinks the claimed support definition or refutes the frame
+   conjecture; freeze exemplars.
+4. ADVERSARIAL: construct positions where distant stones SHOULD matter
+   (a far defender formation that changes the verdict but not the local
+   window structure — e.g. defender threats requiring urgent response
+   elsewhere) and check whether the verifier's support genuinely
+   captures them (it must — via goal/legality/threat checks; if the
+   verifier accepts a cert whose verdict a far stone invalidates,
+   that is a SOUNDNESS finding: STOP, freeze, write up — it outranks
+   everything).
+5. Quantify the prospective win: at the 19-corpus rungs, how many TT
+   entries/fragments would key-collide (reusable) under support-hashing
+   vs today's full-position keys? Even a coarse estimate with method
+   documented.
+
+## Sharpened conjecture (the report's exit artifact)
+State NQ3 precisely from the data: "a strict-verifier-accepted
+certificate remains valid at any root agreeing with the original on
+support(C) [+ exact conditions the transfer experiment exposed:
+legality-store growth, turn parity, no new six, ...]" — with the
+adversarial boundary cases as named obstacles for the proof round, and
+an honest verdict on whether support-hashing is (a) a theorem-shaped
+frame lemma, (b) true only with conditions, or (c) refuted.
+
+## Rules
+CARGO_TARGET_DIR=.target-hunt; one cargo process; --test-threads=1;
+single run <=10 min (downscope + document); free RAM >9 GB before every
+cargo (powershell "Get-CimInstance Win32_OperatingSystem | % {
+$_.FreePhysicalMemory/1MB }") — THREE other sessions share this 31 GB
+host (Lean lane has priority); if below, wait and re-check. No commits.
+Work only in this worktree; siblings read-only. rustfmt --edition 2021
+only on files you edit. Truthfulness outranks completeness. Final
+message: headline numbers, conjecture statement, refutations/soundness
+findings, files, regen commands.

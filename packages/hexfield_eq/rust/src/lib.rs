@@ -39,6 +39,9 @@ mod tss_async;
 mod tss_bench;
 
 #[cfg(test)]
+mod cert_support_hunt;
+
+#[cfg(test)]
 mod tss_corpus;
 
 #[cfg(test)]
