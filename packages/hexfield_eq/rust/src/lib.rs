@@ -42,6 +42,9 @@ mod tss_bench;
 mod tss_corpus;
 
 #[cfg(test)]
+mod tss_cap_resume;
+
+#[cfg(test)]
 mod tss_spare_corpus;
 
 #[cfg(test)]

@@ -21,7 +21,9 @@ use std::time::Instant;
 use hexo_engine::{apply_placement, HexCoord, HexoState, Placement, Player, TurnPhase};
 
 use crate::tss_core::{CertVerify, DeepSolve, ProofStatus, SolveCaps, SolveGoal};
-use crate::tss_solver::{round3_shadow_certificate, TssSolver, WidthOptions};
+use crate::tss_solver::{
+    round3_shadow_certificate, CapResumeError, CapResumeSession, TssSolver, WidthOptions,
+};
 use crate::tss_verify::TssVerifier;
 
 const DEFAULT_TSS_TEST_TT_BYTES: usize = 512 << 20;
@@ -184,6 +186,7 @@ fn tss_corpus_check() {
     let lazy_frontier = std::env::var("TSS_LAZY_FRONTIER").ok().as_deref() == Some("1");
     let interior_gate = std::env::var("TSS_INTERIOR_CENSUS_GATE").ok().as_deref() == Some("1");
     let k_reply_consume = std::env::var("TSS_K_REPLY_CONSUME").ok().as_deref() == Some("1");
+    let cap_resume = std::env::var("TSS_CAP_RESUME").ok().as_deref() == Some("1");
     if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_SHARED_FRAGMENTS") {
         assert_eq!(
             expected,
@@ -212,12 +215,20 @@ fn tss_corpus_check() {
             "TSS_K_REPLY_CONSUME does not match gate expectation",
         );
     }
+    if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_CAP_RESUME") {
+        assert_eq!(
+            expected,
+            if cap_resume { "1" } else { "0" },
+            "TSS_CAP_RESUME does not match gate expectation",
+        );
+    }
     println!(
-        "CORPUS_MODE shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={} tt_bytes_cap={tt_bytes_cap}",
+        "CORPUS_MODE shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={} cap_resume={} tt_bytes_cap={tt_bytes_cap}",
         if shared_fragments { "on" } else { "off" },
         if lazy_frontier { "on" } else { "off" },
         if interior_gate { "on" } else { "off" },
         if k_reply_consume { "on" } else { "off" },
+        if cap_resume { "on" } else { "off" },
     );
     let selected_ids = std::env::var("TSS_CORPUS_ID").ok().map(|value| {
         let mut ids = value
@@ -255,6 +266,8 @@ fn tss_corpus_check() {
     let mut fragment_imports = 0u64;
     let mut max_fragment_store_entries = 0u64;
     let mut max_fragment_store_bytes = 0u64;
+    let mut resume_total_ms = 0.0f64;
+    let mut resume_total_reentries = 0u64;
     for pos in &corpus {
         if selected_ids
             .as_ref()
@@ -264,20 +277,70 @@ fn tss_corpus_check() {
         }
         selected += 1;
         let mut final_status = ProofStatus::Unknown;
+        let resume_solver = cap_resume.then(|| {
+            let mut solver = TssSolver::default();
+            solver.set_width_options(WidthOptions::vcf_pair_complete());
+            solver
+        });
+        let mut resume_session = None::<CapResumeSession>;
+        let mut resume_unsupported = false;
+        let mut resume_root_ms = 0.0f64;
+        let mut resume_root_reentries = 0u64;
         for (i, cap) in ladder.iter().enumerate() {
             if !pos.expect_win && *cap > 1_000_000 {
                 break;
             }
-            let mut solver = TssSolver::default();
-            solver.set_width_options(WidthOptions::vcf_pair_complete());
             let caps = SolveCaps {
                 node_cap: *cap,
                 tt_bytes_cap,
                 semantic_horizon: u32::MAX,
             };
             let t0 = Instant::now();
-            let result = solver.solve(&pos.state, &caps);
+            let (result, resume_meta) = if let Some(solver) = resume_solver.as_ref() {
+                if resume_session.is_none() && !resume_unsupported {
+                    match CapResumeSession::new(solver, &pos.state, &caps, SolveGoal::Both) {
+                        Ok(session) => resume_session = Some(session),
+                        Err(CapResumeError::UnsupportedProfile) => {
+                            resume_unsupported = true;
+                            println!(
+                                "CAP_RESUME_FALLBACK id={} cap={cap} reason=no_unfinished_wide_frontier",
+                                pos.id
+                            );
+                        }
+                        Err(error) => {
+                            panic!("{}: cap-resume session creation: {error:?}", pos.id)
+                        }
+                    }
+                }
+                if let Some(session) = resume_session.as_mut() {
+                    let advance = session
+                        .advance_to_node_cap(solver, &pos.state, &caps, SolveGoal::Both)
+                        .unwrap_or_else(|error| {
+                            panic!("{} cap={cap}: cap-resume advance: {error:?}", pos.id)
+                        });
+                    let meta = (
+                        advance.root_pn,
+                        advance.root_dn,
+                        advance.stage_depth,
+                        advance.advances,
+                        advance.reentries,
+                    );
+                    (advance.result, Some(meta))
+                } else {
+                    let mut fresh_solver = TssSolver::default();
+                    fresh_solver.set_width_options(WidthOptions::vcf_pair_complete());
+                    (fresh_solver.solve(&pos.state, &caps), None)
+                }
+            } else {
+                let mut solver = TssSolver::default();
+                solver.set_width_options(WidthOptions::vcf_pair_complete());
+                (solver.solve(&pos.state, &caps), None)
+            };
             let ms = t0.elapsed().as_secs_f64() * 1e3;
+            if cap_resume {
+                resume_root_ms += ms;
+                resume_total_ms += ms;
+            }
             assert!(
                 result.status == ProofStatus::Unknown || result.cert.is_some(),
                 "{}: hard {} verdict without certificate at cap={cap}",
@@ -314,6 +377,15 @@ fn tss_corpus_check() {
                 result.stats.interior_gate_dismissals,
                 result.stats.interior_gate_nanos as f64 / 1_000.0,
             );
+            if let Some((pn, dn, stage_depth, advances, reentries)) = resume_meta {
+                println!(
+                    "CAP_RESUME_PROFILE id={} cap={cap} pn={pn} dn={dn} status={} cumulative_expansions={} incremental_ms={ms:.3} root_cumulative_ms={resume_root_ms:.3} stage_depth={stage_depth} advances={advances} reentries={reentries}",
+                    pos.id,
+                    status_name(result.status),
+                    result.stats.expansions,
+                );
+                resume_root_reentries = reentries;
+            }
             println!(
                 "FRAGMENT_PROFILE id={} cap={cap} lookups={} hits={} imports={} store_entries={} store_bytes={}",
                 pos.id,
@@ -333,6 +405,7 @@ fn tss_corpus_check() {
                 break;
             }
         }
+        resume_total_reentries = resume_total_reentries.saturating_add(resume_root_reentries);
         if pos.expect_win && final_status != ProofStatus::Win {
             failures.push(format!(
                 "{}: expected WIN, got {}",
@@ -360,12 +433,13 @@ fn tss_corpus_check() {
         "CORPUS_FRAGMENTS lookups={fragment_lookups} hits={fragment_hits} hit_rate_pct={fragment_hit_rate:.3} imports={fragment_imports} max_store_entries={max_fragment_store_entries} max_store_bytes={max_fragment_store_bytes}"
     );
     println!(
-        "CORPUS_DONE failures={} shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={}",
+        "CORPUS_DONE failures={} shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={} cap_resume={} resume_wall_ms={resume_total_ms:.3} resume_reentries={resume_total_reentries}",
         failures.len(),
         if shared_fragments { "on" } else { "off" },
         if lazy_frontier { "on" } else { "off" },
         if interior_gate { "on" } else { "off" },
         if k_reply_consume { "on" } else { "off" },
+        if cap_resume { "on" } else { "off" },
     );
     assert!(
         failures.is_empty(),

@@ -1,0 +1,63 @@
+R-CD1 — REGISTER CLOSURE DEBTS A+B (dynamic child reveal counters + live_ge3 live A/B)
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width
+(confirm HEAD = the R-CR1 cap-resume landing; read
+HUNT_REPORT_CAP_RESUME.md and IDEATION_FINAL.md §5 first — §5's two
+"existing closure debt" subsections are your exact brief). You CANNOT
+git-commit. Deliverable: HUNT_REPORT_CLOSURE_DEBTS.md + cfg(test)
+instrumentation + retained raw logs.
+
+## Debt A — dynamic child reveal (counter pass FIRST; build only if
+## counters justify)
+The consolidated engine still builds WideTurnGate, generates every
+second candidate, evaluates/deduplicates every attacker pair, and
+returns a full Vec before df-pn selects a child. Lazy frontier delays
+arena/TT admission, NOT this classification. Attacker pair generation
+is 43.6% of official wall (151.6s of 351.6s in the new resumed
+baseline); avoiding ~11.5% of it clears 5% end to end.
+1. Add default-off cfg(test) counters: candidate pairs evaluated,
+   accepted, selected, linked, expanded; winning-child rank
+   distribution at Choice nodes; wall split of gate build /
+   second-candidate generation / pair evaluation / dedup.
+2. Run the official 1 GiB lazy+gate profile with counters on; report
+   the wasted-classification fraction (pairs evaluated but never
+   linked/expanded) by row and aggregate.
+3. DECISION GATE: if the counter evidence shows a sound cursor could
+   avoid >=11.5% of pair-generation wall, design (and only if the
+   design is clean, build behind a default-off flag) the incremental
+   reveal: cursor with hidden-universe sentinel, a visible pn=0 proof
+   is allowed, refutation of a Choice node FORBIDDEN before generator
+   exhaustion. Verifier untouched. If the counters say no, record the
+   honest null with numbers — that closes the register debt either way.
+
+## Debt B — live_ge3 PN seed live A/B
+HUNT_REPORT_PN_INIT.md (branch hunt/pn-init, readable read-only at
+E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-pn-init) recommended a
+live test-only A/B of the live_ge3 proof-number seed and warned its
+replay numbers freeze outcomes. Do NOT ship from replay.
+1. Default-off cfg(test) seed wired outside the census domain, scan
+   separately timed.
+2. A/B on the full 1 GiB lazy+gate profile + the Phase-3 selected leaf
+   cells (D config, h8 and h16, cap 500) from
+   HUNT_REPORT_LEAF_SURFACE.md.
+3. Report expansions, wall, TT hits, stage refreshes, verifier results
+   both arms. >=5% aggregate deep improvement without material leaf
+   regression = PROMOTE; else record the closing null.
+
+## Comparability rule
+Every A/B pair must hold ALL other flags identical (state the exact
+env of both arms). Use TSS_CAP_RESUME consistently within each pair
+(recommended: off for both arms, so numbers compare with retained
+pre-resume baselines; note the choice explicitly).
+
+## Rules (campaign-standard)
+CARGO_TARGET_DIR=.target-codex; --target x86_64-pc-windows-msvc on
+EVERY cargo; ONE cargo process; --test-threads=1; free RAM >9 GB
+before every cargo, >11 GB immediately before each 1 GiB profile;
+gate-class runs <=45 min; Lean lane has RAM priority — wait and
+re-check rather than proceed under threshold. cfg(test)-gated,
+default-off instrumentation only; production paths byte-identical when
+unused (verify via the fast subset and say so). Strict verifier
+untouched. No commits. This worktree only; siblings read-only. Honest
+partial stop at a clean boundary is success. Final message: verdicts
+for A and B separately, headline numbers, files, regen commands.

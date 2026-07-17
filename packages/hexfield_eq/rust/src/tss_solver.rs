@@ -668,6 +668,10 @@ pub(crate) struct TssSolver {
     leaf_surface_shared_reconfigurations: u64,
     #[cfg(test)]
     leaf_surface_fragment_reconfigurations: u64,
+    /// Test-only observation seam for cap-resume identity checks. Production
+    /// builds neither retain nor expose unfinished proof numbers.
+    #[cfg(test)]
+    last_wide_root_numbers: Option<(u32, u32)>,
 }
 
 impl Default for TssSolver {
@@ -690,6 +694,8 @@ impl Default for TssSolver {
             leaf_surface_shared_reconfigurations: 0,
             #[cfg(test)]
             leaf_surface_fragment_reconfigurations: 0,
+            #[cfg(test)]
+            last_wide_root_numbers: None,
         }
     }
 }
@@ -711,6 +717,11 @@ impl TssSolver {
             self.fragment_store.clear();
         }
         self.shared_fragments_enabled = enabled;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_wide_root_numbers(&self) -> Option<(u32, u32)> {
+        self.last_wide_root_numbers
     }
 
     #[cfg(test)]
@@ -772,6 +783,7 @@ impl TssSolver {
             last_k_reply_shadow: Vec::new(),
             leaf_surface_shared_reconfigurations: 0,
             leaf_surface_fragment_reconfigurations: 0,
+            last_wide_root_numbers: None,
         }
     }
 
@@ -791,6 +803,7 @@ impl TssSolver {
             last_k_reply_shadow: Vec::new(),
             leaf_surface_shared_reconfigurations: 0,
             leaf_surface_fragment_reconfigurations: 0,
+            last_wide_root_numbers: None,
         }
     }
 
@@ -807,6 +820,7 @@ impl TssSolver {
         {
             self.last_narrow_signatures.clear();
             self.last_k_reply_shadow.clear();
+            self.last_wide_root_numbers = None;
             clear_quotient_telemetry_report();
         }
 
@@ -1072,6 +1086,10 @@ impl TssSolver {
         let root = search.insert_root(state);
         search.run(state, root);
         #[cfg(test)]
+        {
+            self.last_wide_root_numbers = Some((search.entries[root].pn, search.entries[root].dn));
+        }
+        #[cfg(test)]
         pn_init_finalize_wide(&search);
         #[cfg(test)]
         if std::env::var_os("TSS_TRACE_PN").is_some() {
@@ -1230,6 +1248,250 @@ impl TssSolver {
             #[cfg(test)]
             tt_signature: None,
         }
+    }
+}
+
+/// Test-only owner of one unfinished wide proof-number frontier. The session
+/// is deliberately not reachable from production call paths: this campaign
+/// must establish identity and value before any public API is proposed.
+#[cfg(test)]
+pub(crate) struct CapResumeSession {
+    binding: CapResumeBinding,
+    search: WidePnSearch<'static>,
+    root: usize,
+    stage_depth: usize,
+    stage_initialized: bool,
+    last_node_cap: u64,
+    advances: u64,
+    reentries: u64,
+    valid: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CapResumeBinding {
+    root: RootBinding,
+    claimant: Player,
+    goal: SolveGoal,
+    semantic_horizon: u32,
+    width: WidthOptions,
+    zone: ZoneSearchCaps,
+    tt_enabled: bool,
+    tt_bytes_cap: usize,
+    hash_mask: u64,
+    shared_fragments: bool,
+    lazy_frontier: bool,
+    lazy_key_validation: bool,
+    interior_census_gate: bool,
+    k_reply_consume: bool,
+    quotient_telemetry: bool,
+    max_depth_cap: usize,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CapResumeError {
+    Discarded,
+    BindingMismatch,
+    NonMonotoneNodeCap,
+    UnsupportedProfile,
+    VerifierRejected,
+}
+
+#[cfg(test)]
+pub(crate) struct CapResumeAdvance {
+    pub(crate) result: DeepResult<TssCertificate>,
+    pub(crate) root_pn: u32,
+    pub(crate) root_dn: u32,
+    pub(crate) stage_depth: usize,
+    pub(crate) advances: u64,
+    pub(crate) reentries: u64,
+}
+
+#[cfg(test)]
+impl CapResumeBinding {
+    fn capture(
+        solver: &TssSolver,
+        state: &RustHexoState,
+        caps: &SolveCaps,
+        goal: SolveGoal,
+    ) -> Result<Self, CapResumeError> {
+        let uses_wide_pn = solver.width.vcf_pair_complete
+            && !(solver.width.consumes_quiet_turns() && solver.width.consumes_ranked_zone());
+        if !uses_wide_pn
+            || solver.shared_fragments_enabled
+            || caps.node_cap == 0
+            || caps.semantic_horizon < state.placements_made()
+            || state.board().len() > MAX_CERT_ROOT_STONES
+            || immediate_winner(state, solver.width).is_some()
+        {
+            return Err(CapResumeError::UnsupportedProfile);
+        }
+        let claimant = match goal {
+            SolveGoal::Win | SolveGoal::Both => state.current_player(),
+            SolveGoal::Loss => state.current_player().other(),
+        };
+        Ok(Self {
+            root: RootBinding::from_state(state),
+            claimant,
+            goal,
+            semantic_horizon: caps.semantic_horizon,
+            width: solver.width,
+            zone: solver.zone,
+            tt_enabled: solver.tt_enabled,
+            tt_bytes_cap: caps.tt_bytes_cap,
+            hash_mask: solver.hash_mask,
+            shared_fragments: solver.shared_fragments_enabled,
+            lazy_frontier: std::env::var("TSS_LAZY_FRONTIER").ok().as_deref() == Some("1"),
+            lazy_key_validation: std::env::var_os("TSS_LAZY_FRONTIER_VALIDATE_KEYS").is_some(),
+            interior_census_gate: std::env::var_os("TSS_INTERIOR_CENSUS_GATE")
+                .is_some_and(|value| value == "1"),
+            k_reply_consume: matches!(std::env::var("TSS_K_REPLY_CONSUME").as_deref(), Ok("1")),
+            quotient_telemetry: std::env::var_os("TSS_TURN_QUOTIENT_TELEMETRY").is_some(),
+            max_depth_cap: wide_search_final_depth(state.placements_made(), caps.semantic_horizon),
+        })
+    }
+}
+
+#[cfg(test)]
+impl CapResumeSession {
+    pub(crate) fn new(
+        solver: &TssSolver,
+        state: &RustHexoState,
+        caps: &SolveCaps,
+        goal: SolveGoal,
+    ) -> Result<Self, CapResumeError> {
+        let binding = CapResumeBinding::capture(solver, state, caps, goal)?;
+        let local_tt_cap = if binding.tt_enabled {
+            binding.tt_bytes_cap
+        } else {
+            0
+        };
+        let mut search = WidePnSearch::new_with_width(
+            binding.claimant,
+            state.placements_made(),
+            0,
+            local_tt_cap,
+            binding.semantic_horizon,
+            binding.max_depth_cap,
+            binding.width,
+            None,
+        );
+        debug_assert_eq!(search.lazy_frontier, binding.lazy_frontier);
+        search.interior_census_gate = binding.interior_census_gate;
+        let root = search.insert_root(state);
+        Ok(Self {
+            binding,
+            search,
+            root,
+            stage_depth: 0,
+            stage_initialized: false,
+            last_node_cap: 0,
+            advances: 0,
+            reentries: 0,
+            valid: true,
+        })
+    }
+
+    /// Continue this exact query to a strictly larger total solve cap. The
+    /// session is invalidated before doing fallible search/materialization work;
+    /// consequently a caller that catches a panic cannot reuse partial state.
+    pub(crate) fn advance_to_node_cap(
+        &mut self,
+        solver: &TssSolver,
+        state: &RustHexoState,
+        caps: &SolveCaps,
+        goal: SolveGoal,
+    ) -> Result<CapResumeAdvance, CapResumeError> {
+        if !self.valid {
+            return Err(CapResumeError::Discarded);
+        }
+        // Invalidate before even rebuilding the proposed binding. A panic in
+        // binding capture, search, materialization, or verification therefore
+        // leaves no reusable partial session for a catch_unwind caller.
+        self.valid = false;
+        let binding = match CapResumeBinding::capture(solver, state, caps, goal) {
+            Ok(binding) => binding,
+            Err(error) => return Err(error),
+        };
+        if binding != self.binding {
+            return Err(CapResumeError::BindingMismatch);
+        }
+        if caps.node_cap <= self.last_node_cap {
+            return Err(CapResumeError::NonMonotoneNodeCap);
+        }
+
+        self.search.node_cap = caps.node_cap - 1;
+        if self.advances != 0 {
+            self.reentries = self.reentries.saturating_add(1);
+        }
+        self.advances = self.advances.saturating_add(1);
+        self.search.run_resumable(
+            state,
+            self.root,
+            &mut self.stage_depth,
+            &mut self.stage_initialized,
+        );
+        pn_init_finalize_wide(&self.search);
+
+        let root_pn = self.search.entries[self.root].pn;
+        let root_dn = self.search.entries[self.root].dn;
+        let claimed = status_for_claimant(state.current_player(), self.binding.claimant);
+        let cert = self
+            .search
+            .materialize(state, self.root)
+            .and_then(|materialized| {
+                let (nodes, root_node) =
+                    compact_certificate(&materialized.arena, materialized.root_node)?;
+                let mut cert = TssCertificate {
+                    root: RootBinding::from_state(state),
+                    claimant: self.binding.claimant,
+                    root_node,
+                    nodes,
+                    semantic_horizon: self.binding.semantic_horizon,
+                };
+                rebase_zone_distances(&mut cert, state)?;
+                Some(cert)
+            });
+        if cert
+            .as_ref()
+            .is_some_and(|certificate| !TssVerifier.verify(state, certificate, claimed))
+        {
+            return Err(CapResumeError::VerifierRejected);
+        }
+        let status = if cert.is_some() {
+            claimed
+        } else {
+            ProofStatus::Unknown
+        };
+        let result = DeepResult {
+            status,
+            cert,
+            stats: SolveStats {
+                nodes: self.search.expansions.saturating_add(1),
+                expansions: self.search.expansions,
+                tt_hits: self.search.tt_hits,
+                tt_entries: self.search.by_position.len() as u64,
+                peak_tt_bytes: self.search.peak_bytes as u64,
+                tt_admission_rejections: self.search.tt_index_rejections,
+                fragment_lookups: self.search.fragment_lookups,
+                fragment_hits: self.search.fragment_hits,
+                interior_gate_evaluations: self.search.interior_gate_evaluations,
+                interior_gate_dismissals: self.search.interior_gate_dismissals,
+                interior_gate_nanos: self.search.interior_gate_nanos,
+                ..SolveStats::default()
+            },
+        };
+        self.last_node_cap = caps.node_cap;
+        self.valid = true;
+        Ok(CapResumeAdvance {
+            result,
+            root_pn,
+            root_dn,
+            stage_depth: self.stage_depth,
+            advances: self.advances,
+            reentries: self.reentries,
+        })
     }
 }
 
@@ -3237,6 +3499,54 @@ impl<'store> WidePnSearch<'store> {
             stage_depth = next_depth;
         }
 
+        self.depth_cap = final_depth;
+    }
+
+    /// Test-only continuation driver. `stage_depth` and whether its cutoffs
+    /// have already been reopened are session state, not call-local state.
+    #[cfg(test)]
+    fn run_resumable(
+        &mut self,
+        root_state: &RustHexoState,
+        root: usize,
+        stage_depth: &mut usize,
+        stage_initialized: &mut bool,
+    ) {
+        let final_depth = self.max_depth_cap;
+        loop {
+            self.depth_cap = *stage_depth;
+            if !*stage_initialized {
+                self.reopen_depth_cutoffs(*stage_depth);
+                *stage_initialized = true;
+            }
+            let is_final = *stage_depth == final_depth;
+            let selected_cutoff = self.run_until(root_state, root, self.node_cap, !is_final);
+            self.refresh_all_bottom_up();
+            if let Some(telemetry) = self.quotient_telemetry.as_mut() {
+                telemetry.observe_stage(&self.entries, &self.by_position, *stage_depth);
+            }
+            if self.trace_enabled() {
+                let root_entry = &self.entries[root];
+                eprintln!(
+                    "WIDTH_PN_RESUME_STAGE stage_depth={} expansions={} selected_cutoff={selected_cutoff:?} root_pn={} root_dn={}",
+                    *stage_depth, self.expansions, root_entry.pn, root_entry.dn
+                );
+            }
+
+            if self.entries[root].pn == 0 || self.expansions >= self.node_cap || is_final {
+                break;
+            }
+            let Some(encountered_depth) = selected_cutoff else {
+                break;
+            };
+            let Some(next_depth) =
+                next_wide_stage_depth(*stage_depth, encountered_depth, final_depth)
+            else {
+                break;
+            };
+            *stage_depth = next_depth;
+            *stage_initialized = false;
+        }
         self.depth_cap = final_depth;
     }
 

@@ -1,0 +1,77 @@
+FINAL IDEATION ROUND — "what lever have we not posed?"
+
+This is the closing gate of the efficiency program. Owner stopping
+criterion (binding): the program ends only when we can say with
+confidence that NO REALISTIC LEVERS REMAIN to improve the solver. Your
+job: attack that claim. Find levers the program has not posed — or
+come back honestly empty. An empty answer is a legitimate, valuable
+result; a padded list of unrealistic ideas is a failure. Deep invested
+research is authorized and expected.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width
+(HEAD = the register landing; docs/PLAN_TSS_SOLVER_UPGRADES.md is the
+complete dispositioned lever register — READ IT FIRST, then
+MERGE_RESOLUTION.md and the HUNT_REPORT_*/BUILD_* docs it cites). You
+CANNOT git-commit. Deliverable: IDEATION_FINAL.md.
+
+## What has been dispositioned (do not re-pose; the register has the
+## details)
+Consumed/landed: lazy frontier; interior census gate; zone-clock fix;
+one-engine consolidation; 1 GiB lazy-on official profile; Phase-3 leaf
+config (wide+lazy+gate). Sound-but-uneconomic: K_reply consume;
+cross-solve fragments. Refuted/dead: support-hashing on the current
+format (NQ3); D6 search-TT folding (NQ5); horizon laddering (NQ8);
+stronger census bounds (collide with positives); commutation ordering
+(<=0.16%). Parked with reopening conditions: b=2 domination; C_rel
+relative certificates; GAP-RAW.
+
+## Where to hunt (be systematic; spend real effort per angle, and say
+## per angle what you looked at and why nothing (or something) is there)
+1. TELEMETRY RESIDUE: with lazy+gate on, WHERE does the remaining time
+   go? Profile a 1 GiB lazy-on official run (existing telemetry +
+   wide_gen_profile) and decompose: pair generation, defender
+   enumeration, threat analysis, TT ops, verifier, zone builds. Any
+   component >20% of wall that no lever touched = a candidate.
+2. ALGORITHM CLASS SWEEP: df-pn variants and proof-number literature
+   shapes not yet tried on THIS engine — 1+epsilon trick / threshold
+   controls, weak PNS / evaluation-informed initialization, proof-set
+   vs proof-tree storage, DAG-aware pn/dn (double-counting correction),
+   GHI handling costs, seldom-expanding variants. For each: does the
+   engine already do it, does a measured number say it can't matter, or
+   is it a genuine unposed lever with a sizing plan?
+3. DOMAIN STRUCTURE: anything in Hexo's structure the zone/census/
+   kernel machinery still ignores — e.g. attacker-threat sequencing
+   properties, defender-reply typing beyond K_reply, window-graph
+   decompositions, endgame databases for small residues, symmetry at
+   the ROOT (opening atlas D6 folding — distinct from the dead
+   search-TT folding).
+4. CROSS-SURFACE: the leaf campaign's open horizon-height question;
+   MCTS-side batching/caching interfaces; anything the trainer call
+   pattern exposes that single-solve profiling hides.
+5. THE PAPER'S CAPSTONE NEEDS: reference-solver comparisons (idtt/
+   dfpn/pdspn columns) — if any reference beats us anywhere at matched
+   budget, that gap is a lever by definition. Check the existing
+   G2R2-era reference numbers against the consolidated engine's
+   current numbers.
+
+## Output contract (IDEATION_FINAL.md)
+For each candidate lever: name, mechanism, why the program missed it,
+prospective size (order of magnitude, from telemetry or literature
+reasoning — no fabricated numbers), soundness obligation, and the
+exact next hunt/proof round it would need. Then the VERDICT: either
+"N realistic levers remain (ranked)" or "LEVER EXHAUSTION: nothing
+realistic remains — here is what I checked and why each angle is dry."
+Truthfulness outranks completeness; realistic means a plausible >=5%
+end-to-end improvement on a profile that matters (deep official or
+Phase-3 leaf), or a soundness/capability gain the owner would care
+about.
+
+## Rules
+Profiling runs allowed: CARGO_TARGET_DIR=.target-codex; --target
+x86_64-pc-windows-msvc always; ONE cargo; --test-threads=1; free RAM
+>9 GB before every cargo, >11 GB for 2 GiB/1 GiB gate-class profiling
+(such runs <=45 min); Lean lane has RAM priority. No production code
+changes; test-gated instrumentation only if strictly needed (default
+off, identity-checked). No commits. This worktree only; siblings
+read-only. Final message: the verdict, the ranked candidates (or the
+dry-angle inventory), files, regen commands.
