@@ -11,12 +11,12 @@ use std::time::Instant;
 
 use hexo_engine::{apply_placement, HexCoord, HexoState, Placement, TurnPhase};
 
-use crate::tss_core::{CertVerify, ProofStatus, SolveCaps, SolveGoal, ZoneSearchCaps};
+use crate::tss_core::{CertVerify, ProofStatus, SolveCaps, SolveGoal, SolveStats, ZoneSearchCaps};
 use crate::tss_solver::{
     begin_pn_init_telemetry, take_pn_init_telemetry_report, PnInitTelemetryMode,
     PnInitTelemetryNode, PnInitTelemetryOutcome, PnInitTelemetryReport, TssSolver, WidthOptions,
 };
-use crate::tss_verify::TssVerifier;
+use crate::tss_verify::{CertNode, TssCertificate, TssVerifier};
 
 const DEFAULT_TT_BYTES: usize = 512 << 20;
 const RELATIVE_HORIZON: u32 = 16;
@@ -1080,4 +1080,533 @@ fn interior_gate_live_campaign() {
     }
     print_live_aggregate(&format!("human_{human_n}_cap10000"), &human_aggregate);
     println!("IG_DONE result=PASS certificates=VERIFIED forcing_anomalies=0");
+}
+
+#[derive(Clone)]
+struct HorizonLadderRoot {
+    group: String,
+    id: String,
+    state: HexoState,
+    node_cap: u64,
+    width: WidthOptions,
+    zone: ZoneSearchCaps,
+    expect_win: bool,
+}
+
+#[derive(Clone, Copy)]
+struct HorizonLadderSchedule {
+    name: &'static str,
+    relative_horizons: &'static [u32],
+    bounded_node_cap: Option<u64>,
+}
+
+#[derive(Clone, Copy)]
+struct HorizonLadderSolve {
+    status: ProofStatus,
+    stats: SolveStats,
+    wall_nanos: u128,
+    resolution_depth: Option<u32>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct HorizonLadderCost {
+    nodes: u64,
+    expansions: u64,
+    wall_nanos: u128,
+}
+
+impl HorizonLadderCost {
+    fn add_solve(&mut self, solve: HorizonLadderSolve) {
+        self.nodes = self.nodes.saturating_add(solve.stats.nodes);
+        self.expansions = self.expansions.saturating_add(solve.stats.expansions);
+        self.wall_nanos = self.wall_nanos.saturating_add(solve.wall_nanos);
+    }
+}
+
+#[derive(Default)]
+struct HorizonLadderDirectAggregate {
+    roots: u64,
+    wins: u64,
+    unknowns: u64,
+    cost: HorizonLadderCost,
+    resolution_depths: Vec<u32>,
+}
+
+#[derive(Default)]
+struct HorizonLadderAggregate {
+    roots: u64,
+    wins: u64,
+    losses: u64,
+    ties: u64,
+    direct: HorizonLadderCost,
+    ladder: HorizonLadderCost,
+    failed_rung_nodes: BTreeMap<u32, u64>,
+    found_at: BTreeMap<u32, u64>,
+    saving_at: BTreeMap<u32, u64>,
+    final_rungs: u64,
+}
+
+struct GateEnvironmentGuard {
+    original: Option<std::ffi::OsString>,
+}
+
+impl GateEnvironmentGuard {
+    fn capture() -> Self {
+        Self {
+            original: std::env::var_os("TSS_INTERIOR_CENSUS_GATE"),
+        }
+    }
+}
+
+impl Drop for GateEnvironmentGuard {
+    fn drop(&mut self) {
+        if let Some(value) = self.original.as_ref() {
+            std::env::set_var("TSS_INTERIOR_CENSUS_GATE", value);
+        } else {
+            std::env::remove_var("TSS_INTERIOR_CENSUS_GATE");
+        }
+    }
+}
+
+fn certificate_resolution_depth(state: &HexoState, cert: &TssCertificate) -> u32 {
+    let resolution = cert
+        .nodes
+        .iter()
+        .filter_map(|node| match node {
+            CertNode::OrCompletion { completion_ply, .. } => Some(*completion_ply),
+            CertNode::Win { resolution_ply, .. } | CertNode::Loss { resolution_ply, .. } => {
+                Some(*resolution_ply)
+            }
+            CertNode::Choice { .. } | CertNode::Universal { .. } => None,
+        })
+        .max()
+        .expect("WIN certificate must contain a typed leaf resolution");
+    resolution
+        .checked_sub(state.placements_made())
+        .expect("certificate resolution precedes root clock")
+}
+
+fn horizon_ladder_solve(
+    root: &HorizonLadderRoot,
+    node_cap: u64,
+    semantic_horizon: u32,
+    gate: bool,
+) -> HorizonLadderSolve {
+    if gate {
+        std::env::set_var("TSS_INTERIOR_CENSUS_GATE", "1");
+    } else {
+        std::env::remove_var("TSS_INTERIOR_CENSUS_GATE");
+    }
+    let mut solver = TssSolver::default();
+    solver.set_width_options(root.width);
+    solver.set_zone_options(root.zone);
+    let started = Instant::now();
+    let result = solver.solve_goal(
+        &root.state,
+        &SolveCaps {
+            node_cap,
+            tt_bytes_cap: horizon_ladder_tt_bytes(),
+            semantic_horizon,
+        },
+        SolveGoal::Win,
+    );
+    let wall_nanos = started.elapsed().as_nanos();
+    assert_ne!(
+        result.status,
+        ProofStatus::Loss,
+        "WIN-only horizon-ladder solve returned LOSS for {}",
+        root.id
+    );
+    let resolution_depth = match (result.status, result.cert.as_ref()) {
+        (ProofStatus::Win, Some(cert)) => {
+            let depth = certificate_resolution_depth(&root.state, cert);
+            if !TssVerifier.verify(&root.state, cert, ProofStatus::Win) {
+                eprintln!(
+                    "HL_VERIFY_FAILURE group={} id={} cap={} horizon={} nodes={} expansions={} cert_nodes={} cert_horizon={} resolution_depth={depth}",
+                    root.group,
+                    root.id,
+                    node_cap,
+                    semantic_horizon,
+                    result.stats.nodes,
+                    result.stats.expansions,
+                    cert.nodes.len(),
+                    cert.semantic_horizon,
+                );
+                let original_trace = std::env::var_os("TSS_R3_VERIFY_TRACE");
+                std::env::set_var("TSS_R3_VERIFY_TRACE", "1");
+                let _ = TssVerifier.verify(&root.state, cert, ProofStatus::Win);
+                if let Some(value) = original_trace {
+                    std::env::set_var("TSS_R3_VERIFY_TRACE", value);
+                } else {
+                    std::env::remove_var("TSS_R3_VERIFY_TRACE");
+                }
+                panic!(
+                    "horizon-ladder certificate verification failed for {}",
+                    root.id
+                );
+            }
+            Some(depth)
+        }
+        (ProofStatus::Win, None) => panic!("WIN without certificate for {}", root.id),
+        (ProofStatus::Unknown, None) => None,
+        (ProofStatus::Unknown, Some(_)) => panic!("UNKNOWN carried certificate for {}", root.id),
+        (ProofStatus::Loss, _) => unreachable!(),
+    };
+    HorizonLadderSolve {
+        status: result.status,
+        stats: result.stats,
+        wall_nanos,
+        resolution_depth,
+    }
+}
+
+fn horizon_ladder_tt_bytes() -> usize {
+    std::env::var("TSS_HORIZON_LADDER_TT_BYTES")
+        .ok()
+        .map(|value| value.parse().expect("numeric horizon-ladder TT bytes"))
+        .unwrap_or(DEFAULT_TT_BYTES)
+}
+
+fn horizon_ladder_roots(human_n: usize) -> Vec<HorizonLadderRoot> {
+    let corpus = forcing_corpus();
+    let mut roots = Vec::new();
+    for cap in [10_000u64, 100_000] {
+        for position in &corpus {
+            roots.push(HorizonLadderRoot {
+                group: format!("forcing_{cap}"),
+                id: position.id.clone(),
+                state: position.state.clone(),
+                node_cap: cap,
+                width: WidthOptions::vcf_pair_complete(),
+                zone: ZoneSearchCaps::default(),
+                expect_win: position.expect_win,
+            });
+        }
+    }
+
+    roots.push(HorizonLadderRoot {
+        group: "double_fork_compact".to_owned(),
+        id: "double_fork_compact".to_owned(),
+        state: replay(DOUBLE_FORK_COMPACT),
+        node_cap: 100_000,
+        width: WidthOptions::round3_consume(),
+        zone: ZoneSearchCaps {
+            enabled: true,
+            stale_area_filter: false,
+            count2_threshold: true,
+            pair_commutation: false,
+        },
+        expect_win: true,
+    });
+
+    let games = human_games();
+    let sampled = human_roots(&games, human_n);
+    assert_eq!(sampled.len(), human_n, "human sample size drift");
+    for (rank, sampled_root) in sampled.iter().enumerate() {
+        roots.push(HorizonLadderRoot {
+            group: format!("human_{human_n}_cap10000"),
+            id: format!(
+                "human_{rank:03}_g{}_p{}",
+                sampled_root.game, sampled_root.prefix
+            ),
+            state: replay(&games[sampled_root.game].moves[..sampled_root.prefix]),
+            node_cap: 10_000,
+            width: WidthOptions::vcf_pair_complete(),
+            zone: ZoneSearchCaps::default(),
+            expect_win: true,
+        });
+    }
+    roots
+}
+
+fn print_resolution_census(group: &str, depths: &[u32]) {
+    let counts = [8u32, 12, 16, 24, 32]
+        .map(|horizon| depths.iter().filter(|depth| **depth <= horizon).count());
+    println!(
+        "HL_DEPTH_SUMMARY group={group} wins={} le8={} le12={} le16={} le24={} le32={}",
+        depths.len(),
+        counts[0],
+        counts[1],
+        counts[2],
+        counts[3],
+        counts[4]
+    );
+}
+
+#[test]
+#[ignore = "NQ8 semantic-horizon ladder campaign; release-only, serialized, <=10 minutes"]
+fn horizon_ladder_campaign() {
+    let _gate_environment = GateEnvironmentGuard::capture();
+    let human_n = std::env::var("TSS_HORIZON_LADDER_HUMAN_N")
+        .ok()
+        .map(|value| value.parse().expect("numeric human sample"))
+        .unwrap_or(100usize);
+    let small_rung_cap = std::env::var("TSS_HORIZON_LADDER_RUNG_CAP")
+        .ok()
+        .map(|value| value.parse().expect("numeric bounded-rung cap"))
+        .unwrap_or(1_000u64);
+    let schedules = [
+        HorizonLadderSchedule {
+            name: "h8_16_24_32",
+            relative_horizons: &[8, 16, 24, 32],
+            bounded_node_cap: None,
+        },
+        HorizonLadderSchedule {
+            name: "h8_16",
+            relative_horizons: &[8, 16],
+            bounded_node_cap: None,
+        },
+        HorizonLadderSchedule {
+            name: "h16",
+            relative_horizons: &[16],
+            bounded_node_cap: None,
+        },
+        HorizonLadderSchedule {
+            name: "h8_16_24_32_cap",
+            relative_horizons: &[8, 16, 24, 32],
+            bounded_node_cap: Some(small_rung_cap),
+        },
+    ];
+    let mut roots = horizon_ladder_roots(human_n);
+    if let Ok(only_group) = std::env::var("TSS_HORIZON_LADDER_ONLY_GROUP") {
+        roots.retain(|root| root.group == only_group);
+        assert!(
+            !roots.is_empty(),
+            "horizon-ladder group filter matched no roots"
+        );
+    }
+    let mut direct_aggregates = BTreeMap::<String, HorizonLadderDirectAggregate>::new();
+    let mut schedule_aggregates = BTreeMap::<(String, &'static str), HorizonLadderAggregate>::new();
+    let mut all_resolution_depths = Vec::new();
+
+    for root in &roots {
+        let direct = horizon_ladder_solve(root, root.node_cap, u32::MAX, false);
+        if !root.expect_win {
+            assert_ne!(
+                direct.status,
+                ProofStatus::Win,
+                "forcing NO row {} became WIN",
+                root.id
+            );
+        }
+        println!(
+            "HL_DIRECT group={} id={} cap={} status={} nodes={} expansions={} resolution_depth={} ms={:.3}",
+            root.group,
+            root.id,
+            root.node_cap,
+            status_name(direct.status),
+            direct.stats.nodes,
+            direct.stats.expansions,
+            direct
+                .resolution_depth
+                .map_or_else(|| "none".to_owned(), |depth| depth.to_string()),
+            direct.wall_nanos as f64 / 1e6,
+        );
+        let direct_aggregate = direct_aggregates.entry(root.group.clone()).or_default();
+        direct_aggregate.roots = direct_aggregate.roots.saturating_add(1);
+        direct_aggregate.cost.add_solve(direct);
+        match direct.status {
+            ProofStatus::Win => direct_aggregate.wins = direct_aggregate.wins.saturating_add(1),
+            ProofStatus::Unknown => {
+                direct_aggregate.unknowns = direct_aggregate.unknowns.saturating_add(1)
+            }
+            ProofStatus::Loss => unreachable!(),
+        }
+        if let Some(depth) = direct.resolution_depth {
+            direct_aggregate.resolution_depths.push(depth);
+            all_resolution_depths.push(depth);
+            println!(
+                "HL_DEPTH group={} id={} cap={} relative_resolution={depth}",
+                root.group, root.id, root.node_cap
+            );
+        }
+
+        // Each unique bounded rung is measured once with a fresh solver. Schedules
+        // are then exact deterministic compositions of those cold measurements;
+        // likewise, the one cold direct solve is the unchanged final rung.
+        let mut measured_rungs = BTreeMap::<(u64, u32), HorizonLadderSolve>::new();
+        for schedule in schedules {
+            let mut ladder_cost = HorizonLadderCost::default();
+            let mut failed = Vec::<(u32, u64)>::new();
+            let mut found_at = None;
+            let mut ladder_status = ProofStatus::Unknown;
+            for &relative_horizon in schedule.relative_horizons {
+                let rung_cap = schedule
+                    .bounded_node_cap
+                    .unwrap_or(root.node_cap)
+                    .min(root.node_cap);
+                let key = (rung_cap, relative_horizon);
+                let (rung, source) = if let Some(rung) = measured_rungs.get(&key).copied() {
+                    (rung, "reused_measurement")
+                } else {
+                    let rung = horizon_ladder_solve(
+                        root,
+                        rung_cap,
+                        root.state
+                            .placements_made()
+                            .saturating_add(relative_horizon),
+                        true,
+                    );
+                    measured_rungs.insert(key, rung);
+                    (rung, "fresh_measurement")
+                };
+                ladder_cost.add_solve(rung);
+                println!(
+                    "HL_RUNG group={} id={} schedule={} relative_horizon={} cap={} status={} nodes={} expansions={} resolution_depth={} ms={:.3} source={source}",
+                    root.group,
+                    root.id,
+                    schedule.name,
+                    relative_horizon,
+                    rung_cap,
+                    status_name(rung.status),
+                    rung.stats.nodes,
+                    rung.stats.expansions,
+                    rung.resolution_depth.map_or_else(|| "none".to_owned(), |depth| depth.to_string()),
+                    rung.wall_nanos as f64 / 1e6,
+                );
+                if rung.status == ProofStatus::Win {
+                    ladder_status = ProofStatus::Win;
+                    found_at = Some(relative_horizon);
+                    break;
+                }
+                failed.push((relative_horizon, rung.stats.nodes));
+            }
+
+            let used_final = found_at.is_none();
+            if used_final {
+                ladder_status = direct.status;
+                ladder_cost.add_solve(direct);
+                println!(
+                    "HL_RUNG group={} id={} schedule={} relative_horizon=unbounded cap={} status={} nodes={} expansions={} resolution_depth={} ms={:.3} source=direct_measurement",
+                    root.group,
+                    root.id,
+                    schedule.name,
+                    root.node_cap,
+                    status_name(direct.status),
+                    direct.stats.nodes,
+                    direct.stats.expansions,
+                    direct.resolution_depth.map_or_else(|| "none".to_owned(), |depth| depth.to_string()),
+                    direct.wall_nanos as f64 / 1e6,
+                );
+            }
+
+            if ladder_status != direct.status {
+                panic!(
+                    "VERDICT DIVERGENCE STOP group={} id={} schedule={} direct={} ladder={} found_at={:?}",
+                    root.group,
+                    root.id,
+                    schedule.name,
+                    status_name(direct.status),
+                    status_name(ladder_status),
+                    found_at
+                );
+            }
+            let economic = ladder_cost.nodes.cmp(&direct.stats.nodes);
+            let economic_name = match economic {
+                std::cmp::Ordering::Less => "WIN",
+                std::cmp::Ordering::Greater => "LOSS",
+                std::cmp::Ordering::Equal => "TIE",
+            };
+            println!(
+                "HL_ROW group={} id={} schedule={} verdict={} direct_nodes={} ladder_nodes={} node_delta={} direct_expansions={} ladder_expansions={} expansion_delta={} direct_ms={:.3} ladder_ms={:.3} wall_delta_ms={:.3} economic={} found_at={} failed_nodes={}",
+                root.group,
+                root.id,
+                schedule.name,
+                status_name(ladder_status),
+                direct.stats.nodes,
+                ladder_cost.nodes,
+                i128::from(ladder_cost.nodes) - i128::from(direct.stats.nodes),
+                direct.stats.expansions,
+                ladder_cost.expansions,
+                i128::from(ladder_cost.expansions) - i128::from(direct.stats.expansions),
+                direct.wall_nanos as f64 / 1e6,
+                ladder_cost.wall_nanos as f64 / 1e6,
+                (ladder_cost.wall_nanos as f64 - direct.wall_nanos as f64) / 1e6,
+                economic_name,
+                found_at.map_or_else(|| "final".to_owned(), |horizon| format!("h{horizon}")),
+                failed.iter().map(|(horizon, nodes)| format!("h{horizon}:{nodes}")).collect::<Vec<_>>().join(","),
+            );
+
+            let aggregate = schedule_aggregates
+                .entry((root.group.clone(), schedule.name))
+                .or_default();
+            aggregate.roots = aggregate.roots.saturating_add(1);
+            aggregate.direct.add_solve(direct);
+            aggregate.ladder.nodes = aggregate.ladder.nodes.saturating_add(ladder_cost.nodes);
+            aggregate.ladder.expansions = aggregate
+                .ladder
+                .expansions
+                .saturating_add(ladder_cost.expansions);
+            aggregate.ladder.wall_nanos = aggregate
+                .ladder
+                .wall_nanos
+                .saturating_add(ladder_cost.wall_nanos);
+            match economic {
+                std::cmp::Ordering::Less => aggregate.wins = aggregate.wins.saturating_add(1),
+                std::cmp::Ordering::Greater => {
+                    aggregate.losses = aggregate.losses.saturating_add(1)
+                }
+                std::cmp::Ordering::Equal => aggregate.ties = aggregate.ties.saturating_add(1),
+            }
+            if used_final {
+                aggregate.final_rungs = aggregate.final_rungs.saturating_add(1);
+            }
+            for (horizon, nodes) in failed {
+                let total = aggregate.failed_rung_nodes.entry(horizon).or_default();
+                *total = total.saturating_add(nodes);
+            }
+            if let Some(horizon) = found_at {
+                *aggregate.found_at.entry(horizon).or_default() += 1;
+                let saving = aggregate.saving_at.entry(horizon).or_default();
+                *saving =
+                    saving.saturating_add(direct.stats.nodes.saturating_sub(ladder_cost.nodes));
+            }
+        }
+    }
+
+    for (group, aggregate) in &direct_aggregates {
+        println!(
+            "HL_DIRECT_SUMMARY group={group} roots={} verdicts={}/{} nodes={} expansions={} wall_ms={:.3}",
+            aggregate.roots,
+            aggregate.wins,
+            aggregate.unknowns,
+            aggregate.cost.nodes,
+            aggregate.cost.expansions,
+            aggregate.cost.wall_nanos as f64 / 1e6,
+        );
+        print_resolution_census(group, &aggregate.resolution_depths);
+    }
+    print_resolution_census("all", &all_resolution_depths);
+    for ((group, schedule), aggregate) in &schedule_aggregates {
+        println!(
+            "HL_SUMMARY group={group} schedule={schedule} roots={} economic={}/{}/{} direct_nodes={} ladder_nodes={} node_delta={} node_pct={:.3} direct_expansions={} ladder_expansions={} expansion_delta={} expansion_pct={:.3} direct_ms={:.3} ladder_ms={:.3} wall_pct={:.3} final_rungs={}",
+            aggregate.roots,
+            aggregate.wins,
+            aggregate.losses,
+            aggregate.ties,
+            aggregate.direct.nodes,
+            aggregate.ladder.nodes,
+            i128::from(aggregate.ladder.nodes) - i128::from(aggregate.direct.nodes),
+            100.0 * (aggregate.ladder.nodes as f64 / aggregate.direct.nodes.max(1) as f64 - 1.0),
+            aggregate.direct.expansions,
+            aggregate.ladder.expansions,
+            i128::from(aggregate.ladder.expansions) - i128::from(aggregate.direct.expansions),
+            100.0 * (aggregate.ladder.expansions as f64 / aggregate.direct.expansions.max(1) as f64 - 1.0),
+            aggregate.direct.wall_nanos as f64 / 1e6,
+            aggregate.ladder.wall_nanos as f64 / 1e6,
+            100.0 * (aggregate.ladder.wall_nanos as f64 / aggregate.direct.wall_nanos.max(1) as f64 - 1.0),
+            aggregate.final_rungs,
+        );
+        println!(
+            "HL_WASTE group={group} schedule={schedule} failed_rung_nodes={} found_at={} saving_at={}",
+            aggregate.failed_rung_nodes.iter().map(|(horizon, nodes)| format!("h{horizon}:{nodes}")).collect::<Vec<_>>().join(","),
+            aggregate.found_at.iter().map(|(horizon, roots)| format!("h{horizon}:{roots}")).collect::<Vec<_>>().join(","),
+            aggregate.saving_at.iter().map(|(horizon, nodes)| format!("h{horizon}:{nodes}")).collect::<Vec<_>>().join(","),
+        );
+    }
+    println!(
+        "HL_DONE result=PASS verdict_divergences=0 certificates=VERIFIED schedules={} roots={}",
+        schedules.len(),
+        roots.len()
+    );
 }
