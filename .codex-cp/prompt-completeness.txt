@@ -1,0 +1,88 @@
+R-CP1 — RESEARCH ROUND (ultra): certified completeness of the width contract — scoping + theorem design
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-completeness
+(branch hunt/completeness, HEAD = a49e8abd, the current engine tip). You
+CANNOT git-commit. This is a DOC-ONLY round: NO cargo (the host-wide slot
+is held by a measurement job whose wall numbers a concurrent build would
+contaminate), NO lake/Lean builds (the spine lane owns E:\tss-lean; that
+repo is READ-ONLY for you). Deliverable: COMPLETENESS_SPEC.md (+ a short
+final message).
+
+## The prize
+Every WIN/LOSS the solver emits is certificate-backed end to end. Every
+UNKNOWN is naked: its meaning — "the contracted search space contains no
+TSS-win" — rests entirely on unverified Rust search code. The target of
+the 3.1 program is a machine-checked completeness theorem: IF the
+contracted search space contains a win, THEN the engine's search
+discipline finds it. Equivalently: a terminating, uncapped-exhausted
+search returning UNKNOWN is a THEOREM that no win exists within the
+contract. No public precedent exists for machine-checked completeness of
+a df-pn threat-space solver. This round does not prove it; it produces
+the authoritative design that makes the proof a sequence of tractable
+sessions.
+
+## What you must produce in COMPLETENESS_SPEC.md
+
+1. **The exact theorem statement (candidates).** Define precisely:
+   - the CONTRACT: the vcf_pair_complete / WideTurnGate forcing grammar
+     (what counts as a contract-win derivation — align with the
+     "forcing-grammar certificate" contract in the R-CF1 material:
+     `CENSUS_CANDIDATES.md` on branch hunt/census-deep, esp. its
+     contract-separation preamble), the semantic horizon, and which
+     verdict states the theorem covers. Be exact about what UNKNOWN
+     means TODAY in the engine (read the code, cite lines).
+   - the DISCIPLINE: which engine mechanisms the theorem must model.
+     Enumerate at least: Choice/Universal pn/dn recurrences, second-best
+     threshold descent + child-progress floor + conjunctive budget
+     subtraction, generator exhaustion semantics (a Choice node may not
+     be refuted before exhaustion), lazy frontier admission
+     (TSS_LAZY_FRONTIER), incremental defender enumeration
+     (TSS_INCR_DEFENDER — exact identity, but say what the theorem
+     assumes), TT as cache (hits, eviction at 1 GiB, stage refreshes —
+     completeness must not depend on retention), interior census gate
+     (inert at unbounded horizon — in or out of scope?), cap semantics
+     (node caps make UNKNOWN mean "capped", NOT "exhausted" — the
+     theorem covers exhausted terminations; define how the engine
+     distinguishes them, or flag it if it cannot, which is itself a
+     major finding).
+2. **The obligations ledger.** Numbered list of lemmas/invariants the
+   theorem decomposes into. For each: statement sketch, difficulty,
+   and status — already-kernel-proved in the tss-lean spine (READ
+   E:\tss-lean LEDGER.md + the TssZones module headers; cite rows:
+   T3-T5, T9, T10, D19-D21, L15/L16, the pending L17/T11/T6 capstone
+   chain), provable-with-existing-machinery, or needs-new-machinery.
+   Say explicitly which obligations the T6 capstone unblocks.
+3. **The route decision.** Compare at least these three architectures,
+   then RECOMMEND ONE with reasons and an honest effort estimate:
+   (a) Lean model of the search grammar + paper-level Rust-to-model
+       argument (trust gap at the Rust boundary — bound it);
+   (b) exhaustion certificates: the engine emits a NO-witness trace
+       (frontier tree + exhaustion markers) and a verified checker
+       validates it — the UNKNOWN analogue of the strict verifier.
+       Beware: C-REL round 1 REJECTED support-only WIN verification at
+       obligation O4 (remote-witness counterexample, NQ2) — analyze
+       whether exhaustion certificates evade or inherit that failure
+       mode, explicitly;
+   (c) full functional-correctness verification of the search core
+       (say why this is or is not realistic here).
+   State kill criteria for the recommended route (what discovery would
+   make it not worth continuing).
+4. **The boundary map.** What the theorem does NOT give: engine bugs
+   below the modeled discipline, cosmic-ray/compiler trust, cap-outs,
+   flags outside the covered set. One honest table.
+
+## Rules
+- Read the ACTUAL code and cite files/lines: packages/hexfield_eq/rust/
+  src/tss_solver.rs (search core), tss_verify.rs (strict verifier —
+  READ-ONLY context), tss_corpus.rs (verdict/expectation semantics),
+  and the R-CF1 contract material. Read E:\tss-lean\LEDGER.md and any
+  TssZones files you need (read-only).
+- Conventions: every claim labeled; no status inflation; if the engine's
+  current UNKNOWN conflates capped and exhausted, say so bluntly and
+  design the smallest engine-side distinction (default-off, cfg(test)
+  first) that would make the theorem statable — as a PROPOSAL only, no
+  code changes this round.
+- Incremental disk writes; chunk <= 2h per exec; honest partial stop
+  with named remaining sections is success.
+- Final message: recommended route + top-5 obligations + what the T6
+  capstone unblocks + the single biggest risk to the whole program.
