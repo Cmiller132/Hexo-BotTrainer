@@ -1860,34 +1860,88 @@ fn dom_hunt_b2_q0() {
                             node_cap,
                             overall_deadline,
                         );
-                        if stock == B2Bounded::Complete(ProofStatus::Loss) {
-                            let fast = tss_reference_fast::solve(&state, depth, b2_fast_config());
-                            assert_eq!(
-                                fast.status,
-                                ProofStatus::Loss,
-                                "fast reference missed stock Loss qualification row"
-                            );
-                            counts[player_index][phase_index] += 1;
-                            let row = format!(
-                                "Q0_LOSS {{\"game_hash\":\"{}\",\"prefix\":{},\"position\":[{}],\"player\":{},\"phase\":\"{}\",\"depth\":{},\"stock_nodes\":{},\"fast_nodes\":{},\"fast_tt_hits\":{}}}",
+                        let phase = if phase_index == 0 {
+                            "FirstStone"
+                        } else {
+                            "SecondStone"
+                        };
+                        match stock {
+                            B2Bounded::Complete(ProofStatus::Loss) => {
+                                let fast = tss_reference_fast::solve_for_player_until(
+                                    &state,
+                                    state.current_player(),
+                                    depth,
+                                    b2_fast_config(),
+                                    overall_deadline,
+                                );
+                                match fast.status {
+                                    Some(ProofStatus::Loss) => {
+                                        let slot = counts[player_index][phase_index] + 1;
+                                        counts[player_index][phase_index] += 1;
+                                        let row = format!(
+                                            "Q0_LOSS {{\"game_hash\":\"{}\",\"prefix\":{},\"position\":[{}],\"player\":{},\"phase\":\"{}\",\"slot\":{},\"depth\":{},\"stock_nodes\":{},\"fast_nodes\":{},\"fast_tt_hits\":{},\"classification\":\"QUALIFIED\"}}",
+                                            game.game_hash,
+                                            prefix,
+                                            b2_position_dump(&game.moves, prefix),
+                                            player_index,
+                                            phase,
+                                            slot,
+                                            depth,
+                                            nodes,
+                                            fast.nodes,
+                                            fast.tt_hits
+                                        );
+                                        println!("{row}");
+                                        rows.push(row);
+                                    }
+                                    Some(status) => println!(
+                                        "Q0_DISQUALIFIED hash={} prefix={} player={} phase={} depth={} stock=LOSS stock_nodes={} fast={} fast_nodes={} reason=FAST_MISMATCH",
+                                        game.game_hash,
+                                        prefix,
+                                        player_index,
+                                        phase,
+                                        depth,
+                                        nodes,
+                                        status_name(status),
+                                        fast.nodes
+                                    ),
+                                    None => println!(
+                                        "Q0_UNQUALIFIABLE hash={} prefix={} player={} phase={} depth={} stock=LOSS stock_nodes={} fast_nodes={} wall_s={:.6} reason=FAST_DEADLINE",
+                                        game.game_hash,
+                                        prefix,
+                                        player_index,
+                                        phase,
+                                        depth,
+                                        nodes,
+                                        fast.nodes,
+                                        fast.elapsed.as_secs_f64()
+                                    ),
+                                }
+                            }
+                            B2Bounded::Complete(status) => println!(
+                                "Q0_DISQUALIFIED hash={} prefix={} player={} phase={} depth={} stock={} stock_nodes={} reason=STOCK_NOT_LOSS",
                                 game.game_hash,
                                 prefix,
-                                b2_position_dump(&game.moves, prefix),
                                 player_index,
-                                if phase_index == 0 { "FirstStone" } else { "SecondStone" },
+                                phase,
+                                depth,
+                                status_name(status),
+                                nodes
+                            ),
+                            B2Bounded::Incomplete => println!(
+                                "Q0_UNQUALIFIABLE hash={} prefix={} player={} phase={} depth={} stock_nodes={} reason={}",
+                                game.game_hash,
+                                prefix,
+                                player_index,
+                                phase,
                                 depth,
                                 nodes,
-                                fast.nodes,
-                                fast.tt_hits
-                            );
-                            println!("{row}");
-                            rows.push(row);
-                        }
-                        if stock == B2Bounded::Incomplete {
-                            println!(
-                                "Q0_INCOMPLETE hash={} prefix={} player={} phase={} depth={} nodes={}",
-                                game.game_hash, prefix, player_index, phase_index, depth, nodes
-                            );
+                                if nodes >= node_cap {
+                                    "STOCK_NODE_CAP"
+                                } else {
+                                    "STOCK_DEADLINE"
+                                }
+                            ),
                         }
                     }
                 }
@@ -1918,6 +1972,28 @@ fn dom_hunt_b2_q0() {
         rows.len(),
         counts.iter().flatten().all(|&n| n >= per_bucket)
     );
+    for (player, phases) in counts.iter().enumerate() {
+        for (phase_index, &completed) in phases.iter().enumerate() {
+            for slot in (completed + 1)..=per_bucket {
+                println!(
+                    "Q0_MISSING player={} phase={} slot={} classification=GENUINELY_UNQUALIFIABLE reason=NO_QUALIFIED_ROW_BEFORE_45_MINUTE_DEADLINE",
+                    player,
+                    if phase_index == 0 {
+                        "FirstStone"
+                    } else {
+                        "SecondStone"
+                    },
+                    slot
+                );
+            }
+        }
+    }
+    if let Ok(path) = std::env::var("TSS_DOM_B2_Q0_MANIFEST") {
+        let mut text = rows.join("\n");
+        text.push('\n');
+        std::fs::write(&path, text).unwrap_or_else(|e| panic!("write b2 q0 manifest {path}: {e}"));
+        println!("Q0_MANIFEST path={path} rows={}", rows.len());
+    }
     assert!(
         counts.iter().flatten().all(|&n| n >= per_bucket),
         "Q0 Loss qualification shortfall blocks use of b2 attacker-Loss rows"
@@ -2092,6 +2168,247 @@ fn dom_hunt_b2_pair_exact() {
         first_delta,
         second_delta
     );
+}
+
+fn b2_adjudication_deadline() -> Instant {
+    Instant::now() + std::time::Duration::from_millis(envn64("TSS_DOM_B2_DEADLINE_MS", 2_700_000))
+}
+
+fn b2_bounded_status(status: Option<ProofStatus>) -> (&'static str, i8) {
+    match status {
+        Some(ProofStatus::Loss) => ("LOSS", 2),
+        Some(ProofStatus::Unknown) => ("UNKNOWN", 1),
+        Some(ProofStatus::Win) => ("WIN", 0),
+        None => ("INCOMPLETE", -1),
+    }
+}
+
+#[test]
+#[ignore = "45-minute adjudication: every hitter F_3 in four frozen K1 parents"]
+fn dom_hunt_b2_adjudicate_f3() {
+    // Split hitters precede H hitters so that a deadline still identifies the
+    // smallest exactly completable subset. The row set itself is frozen.
+    let cases = [
+        ("32f44c499244b611", 9usize, HexCoord::new(-2, 1)),
+        ("32f44c499244b611", 9, HexCoord::new(4, 1)),
+        ("19b085e7aa9f6215", 9, HexCoord::new(-1, 0)),
+        ("19b085e7aa9f6215", 9, HexCoord::new(5, 0)),
+        ("498a61ae0b5cf4ef", 9, HexCoord::new(-2, 2)),
+        ("498a61ae0b5cf4ef", 9, HexCoord::new(4, -4)),
+        ("fd688f189544bf72", 9, HexCoord::new(-2, 0)),
+        ("fd688f189544bf72", 9, HexCoord::new(4, 0)),
+        ("32f44c499244b611", 9, HexCoord::new(2, 1)),
+        ("19b085e7aa9f6215", 9, HexCoord::new(3, 0)),
+        ("498a61ae0b5cf4ef", 9, HexCoord::new(2, -2)),
+        ("fd688f189544bf72", 9, HexCoord::new(2, 0)),
+    ];
+    let games = load_corpus();
+    let deadline = b2_adjudication_deadline();
+    let started = Instant::now();
+    let mut completed = 0usize;
+    let mut total_nodes = 0u64;
+    let mut rows = Vec::new();
+
+    for (hash, prefix, first) in cases {
+        let game = games
+            .iter()
+            .find(|game| game.game_hash == hash)
+            .expect("frozen b2 audit game missing");
+        let state = replay_prefix(&game.moves, prefix);
+        let node = classify_def_node(&state).expect("frozen row is not defensive");
+        assert_eq!(node.min_hitting_set, Some(1));
+        assert!(node.hitters.contains(&first));
+        let h = b2_h(&state, &node);
+        let role = if h.contains(&first) { "H" } else { "SPLIT" };
+        let (after_first, winner) = child_after(&state, first);
+        assert!(winner.is_none());
+        let exact = tss_reference_fast::solve_for_player_until(
+            &after_first,
+            node.attacker,
+            4,
+            b2_fast_config(),
+            deadline,
+        );
+        let (status, rank) = b2_bounded_status(exact.status);
+        completed += usize::from(exact.status.is_some());
+        total_nodes = total_nodes.saturating_add(exact.nodes);
+        let row = format!(
+            "B2_ADJ_F3 {{\"game_hash\":\"{}\",\"prefix\":{},\"position\":[{}],\"first\":[{},{}],\"role\":\"{}\",\"depth_after_pair\":3,\"status_for_attacker\":\"{}\",\"def_rank\":{},\"nodes\":{},\"tt_hits\":{},\"tt_entries\":{},\"tt_bytes\":{},\"tt_clears\":{},\"wall_s\":{:.6}}}",
+            hash,
+            prefix,
+            b2_position_dump(&game.moves, prefix),
+            first.q,
+            first.r,
+            role,
+            status,
+            rank,
+            exact.nodes,
+            exact.tt_hits,
+            exact.tt_entries,
+            exact.tt_accounted_bytes,
+            exact.tt_clears,
+            exact.elapsed.as_secs_f64()
+        );
+        println!("{row}");
+        rows.push(row);
+    }
+    println!(
+        "B2_ADJ_F3_SUMMARY required={} completed={} incomplete={} nodes={} wall_s={:.6}",
+        cases.len(),
+        completed,
+        cases.len() - completed,
+        total_nodes,
+        started.elapsed().as_secs_f64()
+    );
+    if let Ok(path) = std::env::var("TSS_DOM_B2_F3_RESULTS") {
+        let mut text = rows.join("\n");
+        text.push('\n');
+        std::fs::write(&path, text).unwrap_or_else(|e| panic!("write b2 F3 results {path}: {e}"));
+    }
+}
+
+#[test]
+#[ignore = "45-minute adjudication: frozen d=4 quiet/frontier comparisons"]
+fn dom_hunt_b2_adjudicate_d4() {
+    let cases = [
+        (
+            "32f44c499244b611",
+            9usize,
+            HexCoord::new(-2, 1),
+            HexCoord::new(4, 1),
+        ),
+        (
+            "32f44c499244b611",
+            9,
+            HexCoord::new(2, 1),
+            HexCoord::new(-2, 1),
+        ),
+        (
+            "32f44c499244b611",
+            9,
+            HexCoord::new(2, 1),
+            HexCoord::new(4, 1),
+        ),
+        (
+            "19b085e7aa9f6215",
+            9,
+            HexCoord::new(-1, 0),
+            HexCoord::new(5, 0),
+        ),
+        (
+            "19b085e7aa9f6215",
+            9,
+            HexCoord::new(3, 0),
+            HexCoord::new(-1, 0),
+        ),
+        (
+            "498a61ae0b5cf4ef",
+            9,
+            HexCoord::new(-2, 2),
+            HexCoord::new(4, -4),
+        ),
+        (
+            "498a61ae0b5cf4ef",
+            9,
+            HexCoord::new(2, -2),
+            HexCoord::new(-2, 2),
+        ),
+        (
+            "fd688f189544bf72",
+            9,
+            HexCoord::new(-2, 0),
+            HexCoord::new(4, 0),
+        ),
+        (
+            "fd688f189544bf72",
+            9,
+            HexCoord::new(2, 0),
+            HexCoord::new(-2, 0),
+        ),
+        (
+            "d7e1b56c925b7f32",
+            19,
+            HexCoord::new(-1, 0),
+            HexCoord::new(-2, 3),
+        ),
+        (
+            "d7e1b56c925b7f32",
+            19,
+            HexCoord::new(-1, 0),
+            HexCoord::new(-1, 2),
+        ),
+    ];
+    let games = load_corpus();
+    let deadline = b2_adjudication_deadline();
+    let started = Instant::now();
+    let mut completed = 0usize;
+    let mut total_nodes = 0u64;
+    let mut rows = Vec::new();
+
+    for (hash, prefix, first, second) in cases {
+        let game = games
+            .iter()
+            .find(|game| game.game_hash == hash)
+            .expect("frozen b2 d4 game missing");
+        let state = replay_prefix(&game.moves, prefix);
+        let node = classify_def_node(&state).expect("frozen d4 row is not defensive");
+        assert!(b2_pair_covers(&state, &node, first, second));
+        let h = b2_h(&state, &node);
+        let coverage = if h.contains(&first) || h.contains(&second) {
+            "H_CONTAINING"
+        } else {
+            "SPLIT"
+        };
+        let (mut after_pair, first_winner) = child_after(&state, first);
+        assert!(first_winner.is_none());
+        let second_result = apply_placement(&mut after_pair, Placement { coord: second })
+            .expect("frozen d4 second action is illegal");
+        assert!(second_result.outcome.is_none());
+        let exact = tss_reference_fast::solve_for_player_until(
+            &after_pair,
+            node.attacker,
+            4,
+            b2_fast_config(),
+            deadline,
+        );
+        let (status, rank) = b2_bounded_status(exact.status);
+        completed += usize::from(exact.status.is_some());
+        total_nodes = total_nodes.saturating_add(exact.nodes);
+        let row = format!(
+            "B2_ADJ_D4 {{\"game_hash\":\"{}\",\"prefix\":{},\"position\":[{}],\"pair\":[[{},{}],[{},{}]],\"coverage\":\"{}\",\"depth\":4,\"status_for_attacker\":\"{}\",\"def_rank\":{},\"nodes\":{},\"tt_hits\":{},\"tt_entries\":{},\"tt_bytes\":{},\"tt_clears\":{},\"wall_s\":{:.6}}}",
+            hash,
+            prefix,
+            b2_position_dump(&game.moves, prefix),
+            first.q,
+            first.r,
+            second.q,
+            second.r,
+            coverage,
+            status,
+            rank,
+            exact.nodes,
+            exact.tt_hits,
+            exact.tt_entries,
+            exact.tt_accounted_bytes,
+            exact.tt_clears,
+            exact.elapsed.as_secs_f64()
+        );
+        println!("{row}");
+        rows.push(row);
+    }
+    println!(
+        "B2_ADJ_D4_SUMMARY required={} completed={} incomplete={} nodes={} wall_s={:.6}",
+        cases.len(),
+        completed,
+        cases.len() - completed,
+        total_nodes,
+        started.elapsed().as_secs_f64()
+    );
+    if let Ok(path) = std::env::var("TSS_DOM_B2_D4_RESULTS") {
+        let mut text = rows.join("\n");
+        text.push('\n');
+        std::fs::write(&path, text).unwrap_or_else(|e| panic!("write b2 d4 results {path}: {e}"));
+    }
 }
 
 #[test]

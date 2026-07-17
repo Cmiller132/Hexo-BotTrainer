@@ -1,0 +1,48 @@
+DOM-B2R2 — ADJUDICATE the b=2 domination experiment (extended run
+budget granted).
+
+You are continuing DOM-B2 in
+E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-domination (branch
+hunt/domination @a3047de1 — YOUR OWN prior session's harness and
+report: read EXPERIMENT_DOMINATION_B2.md in full first; the repaired
+§7 protocol, frozen parents, and regen commands in its §5 are the
+starting state). You CANNOT git-commit.
+
+## The one change: run budget
+The 10-minute single-run bound is LIFTED for the three adjudication
+computations ONLY — each may run up to 45 minutes (single process,
+RAM-gated as always). Everything else in the protocol is unchanged.
+
+## Work order (exactly the report's adjudication matrix)
+1. The 16-row stock/fast Loss qualification manifest (Q0) — complete
+   it; failed-closed rows must be explained row-by-row (qualified,
+   disqualified-with-reason, or genuinely unqualifiable).
+2. Complete d=3 F_d values for EVERY hitter in the four frozen K1
+   audit parents.
+3. Complete d=4 results for their quiet/frontier comparisons.
+Append results to EXPERIMENT_DOMINATION_B2.md (keep the round-1
+sections; add an "Adjudication" section).
+
+## Binding verdict rule (from your own report — no middle verdict)
+- ANY reversal (a covered child strictly better than its dominating
+  representative under the repaired comparison) → the b=2 extension is
+  **DEAD**: freeze the witness (deterministic seed + position dump +
+  exact F_d values) and say so plainly.
+- ZERO reversals over the completed matrix → state the precisely
+  fenced b=2 proof conjecture (as drafted in the report) as READY for
+  a proof round, with the fence discipline identical to b=1 (consumer
+  branches on the computed mhs/budget pair).
+- If a computation STILL cannot complete inside 45 minutes, report the
+  exact wall/node numbers and the smallest completable subset — do not
+  substitute sampling for exhaustive F_d aggregation (repair 6 stands).
+
+## Rules (otherwise unchanged)
+CARGO_TARGET_DIR=.target-hunt; ONE cargo process; --test-threads=1;
+free RAM >9 GB before every cargo (powershell "Get-CimInstance
+Win32_OperatingSystem | % { $_.FreePhysicalMemory/1MB }") — THREE other
+sessions share this 31 GB host (Lean lane priority; a heavy ULTRA build
+runs concurrently); if below, wait and re-check. No commits. This
+worktree only; siblings read-only. rustfmt --edition 2021 only on files
+you edit. Truthfulness outranks completeness. Final message: the three
+completed computations, the binary verdict (DEAD with frozen witness /
+proof-round-ready conjecture), files, regen commands.

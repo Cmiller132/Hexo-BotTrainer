@@ -55,6 +55,17 @@ pub(crate) struct FastReferenceResult {
     pub(crate) elapsed: Duration,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FastReferenceBoundedResult {
+    pub(crate) status: Option<ProofStatus>,
+    pub(crate) nodes: u64,
+    pub(crate) tt_hits: u64,
+    pub(crate) tt_entries: usize,
+    pub(crate) tt_accounted_bytes: usize,
+    pub(crate) tt_clears: u64,
+    pub(crate) elapsed: Duration,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct ExactKey {
     stones: Box<[u64]>,
@@ -83,6 +94,7 @@ struct Search {
     nodes: u64,
     tt_hits: u64,
     tt_clears: u64,
+    deadline: Option<Instant>,
 }
 
 pub(crate) fn solve(
@@ -109,11 +121,47 @@ pub(crate) fn solve_for_player(
         nodes: 0,
         tt_hits: 0,
         tt_clears: 0,
+        deadline: None,
+    };
+    let mut working = state.clone();
+    let mut frontier = ExactFrontier::from_state(&working);
+    let status = search
+        .minimax(&mut working, &mut frontier, ply_budget)
+        .expect("unbounded fast-reference solve cannot be incomplete");
+    FastReferenceResult {
+        status,
+        nodes: search.nodes,
+        tt_hits: search.tt_hits,
+        tt_entries: search.tt.len(),
+        tt_accounted_bytes: search.tt_accounted_bytes,
+        tt_clears: search.tt_clears,
+        elapsed: started.elapsed(),
+    }
+}
+
+pub(crate) fn solve_for_player_until(
+    state: &HexoState,
+    root_player: Player,
+    ply_budget: u32,
+    mut config: FastReferenceConfig,
+    deadline: Instant,
+) -> FastReferenceBoundedResult {
+    config.tt_bytes_cap = config.tt_bytes_cap.min(MAX_TT_BYTES);
+    let started = Instant::now();
+    let mut search = Search {
+        root_player,
+        config,
+        tt: HashMap::new(),
+        tt_accounted_bytes: 0,
+        nodes: 0,
+        tt_hits: 0,
+        tt_clears: 0,
+        deadline: Some(deadline),
     };
     let mut working = state.clone();
     let mut frontier = ExactFrontier::from_state(&working);
     let status = search.minimax(&mut working, &mut frontier, ply_budget);
-    FastReferenceResult {
+    FastReferenceBoundedResult {
         status,
         nodes: search.nodes,
         tt_hits: search.tt_hits,
@@ -134,29 +182,35 @@ impl Search {
         state: &mut HexoState,
         frontier: &mut ExactFrontier,
         plies_left: u32,
-    ) -> ProofStatus {
+    ) -> Option<ProofStatus> {
         self.nodes = self.nodes.saturating_add(1);
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return None;
+        }
 
         if let Some(winner) = direct_winner(state) {
-            return if winner == self.root_player {
+            return Some(if winner == self.root_player {
                 ProofStatus::Win
             } else {
                 ProofStatus::Loss
-            };
+            });
         }
         if plies_left == 0 {
-            return ProofStatus::Unknown;
+            return Some(ProofStatus::Unknown);
         }
 
         let key = exact_key(state, plies_left, self.config.d6_canonical);
         if let Some(entry) = self.tt.get(&key) {
             self.tt_hits = self.tt_hits.saturating_add(1);
-            return entry.status;
+            return Some(entry.status);
         }
 
         let mut moves = frontier.legal_moves(state);
         if moves.is_empty() {
-            return ProofStatus::Unknown;
+            return Some(ProofStatus::Unknown);
         }
 
         let mover = state.current_player();
@@ -175,12 +229,13 @@ impl Search {
                 ProofStatus::Unknown
             };
             self.insert_exact(key, status);
-            return status;
+            return Some(status);
         }
         if maximizing_root {
             order_moves(state, mover, &mut moves, self.config.ordering_hint);
         }
         let mut saw_unknown = false;
+        let mut saw_incomplete = false;
 
         let status = if maximizing_root {
             let mut answer = ProofStatus::Loss;
@@ -192,18 +247,21 @@ impl Search {
                 let child = self.minimax(state, frontier, plies_left - 1);
                 state.undo(delta);
                 frontier.undo(state, frontier_delta);
-                if child == ProofStatus::Win {
+                if child == Some(ProofStatus::Win) {
                     answer = ProofStatus::Win;
                     break;
                 }
-                saw_unknown |= child == ProofStatus::Unknown;
+                saw_unknown |= child == Some(ProofStatus::Unknown);
+                saw_incomplete |= child.is_none();
             }
             if answer == ProofStatus::Win {
-                answer
+                Some(answer)
+            } else if saw_incomplete {
+                None
             } else if saw_unknown {
-                ProofStatus::Unknown
+                Some(ProofStatus::Unknown)
             } else {
-                ProofStatus::Loss
+                Some(ProofStatus::Loss)
             }
         } else {
             let mut answer = ProofStatus::Win;
@@ -215,22 +273,27 @@ impl Search {
                 let child = self.minimax(state, frontier, plies_left - 1);
                 state.undo(delta);
                 frontier.undo(state, frontier_delta);
-                if child == ProofStatus::Loss {
+                if child == Some(ProofStatus::Loss) {
                     answer = ProofStatus::Loss;
                     break;
                 }
-                saw_unknown |= child == ProofStatus::Unknown;
+                saw_unknown |= child == Some(ProofStatus::Unknown);
+                saw_incomplete |= child.is_none();
             }
             if answer == ProofStatus::Loss {
-                answer
+                Some(answer)
+            } else if saw_incomplete {
+                None
             } else if saw_unknown {
-                ProofStatus::Unknown
+                Some(ProofStatus::Unknown)
             } else {
-                ProofStatus::Win
+                Some(ProofStatus::Win)
             }
         };
 
-        self.insert_exact(key, status);
+        if let Some(status) = status {
+            self.insert_exact(key, status);
+        }
         status
     }
 

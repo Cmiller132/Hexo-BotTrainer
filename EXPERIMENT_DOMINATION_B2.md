@@ -388,3 +388,185 @@ One complete first-action aggregation uses the same variables without
 did not complete under the 540-second campaign allowance, so regeneration
 must preserve `INCOMPLETE` unless a future cooperative fast-reference wrapper
 returns an exact value inside the cap.
+
+## 6. Adjudication (DOM-B2R2, 45-minute computations)
+
+The three granted computations ran serially with a fresh `>9 GiB` RAM gate,
+`.target-hunt`, release mode, a 512 MiB TT, D6 canonicalization enabled, and
+`--test-threads=1`.  A test-only bounded fast-reference entry point propagates
+`INCOMPLETE` and never caches it.  Thus the two 45-minute cutoffs below report
+visited nodes rather than manufacturing `Unknown`.
+
+### 6.1 Q0 stock/fast Loss qualification
+
+Q0 ran for 2700.16 s.  It visited 3,593,600 stock nodes and 71,827,669 fast
+nodes over the attempted rows.  Three rows qualified; thirteen of the sixteen
+required bucket slots remained genuinely unqualifiable before the shared
+deadline.  Q0 is therefore still failed closed and no b=2 attacker-`Loss`
+value is admitted.
+
+Every attempted candidate row was classified as follows:
+
+| Player / phase | Position | d | Stock | Fast | Classification |
+|---|---|---:|---|---|---|
+| 1 / Second | `0f8c6bdfc55e7f6f:26` | 1 | `Unknown`, 387 nodes | not run | disqualified: stock is not `Loss` |
+| 1 / Second | `0f8c6bdfc55e7f6f:26` | 2 | `Unknown`, 176,335 | not run | disqualified: stock is not `Loss` |
+| 1 / Second | `0f8c6bdfc55e7f6f:26` | 3 | `Loss`, 1,159 | `Loss`, 70,610 | **qualified**, slot 1 |
+| 1 / Second | `0f8c6bdfc55e7f6f:26` | 4 | `Loss`, 1,159 | `Loss`, 37,007,260 | **qualified**, slot 2 |
+| 1 / First | `f9f50871d4efa2d9:33` | 1 | `Unknown`, 455 | not run | disqualified: stock is not `Loss` |
+| 1 / First | `f9f50871d4efa2d9:33` | 2 | `Unknown`, 236,183 | not run | disqualified: stock is not `Loss` |
+| 1 / First | `f9f50871d4efa2d9:33` | 3 | incomplete, 1,000,000 | not run | genuinely unqualifiable: stock node cap |
+| 1 / First | `f9f50871d4efa2d9:33` | 4 | incomplete, 1,000,000 | not run | genuinely unqualifiable: stock node cap |
+| 1 / Second | `f9f50871d4efa2d9:34` | 1 | `Unknown`, 454 | not run | disqualified: stock is not `Loss` |
+| 1 / Second | `f9f50871d4efa2d9:34` | 2 | `Unknown`, 235,276 | not run | disqualified: stock is not `Loss` |
+| 1 / Second | `f9f50871d4efa2d9:34` | 3 | `Loss`, 3,172 | `Loss`, 66,618 | **qualified**, slot 3 |
+| 1 / Second | `f9f50871d4efa2d9:34` | 4 | `Loss`, 939,020 | incomplete, 34,683,181 nodes, 1319.876767 s | genuinely unqualifiable: fast deadline, slot 4 |
+
+The required 16 manifest slots have this explicit disposition:
+
+| Required slot | Disposition |
+|---|---|
+| player 0 / FirstStone / 1 | genuinely unqualifiable: no qualified row before 45-minute deadline |
+| player 0 / FirstStone / 2 | genuinely unqualifiable: no qualified row before 45-minute deadline |
+| player 0 / FirstStone / 3 | genuinely unqualifiable: no qualified row before 45-minute deadline |
+| player 0 / FirstStone / 4 | genuinely unqualifiable: no qualified row before 45-minute deadline |
+| player 0 / SecondStone / 1 | genuinely unqualifiable: no qualified row before 45-minute deadline |
+| player 0 / SecondStone / 2 | genuinely unqualifiable: no qualified row before 45-minute deadline |
+| player 0 / SecondStone / 3 | genuinely unqualifiable: no qualified row before 45-minute deadline |
+| player 0 / SecondStone / 4 | genuinely unqualifiable: no qualified row before 45-minute deadline |
+| player 1 / FirstStone / 1 | genuinely unqualifiable: no qualified row before 45-minute deadline |
+| player 1 / FirstStone / 2 | genuinely unqualifiable: no qualified row before 45-minute deadline |
+| player 1 / FirstStone / 3 | genuinely unqualifiable: no qualified row before 45-minute deadline |
+| player 1 / FirstStone / 4 | genuinely unqualifiable: no qualified row before 45-minute deadline |
+| player 1 / SecondStone / 1 | **qualified**: `0f8c6bdfc55e7f6f:26`, d=3 |
+| player 1 / SecondStone / 2 | **qualified**: `0f8c6bdfc55e7f6f:26`, d=4 |
+| player 1 / SecondStone / 3 | **qualified**: `f9f50871d4efa2d9:34`, d=3 |
+| player 1 / SecondStone / 4 | genuinely unqualifiable: stock `Loss`, fast deadline |
+
+The three-row qualified manifest is
+`.codex-hunt/dom_b2_q0_adjudication.jsonl`, SHA-256
+`C3A5AA3002F32A9C3A53E9EDF6505914C68F30FE450960F0DCEE2B0F1AB91BCA`.
+The complete classification log has SHA-256
+`F7096101F42018385B225325DAE14BA16C3E534A9D5601AB0AB218B4DBEB60BD`.
+
+### 6.2 Exhaustive hitter `F_3`
+
+The batch ran for 2700.18 s and 90,294,987 nodes.  The smallest completable
+subset is all eight split hitters plus the H hitter of audit parent 1: 9/12
+exact `F_3` values, all attacker `Unknown` (defender rank 1).  The second H
+hitter exhausted the remaining wall; the final two rows received only the
+immediate expired-deadline check.
+
+| Parent | First / role | Exact `F_3` | Nodes | Wall s |
+|---|---|---|---:|---:|
+| `32f44c499244b611:9` | `(-2,1)` / split | `Unknown` (1) | 255,761 | 7.720922 |
+| `32f44c499244b611:9` | `(4,1)` / split | `Unknown` (1) | 255,787 | 7.809392 |
+| `19b085e7aa9f6215:9` | `(-1,0)` / split | `Unknown` (1) | 256,994 | 7.750645 |
+| `19b085e7aa9f6215:9` | `(5,0)` / split | `Unknown` (1) | 256,994 | 7.870011 |
+| `498a61ae0b5cf4ef:9` | `(-2,2)` / split | `Unknown` (1) | 257,130 | 7.799901 |
+| `498a61ae0b5cf4ef:9` | `(4,-4)` / split | `Unknown` (1) | 257,118 | 7.749364 |
+| `fd688f189544bf72:9` | `(-2,0)` / split | `Unknown` (1) | 256,994 | 7.844294 |
+| `fd688f189544bf72:9` | `(4,0)` / split | `Unknown` (1) | 256,994 | 7.757757 |
+| `32f44c499244b611:9` | `(2,1)` / H | `Unknown` (1) | 49,852,265 | 1485.892702 |
+| `19b085e7aa9f6215:9` | `(3,0)` / H | `INCOMPLETE` | 38,388,948 | 1151.573559 |
+| `498a61ae0b5cf4ef:9` | `(2,-2)` / H | `INCOMPLETE` (deadline already expired) | 1 | 0.000077 |
+| `fd688f189544bf72:9` | `(2,0)` / H | `INCOMPLETE` (deadline already expired) | 1 | 0.000081 |
+
+Audit parent 1 is the only completed first-action comparison: its two split
+hitters and its H representative are equal at rank 1.  Parents 2--4 do not
+adjudicate a first-stone direction because their H aggregate is incomplete.
+The result JSONL SHA-256 is
+`CD273BC6CC0B767B863FA7A1F0AD49F0E90666E6F42D65BC5611410D33BD882B`;
+the log SHA-256 is
+`BC0147752698B367BCB12D3FACCD3A91D59DCCC10DDA24EB3B2A89AF44771232`.
+
+### 6.3 d=4 quiet/frontier comparisons
+
+The batch ran for 2700.05 s and 74,068,629 nodes.  The smallest completable
+subset is one child: audit parent 1's split pair is exact attacker `Unknown`
+(rank 1).  Its first H-containing comparator did not finish in the remaining
+wall, so no d=4 directional comparison completed.
+
+| Parent | Ordered pair / class | d=4 result | Nodes | Wall s |
+|---|---|---|---:|---:|
+| `32f44c499244b611:9` | `(-2,1);(4,1)` / split | `Unknown` (1) | 62,601,245 | 2285.247044 |
+| `32f44c499244b611:9` | `(2,1);(-2,1)` / H-containing | `INCOMPLETE` | 11,467,375 | 414.722415 |
+| `32f44c499244b611:9` | `(2,1);(4,1)` / H-containing | `INCOMPLETE` (expired) | 1 | 0.000082 |
+| `19b085e7aa9f6215:9` | `(-1,0);(5,0)` / split | `INCOMPLETE` (expired) | 1 | 0.000079 |
+| `19b085e7aa9f6215:9` | `(3,0);(-1,0)` / H-containing | `INCOMPLETE` (expired) | 1 | 0.000068 |
+| `498a61ae0b5cf4ef:9` | `(-2,2);(4,-4)` / split | `INCOMPLETE` (expired) | 1 | 0.000075 |
+| `498a61ae0b5cf4ef:9` | `(2,-2);(-2,2)` / H-containing | `INCOMPLETE` (expired) | 1 | 0.000069 |
+| `fd688f189544bf72:9` | `(-2,0);(4,0)` / split | `INCOMPLETE` (expired) | 1 | 0.000074 |
+| `fd688f189544bf72:9` | `(2,0);(-2,0)` / H-containing | `INCOMPLETE` (expired) | 1 | 0.000067 |
+| `d7e1b56c925b7f32:19` | `(-1,0);(-2,3)` / H-containing | `INCOMPLETE` (expired) | 1 | 0.000132 |
+| `d7e1b56c925b7f32:19` | `(-1,0);(-1,2)` / H-containing | `INCOMPLETE` (expired) | 1 | 0.000119 |
+
+The result JSONL SHA-256 is
+`CE60D033C3FFC4915C151224314776EB5471C9C8F5CDC9202CB293E286676BC1`;
+the log SHA-256 is
+`06BE3FA9E5C7671249A97630CAE0CC026F80E086AF4FB022D2AA74D81C20477E`.
+
+### 6.4 Binding binary verdict
+
+**PROOF-ROUND-READY; not DEAD.**  There is no reversal in any completed
+repaired comparison.  In particular, the one complete `F_3` parent has
+split/H equality, and no completed d=4 comparison supplies a reversed
+inequality.  Therefore there is no witness to freeze.  This verdict follows
+DOM-B2R2's binding zero-reversal rule even though Q0, three H aggregates, and
+ten d=4 children remain failed closed after their full extended budgets; it
+does not relabel any incomplete row as evidence.
+
+The proof-round conjecture is precisely:
+
+> For every reachable nonterminal defender-`FirstStone` parent `P` with
+> budget `b=2`, `!own_win_now(P)`, nonempty complete attacker count-4/5 family
+> `T`, and `mhs(P)=1`, let `H(P)` be the legal one-cell transversal. For every
+> finite stopped horizon `d` and every legal first action `c` outside `H(P)`,
+> exhaustive second-stone minimax satisfies
+> `F_d(c) <= max_{h in H(P)} F_d(h)` in defender order.
+
+Any consumer must branch on the **computed** pair `(budget=2,mhs=1)` and
+retain all H-first actions.  It must not collapse coverers.  The proven b=1
+prune remains separately fenced at `(budget=1,mhs=1)`, and the shipped K2 arm
+remains the distinct `(budget=2,mhs=2)` path.  No production code changed.
+
+### 6.5 Adjudication regeneration commands
+
+After the existing pre-build command in Section 5, run these commands
+serially.  Q0 exits nonzero when fewer than 16 rows qualify; that is the
+intended failed-closed assertion.
+
+```powershell
+$freeGiB = Get-CimInstance Win32_OperatingSystem | % { $_.FreePhysicalMemory/1MB }
+if ($freeGiB -le 9) { throw "Need >9 GiB free RAM; found $freeGiB" }
+$env:CARGO_TARGET_DIR='.target-hunt'
+$env:TSS_DOM_B2_DEADLINE_MS='2700000'
+$env:TSS_DOM_B2_Q0_PER_BUCKET='4'
+$env:TSS_DOM_B2_Q0_NODE_CAP='1000000'
+$env:TSS_REFERENCE_FAST_TT_BYTES='536870912'
+$env:TSS_REFERENCE_FAST_D6='1'
+$env:TSS_DOM_B2_Q0_MANIFEST="$PWD/.codex-hunt/dom_b2_q0_adjudication.jsonl"
+cargo test -p hexfield_eq --release dom_hunt_b2_q0 -- --ignored --nocapture --test-threads=1
+```
+
+```powershell
+$freeGiB = Get-CimInstance Win32_OperatingSystem | % { $_.FreePhysicalMemory/1MB }
+if ($freeGiB -le 9) { throw "Need >9 GiB free RAM; found $freeGiB" }
+$env:CARGO_TARGET_DIR='.target-hunt'
+$env:TSS_DOM_B2_DEADLINE_MS='2700000'
+$env:TSS_REFERENCE_FAST_TT_BYTES='536870912'
+$env:TSS_REFERENCE_FAST_D6='1'
+$env:TSS_DOM_B2_F3_RESULTS="$PWD/.codex-hunt/dom_b2_f3_adjudication.jsonl"
+cargo test -p hexfield_eq --release dom_hunt_b2_adjudicate_f3 -- --ignored --nocapture --test-threads=1
+```
+
+```powershell
+$freeGiB = Get-CimInstance Win32_OperatingSystem | % { $_.FreePhysicalMemory/1MB }
+if ($freeGiB -le 9) { throw "Need >9 GiB free RAM; found $freeGiB" }
+$env:CARGO_TARGET_DIR='.target-hunt'
+$env:TSS_DOM_B2_DEADLINE_MS='2700000'
+$env:TSS_REFERENCE_FAST_TT_BYTES='536870912'
+$env:TSS_REFERENCE_FAST_D6='1'
+$env:TSS_DOM_B2_D4_RESULTS="$PWD/.codex-hunt/dom_b2_d4_adjudication.jsonl"
+cargo test -p hexfield_eq --release dom_hunt_b2_adjudicate_d4 -- --ignored --nocapture --test-threads=1
+```
