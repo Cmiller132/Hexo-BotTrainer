@@ -1,0 +1,67 @@
+R-ST2 — RESEARCH ROUND (ultra): GAP-FRONTIER-COUPLING — non-identity simulation toward opener non-loss
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+(branch hunt/gap-raw, HEAD = 12980bc8). You CANNOT git-commit. NO cargo
+(host-wide slot is held by a wall-sensitive measurement job), no Lean
+builds, no harness runs. NOTE: another research session (R-G3, tempo
+round 5) is working in this same directory on GAP_RAW_PROOF_ROUND5.md —
+do NOT touch that file or any GAP_RAW_* file; your deliverable is
+STRATEGY_STEALING_ROUND2.md only (+ a short final message). Ignore any
+uncommitted files you did not create.
+
+## Context (read first, in order)
+1. STRATEGY_STEALING_HEXO.md (round 1, review-confirmed): the rules
+   formalization (engine-cited, PROVEN) and the two obstructions — S3
+   (legality is NOT deletion-monotone under the radius-8 growth rule;
+   exact witness (8,0)) and S4 (opening cadence misalignment: counts
+   (2,0) vs (1,0), translation-proof). Classical identity/deletion
+   stealing is DEAD; do not relitigate it.
+2. GAP_RAW_REVIEW_ROUND3.md section on the stealing verdict (scope).
+3. The named open obligations from round 1: GAP-FRONTIER-COUPLING (a
+   non-identity simulation invariant absorbing frontier-only moves),
+   GAP-OPENING-ALIGNMENT (absorbing the cadence mismatch), and the
+   non-loss determinacy bridge.
+
+## The goal
+Target: **NL_F — the first player (opener) has a non-losing strategy in
+Hexo** — via a non-identity simulation argument, or a proven obstruction
+to a natural class of such arguments.
+
+Ranked outcomes (any one rigorous result = complete round):
+(a) Construct a simulation coupling: a map from opponent-strategy play
+    histories to shadow-play histories that is NOT stone-deletion —
+    candidates: extra-stone dominance (opener plays the shadow move
+    PLUS banks the surplus stone; prove surplus stones never hurt in a
+    Maker-Maker hex-grid six-in-a-row game — careful: extra stones can
+    change the radius-8 legal frontier, which is exactly S3's trap;
+    characterize when frontier growth is monotone-beneficial),
+    time-shifted coupling (absorb the cadence mismatch by lagging the
+    shadow by one placement — attack GAP-OPENING-ALIGNMENT head-on),
+    or region-restricted stealing (steal only within a frozen legal
+    region where growth cannot be triggered by the surplus stone).
+(b) Prove a sharpened obstruction: extend S3/S4 to a THEOREM killing a
+    well-defined class of non-identity couplings (e.g. every coupling
+    whose shadow map is pointwise-injective on stones and commutes
+    with D6), so the survivor class is exactly characterized.
+(c) Prove NL_F outright on a restricted board class (e.g. bounded
+    frontier radius) as a stepping stone, with the exact obstruction to
+    lifting the restriction named.
+(d) Honest partial: precise formalization of the coupling design space,
+    partial lemmas (e.g. surplus-stone monotonicity for win-detection
+    alone, separated from legality), and the exact open obstacle.
+
+## Hard constraints
+Use round 1's rules formalization verbatim (radius-8 growth, 1-then-2:2
+cadence, six-in-a-row win, D6 symmetry); any new rule fact must be
+cited to engine source file:line. Check every gadget's placement
+legality. Determinacy: Hexo positions are finite-branching but the game
+can be infinite — treat draws honestly (non-loss ≠ win; state which
+determinacy framework you use, and if you invoke open determinacy label
+it CITED with the exact class). Every claim PROVEN / SKETCH /
+CONJECTURE / OPEN / CITED(-FROM-MEMORY). No status inflation.
+
+## Output
+STRATEGY_STEALING_ROUND2.md: numbered sections continuing round 1.
+Incremental disk writes; chunk <= 2h per exec; honest partial with a
+named resume point is success. Final message: which ranked outcome was
+achieved, PROVEN vs SKETCH list, and the resume point.
