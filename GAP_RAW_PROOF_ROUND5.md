@@ -307,7 +307,12 @@ and every local service/stabilizer cell used below, lies in the radius-21
 neighborhood.  Call a union of pencils **fully one-cycle-separated** when it
 has no other occupied support and these radius-21 neighborhoods are pairwise
 disjoint.  Pairwise support distance at least 43 is a simple sufficient
-condition.
+condition.  (Post-review erratum, R-G3-REV Finding 7: radius 21 is tight for
+this conservative all-touched-alive-window envelope — from a support cell `o`,
+play `o+8u` then `o+16u`, and a count-one window through the second stone
+extends to `o+21u` — but it is NOT claimed sharp for the `M<=2` value
+conclusion itself; the minimum support separation needed for the value theorem
+is unresolved.)
 
 This deliberately strengthens R4.8's enlarged-footprint premise, which was
 tailored only to the two adjacent extensions audited there.  It excludes a
@@ -561,9 +566,13 @@ demands after current service is false.  The exact escaping class is the
 
 ### 41.3 A forced-service Bellman embedding
 
-Choose two translations `b_1,b_2` far enough that every cell of one complete
-gadget support is at hex distance at least six from every cell of another
-gadget or of the hub.  For `i=1,2`, put
+Define the complete protected supports (post-review erratum, R-G3-REV
+Finding 2): `G_i = A_i union D_i union Y_i` for each gadget and
+`H = A_H union D_H union X` for the hub.  Choose two translations `b_1,b_2`
+such that the three sets `G_1`, `G_2`, `H` have pairwise set distance at least
+six.  This expressly includes the service cells `z_i` (empty cells of `Y_i`)
+and every protected window cell, so no service cell can lie in or kill a hub
+window.  For `i=1,2`, put
 
 ```text
 Y_i=b_i+[0,5]_u,
@@ -730,6 +739,7 @@ Thus `GAP-TEMPO-INITIALIZATION` remains **OPEN**.
 | L11.9 strict hub/sealed initialization instances | **PROVEN** | Direct hub pre-emption; sealed `n_1=6,n_2=5` plus L10.3--L10.4 |
 | First isolated sealed return cannot source the hub escape | **PROVEN** | L11.2 and R5.1 |
 | GAP-CASCADE-REACHABILITY | **OPEN** | Forced embedding has `Phi>1`; exact strict hub is proactively defusable |
+| GAP-HUB-FANOUT-REACHABILITY | **OPEN** | Post-review addition (R-G3-REV Finding 5): the narrower obstruction-specific subproblem of GAP-CASCADE-REACHABILITY defined in Section 46 — NOT a replacement for the broader cascade, initialization, or repair obligations |
 | GAP-TEMPO-INITIALIZATION | **OPEN** | General `tau=0` free-pair geometry remains |
 | GAP-TEMPO-REPAIR | **OPEN** | Local one-cycle success does not give strategy-reachable induction |
 | New machine verification | **none** | No Cargo, Lean, harness, search, `[UNRUN]`, or `VERIFIED` claim |
@@ -791,12 +801,39 @@ may instead replace `S_T`'s one-step `TEMPO` objective by a genuinely
 Bellman-aware rule, but that rule and its common-strategy closure must be stated
 and proved rather than inferred from the sealed existential response.
 
-This is the named round-5 resume point.  It contains both remaining exact
-questions: can the axial-chase dormant stock build the hub escape, and if not,
-what one-strategy invariant proves the exclusion?
+**Scope correction (post-review erratum, R-G3-REV Finding 4, MAJOR).**  The
+original text called this "the named round-5 resume point ... contain[ing]
+both remaining exact questions."  That characterization is DOWNGRADED:
+hub-fanout reachability is a sharp obstruction-specific subproblem of
+`GAP-CASCADE-REACHABILITY`, but it is neither necessary nor sufficient for all
+of `GAP-TEMPO-INITIALIZATION`, `GAP-TEMPO-REPAIR`, or GAP-RAW, because it
+conflates three differently quantified problems that must be stated
+separately:
+
+1. **Fixed-`S_T` hub reachability** — reaching the hub against the one fixed
+   policy `S_T` proves only that this policy fails; it can refute `S_T` but
+   nothing more.
+2. **Strategy-independent hub forcing** — a GAP-RAW counterexample route
+   requires the much stronger `exists P_0, for every Defender strategy S,
+   there exists an S-consistent Attacker continuation reaching a forced-loss
+   state` (`∃P_0 ∀S ∃α`).
+3. **The positive universal initialization/repair obligation** — one named
+   strategy preserving `M<=2` after every response (`∀P_0 ∃S ∀α`) must also
+   exclude every OTHER escape class: other `M>2` fanouts, cross-hull
+   interactions, next turns from nested derivatives, and all responses from
+   the R5.3.1 axial-cleanup handoff (acknowledged OPEN in Sections 37.2, 39.2,
+   40.2, and 43).
+
+Hub reachability remains the most concrete next attack; it may decide `S_T`.
+The two questions in the original phrasing (can the axial-chase dormant stock
+build the hub escape; if not, what one-strategy invariant proves exclusion)
+are real, but they are entries in the broader obligation set above, not its
+entirety.
 
 **Input commit:** `12980bc8` on branch `hunt/gap-raw`.  This authoring pass
-created no commit.
+created no commit.  **Reviewed/output artifact:** `d93d5768` (the commit the
+R-G3-REV hostile review examined; errata from that review are folded in this
+file).
 
 An unrelated concurrent strategy-stealing job advanced the shared branch HEAD
 during authoring.  A final read-only diff from `12980bc8` to the observed HEAD
@@ -816,3 +853,37 @@ concurrent file is used as evidence here.
 The test-gated harness, production rules, strict verifier, and Lean sources
 were not modified.  No Cargo command, Lean build, harness, search executable,
 or generated enumeration was run.
+
+## 47. Post-review errata (R-G3-REV, folded from GAP_RAW_REVIEW_ROUND5.md)
+
+Hostile review of artifact `d93d5768` returned **SOUND-WITH-ERRATA**: no
+round-5 theorem refuted; L11.1–L11.9, R5.1–R5.3.1, the shared-hub cascade, and
+the unrestricted equation-(22) closure refutation all CONFIRMED.  The
+following repairs are folded in place above:
+
+1. **Finding 4 (MAJOR, folded in Section 46):** the "exact/sole resume point"
+   characterization of `GAP-HUB-FANOUT-REACHABILITY` is downgraded — it is an
+   obstruction-specific subproblem of `GAP-CASCADE-REACHABILITY`, with the
+   three differently quantified problems now stated separately.
+2. **Finding 2 (MINOR, folded in Section 41.3):** R5.4's separation region is
+   now formal — `G_i = A_i ∪ D_i ∪ Y_i`, `H = A_H ∪ D_H ∪ X`, pairwise set
+   distance at least six — so the service cells `z_i` and all protected window
+   cells are expressly covered.  R5.4 verdict: CONFIRMED-WITH-ERRATA.
+3. **Finding 5 (MINOR, folded in Section 44):** the authoritative ledger now
+   carries an OPEN row for `GAP-HUB-FANOUT-REACHABILITY` with the
+   narrower-subproblem characterization.
+4. **Finding 6 (MINOR, folded in Section 46):** provenance now distinguishes
+   the input commit (`12980bc8`) from the reviewed/output artifact
+   (`d93d5768`).
+5. **Finding 7 (NOTE, folded in Section 39.x separation paragraph):** radius
+   21 is tight for the conservative all-touched-alive-window envelope but not
+   claimed sharp for the `M<=2` value conclusion; minimum separation for the
+   value theorem is unresolved.
+
+The review's closing list of exact unresolved obstacles is adopted verbatim
+as the round-5 exit state: (1) universal strict-root `tau=0` initialization of
+`M<=2`; (2) one named Defender strategy preserving `M<=2` after every response
+on all reached histories; (3) quantifier-correct causal reachability or
+exclusion of the shared hub, plus the other unclassified escape classes; and
+(4) optionally, the minimum support separation for the separated value
+theorem.

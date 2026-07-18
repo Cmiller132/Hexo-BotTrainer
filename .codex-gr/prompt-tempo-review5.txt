@@ -1,0 +1,55 @@
+R-G3-REV — HOSTILE REVIEW (ultra): GAP_RAW_PROOF_ROUND5.md
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+(branch hunt/gap-raw, HEAD = d93d5768). You CANNOT git-commit. DOC-ONLY:
+NO cargo, no Lean builds, no harness runs. NOTE: another session (R-ST4)
+works in this directory on STRATEGY_STEALING_ROUND4.md — do not touch
+STRATEGY_STEALING_* files. Deliverable: GAP_RAW_REVIEW_ROUND5.md only
+(+ short final message).
+
+## Task
+Hostile review of GAP_RAW_PROOF_ROUND5.md (round 5 of the tempo
+program). Prerequisites, read in order: GAP_RAW_PROOF_ROUND2.md,
+GAP_RAW_PROOF_ROUND3.md, GAP_RAW_REVIEW_ROUND3.md,
+GAP_RAW_PROOF_ROUND4.md (post-errata), GAP_RAW_REVIEW_ROUND4.md, then
+round 5. Definitions (I, tau, Phi, TEMPO, M, equation (22), sealed
+pencils, S_T, transverse seals) are inherited — check for silent drift.
+Default posture: guilty until the proof survives.
+
+Attack list (round 5's PROVEN claims):
+1. **Complete sealed-pencil classification**: every return through the
+   six surviving count-one extremes and every nonconsecutive axial
+   return. COMPLETENESS is the claim — enumerate independently and hunt
+   for a missed return class. Recompute all gadget coordinates, hitting
+   sets, and label counts by hand; check radius-8 legality and 2:2
+   cadence everywhere.
+2. **One-cycle M<=2 value bounds** for the isolated and
+   radius-21-separated cases: re-derive; check the separation constant
+   21 is actually forced by the argument (not just sufficient-looking);
+   hunt for interaction leakage just under the separation bound.
+3. **The exact shared-hub cascade (M: 2 -> >=3)**: verify the gadget —
+   this is the round's sharpest positive-obstruction claim. One
+   placement creating >=3 stabilizer demands after mandatory service:
+   check the demand count, the mandatory-service accounting, and
+   whether the Defender has an uncounted dodge.
+4. **S_T rejects natural transverse-seal entry**: verify against S_T's
+   actual definition from round 4 — is the rejection an artifact of one
+   specific S_T tie-break, or robust for the defined strategy?
+5. **Refutation of unrestricted statewise equation-(22) closure**:
+   check the counterexample satisfies all of (22)'s side conditions.
+6. **Status discipline**: PROVEN/OPEN labels, the honest Bellman
+   verdict (conditional bound survived, closure failed), no
+   resurrection of theorem-dead routes (uniform dormant charges per
+   round-4 R4.7.1 as narrowed, canonical J, global pairing, NQ2), and
+   whether GAP-HUB-FANOUT-REACHABILITY is genuinely the right next
+   obligation (does the cascade's reachability from a strict Phi<1 root
+   really gate everything?).
+
+## Output
+GAP_RAW_REVIEW_ROUND5.md: numbered findings with severity
+(FATAL/MAJOR/MINOR/NOTE), exact quoted claim, counter-derivation or
+confirmation, proposed repair. Per-theorem verdicts (CONFIRMED /
+CONFIRMED-WITH-ERRATA / REFUTED / DOWNGRADE) + overall verdict.
+UNRESOLVED with exact obstacle beats a guess. Incremental writes;
+chunk <= 2h per exec. Final message: overall verdict, per-theorem list,
+most severe finding.
