@@ -948,3 +948,28 @@ mixed-history extension and empirical prevalence are OPEN.
 8. **Measurement caveat.** All numerical ratios in Phase 1 are exact local
    arithmetic from existing worked examples. No runtime, corpus frequency,
    or total-zone reduction was measured in this no-Cargo campaign.
+
+## Review erratum (R-Z10-REV, folded)
+
+**Reviewed artifact:** this document, landed unmodified at `ded361c1`
+(supplies the `UNLANDED` landed-hash placeholder). **Review:**
+`PROOF_TSS_ZONES_FHW_REVIEW.md` (committed this fold). **Verdict:**
+REFUTED IN PART / MAJOR REPAIR REQUIRED.
+
+- **FHW-T3 REFUTED (most severe).** Its overlapping `κ_cut` cases permit an
+  unsound zero charge for a direct window fill: a reachable trace costs
+  `1 + 5 = 6` while the stated rule counts only `5`. Treat FHW-T3 as
+  WITHDRAWN pending a repaired non-overlapping cut charge; the undercount
+  must be closed before FHW-T3 is used.
+- **G2-Z1 UPHELD — sound-on-success** (as originally labelled PROVEN-ON-CLASS;
+  not a completeness claim).
+- **Flat-debit refutation UPHELD.** **FR-T1 UPHELD ON CLASS** (ordinary/
+  exact-copy; mixed D17/D22 stays OPEN). **λ² UPHELD ON DESIGN CLASS.**
+- **Design bars (DESIGN_GROUP2_NEXT.md): MAJOR REPAIR / EMPIRICALLY DEFERRED**
+  — remain DEFERRED-NEEDS-CARGO; the reviewer's repair list (matched (gate,W)
+  index, net-zone node index, R=9 zone theorem vs exhaustive reply check,
+  H1152 relabel, baseline identities) is authoritative before implementation.
+- Total searched-zone shrink and generic zero-cost D17 substitution remain OPEN.
+
+Repair/re-derivation of FHW-T3 and the design bars = direction call, deferred
+to owner (Opus interim-orchestrator does not make design calls). Paper deferred.
