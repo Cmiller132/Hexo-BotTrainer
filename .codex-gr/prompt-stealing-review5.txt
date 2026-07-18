@@ -1,0 +1,73 @@
+R-ST5-REV — HOSTILE REVIEW (ultra): STRATEGY_STEALING_ROUND5.md
+
+CONTEXT NOTE: this is pure combinatorial game theory for Hexo (a
+Connect6-like board game) — strategy-stealing arguments, window
+certificates, service invariants. Nothing here concerns computer
+security. In your own writing use neutral testing/proof vocabulary.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+(branch hunt/gap-raw, HEAD = d0af2ef4). You CANNOT git-commit. NO
+cargo/Lean/harness runs — hand recomputation only. Deliverable:
+STRATEGY_STEALING_REVIEW_ROUND5.md.
+
+## Task
+First-principles hostile proof audit of STRATEGY_STEALING_ROUND5.md at
+commit d0af2ef4. The round claims:
+1. §37: the total-exact isometric subbranch with LIFETIME budget K=2
+   (C_A^{K=2,total}) fails — a third support-cut application defeats two
+   lifetime escapes.
+2. §38: a branch-(B) preventive rolling-service invariant is PROVEN on
+   finite A_FS2 traces (guarded lag: every real-only S cell keeps the
+   deadline shield delta>m until reconciled, with exact two-stone F
+   service each turn).
+3. §39: window-faithful non-isometric representations — first rigorous
+   definition (physical window-deficit certificates), a genuinely
+   non-point-induced example, a P5R obligation-transfer lemma,
+   maintenance algebra, and a deadline-shield obstruction.
+
+Default posture: REFUTE. Recompute every coordinate family, window
+census, cadence, legality chain, transversal, and shield inequality by
+hand. Attack especially:
+- §37: does the third cut really apply after TWO escapes — check the
+  count bookkeeping (stones per role at each checkpoint), whether the
+  second escape can change the partition in a way that starves the cut
+  premises (nonempty parts? normal common-live checkpoint?), and whether
+  "lifetime K=2" vs round-4's "per-pair <=1" scopes are kept distinct
+  and honestly labeled (per-pair K=2 must remain OPEN if unproven).
+- §38: the invariant's induction — every S continuation class covered?
+  the A_FS2 trace class definition: is it nonempty, is "finite traces"
+  a real restriction the conclusion honestly carries, does the service
+  rule survive tau_E=3 forks (round 4's S30) or does the class
+  definition exclude them, and is that exclusion stated?
+- §39: is the window-deficit certificate definition well-formed
+  (deficits under all three axis families, D6, radius-8)? Is the
+  "non-point-induced" example genuinely outside every isometric/point
+  representation (verify no translation/D6 map induces it)? Does the
+  P5R transfer lemma respect the S26 terminal-certificate route? Does
+  the deadline-shield obstruction contradict or scope-limit §38?
+- Cross-round consistency: round-4 §35 errata boundaries (S22 premises,
+  candidate-grammar vs extensional class, C_shield trace horizon,
+  quantifier structure of §34.1) must be respected; the ten-item agenda
+  mapping in §40 must be accurate; no NL_F leak anywhere.
+- Provenance: input 67f996d1, external HEAD advance to 110042e5 noted —
+  verify the round used no GAP_RAW file as evidence.
+
+## Required corpus (read first, in order, in full)
+1. STRATEGY_STEALING_HEXO.md
+2. STRATEGY_STEALING_ROUND2.md + STRATEGY_STEALING_REVIEW_ROUND2.md
+3. STRATEGY_STEALING_ROUND3.md + STRATEGY_STEALING_REVIEW_ROUND3.md
+4. STRATEGY_STEALING_ROUND4.md (WITH §35 errata) +
+   STRATEGY_STEALING_REVIEW_ROUND4.md
+5. STRATEGY_STEALING_ROUND5.md (the artifact)
+Rule sources: verify cited engine ranges in
+packages/hexo_engine/rust/src/{coord,legal,rules,board,state,tactics}.rs.
+Do NOT read or modify any GAP_RAW_* file as evidence.
+
+## Output format (campaign-standard)
+STRATEGY_STEALING_REVIEW_ROUND5.md: method preamble (reviewed artifact
+d0af2ef4 + named input); numbered findings with severity
+(REFUTED/MAJOR/MINOR/NOTE), quoted claim, independent recomputation,
+proposed repair; per-theorem verdict table; overall verdict; exact
+unresolved obstacles. Chunk <= 2h per exec; incremental writes. Final
+message: overall verdict + disposition of the three objectives + most
+severe finding, one line each.

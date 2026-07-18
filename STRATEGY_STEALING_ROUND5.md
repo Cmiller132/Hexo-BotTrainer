@@ -69,9 +69,10 @@ the legal/window updates occur before the next placement is considered
 (`packages/hexo_engine/rust/src/board.rs:83-105`). A six is checked after each
 single placement and before phase advancement; a nonwinning `SecondStone`
 passes control to the other owner at `FirstStone`
-(`packages/hexo_engine/rust/src/state.rs:289-357`). The all-six predicate and
-the eighteen incident windows are at
-`packages/hexo_engine/rust/src/tactics.rs:13-17,205-208,451-485`.
+(`packages/hexo_engine/rust/src/state.rs:289-357`). The all-six predicate,
+the three Q/R/QR axis-vector window families, and the eighteen incident
+windows are at
+`packages/hexo_engine/rust/src/tactics.rs:13-17,21-75,205-208,451-485`.
 Terminal states expose no legal continuation
 (`packages/hexo_engine/rust/src/state.rs:203-252`).
 
@@ -145,8 +146,14 @@ never truncates voluntarily. Finally define the extensional success class
 
 `C_A^{K=2,total}={C in G_A^2 : Success_A(C)}`.
 
-The grammar is nonempty **[PROVEN]**: the legal backing/filler partial
-execution folded into round-4 section 35 is one such partial execution. S32
+The grammar is nonempty **[PROVEN]**: fix the deterministic candidate
+`C_0 in G_A^2` that follows the folded round-4 section-35 backing/filler
+behavior on that named history, resolves every tie with the already-required
+fixed coordinate and subset enumerations, and reports its first failed
+promise on any history departing from that path. The round-4 legal partial
+execution is then one legal partial execution *of `C_0`*, witnessing
+nonemptiness of the algorithm class (a trace alone is not an algorithm —
+review round-5 Finding 4). S32
 proves that the extensional success class is empty. **Agenda {2,7,10}.**
 
 ### 37.2 The third-cut theorem
@@ -270,8 +277,9 @@ They continue to affect legality, blocking, and terminal windows. A label
 change is not reconciliation.
 
 The queue is representation lag, not engine-phase lag: one physical S-role
-stone is appended to each game on the coupled step. A legal `Shat` win during
-reconciliation ends the physical module; it contradicts alleged-winning
+stone is appended to each game on the coupled step. Any branch-(B) `Shat`
+append — reconciliation `Shat@T(e)` *or* an enumerated filler — ends the
+physical module when it completes a shadow six; it contradicts alleged-winning
 `sigma` only when the outer P3 carrier has kept the prefix `sigma`-consistent.
 Otherwise the histories remain common-live. This module authorizes neither an
 extra physical shadow move nor undo. **Agenda {3,8}.**
@@ -300,7 +308,9 @@ let `A_FS2` be the class of finite physical coupled trace segments generated
 by the handler and satisfying, recursively on each segment's own prefix:
 
 1. every required old-debt certificate `T(e)` is fresh and shadow-legal, or
-   its append is an immediate physical `Shat` terminal stop;
+   its append is an immediate physical `Shat` terminal stop; likewise any
+   enumerated filler append that completes a shadow six is an immediate
+   physical `Shat` terminal stop of the module;
 2. after every lagged `FirstStone y`, each F-unblocked six-window through `y`
    contains at most four real S stones in the post-state, equivalently
    `delta>=2`;
@@ -370,7 +380,17 @@ shield after every live real-S placement. If the following Definition
 meet `E_S`; a terminal coordinate cannot be admitted to this branch.
 **Agenda {2,3,4,8,9}.**
 
-*Proof.* Induct over coupled single placements. Each rolling step physically
+*Proof.* Induct over coupled single placements. Consider first the transient
+physical state between the real append `S@y` and the shadow append
+`Shat@T(e)`, in which the old debt `e` is not yet reconciled and `y` is also
+unmatched. For every old E-live window `W` through `e`, the real append and
+the role-count change give
+
+`delta'(W) - m' = (delta(W) - 1_{y in W}) - (m - 1) = (delta(W) - m) + 1 - 1_{y in W} > 0,`
+
+so no old-debt window can become terminal in the transient real state; every
+new window through `y` is instead handled by the first-safe or nonwinning
+admission test below. The shadow append then physically
 certifies the old singleton debt, so its E-live family disappears. Lemma
 S33(1) admits exactly the first-safe new debt after `FirstStone`; Lemma S33(2)
 admits every nonterminal new debt after `SecondStone`. Thus the shield holds
@@ -441,7 +461,13 @@ checkpoint the only urgent E-live window is
 with `H_W={(0,5),(0,6)}`. Hence `tau_E=1`; take the fixed order to select
 `(0,5)` and pad with `(1,5)`. The real service pair `(0,5),(1,5)` and shadow `Fhat` pair
 `(2,5),(3,5)=T[(0,5),(1,5)]` are legal and nonwinning. The real blocker
-`(0,5)` restores `delta>2` for `E_S={(0,4)}`. **Agenda {1 locally,3,4,8};
+`(0,5)` restores `delta>2` for `E_S={(0,4)}`. S35 is a P3-shaped,
+phase/legality-paired physical trace: its shadow pair is legal and
+coordinatewise associated with the real service pair, and its on-branch
+choices extend to *some* legal pure strategy — not claimed winning, so this
+is no advance for arbitrary alleged-winning `sigma`. **Agenda: geometry side
+of {3,4} and physical persistence in {8}; item 1 is advanced only by S32's
+negative crossing — arbitrary positive P3 composition remains OPEN;
 Agenda 10 is not advanced beyond reachable-prefix nonvacuity.**
 
 *Proof.* Every coordinate is fresh. Each real vertical S placement is
@@ -669,12 +695,12 @@ it.
 
 | Review item | Round-5 status | Exact advance and remaining gap |
 |---:|---|---|
-| 1. Pre-checkpoint P3 transfer | **OPEN globally; PARTIAL at scope** | S32 crosses two actual `sigma` pairs and treats transfer/restoration failure as a genuine `C_A^{K=2,total}` failure. S35 gives one legal P3-compatible service trace. Composing S34 still requires an outer carrier for arbitrary `sigma`; checkpoint (28.1) remains conditional. |
-| 2. P2/P4 at each real-S coordinate | **PROVEN negative for `C_A^{K=2,total}`; PROVEN positive on `A_FS2`; OPEN globally** | S32 forces a third occupied target after the lifetime budget is exhausted. S33/S34 give a legal rolling branch-B rule on first-safe continuations. Two repairs per S pair, other zero-lag recodes, general lag, and dynamic window recoding remain open. |
-| 3. P5R during every lag/recode | **PROVEN for two conditional modules; OPEN globally** | S34 proves the deadline shield for the rolling queue on `A_FS2`. S38 transfers E-meeting wins for complete traces maintaining physical deficit certificates. S39.1 proves that this natural window representation cannot certify shield-unsafe debt on a winning-`sigma` history. |
+| 1. Pre-checkpoint P3 transfer | **OPEN globally; PARTIAL at scope** | S32 crosses two actual `sigma` pairs and treats transfer/restoration failure as a genuine `C_A^{K=2,total}` failure. S35 gives one legal P3-shaped, phase/legality-paired service trace (not arbitrary-winning-`sigma` compatible). Composing S34 still requires an outer carrier for arbitrary `sigma`; checkpoint (28.1) remains conditional. |
+| 2. P2/P4 at each real-S coordinate | **PROVEN negative for `C_A^{K=2,total}`; PROVEN positive on `A_FS2`; OPEN globally** | S32 forces a third occupied target after the lifetime budget is exhausted. S33/S34 give a legal rolling branch-B rule on first-safe continuations. Two repairs per S pair, other zero-lag recodes, general lag, and dynamic window recoding remain open. Round-2 S13 (fixed-isometry one-stone FIFO frontier failure) remains a binding regression for any FIFO interpretation of lag; the rolling queue differs from it by persistent genuine fillers/proxies and physical reconciliation. |
+| 3. P5R during every lag/recode | **PROVEN for two conditional modules; OPEN globally** | S34 proves the deadline shield for the rolling queue on `A_FS2`. S38 transfers E-meeting wins for complete traces maintaining physical deficit certificates. S39.1 proves that this natural window representation cannot certify shield-unsafe debt on a winning-`sigma` history. Round-2 S14 (literal one-S-stone-lag terminal-count failure) remains binding for any unguarded literal lag; S34 avoids it only on shield-admitted traces. |
 | 4. F-service compatibility | **PROVEN as real-board service on `A_FS2`; P3 composition OPEN** | The canonical `K_E` rule realizes S29 whenever `tau_E<=2`; S35 exercises it. No theorem makes every arbitrary `sigma` pair realize `K_E`, and `tau_E>2` states remain possible. |
 | 5. Permanent-fence installation | **OPEN; no new advance** | S31's six-blocker geometry remains binding. Availability, interrupted installation, and compatibility with prescribed F moves are unsolved. |
-| 6. Reverse shadow-to-real legality | **OPEN** | A temporal P3 carrier may pair a legal shadow prescription with a legal service cell, but no universal carrier is constructed. S18 and the sequentially updated unsupported/collision sets remain mandatory. |
+| 6. Reverse shadow-to-real legality | **OPEN** | A temporal P3 carrier may pair a legal shadow prescription with a legal service cell, but no universal carrier is constructed. S18 and the sequentially updated unsupported/collision sets remain mandatory, and S13 remains binding on its fixed-isometry FIFO schedule. |
 | 7. Shadow-`Fhat` terminal fidelity | **OPEN; sharpened negative use** | S32 shows that the intervening sixth `Fhat` stone, if terminal, is necessarily untransferable at counts six versus five. S20 is not repaired; S34's composition corollary makes same-step physical P5 a premise. |
 | 8. Strategy domain and physical persistence | **PARTIAL at module scope; OPEN globally** | Definitions 38.1 and 39.1 retain every filler/proxy, and each displayed S-role append is physical and legal. Branch B does not prove that its F-service partner is prescribed by the fixed alleged-winning `sigma`; the P0/P3 interface and arbitrary future recodes still owe one `sigma`-consistent history and phase relation. |
 | 9. Causality | **PROVEN for the local selectors; OPEN globally** | S32 commits before each adversarial coordinate. Branch-B debt/service choices use only the observed prefix; `K_E` is selected after the S pair, so it does not preannounce an F coordinate across that S turn. An outer P3 carrier may still trigger S12 and is not supplied. |
@@ -690,7 +716,7 @@ it.
 | `P3 SHADOW->REAL` | **OPEN** | S34 supplies the desired service pair, not a universal mapping of `sigma` to it. S18 remains live. |
 | `P4 COLLISION` | **PARTIAL** | S32 strengthens the cut obstruction for `C_A^{K=2,total}` to lifetime budget two. Branch B avoids exact occupied targets by physical debt rotation on `A_FS2`. |
 | `P5 SHADOW-F-TERMINAL` | **OPEN** | S32's six-versus-five fork and inherited S20 show why a physical certificate is indispensable. |
-| `P5R REAL-S-TERMINAL-REFLECTION` | **PROVEN in `C_shield`, `A_FS2`, and deficit-certified traces; OPEN globally** | S34 is preventive; S38 is a non-stonewise physical certificate route. |
+| `P5R REAL-S-TERMINAL-REFLECTION` | **PROVEN in `C_shield`, `A_FS2`, and deficit-certified traces; OPEN globally** | S34 is preventive; S38 is a non-stonewise physical certificate route. S14 and S25 remain mandatory terminal-memory regressions for any unguarded literal lag. |
 | `P6 CAUSALITY` | **PARTIAL** | The new selectors are prefix-causal, but no universal P3 carrier is shown safe from S12. |
 
 ## 41. Hostile-review attack surface
@@ -820,3 +846,51 @@ and every rolling `A_FS2` prefix, can one genuine causal P3 carrier realize
 the canonical service pair `K_E` while also surviving S18, transferring every
 S20-type `Fhat` terminal placement, and avoiding S12--or can failure of such a
 carrier be forced on its own `sigma`-consistent history?
+
+## 44. Errata and clarifications folded from the round-5 hostile review
+
+`STRATEGY_STEALING_REVIEW_ROUND5.md` (ultra, reviewed artifact `d0af2ef4`)
+returned **SOUND-WITH-MINOR-ERRATA**: no REFUTED or MAJOR finding; all three
+round objectives CONFIRMED (S32 at exact lifetime/total scope; the S34
+finite conditional `A_FS2` invariant; the S36--S39.1 window-certificate
+module). The following repairs are folded inline above; this section records
+them.
+
+1. **(Finding 1, NOTE)** Section 36.2's source list now includes
+   `tactics.rs:21-75` — the three Q/R/QR axis-vector window families used by
+   the section-38/39 window constructions.
+2. **(Finding 4, MINOR)** Grammar nonemptiness of `G_A^2` is now witnessed by
+   a deterministic candidate `C_0` (fixed-enumeration tie-breaks, first
+   failed promise reported off-path), not by the round-4 trace alone: a
+   legal partial execution is not itself an algorithm. S32 and the emptiness
+   of `C_A^{K=2,total}` are unaffected.
+3. **(Finding 6, MINOR)** The S34 induction now exposes the transient
+   two-debt microstate between real `S@y` and shadow `Shat@T(e)`: for every
+   old E-live window, `delta'-m' = (delta-m)+1-1_{y in W} > 0`, so no
+   old-debt window can become terminal in the transient physical real state.
+4. **(Finding 7, MINOR)** Definition 38.1's terminal sentence and `A_FS2`
+   clause 1 now classify a *filler-created* physical `Shat` win: any
+   branch-(B) `Shat` append, reconciliation or filler, ends the physical
+   module when it wins; the win contradicts `sigma` only under an outer
+   P0/P3 carrier.
+5. **(Finding 15, MINOR)** S35 is a "P3-shaped, phase/legality-paired
+   physical trace," not "P3-compatible" for arbitrary alleged-winning
+   `sigma`. Its agenda credit moved to the geometry side of items 3--4 and
+   physical persistence in item 8; item 1's only round-5 advance is S32's
+   negative crossing. Arbitrary positive P3 composition remains OPEN.
+6. **(Finding 16, MINOR)** The regression ledger now names the inherited
+   round-2 regressions: S13 (fixed-isometry one-stone FIFO frontier failure)
+   in agenda items 2/6, and S14 (literal one-S-stone-lag terminal-count
+   failure) in item 3 and the P5R cross-ledger row. Neither is silently
+   solved: the rolling queue differs from S13's schedule by persistent
+   genuine fillers/proxies and physical reconciliation, and S34 avoids S14
+   only on shield-admitted traces.
+
+**Review confirmations of record.** Per-pair `K=2` remains OPEN (Finding 5);
+the review's checkpoint table (Finding 2) and terminal-fork exhaustiveness
+(Finding 3) independently recompute S32; S36's seventeen-window census,
+deficit-three cover, and injectivity contradiction recompute exactly
+(Finding 12); S38 implements S26's same-step physical terminal certificate
+and S39.1 scope-limits rather than contradicts S34 (Finding 14). The
+review's twelve-item unresolved-obstacle list supersedes and refines
+section 43's obstacle statement as the authoritative open state.
