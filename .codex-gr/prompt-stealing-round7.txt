@@ -1,0 +1,79 @@
+R-ST7 — STRATEGY-STEALING ROUND 7 (ultra): co-terminal alignment — the last obligation
+
+CONTEXT NOTE: this is pure combinatorial game theory for Hexo (a
+Connect6-like board game). Nothing here concerns computer security.
+Use neutral proof vocabulary in your own writing (stop criterion,
+negative control, stress case).
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+(branch hunt/gap-raw, HEAD = 09e27a93). You CANNOT git-commit. NO
+cargo/Lean/harness runs — hand proofs only. Deliverable:
+STRATEGY_STEALING_ROUND7.md.
+
+## Required corpus (read first, in order, in full)
+1. STRATEGY_STEALING_HEXO.md
+2. ROUND2 + REVIEW_ROUND2; 3. ROUND3 + REVIEW_ROUND3;
+4. ROUND4 (WITH §35) + REVIEW_ROUND4;
+5. ROUND5 (WITH §44) + REVIEW_ROUND5;
+6. ROUND6 (WITH §53 — binding, incl. the terminal-closure definition
+   of A_FS2^ET and the restored ledger caveats) + REVIEW_ROUND6 (its
+   updated obstacle list is the authoritative open state).
+Rule sources: packages/hexo_engine/rust/src/{coord,legal,rules,board,
+state,tactics}.rs. Do NOT read any GAP_RAW_* file as evidence.
+
+## The state you inherit (round-6 exit, review-confirmed)
+S40: the P3 event carrier is PROVEN on finite A_FS2^ET(sigma) traces —
+temporal pairing, causal, S18-independent, S12-safe; nonterminal P3 is
+SOLVED at that scope. The single remaining F-role obligation is
+CO-TERMINAL ALIGNMENT: every terminal shadow-Fhat event needs a
+same-step physical real-F terminal certificate. S42 kills the
+terminal-blind selector. Also inherited: per-pair K=2 partial
+(intra-pair rebinding open), S30 certificate barrier with exact
+tau_E=5, window-deficit certificates (round 5), and the full
+regression suite (S12/S13/S14/S18/S20/S25/S30/S31).
+
+## Round-7 objectives (priority order)
+1. **THE ALIGNMENT QUESTION [the named sharpest question].** For
+   every alleged-winning sigma coupled by the S40 carrier on
+   A_FS2^ET: derive co-terminal alignment, or force its failure on a
+   winning strategy's own history. Attack both ways:
+   (a) POSITIVE: a causal physical F-window deficit invariant
+   maintained by the canonical service events themselves — does the
+   two-stone service rule (or an augmented exact variant) keep every
+   Fhat-side terminal window physically pre-certified on the real
+   board, so that when sigma's prescription completes a shadow six,
+   the paired service placement (or an already-installed real
+   configuration) completes a real six on the same coupled step?
+   Name the exact invariant, prove it inductively on A_FS2^ET, and
+   state honestly which trace classes it covers.
+   (b) NEGATIVE: an ADAPTIVE version of S42 in which the strategy is
+   genuinely alleged-winning (not merely legal) — force the
+   misalignment from sigma's own winning behavior, or prove that any
+   such forcing needs sigma to be refutable for other reasons
+   (which would make the negative route circular and the positive
+   route mandatory).
+2. **Membership pressure (secondary).** The carrier assumes continued
+   A_FS2^ET membership. Which legal real-S behaviors eject a coupled
+   trace from the class (first-unsafe, tau_E>2, certificate failure),
+   and can the ejection set be covered by branches (A)/(C) at any
+   named scope — even one new covered ejection class is a WIN.
+3. **Per-pair K=2 intra-pair rebinding (tertiary, only if time):
+   one honest step — either a cut adaptation or a surviving
+   construction sketch labeled at exact scope.
+
+## Binding rules (campaign-standard)
+Hand proofs only; PROVEN/SKETCH/CONJECTURE/OPEN/CITED discipline;
+statement fidelity to ALL inherited definitions and folded errata
+(§35, §44, §53 binding); quantifiers explicit everywhere (branches
+(A)/(B)/(C) alternatives per coordinate, obligations mandatory in
+every branch); negative gadgets must be forced on the candidate's own
+legal sigma-consistent history — an unproven-winning legal sigma is a
+diagnostic, not a refutation (label honestly); append-only physical
+discipline. Continue numbering from §53 (start §54). Status ledger vs
+the round-6 review's obstacle list + agenda + P0-P6/P5R cross-ledger
++ attack-surface + provenance sections mandatory (record input commit
+09e27a93; this pass creates no commit). Incremental writes; chunk
+<= 2h per exec. Final message: alignment verdict
+(POSITIVE-AT-SCOPE / NEGATIVE / CIRCULARITY-PROVEN / PARTIAL with
+exact scope), invariant name if defined, membership-coverage outcome,
+most valuable new theorem, sharpest next question — one line each.
