@@ -1,0 +1,33 @@
+    Finished `release` profile [optimized] target(s) in 0.07s
+     Running unittests rust\src\lib.rs (.target-rs\x86_64-pc-windows-msvc\release\deps\hexfield_eq-ebbc2e9e0747aecb.exe)
+
+running 1 test
+test tss_root_stabilizer_hunt::tss_root_stabilizer_atlas_campaign ... RS_CENSUS stabilizer=1 families=201 games=2559 game_pct=37.0762
+RS_CENSUS stabilizer=2 families=53 games=4088 game_pct=59.2292
+RS_CENSUS stabilizer=4 families=8 games=255 game_pct=3.6946
+RS_CENSUS_DONE families=262 games=6902 nontrivial_games=4343 nontrivial_game_pct=62.9238 weighted_root_child_removal_ceiling_pct=32.3855
+RS_FAMILY rank=1 key=(-1,0);(0,1) games=1337 game_pct=19.371197 stabilizer=2
+RS_FAMILY rank=2 key=(-1,0);(-1,1) games=1157 game_pct=16.763257 stabilizer=2
+RS_FAMILY rank=3 key=(-2,0);(-2,2) games=523 game_pct=7.577514 stabilizer=2
+RS_FAMILY rank=4 key=(-3,0);(-1,1) games=258 game_pct=3.738047 stabilizer=1
+RS_FAMILY rank=5 key=(-2,1);(0,-1) games=175 game_pct=2.535497 stabilizer=1
+RS_FAMILY rank=6 key=(-2,0);(0,2) games=169 game_pct=2.448566 stabilizer=2
+RS_FAMILY rank=7 key=(-9,1);(-8,0) games=165 game_pct=2.390611 stabilizer=1
+RS_FAMILY rank=8 key=(-2,1);(-1,0) games=149 game_pct=2.158795 stabilizer=1
+RS_FAMILY rank=9 key=(-2,0);(0,1) games=146 game_pct=2.115329 stabilizer=1
+RS_FAMILY rank=10 key=(-2,0);(-1,1) games=133 game_pct=1.926978 stabilizer=1
+RS_FAMILY rank=11 key=(-5,2);(-5,3) games=122 game_pct=1.767604 stabilizer=2
+RS_FAMILY rank=12 key=(-1,0);(1,0) games=116 game_pct=1.680672 stabilizer=4
+RS_FAMILY rank=13 key=(-8,0);(-8,1) games=113 game_pct=1.637207 stabilizer=1
+RS_FAMILY rank=14 key=(-9,0);(-1,0) games=112 game_pct=1.622718 stabilizer=2
+RS_FAMILY rank=15 key=(-2,0);(-1,0) games=104 game_pct=1.506810 stabilizer=2
+RS_FAMILY rank=16 key=(-3,0);(-3,3) games=98 game_pct=1.419878 stabilizer=2
+RS_FAMILY rank=17 key=(-2,0);(-2,1) games=94 game_pct=1.361924 stabilizer=1
+RS_FAMILY rank=18 key=(-2,1);(2,-1) games=91 game_pct=1.318458 stabilizer=4
+RS_FAMILY rank=19 key=(-3,1);(0,1) games=89 game_pct=1.289481 stabilizer=1
+RS_FAMILY rank=20 key=(-2,1);(1,-1) games=84 game_pct=1.217039 stabilizer=1
+RS_SETUP families=4 transforms=4 caps=[10000] tt_bytes=1073741824 lazy=1 interior_gate=1 incr_defender=1
+error: test failed, to rerun pass `-p hexfield_eq --lib`
+
+Caused by:
+  process didn't exit successfully: `E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-root-stabilizer\.target-rs\x86_64-pc-windows-msvc\release\deps\hexfield_eq-ebbc2e9e0747aecb.exe tss_root_stabilizer_atlas_campaign --ignored --test-threads=1 --nocapture` (exit code: 1)

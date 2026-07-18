@@ -1,0 +1,46 @@
+    Finished `release` profile [optimized] target(s) in 1.85s
+     Running unittests rust\src\lib.rs (.target-rs\x86_64-pc-windows-msvc\release\deps\hexfield_eq-ebbc2e9e0747aecb.exe)
+
+running 1 test
+test tss_root_stabilizer_hunt::tss_root_stabilizer_atlas_campaign ... RS_CENSUS stabilizer=1 families=201 games=2559 game_pct=37.0762
+RS_CENSUS stabilizer=2 families=53 games=4088 game_pct=59.2292
+RS_CENSUS stabilizer=4 families=8 games=255 game_pct=3.6946
+RS_CENSUS_DONE families=262 games=6902 nontrivial_games=4343 nontrivial_game_pct=62.9238 weighted_root_child_removal_ceiling_pct=32.3855
+RS_FAMILY rank=1 key=(-1,0);(0,1) games=1337 game_pct=19.371197 stabilizer=2
+RS_FAMILY rank=2 key=(-1,0);(-1,1) games=1157 game_pct=16.763257 stabilizer=2
+RS_FAMILY rank=3 key=(-2,0);(-2,2) games=523 game_pct=7.577514 stabilizer=2
+RS_FAMILY rank=4 key=(-3,0);(-1,1) games=258 game_pct=3.738047 stabilizer=1
+RS_FAMILY rank=5 key=(-2,1);(0,-1) games=175 game_pct=2.535497 stabilizer=1
+RS_FAMILY rank=6 key=(-2,0);(0,2) games=169 game_pct=2.448566 stabilizer=2
+RS_FAMILY rank=7 key=(-9,1);(-8,0) games=165 game_pct=2.390611 stabilizer=1
+RS_FAMILY rank=8 key=(-2,1);(-1,0) games=149 game_pct=2.158795 stabilizer=1
+RS_FAMILY rank=9 key=(-2,0);(0,1) games=146 game_pct=2.115329 stabilizer=1
+RS_FAMILY rank=10 key=(-2,0);(-1,1) games=133 game_pct=1.926978 stabilizer=1
+RS_FAMILY rank=11 key=(-5,2);(-5,3) games=122 game_pct=1.767604 stabilizer=2
+RS_FAMILY rank=12 key=(-1,0);(1,0) games=116 game_pct=1.680672 stabilizer=4
+RS_FAMILY rank=13 key=(-8,0);(-8,1) games=113 game_pct=1.637207 stabilizer=1
+RS_FAMILY rank=14 key=(-9,0);(-1,0) games=112 game_pct=1.622718 stabilizer=2
+RS_FAMILY rank=15 key=(-2,0);(-1,0) games=104 game_pct=1.506810 stabilizer=2
+RS_FAMILY rank=16 key=(-3,0);(-3,3) games=98 game_pct=1.419878 stabilizer=2
+RS_FAMILY rank=17 key=(-2,0);(-2,1) games=94 game_pct=1.361924 stabilizer=1
+RS_FAMILY rank=18 key=(-2,1);(2,-1) games=91 game_pct=1.318458 stabilizer=4
+RS_FAMILY rank=19 key=(-3,1);(0,1) games=89 game_pct=1.289481 stabilizer=1
+RS_FAMILY rank=20 key=(-2,1);(1,-1) games=84 game_pct=1.217039 stabilizer=1
+RS_SETUP families=2 transforms=2 caps=[1000] tt_bytes=1073741824 lazy=1 interior_gate=1 incr_defender=1
+RS_RUN rank=1 key=(-1,0);(0,1) games=1337 cap=1000 symmetry=0 stabilizer=2 raw_children=51752 orbits=26030 fixed_children=308 baseline_status=UNKNOWN consume_status=UNKNOWN baseline_ms=713375.745 consume_ms=688211.299 baseline_expansions=999 consume_expansions=999 root_gen_ms=555.092 fail_closed=0 strict_verify=PASS
+RS_RUN rank=1 key=(-1,0);(0,1) games=1337 cap=1000 symmetry=1 stabilizer=2 raw_children=51752 orbits=26030 fixed_children=308 baseline_status=UNKNOWN consume_status=UNKNOWN baseline_ms=694015.179 consume_ms=721525.647 baseline_expansions=999 consume_expansions=999 root_gen_ms=752.735 fail_closed=0 strict_verify=PASS
+RS_ORBIT rank=1 key=(-1,0);(0,1) cap=1000 orbit=0 representative=O(-9,0)->(-17,0) members=O(-9,0)->(-17,0)|O(0,9)->(0,17) fixed=0 descents=1 expansions=998 wall_ms=712764.389
+RS_ORBIT_ZERO rank=1 key=(-1,0);(0,1) cap=1000 zero_work_orbits=26029 total_orbits=26030
+RS_ATTRIBUTION rank=1 key=(-1,0);(0,1) games=1337 cap=1000 stabilizer=2 raw_children=51752 orbits=26030 orbits_removed=25722 fixed_children=308 baseline_status=UNKNOWN consume_status=UNKNOWN baseline_mean_ms=703695.462 consume_mean_ms=704868.473 wall_delta_pct=-0.1667 baseline_expansions=1998 consume_expansions=1998 expansion_delta_pct=0.0000
+RS_RUN rank=2 key=(-1,0);(-1,1) games=1157 cap=1000 symmetry=0 stabilizer=2 raw_children=49452 orbits=24808 fixed_children=164 baseline_status=UNKNOWN consume_status=UNKNOWN baseline_ms=731821.425 consume_ms=669175.233 baseline_expansions=999 consume_expansions=999 root_gen_ms=566.625 fail_closed=0 strict_verify=PASS
+RS_RUN rank=2 key=(-1,0);(-1,1) games=1157 cap=1000 symmetry=1 stabilizer=2 raw_children=49452 orbits=24808 fixed_children=164 baseline_status=UNKNOWN consume_status=UNKNOWN baseline_ms=684301.446 consume_ms=687158.283 baseline_expansions=999 consume_expansions=999 root_gen_ms=549.663 fail_closed=0 strict_verify=PASS
+RS_ORBIT rank=2 key=(-1,0);(-1,1) cap=1000 orbit=0 representative=O(-9,0)->(-17,0) members=O(-9,0)->(-17,0)|O(-9,9)->(-17,17) fixed=0 descents=1 expansions=998 wall_ms=731199.626
+RS_ORBIT_ZERO rank=2 key=(-1,0);(-1,1) cap=1000 zero_work_orbits=24807 total_orbits=24808
+RS_ATTRIBUTION rank=2 key=(-1,0);(-1,1) games=1157 cap=1000 stabilizer=2 raw_children=49452 orbits=24808 orbits_removed=24644 fixed_children=164 baseline_status=UNKNOWN consume_status=UNKNOWN baseline_mean_ms=708061.436 consume_mean_ms=678166.758 wall_delta_pct=4.2220 baseline_expansions=1998 consume_expansions=1998 expansion_delta_pct=0.0000
+RS_AGGREGATE cap=1000 families=2 transforms=2 family_weighted_baseline_ms=1411756.898 family_weighted_consume_ms=1383035.231 family_weighted_wall_delta_pct=2.0345 game_weighted_baseline_ms=1760067913.924 game_weighted_consume_ms=1727048087.465 game_weighted_wall_delta_pct=1.8761 baseline_expansions=3996 consume_expansions=3996 verdict_identity=PASS strict_verify=PASS differential_12=PASS fail_closed=PASS
+RS_CAMPAIGN_DONE verdict_identity=PASS strict_verify=PASS fail_closed=PASS
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 147 filtered out; finished in 5589.64s
+
+SIZING_JOB_EXIT=0

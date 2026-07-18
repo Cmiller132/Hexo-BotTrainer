@@ -262,3 +262,31 @@ cargo test --release --target x86_64-pc-windows-msvc `
     -p hexfield_eq tss_root_stabilizer_atlas_campaign -- `
     --ignored --test-threads=1 --nocapture *> ROOT_STABILIZER_ATLAS_RAW.log
 ```
+
+## Orchestrator addendum — binding-rung verdict (2026-07-18, rescope 2)
+
+**VERDICT: CLOSED NULL vs the 5% bar.** The prescribed 10k matrix was
+killed (first arm alone >4.5h; cap is the cost driver) and rescoped
+twice: final binding rung = top-2 stab-2 families × 2 transforms ×
+cap 1000 under the official profile (1 GiB + lazy + census gate +
+incr-defender), raws in `ROOT_STABILIZER_ATLAS_1K_RAW.log`.
+
+Results (both families, both transforms, A/B):
+- rank 1 `(-1,0);(0,1)`: 26,030 orbits, 26,029 zero-work; single orbit
+  absorbed 998/999 expansions; wall delta −0.17%; expansion delta
+  0.0000%; strict_verify PASS everywhere.
+- rank 2 `(-1,0);(-1,1)`: 24,808 orbits, 24,807 zero-work; single
+  orbit 998/999; wall delta +4.22% (contention noise — expansions
+  identical); expansion delta 0.0000%; strict_verify PASS.
+
+Mechanism (now measured at cap 128 AND cap 1000, 16 arms total, plus
+one 4.5h partial 10k arm on the same single orbit): the engine's
+second-best threshold descent commits to the principal orbit at these
+roots and NEVER expands sibling-orbit children, so stabilizer-based
+orbit deduplication has nothing to save — the orbits it would remove
+are already zero-work. The 62.92% nontrivial-stabilizer census
+(atlas) is real but economically inert under this search discipline.
+Reopen condition: a search-discipline change that actually spreads
+root-level work across orbits (e.g. root parallelization or portfolio
+descents), at which point the atlas + consumption harness here are
+ready to re-measure.
