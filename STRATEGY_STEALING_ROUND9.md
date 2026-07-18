@@ -1125,21 +1125,25 @@ strictly beyond the now-proved first-cycle cover.
 
 - Workspace: `E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw`
 - Branch supplied by the task: `hunt/gap-raw`
-- Input/HEAD read during this round:
-  `ab0fd965f2c8be07d373c0426e7a457c21f4700a`
-  (`ab0fd965`)
-- Input subject: `docs(stealing): round-8 hostile review — core S55-S63
-  CONFIRMED at scopes, §68 synthesis REFUTED and rewritten as partial
-  interface map (§73)`
-- The input already contains the post-review fold.  Its section 73 records
-  the reviewed/landed Round-8 artifact identity `e93d9d74`; this Round-9
-  artifact does not rewrite that historical identity.
-- After the proof and source audit, the shared branch advanced externally to
-  `9e57ea060462788841d1f8f761db894981b482e9`.  That later commit was not an
-  evidentiary input to this round; every claim here remains based on the
-  task-pinned `ab0fd965` corpus and the six listed rule sources.
-- `STRATEGY_STEALING_ROUND9.md` is a working-tree deliverable.  No commit was
-  created, so there is no Round-9 landed hash.
+- **Campaign provenance (corrected per review Finding 7, §84.2):**
+  task input `9e57ea060462788841d1f8f761db894981b482e9`; landed
+  unmodified in its immediate child
+  `e19e97f73f66154459500be1d578bb0a5a807592` (blob
+  `9c999896f1e3f64aeb60bcbc3e4ffb16e181081c`, SHA-256
+  `d2b718a173601a8704c10a8b9929e1f94bb72b53198a3900402f1dc302b4c31d`).
+  The inherited Round5-Round8 corpus and the engine sources are
+  unchanged across the input-to-landing edge.
+- Historical authoring note (superseded chronology, retained for the
+  record): drafting began against `ab0fd965f2c8be07d373c0426e7a457c21f4700a`
+  (`docs(stealing): round-8 hostile review — core S55-S63 CONFIRMED at
+  scopes, §68 synthesis REFUTED and rewritten as partial interface map
+  (§73)`), whose §73 records the reviewed/landed Round-8 artifact
+  identity `e93d9d74`; this Round-9 artifact does not rewrite that
+  historical identity. The branch advance to `9e57ea06` during
+  drafting changed no evidentiary file.
+- `STRATEGY_STEALING_ROUND9.md` was authored without a commit
+  (sessions cannot commit); the landed identity above was recorded at
+  the review fold.
 
 ### 83.2 Required corpus read first, in order and in full
 
@@ -1195,3 +1199,59 @@ slow three-way **first-cycle selected-history controller is PROVEN** by S70,
 with an optional immediate sound closure by S70.1; arbitrary-S coverage and
 indefinite recurrence remain **OPEN**.  Scalar S-pair reserve membership is
 classified exactly at S69's scope.
+
+## 84. Post-review confirmation record (folded from STRATEGY_STEALING_REVIEW_ROUND9.md)
+
+### 84.1 Verdicts
+
+The round-9 hostile review (ultra tier; hand recomputation; rounds
+5-8 corpora with all binding errata read in full) returned
+**SOUND-WITH-MINOR-ERRATA** — no REFUTED or MAJOR finding survived
+recomputation. Per-theorem:
+
+- **S70 CONFIRMED** at constructed selected-history, first-cycle
+  scope: the three-way disposition (cliff / physical Shat stop /
+  full current R_1 entrance) is exhaustive; the line seed exists,
+  every forcing step is legal, nonterminal, and cadence-correct; and
+  the S50 quantifier bypass is **genuine but narrow** — one finite
+  inherited-T prefix, not arbitrary-S recurrence.
+- **S70.1 CONFIRMED** as an optional, preselected positive-horn
+  variant yielding a sound immediate real-F closure — not an
+  automatic or universal consequence.
+- **S70.2 CONFIRMED** for FAST_8^{S15}: S60 is applied correctly and
+  the forced S58 cliff defeats only the one-for-one CARRIER, not
+  sigma. No outcome claim.
+- **S69 CONFIRMED** as an exact necessary-and-sufficient scalar
+  RES_1 test; full R_1 preservation conditionally requires every S59
+  admission gate, by conditional class unfolding only.
+- **All four fast-conversion obstructions CONFIRMED**: the named
+  reserve, both ordinary appends, the §53 closure, and
+  terminal-moment S63 each fail; no sound named conversion exists.
+  The fast outcome and NL_F remain OPEN.
+
+### 84.2 The single MINOR repair
+
+Finding 7: §83.1 recorded the drafting chronology (ab0fd965, "no
+landed hash") instead of the required campaign provenance. Repaired
+inline: input 9e57ea06, landing e19e97f7, blob 9c999896, SHA-256
+d2b718a1..., with the historical authoring note retained. No
+mathematical claim was affected.
+
+### 84.3 Review-confirmed open obstacles (carried forward verbatim in substance)
+
+(1) full per-pair zero-lag coverage (arbitrary-S recurrence,
+changing isometries, nonisometric/partial recodings, indefinite
+one-repair service); (2) pre-checkpoint and recurring P3 globally —
+S70 completes the named first cycle only; (3) coverage outside
+strict A_FS2 (missing/blocked/wrong-role/illegal/unsupported/
+phase-lagged/unreflected-terminal/high-transversal cases are avoided
+on S70's line, not handled); (4) P5R and common-only real-win
+transfer generally; (5) universal service and lock (canonical F-LOCK
+beyond quiet/R_1 F-LOCK^+); (6) universal shadow-F terminal fidelity
+and the fast OUTCOME — S70.2 forces the cliff precursor but neither
+defeats sigma nor decides post-cliff play; (7) reverse legality for
+spatial carriers (inverse lifts of S67 survivors owe
+support/collision/S13/S18 checks; S70 avoids rather than solves
+this). The sharpest next question stands: can an asynchronous or
+outer carrier cross the forced S58/S49 cliff and decide the fast
+game outcome?
