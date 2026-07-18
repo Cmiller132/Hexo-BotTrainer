@@ -1,0 +1,66 @@
+R-G7 — TEMPO ROUND 9 (ultra): the earliest loss index and the double-corner seal
+
+CONTEXT NOTE: pure combinatorial game theory for Hexo (a Connect6-like
+board game). Nothing here concerns computer security. Use neutral
+proof vocabulary.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+(branch hunt/gap-raw, HEAD = c019400a). You CANNOT git-commit. NO
+cargo/Lean/harness runs — hand proofs only. Deliverable:
+GAP_RAW_PROOF_ROUND9.md.
+
+## Required corpus (read first, in order, in full)
+1. GAP_RAW_PROOF_ROUND6.md (WITH §58) + REVIEW_ROUND6
+2. GAP_RAW_PROOF_ROUND7.md (WITH §67) + REVIEW_ROUND7
+3. GAP_RAW_PROOF_ROUND8.md (WITH §76 — binding: the safe-filler
+   clause, the split later-plateau ledger, the no-corner legality
+   wording) + GAP_RAW_REVIEW_ROUND8.md (its nine-item obstacle list
+   is the authoritative open state)
+(Earlier rounds as needed.) Do NOT read STRATEGY_STEALING_* files.
+
+## The state you inherit (round-8 exit, review-confirmed)
+REPAIRABLE-AT-P0/P1: dual near-trigger cap a^dagger=((0,-1),(1,1))
+holds R_1=2 at P_0^pl and P_1^pl (post-cap inventory (8,12), all
+response classes verified exhaustive). P_5^pl=P_stock UNSAFE (R7.2:
+every action, R_1>=3). EARLIEST LOSS INDEX in {2,3,4,5} UNKNOWN. Q2:
+R8.3 one-level tree complete; every non-seal deviation reroutes to
+tau=0/M=2 lozenges; double-corner seal {(0,1),(1,-1)} = the exact
+earliest unresolved obstruction (R5.1: every immediate response
+returns M<=2). R8.4 one renewal step w/ safe-filler clause. L13.6
+init through hitting-number<=2 count-three families.
+
+## Round-9 objectives (priority order)
+1. **THE EARLIEST LOSS INDEX.** For i=2 (post-V^- stock): does the
+   cap action (or ANY legal pair — the round-8 machinery L14.2-L14.3
+   generalizes) hold R_1<=2 at P_2^pl? Work upward: settle i=2, then
+   i=3, then i=4 as far as the window allows. Each settled index is
+   a papered datum; the full answer (the exact phase-transition
+   index k* where repairability is lost) is the round's headline
+   target. Expect the mechanism: each stock turn adds fan material —
+   find where the capped inventory first admits a third packed
+   region or an uncapped triangle fan.
+2. **THE DOUBLE-CORNER SEAL.** Iterate R8.3's sealed branch one
+   Attacker-Defender cycle: from the sealed handoff (n_1=6, n_2=5,
+   TEMPO=2), classify Attacker's best continuations — does a second
+   lozenge assembly or a hub-analogue emerge that forces M>=3 within
+   two cycles (advancing Q2), or does Defender provably hold M<=2
+   for another full cycle (advancing renewal)? A complete one-cycle
+   tree with exact values on every branch is a WIN either way.
+3. **Renewal (tertiary):** extend R8.4 one step — can the renewal
+   action's SUCCESSOR epoch again admit an immediate-value-minimizing
+   action with all-response M<=2 (two-cycle renewal at the exact
+   class), or exhibit the obstruction?
+
+## Binding rules (campaign-standard)
+Hand proofs only; PROVEN/OPEN/REFUTED with Q1/Q2/Q3 tags; statement
+fidelity to §58/§67/§76 binding errata; every M/tau/R_1 exact and
+enumerated (response-class exhaustiveness explicit — remote, split,
+bridge, same-axis, stock-assisted; the round-8 review checked this
+and a round-9 review will too); reachability quantifiers explicit.
+Continue numbering from §76 (start §77). Status ledger +
+attack-surface + provenance sections mandatory (record input commit
+c019400a AND the landed artifact hash placeholder to be folded
+post-review; note no commit). Incremental writes; chunk <= 2h per
+exec. Final message: earliest-loss-index verdict (k*=N PROVEN /
+PARTIAL through i=N / all-open), seal-cycle verdict, renewal verdict,
+most valuable new theorem, sharpest next question — one line each.
