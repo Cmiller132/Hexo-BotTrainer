@@ -38,7 +38,7 @@ structure is the **frontier mass inside the widened score band**.
 | T5 | **PROVEN** | Competitive-barrier returns are at most $PV/\delta$, where $PV$ is positive variation of the active child score; if scores are monotone in $[1,U]$, this is at most $\sum_i\lfloor(U-p_i)/\delta\rfloor$, near-matched by unit-response arms. | Local call-count theorem, not a total-expansion theorem. |
 | T6 | **PROVEN** | A scheduling change with positive extra non-revisit cost can win only if saved revisit cost exceeds that extra cost; revisit-attributed baseline wall is an absolute saving ceiling. | Component accounting identity. |
 | D1 | **PROVEN** | After admission saturation, $k$ parents of $M$ unindexed shared DAG children can create $(k-1)M$ duplicate expansions relative to an unlimited exact index. | Abstract admission-only TT model matching the relevant data-structure behavior. |
-| E1 | **CONJECTURE** | R-TS1 delta 2 crossed one or more high-mass score bands; the observed expansion growth reached admission saturation, which may then have amplified work through loss of eligibility for indexed transposition reuse. | Consistent with counters, not identified causally by the retained aggregate logs. |
+| E1 | **MEASURED: SPLIT** (R-T1.1 census, `HUNT_REPORT_FRONTIER_CENSUS.md`) | Both clauses supported with exact fractions on `0l4291i_live`: 40.878716% of the 4,174,977 excess expansions occurred BEFORE the first admission refusal (83.184% of that pre-refusal excess tie-band-launched — clause (a): saturation is not the original cause), and 59.121284% after it (clause (b) temporally supported). | The post-refusal share is a temporal attribution, not a measured count of D1 duplicate semantic keys; sentinel clamping was ACTIVE in delta 2 (84 inherited + 128,957 increment strict clamps), so the schedule difference is not exclusively `second_best + 2`. |
 
 **CITED (novelty boundary; not an exhaustive nonexistence claim).** The checked
 literature proves expansion-selection
@@ -143,10 +143,15 @@ thresholds, second-best additions, and the unit progress floors to
 `PN_INFINITY`.  Retained `THRESHOLD_FULL_D1_RAW.log` shows `Some(1)`
 reproduced the off run's integer structural totals exactly (9,080,708 /
 4,574,016 / 8,464,552 / 8,056,474 / 6,188,156), making the clamp
-observationally inert in the +1 counters; the retained delta-2 aggregate
-has no sentinel-hit counter, so attributing every delta-2 schedule
-difference solely to second-best widening requires an identically clamped
-control or a sentinel-hit assertion.  This does not change the empirical
+observationally inert in the +1 counters.  (Measurement addendum, R-T1.1:
+the census closed this control gap with nonzero counts — delta 2 recorded
+42 inherited-PN + 42 inherited-DN threshold hits, all strict clamps, and
+128,957 threshold-increment hits, all strict clamps, while +1 recorded
+zero in every inherited/increment sentinel counter; branch-sum sentinel
+hits occurred in BOTH arms.  So delta 2 actively clamped at
+`PN_INFINITY`, and attributing every delta-2 schedule difference solely
+to second-best widening remains impermissible — now by measurement
+rather than by missing instrumentation.)  This does not change the empirical
 fact that shipped +1 beat the tested delta-2 implementation.  The
 test-arm plumbing separately
 clamps inherited-threshold and increment arithmetic to `PN_INFINITY`
@@ -755,13 +760,27 @@ indexed-entry totals.  They do not identify how many over-cap entries were
 duplicate semantic keys, so they do not prove D1 occurred materially in this
 instance.
 
-**CONJECTURE (E1: measured catastrophe mechanism).** Delta 2 first crossed a
-high-mass score band of the T2/T2b kind, causing the observed 3.221x expansion
-count.  Admission saturation then amplified later work through loss of
-eligibility for cross-parent indexed reuse.  The first clause is consistent
-with worse global best-first arbitration; the second is plausible from the
-data structure and peak/admission totals.  Neither clause is causally isolated
-by the retained aggregate counters.
+**MEASURED: SPLIT (E1: catastrophe mechanism, decided by the R-T1.1
+census — `HUNT_REPORT_FRONTIER_CENSUS.md`, raws
+`FRONTIER_CENSUS_{PLUS1,DELTA2}_RAW.log`).**  Instrumented reruns of
+`0l4291i_live` under the official deep profile reproduced both historical
+solves exactly (1,879,611 vs 6,054,588 expansions).  The delta-2 first
+admission refusal was timestamped at expansion 3,586,288, decomposing the
+4,174,977 excess into 1,706,677 pre-refusal (40.878716%) and 2,468,300
+post-refusal (59.121284%) expansions, with exact histogram conservation.
+Clause (a) is supported: excess band work exists well before any
+saturation, and 83.183871% of the pre-refusal excess is charged to
+selections that began TIED with the second-best sibling (the tie band
+carries 82–85% of classified work in every segment) — a high-mass
+competitive band, though not a literal observation of the abstract T2
+gadget.  Clause (b) is temporally supported: the majority of the excess
+occurs after loss of eligibility for new indexed reuse; the census does
+not distinguish D1 duplicate semantic keys from work the widened schedule
+would also have performed with an unlimited index, so D1's material
+causal role in the post-refusal segment remains a SKETCH-level gloss.
+Sentinel control: delta 2 actively clamped (84 inherited + 128,957
+increment strict clamps vs zero in +1), so no clause may be attributed
+exclusively to the `second_best + 2` expression.
 
 ## 10. Implications for this engine
 
@@ -910,8 +929,11 @@ scoped corrections, which are hereby part of this document:
    $1\le M<I-1$.
 2. **Official A/B scope (MAJOR, folded in §2.2):** the off-versus-2
    comparison also toggles sentinel clamping; exactness holds below the
-   sentinel, with the `Some(1)` structural-equality control cited and
-   the missing delta-2 sentinel-hit counter noted.
+   sentinel, with the `Some(1)` structural-equality control cited.  The
+   formerly missing delta-2 sentinel-hit counter has since been measured
+   by the R-T1.1 census (nonzero: 84 inherited + 128,957 increment
+   strict clamps) — see the measurement addendum in §2.2 and the
+   MEASURED E1 entry in §9.
 3. **T3 hypotheses (MINOR):** the family $S_M$ additionally assumes all
    DN priors are 1 and root thresholds are infinite (the run analysis
    uses both).  The overestimate parameter is the winner-prior

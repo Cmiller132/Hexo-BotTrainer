@@ -467,6 +467,22 @@ fn tss_corpus_check() {
                 threshold.descent_nanos as f64 / 1e6,
                 threshold.state_apply_undo_nanos as f64 / 1e6,
             );
+            println!(
+                "FRONTIER_CENSUS_ROW id={} cap={cap} first_refusal={:?} choice_pre={:?} choice_post={:?} universal_pre={:?} universal_post={:?} unclassified_pre={} unclassified_post={} sentinel_inherited_hits={:?} sentinel_inherited_clamps={:?} sentinel_increment_hits={} sentinel_increment_clamps={} sentinel_sum_hits={:?}",
+                pos.id,
+                threshold.first_admission_refusal,
+                threshold.choice_gap_expansions_pre_saturation,
+                threshold.choice_gap_expansions_post_saturation,
+                threshold.universal_gap_expansions_pre_saturation,
+                threshold.universal_gap_expansions_post_saturation,
+                threshold.unclassified_expansions_pre_saturation,
+                threshold.unclassified_expansions_post_saturation,
+                threshold.sentinel_inherited_threshold_hits,
+                threshold.sentinel_inherited_threshold_clamps,
+                threshold.sentinel_increment_hits,
+                threshold.sentinel_increment_clamps,
+                threshold.sentinel_sum_hits,
+            );
             if let Some((pn, dn, stage_depth, advances, reentries)) = resume_meta {
                 println!(
                     "CAP_RESUME_PROFILE id={} cap={cap} pn={pn} dn={dn} status={} cumulative_expansions={} incremental_ms={ms:.3} root_cumulative_ms={resume_root_ms:.3} stage_depth={stage_depth} advances={advances} reentries={reentries}",
@@ -558,6 +574,21 @@ fn tss_corpus_check() {
         threshold_total.residency_expansion_bins,
         threshold_total.descent_nanos as f64 / 1e6,
         threshold_total.state_apply_undo_nanos as f64 / 1e6,
+    );
+    println!(
+        "FRONTIER_CENSUS_DONE first_refusal={:?} choice_pre={:?} choice_post={:?} universal_pre={:?} universal_post={:?} unclassified_pre={} unclassified_post={} sentinel_inherited_hits={:?} sentinel_inherited_clamps={:?} sentinel_increment_hits={} sentinel_increment_clamps={} sentinel_sum_hits={:?}",
+        threshold_total.first_admission_refusal,
+        threshold_total.choice_gap_expansions_pre_saturation,
+        threshold_total.choice_gap_expansions_post_saturation,
+        threshold_total.universal_gap_expansions_pre_saturation,
+        threshold_total.universal_gap_expansions_post_saturation,
+        threshold_total.unclassified_expansions_pre_saturation,
+        threshold_total.unclassified_expansions_post_saturation,
+        threshold_total.sentinel_inherited_threshold_hits,
+        threshold_total.sentinel_inherited_threshold_clamps,
+        threshold_total.sentinel_increment_hits,
+        threshold_total.sentinel_increment_clamps,
+        threshold_total.sentinel_sum_hits,
     );
     println!(
         "CORPUS_DONE failures={} shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={} cap_resume={} resume_wall_ms={resume_total_ms:.3} resume_reentries={resume_total_reentries}",

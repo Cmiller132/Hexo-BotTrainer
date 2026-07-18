@@ -1,0 +1,55 @@
+R-T1.1 — MEASUREMENT ROUND (high): frontier-band response census — decide CONJECTURE E1
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width
+(branch claude/tss-vcf-width, HEAD = 71fd05e4). You CANNOT git-commit.
+You HAVE the host cargo slot (one cargo at a time host-wide; always
+`--target x86_64-pc-windows-msvc` with CARGO_TARGET_DIR=.target-codex).
+RAM gate before every cargo run: >=10 GB available and >=5 GB free
+physical (PowerShell Win32_OperatingSystem), abort-and-note if failed.
+Deliverable: HUNT_REPORT_FRONTIER_CENSUS.md + raw logs + (cfg(test)
+counter code changes only).
+
+## The question (from docs/DFPN_RETRAVERSAL_THEORY.md §12 + CONJECTURE E1)
+R-TS1 measured: delta=2 blew the hardest official row `0l4291i_live`
+from 1,879,611 to 6,054,588 expansions (3.221x) and saturated the
+indexed TT (549,161,606 -> 1,073,741,810 peak bytes). E1 conjectures
+the mechanism: (a) delta-2 windows crossed one or more high-mass score
+bands, over-expanding inside widened competitive bands, and/or (b)
+admission saturation then amplified work via loss of indexed
+transposition reuse (theory doc D1: (k-1)M duplication). The census
+decides: of the ~4,174,977 extra expansions, what fraction occurred
+(i) inside widened bands BEFORE first admission saturation vs (ii)
+after saturation?
+
+## Method (binding)
+1. Read HUNT_REPORT_THRESHOLD_SCALE.md and the retained cfg(test)
+   counter/delta plumbing (packages/hexfield_eq/rust/src/tss_solver.rs
+   ~:1979-2000, :3308-3318, :3561-3572, :3999-4005, :4033-4042). The
+   theory doc's review (docs/DFPN_RETRAVERSAL_REVIEW.md Findings 1/6)
+   documented the sentinel-clamping caveat — your counters should also
+   record sentinel hits (threshold or sum reaching PN_INFINITY) to
+   close that hole.
+2. Add cfg(test)-gated counters ONLY (no production-path changes; the
+   strict verifier untouched): (a) a timestamped (expansion-index)
+   marker of FIRST admission saturation (indexed-TT byte cap reached /
+   first admission refusal); (b) per-expansion classification counts:
+   selected-child pn gap to second-best (band width delta vs 1) at
+   selection time, bucketed; (c) sentinel-hit counters.
+3. Two instrumented runs of the SINGLE hard row `0l4291i_live` under
+   the official deep profile env (TSS_BACKWALK_TT_BYTES=1073741824,
+   TSS_LAZY_FRONTIER=1, TSS_INTERIOR_CENSUS_GATE=1, TSS_INCR_DEFENDER=1):
+   one at production +1 (threshold_delta=None) and one at
+   TSS_THRESHOLD_DELTA=2. Wall timing is NOT the point (counters are);
+   note contention honestly.
+4. Report: extra-expansion attribution pre- vs post-saturation, band
+   histogram comparison, sentinel-hit counts (closing the review's
+   Finding-6 control gap), and the E1 verdict: CONFIRMED / REFUTED /
+   SPLIT (with exact fractions).
+
+## Rules
+Counters default-off cfg(test); production semantics untouched; strict
+verifier untouched. Raw logs retained (UTF-8; note UTF-16 pitfalls).
+Honest failure (e.g. the row now solves differently at tip) is a valid
+result — report exactly what changed. Chunk <= 2h per exec; incremental
+writes. Final message: E1 verdict with fractions, sentinel-hit answer,
+and whether the theory doc needs an erratum.

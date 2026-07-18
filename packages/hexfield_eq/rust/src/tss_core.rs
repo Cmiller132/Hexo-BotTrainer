@@ -175,6 +175,28 @@ pub(crate) struct ThresholdScaleStats {
     pub(crate) residency_expansions: u64,
     /// Expansion deltas in bins 0, 1, 2, 3-4, 5-8, 9-16, 17-32, 33+.
     pub(crate) residency_expansion_bins: [u64; 8],
+    /// First indexed-TT admission refusal as
+    /// (expansion clock, retained arena entries, indexed bytes).
+    pub(crate) first_admission_refusal: Option<(u64, u64, u64)>,
+    /// Selection-score gap bins are: no sibling; selected better by 33+,
+    /// 17-32, 9-16, 5-8, 3-4, 2, 1; tie; selected worse by 1, 2, 3-4, 5+.
+    /// Each expansion is charged to its immediate parent's selection snapshot.
+    pub(crate) choice_gap_expansions_pre_saturation: [u64; 13],
+    pub(crate) choice_gap_expansions_post_saturation: [u64; 13],
+    pub(crate) universal_gap_expansions_pre_saturation: [u64; 13],
+    pub(crate) universal_gap_expansions_post_saturation: [u64; 13],
+    /// Root (or otherwise parentless) expansions, split at first refusal.
+    pub(crate) unclassified_expansions_pre_saturation: u64,
+    pub(crate) unclassified_expansions_post_saturation: u64,
+    /// PN and DN inherited-threshold sentinel hits and strict clamp events.
+    pub(crate) sentinel_inherited_threshold_hits: [u64; 2],
+    pub(crate) sentinel_inherited_threshold_clamps: [u64; 2],
+    /// `value + delta` expressions that reached the sentinel, and those whose
+    /// unclamped result was strictly above it.
+    pub(crate) sentinel_increment_hits: u64,
+    pub(crate) sentinel_increment_clamps: u64,
+    /// Choice-DN and Universal-PN branch sums that reached the sentinel.
+    pub(crate) sentinel_sum_hits: [u64; 2],
     /// Exclusive time in `WidePnSearch::work`, with expansion and recursive
     /// child time paused so every wall interval is counted at most once.
     pub(crate) descent_nanos: u64,
@@ -206,6 +228,64 @@ impl ThresholdScaleStats {
             .residency_expansion_bins
             .iter_mut()
             .zip(other.residency_expansion_bins)
+        {
+            *target = target.saturating_add(value);
+        }
+        if self.first_admission_refusal.is_none() {
+            self.first_admission_refusal = other.first_admission_refusal;
+        }
+        for (target_bins, source_bins) in [
+            (
+                &mut self.choice_gap_expansions_pre_saturation,
+                other.choice_gap_expansions_pre_saturation,
+            ),
+            (
+                &mut self.choice_gap_expansions_post_saturation,
+                other.choice_gap_expansions_post_saturation,
+            ),
+            (
+                &mut self.universal_gap_expansions_pre_saturation,
+                other.universal_gap_expansions_pre_saturation,
+            ),
+            (
+                &mut self.universal_gap_expansions_post_saturation,
+                other.universal_gap_expansions_post_saturation,
+            ),
+        ] {
+            for (target, value) in target_bins.iter_mut().zip(source_bins) {
+                *target = target.saturating_add(value);
+            }
+        }
+        self.unclassified_expansions_pre_saturation = self
+            .unclassified_expansions_pre_saturation
+            .saturating_add(other.unclassified_expansions_pre_saturation);
+        self.unclassified_expansions_post_saturation = self
+            .unclassified_expansions_post_saturation
+            .saturating_add(other.unclassified_expansions_post_saturation);
+        for (target, value) in self
+            .sentinel_inherited_threshold_hits
+            .iter_mut()
+            .zip(other.sentinel_inherited_threshold_hits)
+        {
+            *target = target.saturating_add(value);
+        }
+        for (target, value) in self
+            .sentinel_inherited_threshold_clamps
+            .iter_mut()
+            .zip(other.sentinel_inherited_threshold_clamps)
+        {
+            *target = target.saturating_add(value);
+        }
+        self.sentinel_increment_hits = self
+            .sentinel_increment_hits
+            .saturating_add(other.sentinel_increment_hits);
+        self.sentinel_increment_clamps = self
+            .sentinel_increment_clamps
+            .saturating_add(other.sentinel_increment_clamps);
+        for (target, value) in self
+            .sentinel_sum_hits
+            .iter_mut()
+            .zip(other.sentinel_sum_hits)
         {
             *target = target.saturating_add(value);
         }

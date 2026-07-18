@@ -2191,6 +2191,13 @@ struct WideDeferredPosition {
 }
 
 #[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ThresholdBandSelection {
+    kind: WidePnKind,
+    gap_bin: usize,
+}
+
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default)]
 struct ClosurePairNodeProfile {
     evaluated: u64,
@@ -3317,6 +3324,8 @@ struct WidePnSearch<'store> {
     #[cfg(test)]
     threshold_last_selected: Vec<Option<usize>>,
     #[cfg(test)]
+    threshold_band_stack: Vec<ThresholdBandSelection>,
+    #[cfg(test)]
     quotient_telemetry: Option<QuotientTelemetry>,
     entries: Vec<WidePnEntry>,
     by_position: HashMap<WidePositionKey, usize>,
@@ -3571,6 +3580,8 @@ impl<'store> WidePnSearch<'store> {
             #[cfg(test)]
             threshold_last_selected: Vec::new(),
             #[cfg(test)]
+            threshold_band_stack: Vec::new(),
+            #[cfg(test)]
             quotient_telemetry: QuotientTelemetry::enabled(),
             entries: Vec::new(),
             by_position: HashMap::new(),
@@ -3644,9 +3655,17 @@ impl<'store> WidePnSearch<'store> {
         } else {
             #[cfg(test)]
             if self.tt_bytes_cap > 0 {
+                let first_rejection = self.tt_first_rejection.is_none();
                 self.tt_index_rejections = self.tt_index_rejections.saturating_add(1);
                 self.tt_first_rejection
                     .get_or_insert((self.expansions, self.entries.len()));
+                if first_rejection && self.threshold_counters {
+                    self.threshold_stats.borrow_mut().first_admission_refusal = Some((
+                        self.expansions,
+                        self.entries.len() as u64,
+                        self.current_bytes as u64,
+                    ));
+                }
             }
         }
         id
@@ -3962,6 +3981,49 @@ impl<'store> WidePnSearch<'store> {
     }
 
     #[cfg(test)]
+    fn threshold_band_selection(
+        &self,
+        kind: WidePnKind,
+        children: &[WidePnChild],
+        selected: usize,
+    ) -> ThresholdBandSelection {
+        let selected_score = match kind {
+            WidePnKind::Choice => self.child_numbers(&children[selected]).0,
+            WidePnKind::Universal { .. } => self.child_numbers(&children[selected]).1,
+        };
+        let second_best = children
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != selected)
+            .map(|(_, child)| match kind {
+                WidePnKind::Choice => self.child_numbers(child).0,
+                WidePnKind::Universal { .. } => self.child_numbers(child).1,
+            })
+            .min();
+        let gap_bin = match second_best {
+            None => 0,
+            Some(second) if selected_score < second => match second - selected_score {
+                33.. => 1,
+                17..=32 => 2,
+                9..=16 => 3,
+                5..=8 => 4,
+                3..=4 => 5,
+                2 => 6,
+                1 => 7,
+                _ => unreachable!(),
+            },
+            Some(second) if selected_score == second => 8,
+            Some(second) => match selected_score - second {
+                1 => 9,
+                2 => 10,
+                3..=4 => 11,
+                _ => 12,
+            },
+        };
+        ThresholdBandSelection { kind, gap_bin }
+    }
+
+    #[cfg(test)]
     fn selected_threshold_delta(
         &self,
         kind: WidePnKind,
@@ -3999,7 +4061,16 @@ impl<'store> WidePnSearch<'store> {
     fn threshold_increment(&self, value: u32, delta: u32) -> u32 {
         let incremented = value.saturating_add(delta);
         if self.threshold_delta.is_some() {
-            incremented.min(PN_INFINITY)
+            let result = incremented.min(PN_INFINITY);
+            if self.threshold_counters && result == PN_INFINITY {
+                let mut stats = self.threshold_stats.borrow_mut();
+                stats.sentinel_increment_hits = stats.sentinel_increment_hits.saturating_add(1);
+                if incremented > PN_INFINITY {
+                    stats.sentinel_increment_clamps =
+                        stats.sentinel_increment_clamps.saturating_add(1);
+                }
+            }
+            result
         } else {
             incremented
         }
@@ -4029,6 +4100,20 @@ impl<'store> WidePnSearch<'store> {
         let _pn_init_work_guard = PnInitWideWorkGuard::enter(id);
         #[cfg(test)]
         let mut threshold_residency = self.start_threshold_residency(id);
+        #[cfg(test)]
+        if self.threshold_counters && self.threshold_delta.is_some() {
+            let mut stats = self.threshold_stats.borrow_mut();
+            for (index, threshold) in [pn_threshold, dn_threshold].into_iter().enumerate() {
+                if threshold >= PN_INFINITY {
+                    stats.sentinel_inherited_threshold_hits[index] =
+                        stats.sentinel_inherited_threshold_hits[index].saturating_add(1);
+                }
+                if threshold > PN_INFINITY {
+                    stats.sentinel_inherited_threshold_clamps[index] =
+                        stats.sentinel_inherited_threshold_clamps[index].saturating_add(1);
+                }
+            }
+        }
         #[cfg(test)]
         let pn_threshold = if self.threshold_delta.is_some() {
             pn_threshold.min(PN_INFINITY)
@@ -4136,6 +4221,8 @@ impl<'store> WidePnSearch<'store> {
             self.record_closure_pair_selected(id, child_index);
             #[cfg(test)]
             self.record_threshold_selection(id, child_index);
+            #[cfg(test)]
+            let mut threshold_band_selection = None;
             let (kind, child, child_pn_threshold, child_dn_threshold, _root_children_unlinked) = {
                 let WidePnNode::Branch { kind, children } = &self.entries[id].node else {
                     return WidePnStepOutcome::Stalled;
@@ -4143,6 +4230,11 @@ impl<'store> WidePnSearch<'store> {
                 let (child_pn, child_dn) = self.child_numbers(&children[child_index]);
                 #[cfg(test)]
                 let threshold_delta = self.selected_threshold_delta(*kind, children, child_index);
+                #[cfg(test)]
+                if self.threshold_counters {
+                    threshold_band_selection =
+                        Some(self.threshold_band_selection(*kind, children, child_index));
+                }
                 let (child_pn_threshold, child_dn_threshold) = match kind {
                     WidePnKind::Choice => {
                         let mut second_pn = u32::MAX;
@@ -4274,6 +4366,10 @@ impl<'store> WidePnSearch<'store> {
                     self.set_child_entry(id, child_index, child_id);
                     #[cfg(test)]
                     threshold_residency.pause();
+                    #[cfg(test)]
+                    if let Some(selection) = threshold_band_selection {
+                        self.threshold_band_stack.push(selection);
+                    }
                     let outcome = self.work(
                         state,
                         child_id,
@@ -4281,6 +4377,10 @@ impl<'store> WidePnSearch<'store> {
                         child_pn_threshold,
                         child_dn_threshold,
                     );
+                    #[cfg(test)]
+                    if let Some(selection) = threshold_band_selection {
+                        debug_assert_eq!(self.threshold_band_stack.pop(), Some(selection));
+                    }
                     #[cfg(test)]
                     threshold_residency.resume();
                     #[cfg(test)]
@@ -4358,6 +4458,10 @@ impl<'store> WidePnSearch<'store> {
                     );
                     #[cfg(test)]
                     threshold_residency.pause();
+                    #[cfg(test)]
+                    if let Some(selection) = threshold_band_selection {
+                        self.threshold_band_stack.push(selection);
+                    }
                     let outcome = self.work(
                         state,
                         child_id,
@@ -4365,6 +4469,10 @@ impl<'store> WidePnSearch<'store> {
                         child_pn_threshold,
                         child_dn_threshold,
                     );
+                    #[cfg(test)]
+                    if let Some(selection) = threshold_band_selection {
+                        debug_assert_eq!(self.threshold_band_stack.pop(), Some(selection));
+                    }
                     #[cfg(test)]
                     threshold_residency.resume();
                     #[cfg(test)]
@@ -4976,6 +5084,24 @@ impl<'store> WidePnSearch<'store> {
                 }
             },
         };
+        #[cfg(test)]
+        if self.threshold_counters {
+            let sum_kind = match &self.entries[id].node {
+                WidePnNode::Branch {
+                    kind: WidePnKind::Choice,
+                    ..
+                } if numbers.1 == PN_INFINITY => Some(0),
+                WidePnNode::Branch {
+                    kind: WidePnKind::Universal { .. },
+                    ..
+                } if numbers.0 == PN_INFINITY => Some(1),
+                _ => None,
+            };
+            if let Some(index) = sum_kind {
+                let mut stats = self.threshold_stats.borrow_mut();
+                stats.sentinel_sum_hits[index] = stats.sentinel_sum_hits[index].saturating_add(1);
+            }
+        }
         self.entries[id].pn = numbers.0;
         self.entries[id].dn = numbers.1;
         #[cfg(test)]
@@ -5063,6 +5189,45 @@ impl<'store> WidePnSearch<'store> {
         {
             if self.threshold_counters {
                 self.threshold_expansion_clock.set(self.expansions);
+                let post_saturation = self.tt_first_rejection.is_some();
+                let selection = self.threshold_band_stack.last().copied();
+                let mut stats = self.threshold_stats.borrow_mut();
+                match (selection, post_saturation) {
+                    (Some(selection), false) => match selection.kind {
+                        WidePnKind::Choice => {
+                            stats.choice_gap_expansions_pre_saturation[selection.gap_bin] = stats
+                                .choice_gap_expansions_pre_saturation[selection.gap_bin]
+                                .saturating_add(1);
+                        }
+                        WidePnKind::Universal { .. } => {
+                            stats.universal_gap_expansions_pre_saturation[selection.gap_bin] =
+                                stats.universal_gap_expansions_pre_saturation[selection.gap_bin]
+                                    .saturating_add(1);
+                        }
+                    },
+                    (Some(selection), true) => match selection.kind {
+                        WidePnKind::Choice => {
+                            stats.choice_gap_expansions_post_saturation[selection.gap_bin] = stats
+                                .choice_gap_expansions_post_saturation[selection.gap_bin]
+                                .saturating_add(1);
+                        }
+                        WidePnKind::Universal { .. } => {
+                            stats.universal_gap_expansions_post_saturation[selection.gap_bin] =
+                                stats.universal_gap_expansions_post_saturation[selection.gap_bin]
+                                    .saturating_add(1);
+                        }
+                    },
+                    (None, false) => {
+                        stats.unclassified_expansions_pre_saturation = stats
+                            .unclassified_expansions_pre_saturation
+                            .saturating_add(1);
+                    }
+                    (None, true) => {
+                        stats.unclassified_expansions_post_saturation = stats
+                            .unclassified_expansions_post_saturation
+                            .saturating_add(1);
+                    }
+                }
             }
             if let Some(telemetry) = self.quotient_telemetry.as_mut() {
                 telemetry.observe_expand(id, state);
