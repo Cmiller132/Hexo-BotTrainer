@@ -1,0 +1,17 @@
+ANALYSIS_META date=2026-07-18 branch=hunt/cert-support head=f7ac3ce48f523a6a4571c12501123eec780364f9 authoritative_run=CREL_LEAF_COHORT_RAW.log
+PROTOCOL selected_reservation_mib=8 fanout=1 horizons=8,16 node_cap=500 tt_bytes=262144 seed=0x9E3779B97F4A7C15 roots_per_horizon=300 fragments=false k_reply=false shadow_only=true
+GENERATOR leaf_tags=proven_leaf,depth_cutoff,refuted relationship=distinct_subtrees_under_lowest_common_ancestor require_equal_ply=true require_equal_player=true require_exact_phase=true selection=lexicographically_first_pair_per_common_ancestor cluster=common_ancestor
+H8 discovery_roots=300 discovery_hard=16 discovery_zoned=0 leaf_events=967 sibling_groups=67 candidate_pairs=67 source_unknown=64 cohort_pairs=3 reuse_hard=0 positive_zoned=0 zoned_coverage_fraction=0.000000 hard_without_strict=0
+H16 discovery_roots=300 discovery_hard=39 discovery_zoned=0 leaf_events=1643 sibling_groups=265 candidate_pairs=265 source_unknown=203 cohort_pairs=62 reuse_hard=41 positive_zoned=0 zoned_coverage_fraction=0.000000 hard_without_strict=0
+GATE threshold=0.200000 h8_pass=false h16_pass=false verdict=ABORT economics_arms_run=false
+MEASUREMENT h8_net_gain=NA h8_clustered_95_lb=NA h8_non_parent_hit_rate=NA h8_accounted_peak=NA h8_paired_rss=NA reason=pre_registered_abort
+MEASUREMENT h16_net_gain=NA h16_clustered_95_lb=NA h16_non_parent_hit_rate=NA h16_accounted_peak=NA h16_paired_rss=NA reason=pre_registered_abort
+STRUCTURAL wide_materializer=packages/hexfield_eq/rust/src/tss_solver.rs:6579 universal_zone_assignments=none profile_zone_options=default_off
+RESOURCE_AUDIT available_threshold_bytes=10737418240 free_threshold_bytes=5368709120 min_launch_available_bytes=10962931712 min_launch_free_physical_bytes=10940289024 max_foreign_cargo=0 target_dir=.target-hunt target=x86_64-pc-windows-msvc release=true test_threads=1
+FORMAT exit=0 note=repo_wide_rustfmt_changes_restored_except_in_scope_files
+BUILD first_wrapper_exit=terminated_by_powershell_native_stderr retry_exit=0 final_lca_build_exit=0
+FINAL_RUN exit=0 tests_passed=1 tests_failed=0 elapsed_s=2.01 process_wall_s=14.396
+STRICT verifier_file_changed=false warm_hard_values_returned=0 hard_without_strict=0
+ATTEMPT_DISPOSITION CREL_LEAF_COHORT_ATTEMPT1_RAW.log=retained_non_authoritative_immediate_sibling_generator_zero_groups
+ATTEMPT_DISPOSITION CREL_LEAF_COHORT_ATTEMPT2_RAW.log=retained_non_authoritative_corrected_lca_generator_before_final_source_guard
+AUTHORITATIVE_ANCHORS CREL_LEAF_COHORT_RAW.log:16,70-71,134-141

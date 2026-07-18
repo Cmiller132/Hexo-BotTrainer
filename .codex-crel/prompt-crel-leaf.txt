@@ -1,0 +1,81 @@
+R-CREL-5 — C_rel Phase-3 LEAF-RELEVANCE measurement (shadow, default-off, selected cell only)
+
+CONTEXT NOTE: solver-performance research for a board game (Hexo,
+Connect6-like). Nothing here concerns computer security. Use neutral
+vocabulary.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-cert-support
+(branch hunt/cert-support, HEAD = f7ac3ce4). You CANNOT git-commit.
+Deliverables: HUNT_REPORT_CREL_LEAF.md + raws (CREL_LEAF_*_RAW.log) +
+SHA256 manifest. CARGO_TARGET_DIR=.target-hunt; target
+x86_64-pc-windows-msvc; release; serial tests.
+
+## Inherited state (read first: DESIGN_C_REL.md, HUNT_REPORT_CREL_ROUND2.md,
+## HUNT_REPORT_CREL_STAGE4.md)
+Stage 4 PASSED with zero kill criteria fired: selected cell = 8 MiB
+reservation, fanout 1; net repeat-solve gain 90.159% (clustered 95%
+LB 83.243%) on the K=1/K=2 mutation cohort, incremental over exact
+fragments. Its own deploy recommendation (binding here): do NOT
+deploy; advance ONLY the selected cell to the authorized Phase-3
+leaf-relevance measurement, shadow/default-off. Its sharpest residual
+question — YOUR question: does the gain persist on real
+leaf-relevance cohorts with NON-PARENT reuse and POSITIVE
+zoned-certificate coverage?
+
+## The Phase-3 leaf profile (decided, binding — do not redesign)
+Leaf config per the leaf-surface campaign verdict: wide engine +
+TSS_LAZY_FRONTIER=1 + TSS_INTERIOR_CENSUS_GATE=1; fragments and
+K_reply OFF at leaf; leaf horizon h=8 AND h=16 both measured (the
+h8-vs-h16 choice is still the open trainer question — report per-h).
+Cap regime: leaf-scale caps (the campaign used cap 500 for the wide
+gated profile; reproduce its exact envelope from the leaf-config
+report in-tree — find it, cite it, match it).
+
+## Task
+1. COHORT CONSTRUCTION (the crux — this is what distinguishes this
+   measurement from Stage 4's mutation cohort): build a
+   leaf-relevance cohort of position pairs (P_parent-solve, P_reuse)
+   where P_reuse is NOT a direct mutation of P_parent — draw from
+   sibling leaves under a common ancestor in real solve trees on the
+   standard corpus rows (leaves encountered by the wide gated
+   profile at h=8/h=16), so reuse crosses subtree boundaries the way
+   the trainer's Phase-3 leaf stream actually would. Require the
+   cohort to contain a measured, reported fraction of positions with
+   POSITIVE zoned-certificate coverage (zoned certs present in the
+   warm store when the reuse solve begins). Document the cohort
+   generator exactly; deterministic seeds; cluster by common
+   ancestor for the bootstrap.
+2. MEASUREMENT: selected cell ONLY (8 MiB reservation, fanout 1),
+   shadow mode (strict verifier authority unchanged,
+   hard_without_strict must be 0 throughout). Same accounting as
+   Stage 4: template lookup + instantiation + mint + verification +
+   strict-rebind fallback all charged to the C_rel arm; exact
+   fragments enabled in BOTH arms so the result stays incremental.
+   Report per-h (8 and 16): net gain, source(ancestor)-clustered 95%
+   LB (10k resamples, fixed seed), hit/miss decomposition
+   (non-parent hit rate is a first-class reported number), accounted
+   peak, paired RSS regression.
+3. Pre-registered verdict bars (binding, design-verbatim):
+   - RELEVANT if the clustered 95% LB of net gain >= 10% at either h
+     AND the non-parent template-hit rate >= 25% AND
+     hard_without_strict = 0.
+   - IRRELEVANT-AT-LEAF if LB < 10% at both h or non-parent hit rate
+     < 25% (the Stage-4 gain would then be a parent-reuse artifact —
+     an honest and final answer; paper either way).
+   - ABORT (report, do not conclude) if cohort construction cannot
+     achieve >= 20% positive zoned-coverage fraction — say so rather
+     than diluting the cohort definition.
+
+## Hard constraints
+- Strict verifier untouched (tss_verify.rs any-diff = abort).
+- Default-off: all C_rel machinery stays behind its existing flags;
+  cfg(test) harness only.
+- RAM gates before every cargo invocation: >= 10 GiB available AND
+  >= 5 GiB free; no foreign cargo.exe (ONE cargo host-wide — wait,
+  recheck, then launch). Invocations < 10 min; chunk <= 2h per exec.
+- Raws + SHA256 manifest; copy-paste traceability for every reported
+  number; truthful partials (report what ran).
+
+Final message: verdict (RELEVANT / IRRELEVANT-AT-LEAF / ABORT) +
+per-h net gain and LB + non-parent hit rate + zoned-coverage
+fraction + sharpest residual, one line each.

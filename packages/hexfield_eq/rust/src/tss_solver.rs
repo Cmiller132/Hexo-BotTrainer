@@ -122,7 +122,15 @@ pub(crate) struct PnInitTelemetryNode {
     pub(crate) live_ge3: u32,
     pub(crate) disjoint_two_gap: u32,
     pub(crate) outcome: PnInitTelemetryOutcome,
+    /// Final wide-arena shape. This remains `unfinalized` for the narrow
+    /// compatibility collector, whose recursive event already is a leaf-like
+    /// observation rather than a retained PN-arena entry.
+    pub(crate) final_node_tag: &'static str,
     pub(crate) frozen_state: Option<String>,
+    /// Opt-in full state capture for the leaf-relevance cohort generator.
+    /// Ordinary PN-init telemetry keeps this `None`, avoiding any change to
+    /// its retained-memory envelope.
+    pub(crate) captured_state: Option<RustHexoState>,
 }
 
 #[cfg(test)]
@@ -136,6 +144,7 @@ pub(crate) struct PnInitTelemetryReport {
 struct PnInitTelemetrySession {
     report: PnInitTelemetryReport,
     wide_last_event: HashMap<usize, u64>,
+    capture_states: bool,
 }
 
 #[cfg(test)]
@@ -149,6 +158,18 @@ std::thread_local! {
 pub(crate) fn begin_pn_init_telemetry() {
     PN_INIT_TELEMETRY.with(|slot| {
         *slot.borrow_mut() = Some(PnInitTelemetrySession::default());
+    });
+    PN_INIT_WIDE_STACK.with(|stack| stack.borrow_mut().clear());
+    PN_INIT_NARROW_STACK.with(|stack| stack.borrow_mut().clear());
+}
+
+#[cfg(test)]
+pub(crate) fn begin_pn_init_leaf_state_telemetry() {
+    PN_INIT_TELEMETRY.with(|slot| {
+        *slot.borrow_mut() = Some(PnInitTelemetrySession {
+            capture_states: true,
+            ..PnInitTelemetrySession::default()
+        });
     });
     PN_INIT_WIDE_STACK.with(|stack| stack.borrow_mut().clear());
     PN_INIT_NARROW_STACK.with(|stack| stack.borrow_mut().clear());
@@ -374,6 +395,7 @@ fn pn_init_record_node(
             && census.is_some_and(|c| c <= 5)
             && coordinate_safe
             && h_rem.is_some_and(|h| h <= 8 && lb_plies.is_some_and(|lb| u32::from(lb) > h));
+        let captured_state = session.capture_states.then(|| state.clone());
         session.report.nodes.push(PnInitTelemetryNode {
             serial,
             parent_serial,
@@ -392,7 +414,9 @@ fn pn_init_record_node(
             live_ge3,
             disjoint_two_gap,
             outcome: PnInitTelemetryOutcome::Unknown,
+            final_node_tag: "unfinalized",
             frozen_state: gate.then(|| pn_init_frozen_state(state)),
+            captured_state,
         });
         Some(serial)
     })
@@ -3652,6 +3676,7 @@ fn pn_init_finalize_wide(search: &WidePnSearch<'_>) {
             let Some(entry) = search.entries.get(node.engine_node as usize) else {
                 continue;
             };
+            node.final_node_tag = wide_pn_node_tag(&entry.node);
             node.outcome = if entry.pn == 0 {
                 PnInitTelemetryOutcome::Proven
             } else if entry.dn == 0 && !matches!(entry.node, WidePnNode::DepthCutoff) {
