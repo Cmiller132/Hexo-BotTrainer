@@ -836,3 +836,43 @@ terminal no-move facts, with exact source ranges in §§17, 21, and 22.
 executable proof search was performed.  No `GAP_RAW_*` file or production
 source was edited.  The only intended deliverable written by this session is
 `STRATEGY_STEALING_ROUND3.md`.
+
+## 24. Errata folded from the hostile review (R-ST3-REV)
+
+Overall review verdict (`STRATEGY_STEALING_REVIEW_ROUND3.md`):
+**CONFIRMED-WITH-ERRATA** — no FATAL defect; ranked (b) and (c) both
+stand at their formal scopes; one MAJOR omission in the resume
+checklist (Finding 10), which is repaired here and is binding on every
+successor round:
+
+1. **P5R REAL-S-TERMINAL-REFLECTION (MAJOR, new obligation):** the
+   §22.3/§23 resume ledger and `GAP-PROXY-RETIRE-OR-RECODE` are
+   incomplete without an independent obligation covering real-S sixes
+   through *older* real-only surplus stones in `E_S`. Exact witness
+   (review Finding 10): common S-stones (2,1)..(2,4); real S plays
+   e=(2,5) while the shadow uses a legal off-line filler; the later
+   copied coordinate y=(2,6) is legal and supported on BOTH boards, yet
+   the real board completes the r-axis six {(2,1)..(2,6)} while the
+   shadow lacks (2,5). One-coordinate legality diagnosis (S17) cannot
+   see this. Requirement: every real S six meeting `E_S` must produce a
+   legal shadow-Ŝ win no later, or the invariant must represent/
+   reconcile every relevant `E_S` cell; terminal real moves colliding
+   with an opposite-role proxy are included (ordinary collision repair
+   is not enough). The named resume point is
+   `GAP-PROXY-RETIRE-OR-RECODE` **plus P5R**.
+2. **S15.1 retitle (MINOR):** "count/phase invariant under an assumed
+   live coupling" — it does not itself construct the coupling.
+3. **Synchronization dichotomy phrasing (MINOR):** for every legal
+   synchronization, either the next F prescription transfers or the
+   coupling enters a named failure set — the dichotomy is per
+   synchronization, not global.
+4. **S19 premise (MINOR):** S19 opens with "consider a genuine legal
+   live coupling" (strategy-domain premise stated, E=∅ scope explicit);
+   its conclusion is discharged as conditional transfer soundness.
+5. **D6 selection (MINOR):** the isometry-orientation argument fixes an
+   enumeration of D6 and chooses the first surviving element, making
+   the selection deterministic.
+6. **Retirement/movement definitions (MINOR):** proxy retirement and
+   movement in the successor program are representation-level
+   operations (invariant re-binding), not physical stone removals —
+   the real board is append-only.

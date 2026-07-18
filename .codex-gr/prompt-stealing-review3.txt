@@ -1,0 +1,62 @@
+R-ST3-REV — HOSTILE REVIEW (ultra): STRATEGY_STEALING_ROUND3.md
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+(branch hunt/gap-raw, HEAD = 890aa531). You CANNOT git-commit. DOC-ONLY:
+NO cargo, no Lean builds, no harness runs. NOTE: another session (R-G3)
+works in this directory on GAP_RAW_PROOF_ROUND5.md — do not touch
+GAP_RAW_* files. Deliverable: STRATEGY_STEALING_REVIEW_ROUND3.md only
+(+ short final message).
+
+## Task
+Hostile review of STRATEGY_STEALING_ROUND3.md (round 3: proxy shadows;
+claims ranked outcomes (b) AND (c) PROVEN). Read first, in order:
+STRATEGY_STEALING_HEXO.md, STRATEGY_STEALING_ROUND2.md (post-errata),
+STRATEGY_STEALING_REVIEW_ROUND2.md, then round 3. Default posture:
+guilty until the proof survives.
+
+Attack list:
+1. **The two-proxy opening synchronization [(c), PROVEN].** This is the
+   round's headline: two invented stones scheduled as GENUINE legal
+   Hexo placements, with the shadow second-player stone an actual
+   prescription of the allegedly winning strategy, and an isometry
+   oriented so the real first-turn opponent stones avoid both proxies.
+   Re-derive every step: legality of each placement under radius-8
+   growth from the origin opening; the cadence arithmetic before/after
+   the synchronized checkpoint; the isometry-orientation avoidance
+   argument (is avoidance ALWAYS possible? count the constraints — 12
+   isometries, how many collision patterns?); and the exact meaning +
+   scope of "conditional on successful future placement transfer" —
+   does the conditional swallow the theorem? State precisely what
+   unconditional content survives.
+2. **Permanent cadence alignment.** Verify the claim that after
+   synchronization the cadence mismatch never recurs (S4 absorbed
+   permanently) — check parity through both phases and mid-turn wins.
+3. **The static obstruction [(b), PROVEN for C_static^2].** Re-derive:
+   with fixed proxies + fixed bijective isometry + exact immediate
+   two-way copying, at least one proxy has a real preimage that is
+   already legal, and the collision fork (opponent plays the preimage
+   vs reply lift already failed) kills one full ordinary round. Check
+   the class definition is not gerrymandered and the fork is exhaustive.
+4. **The frontier/collision ledger and terminal-fabrication gadgets.**
+   Recompute the gadget geometry (radius-8 balls, i16 safe region,
+   six-window arithmetic); check the ledger's obligations are complete
+   (no missing collision type: proxy-on-real, real-on-proxy,
+   proxy-window fabrication for EITHER color, proxy blocking a real
+   six).
+5. **Consistency with rounds 1-2:** no resurrection of the fixed-map
+   class at its refuted scope (round 3's static class must genuinely
+   differ by the invented stones); S3/S4 respected; the Gale-Stewart
+   bridge used only at its D2 scope.
+6. **Status discipline:** PROVEN vs OPEN labels, the honesty of
+   "conditional on transfer" phrasing everywhere it matters, and the
+   resume point GAP-PROXY-RETIRE-OR-RECODE being genuinely the right
+   next obstruction.
+
+## Output
+STRATEGY_STEALING_REVIEW_ROUND3.md: numbered findings with severity
+(FATAL/MAJOR/MINOR/NOTE), exact quoted claim, counter-derivation or
+confirmation, proposed repair. Per-result verdicts (CONFIRMED /
+CONFIRMED-WITH-ERRATA / REFUTED / DOWNGRADE) + overall verdict.
+UNRESOLVED with exact obstacle beats a guess. Incremental writes;
+chunk <= 2h per exec. Final message: overall verdict, per-result list,
+most severe finding.
