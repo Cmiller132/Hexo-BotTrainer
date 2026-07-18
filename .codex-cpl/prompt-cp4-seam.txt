@@ -1,0 +1,75 @@
+R-CP4 — ENGINE SESSION: the final UNKNOWN provenance seam (SearchStop / RunUntilExit / StageEvent), implement-to-spec
+
+CONTEXT NOTE: this is correctness instrumentation for a board-game
+(Hexo, Connect6-like) proof-search engine. Nothing here concerns
+computer security. Use neutral vocabulary in your own writing
+(negative-control fixture, stop criterion, stress case).
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-completeness
+(branch hunt/completeness, HEAD = 2825a675). You CANNOT git-commit.
+Deliverable: code + fixtures + HUNT_REPORT_CP4_SEAM.md.
+
+## Task
+Implement CP-2.2 of COMPLETENESS_SPEC.md (the "Final UNKNOWN
+provenance seam" — the ONLY normative source for the type shapes;
+read §CP-2.2 and the CP-1 body's SearchStop discussion at lines
+~225-260 and ~400-420 first, plus COMPLETENESS_CERT_SPEC.md §on stop
+taxonomy if it constrains names). The queued task is deliberately
+mechanical:
+
+1. Introduce `RunUntilExit` as the total tagged internal result of
+   `run_until` (replacing the current `Option<usize>`-shaped merge of
+   proof / root refutation / cap / final depth / missing cutoff /
+   nonadvancing cutoff / stall at
+   packages/hexfield_eq/rust/src/tss_solver.rs:4359-4401,4451-4491).
+2. Record intermediate `StageEvent`s (a selected intermediate cutoff
+   is a stage event, NEVER a terminal SearchStop; `NoSelectedCutoff`
+   does not exist as a name).
+3. Return a `SearchStop` from `run`, with the exact variant set CP-2.2
+   fixes (cap, structural exhaustion candidate `RootRefutedCandidate`,
+   missing/nonadvancing cutoff, stall, materialization failure,
+   precondition failure, proof). Classification must match provenance:
+   only provenance-backed structural exhaustion may ever be labeled a
+   refutation CANDIDATE; it is internal — no sealed/hard negative
+   result is minted anywhere.
+4. Thread the SearchStop through `AttemptResult`
+   (tss_solver.rs:1707-1712) behind a DEFAULT-OFF/test-only seam:
+   production behavior, `ProofStatus`, `DeepResult`, hard-value
+   minting, and all default-path return values BIT-IDENTICAL. The seam
+   may be a cfg(test) accessor or a default-off env/field — choose the
+   narrowest that lets tests observe the stop; report the choice.
+5. Fixtures: at least one deterministic test fixture per SearchStop
+   variant and per StageEvent kind (frozen small positions or
+   synthetic constructions; document how each forces its variant).
+   Include the CP-2.2 mapping test: every non-proof SearchStop maps to
+   UNKNOWN(Incomplete) except provenance-backed candidates, and no
+   variant can produce a sealed negative.
+
+## Definition of done (all must pass; quote outputs in the report)
+- Full existing tss test battery in packages/hexfield_eq/rust passes
+  (cargo test, serial) with ZERO changes to existing test expectations.
+- New per-variant fixtures pass.
+- Default-path identity: one official-profile smoke solve on a frozen
+  small root (pick a fast retained fixture, e.g. xsnfyll @10k) with
+  seam off — identical status/certificate/nodes/TT-entries to the
+  pre-change run (record both).
+- tss_verify.rs untouched. No production semantics change.
+
+## Resource laws (host-wide, binding)
+ONE cargo invocation at a time on this host. Before EVERY cargo
+command check RAM: PowerShell
+  (Get-Counter '\Memory\Available Bytes').CounterSamples.CookedValue
+must be >= 10 GiB AND Win32_OperatingSystem.FreePhysicalMemory >= 5
+GiB; if not, wait and re-check (do not proceed low). Use
+CARGO_TARGET_DIR=.target-cpl, --target x86_64-pc-windows-msvc,
+--release for test runs, --test-threads=1. Keep every raw log UTF-8.
+If you see any foreign cargo.exe running (another lane), wait for it.
+
+## Report (HUNT_REPORT_CP4_SEAM.md)
+Variant table (variant -> forcing fixture -> observed), seam mechanism
+chosen and why it is default-off-safe, identity-smoke numbers
+before/after, battery summary, exact files touched, CP-O28 status
+statement, open residue. Provenance: input commit 2825a675; you
+create no commit. Incremental writes; chunk <= 2h per exec. Final
+message: DONE/PARTIAL, battery verdict, identity verdict, variant
+coverage count, one-line CP-O28 disposition.

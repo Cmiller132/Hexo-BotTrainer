@@ -1,0 +1,58 @@
+﻿cargo :    Compiling proc-macro2 v1.0.106
+At line:2 char:514
++ ... Continue }; cargo test --release --target x86_64-pc-windows-msvc -p h ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling proc-macro2 v1.0.106:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling zerocopy v0.8.48
+   Compiling cfg-if v1.0.4
+   Compiling crossbeam-utils v0.8.21
+   Compiling serde_core v1.0.228
+   Compiling version_check v0.9.5
+   Compiling getrandom v0.3.4
+   Compiling serde v1.0.228
+   Compiling thiserror v1.0.69
+   Compiling rayon-core v1.13.0
+   Compiling once_cell v1.21.4
+   Compiling either v1.16.0
+   Compiling getrandom v0.2.17
+   Compiling rand_core v0.6.4
+   Compiling ahash v0.8.12
+   Compiling crossbeam-epoch v0.9.18
+   Compiling crossbeam-deque v0.8.6
+   Compiling syn v2.0.117
+   Compiling rayon v1.12.0
+   Compiling zerocopy-derive v0.8.48
+   Compiling serde_derive v1.0.228
+   Compiling thiserror-impl v1.0.69
+   Compiling ppv-lite86 v0.2.21
+   Compiling half v2.7.1
+   Compiling hexo_engine v0.1.0 (E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-completeness\packages\hexo_engine)
+   Compiling rand_chacha v0.3.1
+   Compiling rand v0.8.6
+   Compiling hexo_utils v0.1.0 (E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-completeness\packages\hexo_utils)
+   Compiling hexfield_eq v0.1.0 (E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-completeness\packages\hexfield_eq)
+    Finished `release` profile [optimized] target(s) in 17.19s
+     Running unittests rust\src\lib.rs 
+(.target-cpl\x86_64-pc-windows-msvc\release\deps\hexfield_eq-ebbc2e9e0747aecb.exe)
+
+running 1 test
+test tss_corpus::tss_corpus_check ... CORPUS_MODE shared_fragments=off lazy_frontier=off interior_gate=off k_reply_consume=off cap_resume=off live_ge3_seed=off closure_counters=off threshold_counters=off threshold_delta=off incr_enum_counters=off incr_defender=off tt_bytes_cap=2147483648
+CORPUS id=xsnfyll cap=10000 status=WIN expect=WIN nodes=82 expansions=81 tt_entries=148 tt_hits=1 tt_bytes_cap=2147483648 peak_tt_bytes=14688 stage_refreshes=15 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=4.4
+CLOSURE_ROW id=xsnfyll cap=10000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=xsnfyll cap=10000 visits=0 revisits=0 threshold_crosses=0 reselections=0 sibling_switches=0 residencies=0 residency_expansions=0 expansion_bins=[0, 0, 0, 0, 0, 0, 0, 0] descent_ms=0.000 state_ms=0.000
+INCR_ENUM_ROW id=xsnfyll cap=10000 calls=0 plans=0 parent=0 exact=0 mismatch=0 residuals=0 patch_exact=0 patch_mismatch=0 root_windows=0 root_cells=0 root_kernel=0 residual_windows=0 residual_cells=0 residual_kernel=0 removed_windows=0 total_ms=0.000 root_analysis_ms=0.000 root_enum_ms=0.000 canonical_ms=0.000 fork_ms=0.000 apply_undo_ms=0.000 child_analysis_ms=0.000 child_enum_ms=0.000 key_ms=0.000 fingerprint_ms=0.000 fingerprint_xor=0000000000000000 incr_calls=0 fallbacks=0 shadow_calls=0 shadow_equal=0 recon_attempts=0 recon_success=0 parent_maint_ms=0.000 incr_plan_ms=0.000 shadow_batch_ms=0.000 snapshot_bytes=0 peak_snapshot_bytes=0
+FRAGMENT_PROFILE id=xsnfyll cap=10000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=1 defender_ms=0 regen_ms=0 expand_ms=2 refresh_ms=0 insert_ms=0
+CORPUS_FRAGMENTS lookups=0 hits=0 hit_rate_pct=0.000 imports=0 max_store_entries=0 max_store_bytes=0
+CLOSURE_DONE evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000 stage_refreshes=15 seed_scans=0 seed_ms=0.000
+THRESHOLD_DONE visits=0 revisits=0 threshold_crosses=0 reselections=0 sibling_switches=0 residencies=0 residency_expansions=0 expansion_bins=[0, 0, 0, 0, 0, 0, 0, 0] descent_ms=0.000 state_ms=0.000
+INCR_ENUM_DONE calls=0 plans=0 parent=0 exact=0 mismatch=0 residuals=0 patch_exact=0 patch_mismatch=0 root_windows=0 root_incidences=0 root_cells=0 root_kernel=0 residual_windows=0 residual_incidences=0 residual_cells=0 residual_kernel=0 removed_windows=0 root_window_bins=[0, 0, 0, 0, 0, 0, 0, 0] root_cell_bins=[0, 0, 0, 0, 0, 0, 0, 0] root_kernel_bins=[0, 0, 0, 0, 0, 0, 0, 0] residual_window_bins=[0, 0, 0, 0, 0, 0, 0, 0] residual_cell_bins=[0, 0, 0, 0, 0, 0, 0, 0] residual_kernel_bins=[0, 0, 0, 0, 0, 0, 0, 0] total_ms=0.000 root_analysis_ms=0.000 root_enum_ms=0.000 canonical_ms=0.000 fork_ms=0.000 apply_undo_ms=0.000 child_analysis_ms=0.000 child_enum_ms=0.000 key_ms=0.000 fingerprint_ms=0.000 fingerprint_xor=0000000000000000 incr_calls=0 fallbacks=0 shadow_calls=0 shadow_equal=0 recon_attempts=0 recon_success=0 parent_maint_ms=0.000 incr_plan_ms=0.000 shadow_batch_ms=0.000 snapshot_bytes=0 peak_snapshot_bytes=0
+CORPUS_DONE failures=0 shared_fragments=off lazy_frontier=off interior_gate=off k_reply_consume=off cap_resume=off resume_wall_ms=0.000 resume_reentries=0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 143 filtered out; finished in 0.01s
+

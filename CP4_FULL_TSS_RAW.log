@@ -1,0 +1,200 @@
+﻿cargo :    Compiling proc-macro2 v1.0.106
+At line:2 char:38
++ ... arget-cpl'; cargo test --release --target x86_64-pc-windows-msvc -p h ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling proc-macro2 v1.0.106:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling cfg-if v1.0.4
+   Compiling zerocopy v0.8.48
+   Compiling serde_core v1.0.228
+   Compiling crossbeam-utils v0.8.21
+   Compiling getrandom v0.3.4
+   Compiling version_check v0.9.5
+   Compiling serde v1.0.228
+   Compiling thiserror v1.0.69
+   Compiling once_cell v1.21.4
+   Compiling rayon-core v1.13.0
+   Compiling either v1.16.0
+   Compiling getrandom v0.2.17
+   Compiling rand_core v0.6.4
+   Compiling ahash v0.8.12
+   Compiling crossbeam-epoch v0.9.18
+   Compiling syn v2.0.117
+   Compiling crossbeam-deque v0.8.6
+   Compiling rayon v1.12.0
+   Compiling zerocopy-derive v0.8.48
+   Compiling serde_derive v1.0.228
+   Compiling thiserror-impl v1.0.69
+   Compiling ppv-lite86 v0.2.21
+   Compiling half v2.7.1
+   Compiling hexo_engine v0.1.0 (E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-completeness\packages\hexo_engine)
+   Compiling rand_chacha v0.3.1
+   Compiling rand v0.8.6
+   Compiling hexo_utils v0.1.0 (E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-completeness\packages\hexo_utils)
+   Compiling hexfield_eq v0.1.0 (E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-completeness\packages\hexfield_eq)
+    Finished `release` profile [optimized] target(s) in 17.43s
+     Running unittests rust\src\lib.rs 
+(.target-cpl\x86_64-pc-windows-msvc\release\deps\hexfield_eq-ebbc2e9e0747aecb.exe)
+
+running 149 tests
+test threats_shared::tests::empty_sets_need_zero_hits ... ok
+test threats_shared::tests::single_window_hit_by_one ... ok
+test threats_shared::tests::three_disjoint_windows_exceed_budget_two ... ok
+test threats_shared::tests::two_disjoint_windows_need_two ... ok
+test threats_shared::tests::two_windows_sharing_a_cell_hit_by_one ... ok
+test threats_shared::tests::unhittable_already_won_window_is_a_miss ... ok
+test threats_shared::tests::verdict_prefers_win_over_loss ... ok
+test tss_bench::curated_bench_corpus_matches_shadow_fixture_families ... ok
+test tss_bench::tss_bench_report ... ignored, timing harness; run explicitly in --release mode
+test tss_cap_resume::cap_resume_discards_on_binding_or_cap_mismatch ... ok
+test tss_cap_resume::tss_cap_resume_campaign ... ignored, R-CR1 milestone identity and uninterrupted-final campaign
+test tss_core::tests::deep_producer_gated_by_verifier ... ok
+test tss_core::tests::lambda1_wrapper_is_verbatim ... ok
+test tss_core::tests::lemma_l1_every_nontactical_move_at_k_eq_b_is_lost ... ok
+test tss_core::tests::proof_status_values ... ok
+test tss_corpus::tss_corpus_backward_walk ... ignored, reference-line debugging helper; run explicitly in --release
+test tss_corpus::tss_corpus_check ... ignored, acceptance gate; run explicitly in --release
+test tss_corpus::tss_round3_shadow_forcing_coverage ... ignored, round-3 all-19 shadow coverage
+test tss_k_reply_shadow::tss_round7_k_reply_double_fork_measurement ... ignored, round-7 double_fork_compact Q8 telemetry
+test tss_k_reply_shadow::tss_round7_k_reply_forcing_measurement ... ignored, round-7 all-19 Q8 telemetry at the 10k/100k ladder rungs
+test tss_k_reply_shadow::tss_round7_k_reply_frozen_witness ... ok
+test tss_k_reply_shadow::tss_round7_k_reply_human_measurement ... ignored, round-7 deterministic 200-root human-corpus Q8 telemetry
+test tss_k_reply_shadow::tss_round7_k_reply_identity ... ignored, round-7 telemetry on/off identity on double_fork_compact corpus row
+test tss_k_reply_shadow::tss_round8_k_reply_double_fork_identity ... ignored, round-8 Q8 consumption identity and local reduction on double_fork_compact
+test tss_k_reply_shadow::tss_round8_k_reply_forcing_identity ... ignored, round-8 paired Q8 consumption identity on forcing-19 at 10k/100k
+test tss_k_reply_shadow::tss_round8_k_reply_human_identity ... ignored, round-8 paired Q8 consumption identity on fixed-seed 200 human roots
+test tss_k_reply_shadow::tss_round8_k_reply_trigger_matrix ... ok
+test tss_leaf_surface_hunt::closure_debt_live_ge3_leaf_ab ... ignored, closure-debt live_ge3 selected Phase-3 D cells; serialized release-only
+test tss_leaf_surface_hunt::incr_defender_leaf_ab ... ignored, R-IE1 incremental defender selected Phase-3 D cells; serialized release-only
+test tss_leaf_surface_hunt::leaf_surface_campaign ... ignored, Phase-3 trainer-leaf surface campaign; run explicitly with --test-threads=1
+test tss_leaf_surface_hunt::threshold_scale_leaf_ab ... ignored, prior-scale threshold selected Phase-3 D cells; serialized release-only
+test tss_pn_init_hunt::horizon_ladder_campaign ... ignored, NQ8 semantic-horizon ladder campaign; release-only, serialized, <=10 minutes
+test tss_pn_init_hunt::interior_gate_live_campaign ... ignored, R-IG1 live on/off campaign; release-only, serialized, <=10 minutes
+test tss_pn_init_hunt::pn_init_campaign ... ignored, NQ6 measurement campaign; release-only, serialized, <=10 minutes
+test tss_reference::tests::direct_scanner_finds_six_on_each_axis ... ok
+test tss_reference::tests::independent_legal_moves_match_engine_on_seeded_states ... ok
+test tss_reference::tests::player_identity_is_fixed_across_two_stone_turn ... ok
+test tss_reference::tests::recursive_make_unmake_restores_exact_public_state ... ok
+test tss_reference_fast::tests::d6_key_matches_all_independent_images ... ignored, test-only exact-oracle validation; run explicitly
+test tss_reference_fast::tests::exact_key_ignores_placement_order_but_not_phase_first ... ignored, test-only exact-oracle validation; run explicitly
+test tss_reference_fast::tests::incremental_frontier_matches_full_rebuild_through_undo ... ignored, test-only exact-oracle validation; run explicitly
+test tss_reference_fast::tests::small_recurrence_matches_stock_reference ... ignored, test-only exact-oracle validation; run explicitly
+test tss_solver::tests::canonical_frame_contender_pruning_matches_full_sort_on_all_fixture_prefixes ... ok
+test tss_solver::tests::certificate_mutations_are_rejected ... ok
+test tss_solver::tests::cp4_attempt_result_observes_node_cap_without_changing_public_unknown ... ok
+test tss_solver::tests::cp4_precondition_stop_is_test_only_and_public_unknown ... ok
+test tss_solver::tests::cp4_search_stop_variant_and_mapping_fixtures ... ok
+test tss_solver::tests::cp4_stage_event_is_intermediate_and_root_proof_is_terminal ... ok
+test tss_solver::tests::cp4_xsnfyll_identity_smoke ... ignored, CP4 before/after official-profile identity smoke
+test tss_solver::tests::curated_deep_branch_zone_or_dispatch_is_reference_consistent ... ok
+test tss_solver::tests::curated_differential_and_every_hard_certificate_verifies ... ok
+test tss_solver::tests::d6_status_and_certificate_replay_all_twelve_symmetries ... ok
+test tss_solver::tests::deep_win_contains_verified_universal_coverage ... ok
+test tss_solver::tests::defender_pair_profile_falls_back_to_ordered_children_when_plan_is_unsupported ... ok
+test tss_solver::tests::differential_forced_loss_after_first_defender_stone ... ok
+test tss_solver::tests::dispatch_theorem_and_per_move_staple_oracles_agree ... ok
+test tss_solver::tests::extendable_hit_kernel_matches_k1_and_k2_algebra ... ok
+test tss_solver::tests::forced_defender_pairs_collapse_symmetric_k2_orders ... ok
+test tss_solver::tests::forced_defender_pairs_materialize_checked_commutations ... ok
+test tss_solver::tests::full_key_rejects_forced_hash_collision ... ok
+test tss_solver::tests::hunt_r1b_chain_sharpness ... ignored, R1b sharpness fixture; run explicitly
+test tss_solver::tests::hunt_seed_band_matches_production ... ignored, R1b production seed-band cross-check; run explicitly
+test tss_solver::tests::incremental_defender_counter_matches_parent_and_every_local_patch ... ok
+test tss_solver::tests::interior_census_phase_tables_match_contract_8_1 ... ok
+test tss_solver::tests::interior_census_secondstone_c3_uses_strict_ply_five_boundary ... ok
+test tss_solver::tests::l13_sparse_obstructions_are_tight_on_triangle_and_c5 ... ok
+test tss_solver::tests::make_unmake_round_trips_on_proof_and_cap_exit ... ok
+test tss_solver::tests::node_cap_only_moves_results_toward_unknown ... ok
+test tss_solver::tests::pair_complete_count_two_order_prefers_forks_then_proximity ... ok
+test tss_solver::tests::pair_complete_turn_forcing_requires_a_new_post_pair_threat ... ok
+test tss_solver::tests::pair_complete_width_adds_every_count_two_cell_at_both_turn_plies ... ok
+test tss_solver::tests::pair_complete_width_keeps_defender_threat_blocks ... ok
+test tss_solver::tests::pair_generator_uses_frozen_parent_order_and_keeps_newly_legal_cells ... ok
+test tss_solver::tests::quiet_no_hitting_universal_is_d6_cap_stable ... ok
+test tss_solver::tests::root_lambda_loss_has_dual_certificate ... ok
+test tss_solver::tests::root_loss_certificates_keep_default_family_and_sparse_wide_family ... ok
+test tss_solver::tests::seeded_random_differential_covers_all_phases_and_dense_positions ... ok
+test tss_solver::tests::semantic_horizon_is_an_absolute_placement_deadline ... ok
+test tss_solver::tests::shared_fragment_store_full_key_claimant_and_accounting ... ok
+test tss_solver::tests::shared_tt_claimant_isolation ... ok
+test tss_solver::tests::shared_tt_conditional_determinism ... ok
+test tss_solver::tests::shared_tt_forced_collision_a_b_a_stays_valid ... ok
+test tss_solver::tests::shared_tt_import_preflight_is_atomic ... ok
+test tss_solver::tests::shared_tt_large_tiny_zero_reconfiguration ... ok
+test tss_solver::tests::shared_tt_never_caches_unknown ... ok
+test tss_solver::tests::shared_tt_parent_proof_reuses_descendant ... ok
+test tss_solver::tests::shared_tt_survives_origin_arena_drop ... ok
+test tss_solver::tests::shared_tt_sustained_churn_respects_cap ... ok
+test tss_solver::tests::shared_tt_warm_and_cold_verdicts_verify ... ok
+test tss_solver::tests::solve_goal_filters_root_facts ... ok
+test tss_solver::tests::solve_goal_one_sided_gets_full_budget ... ok
+test tss_solver::tests::solver_configurations_are_deterministic_on_hard_leaf ... ok
+test tss_solver::tests::spare_stone_counter_threat_cannot_be_implicitly_dispatched ... ok
+test tss_solver::tests::tss_round5_narrow_compat_identity ... ignored, round-5 C1 full fixture and 512-position identity gate
+test tss_solver::tests::tt_allocation_never_exceeds_cap ... ok
+test tss_solver::tests::tt_disabled_tiny_large_and_interleaved_solves_match ... ok
+test tss_solver::tests::wide_lazy_frontier_distinguishes_virtual_and_selection_only_keys ... ok
+test tss_solver::tests::wide_pn_all_finished_parents_recompute_to_terminal ... ok
+test tss_solver::tests::wide_pn_binary_or_tt_converged_universal_keeps_pn_reselection ... ok
+test tss_solver::tests::wide_pn_choice_skips_refuted_child_tied_with_saturated_live_child ... ok
+test tss_solver::tests::wide_pn_completed_turn_child_carries_fork_and_tau_priors ... ok
+test tss_solver::tests::wide_pn_entry_prior_survives_recompute_and_depth_reopen ... ok
+test tss_solver::tests::wide_pn_fork_priors_lead_choice_order_without_breaking_root_commitment ... ok
+test tss_solver::tests::wide_pn_full_tt_retains_indexed_hits_and_falls_back_unindexed ... ok
+test tss_solver::tests::wide_pn_persistent_pair_tier_survives_linked_pn_changes ... ok
+test tss_solver::tests::wide_pn_saturated_tt_links_pending_attacker_child_without_stall ... ok
+test tss_solver::tests::wide_pn_selected_descendant_cutoff_advances_and_reopens ... ok
+test tss_solver::tests::wide_pn_sequential_root_honors_width_tier_after_urgency ... ok
+test tss_solver::tests::wide_pn_stalled_universal_obligation_yields_once_per_sibling ... ok
+test tss_solver::tests::wide_pn_trace_child_format_is_compact_and_structural ... ok
+test tss_solver::tests::wide_pn_universal_obligation_stays_committed_until_verdict ... ok
+test tss_solver::tests::wide_pn_universal_skips_proven_child_tied_with_saturated_live_child ... ok
+test tss_solver::tests::wide_pn_zero_tt_cap_keeps_unindexed_frontier_progress ... ok
+test tss_solver::tests::wide_shared_fragments_forced_collision_never_cross_contaminates ... ok
+test tss_solver::tests::wide_shared_fragments_warm_exact_root_and_verify ... ok
+test tss_solver::tests::wide_staging_depth_and_advance_are_semantic_and_monotonic ... ok
+test tss_solver::tests::wide_staging_final_cutoffs_explore_siblings_and_fail_closed ... ok
+test tss_solver::tests::wide_unordered_pair_dedup_cannot_change_urgent_flag ... ok
+test tss_solver::tests::wide_urgent_root_classification_is_permutation_invariant ... ok
+test tss_solver::tests::width_profile_change_drops_shared_fragments_but_same_profile_keeps_them ... ok
+test tss_solver::tests::xsnfyll_forced_defender_uses_k2_only_in_wide_mode ... ok
+test tss_solver::tests::xsnfyll_kernel_certificate_accepts_supersets_and_rejects_missing_kernel ... ok
+test tss_solver::tests::zero_node_cap_is_unknown_and_certless ... ok
+test tss_solver::tests::zone_adversary_geometry_scaffolds_match_python_reference ... ok
+test tss_solver::tests::zone_cache_composition_refuses_slow_sibling_horizon ... ok
+test tss_solver::tests::zone_generator_is_deterministic_and_never_count_truncates ... ok
+test tss_spare_corpus::bounded_horizon_compact_win_certificate_verifies ... ok
+test tss_spare_corpus::tss_reference_fast_compact_branch_batch ... ignored, serialized compact exact-oracle branch batch
+test tss_spare_corpus::tss_reference_fast_differential ... ignored, serialized exact-reference differential gate
+test tss_spare_corpus::tss_round3_consume_witness ... ignored, round-3 consume witness ladder
+test tss_spare_corpus::tss_round3_shadow_spare_coverage ... ignored, round-3 shadow coverage and default-off identity
+test tss_spare_corpus::tss_round3_verifier_mutations ... ignored, round-3 independent verifier and mandatory mutation controls
+test tss_spare_corpus::tss_spare_corpus_check ... ignored, Group-2 spare-turn acceptance gate
+test tss_spare_corpus::tss_spare_mine_candidate ... ignored, serialized Group-2 corpus mining helper
+test tss_turn_quotient_hunt::lazy_frontier_equivalence_campaign ... ignored, R-LF1 equivalence campaign; release-only and serialized
+test tss_turn_quotient_hunt::shared_fragment_reduced_tt_campaign ... ignored, G2R9 0l reduced-TT saturation campaign; release-only and serialized
+test tss_turn_quotient_hunt::shared_fragment_soundness_and_warm_campaign ... ignored, G2R9 shared-fragment soundness/warm campaign; release-only and serialized
+test tss_turn_quotient_hunt::turn_quotient_campaign ... ignored, NQ4 measurement campaign; release-only, serialized, <=10 minutes
+test tss_verify::tests::all_d6_remaps_replay_against_transformed_roots ... ok
+test tss_verify::tests::arena_rejects_orphans_cycles_and_invalid_ids ... ok
+test tss_verify::tests::implicit_nested_universal_accepts_only_complete_commuted_kernel ... ok
+test tss_verify::tests::opening_terminal_root_and_oversized_certificate_are_rejected ... ok
+test tss_verify::tests::p3_commutation_condition_matrix ... ok
+test tss_verify::tests::replay_memo_key_binds_commuted_context ... ok
+test tss_verify::tests::typed_completion_and_loss_mutations_are_rejected ... ok
+test tss_verify::tests::typed_win_certificate_is_bound_to_status_and_exact_root ... ok
+test tss_verify::tests::verifier_derives_xsnfyll_k2_independently ... ok
+test tss_verify::tests::verifier_extendable_hit_kernel_matches_k1_and_k2_algebra ... ok
+test tss_verify::tests::zone_mutations_reject_d6_late_core_band_opening_and_own_win ... ok
+
+test result: ok. 111 passed; 0 failed; 38 ignored; 0 measured; 0 filtered out; finished in 3.10s
+
+   Doc-tests hexfield_eq
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

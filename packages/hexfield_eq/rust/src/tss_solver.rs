@@ -677,6 +677,12 @@ pub(crate) struct TssSolver {
     /// builds neither retain nor expose unfinished proof numbers.
     #[cfg(test)]
     last_wide_root_numbers: Option<(u32, u32)>,
+    /// CP4 default-off observation seam.  Production builds retain neither
+    /// terminal provenance nor intermediate stage events in `TssSolver`.
+    #[cfg(test)]
+    last_search_stops: Vec<SearchStop>,
+    #[cfg(test)]
+    last_stage_events: Vec<StageEvent>,
 }
 
 impl Default for TssSolver {
@@ -701,6 +707,10 @@ impl Default for TssSolver {
             leaf_surface_fragment_reconfigurations: 0,
             #[cfg(test)]
             last_wide_root_numbers: None,
+            #[cfg(test)]
+            last_search_stops: Vec::new(),
+            #[cfg(test)]
+            last_stage_events: Vec::new(),
         }
     }
 }
@@ -727,6 +737,16 @@ impl TssSolver {
     #[cfg(test)]
     pub(crate) fn last_wide_root_numbers(&self) -> Option<(u32, u32)> {
         self.last_wide_root_numbers
+    }
+
+    #[cfg(test)]
+    fn last_search_stops(&self) -> &[SearchStop] {
+        &self.last_search_stops
+    }
+
+    #[cfg(test)]
+    fn last_stage_events(&self) -> &[StageEvent] {
+        &self.last_stage_events
     }
 
     #[cfg(test)]
@@ -789,6 +809,8 @@ impl TssSolver {
             leaf_surface_shared_reconfigurations: 0,
             leaf_surface_fragment_reconfigurations: 0,
             last_wide_root_numbers: None,
+            last_search_stops: Vec::new(),
+            last_stage_events: Vec::new(),
         }
     }
 
@@ -809,6 +831,8 @@ impl TssSolver {
             leaf_surface_shared_reconfigurations: 0,
             leaf_surface_fragment_reconfigurations: 0,
             last_wide_root_numbers: None,
+            last_search_stops: Vec::new(),
+            last_stage_events: Vec::new(),
         }
     }
 
@@ -826,6 +850,8 @@ impl TssSolver {
             self.last_narrow_signatures.clear();
             self.last_k_reply_shadow.clear();
             self.last_wide_root_numbers = None;
+            self.last_search_stops.clear();
+            self.last_stage_events.clear();
             clear_quotient_telemetry_report();
         }
 
@@ -887,10 +913,19 @@ impl TssSolver {
             fragment_store_bytes: self.fragment_store.current_bytes as u64,
             ..SolveStats::default()
         };
-        if caps.node_cap == 0
-            || caps.semantic_horizon < state.placements_made()
-            || state.board().len() > MAX_CERT_ROOT_STONES
-        {
+        let precondition_failure = if caps.node_cap == 0 {
+            Some(PreconditionFailure::ZeroNodeCap)
+        } else if caps.semantic_horizon < state.placements_made() {
+            Some(PreconditionFailure::HorizonBeforeRoot)
+        } else if state.board().len() > MAX_CERT_ROOT_STONES {
+            Some(PreconditionFailure::RootTooLarge)
+        } else {
+            None
+        };
+        if let Some(_reason) = precondition_failure {
+            #[cfg(test)]
+            self.last_search_stops
+                .push(SearchStop::PreconditionRejected { reason: _reason });
             return unknown(initial_stats);
         }
 
@@ -904,6 +939,11 @@ impl TssSolver {
         };
         if let Some((claimant, leaf)) = immediate_winner(state, self.width) {
             if node_resolution(&leaf) > caps.semantic_horizon {
+                #[cfg(test)]
+                self.last_search_stops
+                    .push(SearchStop::PreconditionRejected {
+                        reason: PreconditionFailure::ImmediateBeyondHorizon,
+                    });
                 return unknown(stats);
             }
             let status = status_for_claimant(state.current_player(), claimant);
@@ -915,12 +955,20 @@ impl TssSolver {
                     nodes: vec![leaf],
                     semantic_horizon: caps.semantic_horizon,
                 };
+                #[cfg(test)]
+                self.last_search_stops
+                    .push(SearchStop::RootProven { final_stage: 0 });
                 return DeepResult {
                     status,
                     cert: Some(cert),
                     stats,
                 };
             }
+            #[cfg(test)]
+            self.last_search_stops
+                .push(SearchStop::PreconditionRejected {
+                    reason: PreconditionFailure::GoalFilteredImmediate,
+                });
             return unknown(stats);
         }
 
@@ -954,6 +1002,14 @@ impl TssSolver {
             if let Some(signature) = attempt.tt_signature.as_ref() {
                 self.last_narrow_signatures.push(signature.clone());
             }
+            #[cfg(test)]
+            {
+                if let Some(stop) = attempt.search_stop.as_ref() {
+                    self.last_search_stops.push(stop.clone());
+                }
+                self.last_stage_events
+                    .extend(attempt.stage_events.iter().copied());
+            }
             merge_stats(&mut stats, attempt.stats);
             if let Some(cert) = attempt.cert {
                 return DeepResult {
@@ -979,6 +1035,14 @@ impl TssSolver {
             #[cfg(test)]
             if let Some(signature) = attempt.tt_signature.as_ref() {
                 self.last_narrow_signatures.push(signature.clone());
+            }
+            #[cfg(test)]
+            {
+                if let Some(stop) = attempt.search_stop.as_ref() {
+                    self.last_search_stops.push(stop.clone());
+                }
+                self.last_stage_events
+                    .extend(attempt.stage_events.iter().copied());
             }
             merge_stats(&mut stats, attempt.stats);
             if let Some(cert) = attempt.cert {
@@ -1089,7 +1153,10 @@ impl TssSolver {
         );
         search.interior_census_gate = interior_census_gate;
         let root = search.insert_root(state);
-        search.run(state, root);
+        #[cfg(test)]
+        let mut search_stop = search.run(state, root);
+        #[cfg(not(test))]
+        let _ = search.run(state, root);
         #[cfg(test)]
         {
             self.last_wide_root_numbers = Some((search.entries[root].pn, search.entries[root].dn));
@@ -1167,11 +1234,27 @@ impl TssSolver {
             ..SolveStats::default()
         };
         let mut promotions = Vec::new();
-        let cert = search.materialize(state, root).and_then(|materialized| {
+        let cert_result = (|| -> Result<TssCertificate, WinMaterializationFailure> {
+            let root_has_proven_tag = search.entries.get(root).is_some_and(|entry| {
+                matches!(
+                    &entry.node,
+                    WidePnNode::ProvenLeaf(_)
+                        | WidePnNode::ProvenFragment(_)
+                        | WidePnNode::Branch { .. }
+                )
+            });
+            let materialized = search
+                .materialize(state, root)
+                .ok_or(if root_has_proven_tag {
+                    WinMaterializationFailure::ProofBuildFailed
+                } else {
+                    WinMaterializationFailure::RootNotProvenTag
+                })?;
             let fragment_imports = materialized.fragment_imports;
             let _dag_reuses = materialized.dag_reuses;
             let (nodes, root_node) =
-                compact_certificate(&materialized.arena, materialized.root_node)?;
+                compact_certificate(&materialized.arena, materialized.root_node)
+                    .ok_or(WinMaterializationFailure::CompactLimit)?;
             let mut cert = TssCertificate {
                 root: RootBinding::from_state(state),
                 claimant,
@@ -1180,22 +1263,31 @@ impl TssSolver {
                 semantic_horizon,
             };
             if fragments_enabled {
-                rebase_shared_fragment_labels(&mut cert, state)?;
+                rebase_shared_fragment_labels(&mut cert, state)
+                    .ok_or(WinMaterializationFailure::RebaseFailed)?;
                 let claimed = status_for_claimant(state.current_player(), claimant);
                 if !TssVerifier.verify(state, &cert, claimed) {
-                    return None;
+                    return Err(WinMaterializationFailure::StrictPositiveVerificationFailed);
                 }
                 if let Some(proof) = CachedProof::from_compact(cert.nodes.clone(), cert.root_node) {
                     promotions.push((PositionKey::from_state(state), proof));
                 }
             } else {
-                rebase_zone_distances(&mut cert, state)?;
+                rebase_zone_distances(&mut cert, state)
+                    .ok_or(WinMaterializationFailure::RebaseFailed)?;
             }
             // Count only imports that survive compaction, dominant relabel,
             // and (when enabled) strict final-certificate verification.
             stats.fragment_imports = fragment_imports;
-            Some(cert)
-        });
+            Ok(cert)
+        })();
+        #[cfg(test)]
+        if matches!(search_stop, SearchStop::RootProven { .. }) {
+            if let Err(reason) = cert_result.as_ref() {
+                search_stop = SearchStop::MaterializationFailed { reason: *reason };
+            }
+        }
+        let cert = cert_result.ok();
 
         if fragments_enabled {
             let mut promoted_keys = promotions
@@ -1246,6 +1338,8 @@ impl TssSolver {
             let report = telemetry.finish(&search.entries, &search.by_position, search.tt_hits);
             LAST_QUOTIENT_REPORT.with(|slot| *slot.borrow_mut() = Some(report));
         }
+        #[cfg(test)]
+        let stage_events = search.stage_events.clone();
         drop(search);
         // The solved attempt root was queued first; admit it last so a direct-
         // mapped collision with one of its descendants cannot erase the warm
@@ -1264,6 +1358,10 @@ impl TssSolver {
             stats,
             #[cfg(test)]
             tt_signature: None,
+            #[cfg(test)]
+            search_stop: Some(search_stop),
+            #[cfg(test)]
+            stage_events,
         }
     }
 }
@@ -1709,6 +1807,10 @@ struct AttemptResult {
     stats: SolveStats,
     #[cfg(test)]
     tt_signature: Option<NarrowAttemptSignature>,
+    #[cfg(test)]
+    search_stop: Option<SearchStop>,
+    #[cfg(test)]
+    stage_events: Vec<StageEvent>,
 }
 
 #[cfg(test)]
@@ -2137,6 +2239,171 @@ enum WidePnStepOutcome {
     Progress,
     DepthCutoff { depth: usize, made_progress: bool },
     Stalled,
+}
+
+/// An intermediate staged-deepening observation.  This is deliberately not a
+/// terminal result: selecting a cutoff requests the next stage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StageEvent {
+    SelectedCutoff {
+        from_stage: u16,
+        encountered_depth: u16,
+    },
+}
+
+/// Total result of one `run_until` invocation.  Every former `None` path has a
+/// provenance-preserving tag; only `SelectedCutoff` asks the outer driver to
+/// continue at a deeper stage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RunUntilExit {
+    RootPnZero,
+    RootDnZero,
+    NodeCap { expansions: u64, cap: u64 },
+    SelectedCutoff { depth: u16 },
+    CutoffNoProgress { depth: u16 },
+    Stalled,
+}
+
+// Preserve the pre-CP4 focused test's selected-cutoff expectation verbatim.
+// Production code never converts the tagged result back to `Option`.
+#[cfg(test)]
+impl PartialEq<Option<usize>> for RunUntilExit {
+    fn eq(&self, other: &Option<usize>) -> bool {
+        match (self, other) {
+            (Self::SelectedCutoff { depth }, Some(expected)) => usize::from(*depth) == *expected,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PreconditionFailure {
+    ZeroNodeCap,
+    HorizonBeforeRoot,
+    RootTooLarge,
+    ImmediateBeyondHorizon,
+    GoalFilteredImmediate,
+    UnsupportedCP1Root,
+    UnsupportedProfile,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WinMaterializationFailure {
+    RootNotProvenTag,
+    ProofBuildFailed,
+    CompactLimit,
+    RebaseFailed,
+    StrictPositiveVerificationFailed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NoEmitFailure {
+    LiveUnexpanded,
+    EligibleDepthCutoff,
+    UnlinkedLazyObligation,
+    ChoiceGeneratorNotExhausted,
+    UnsupportedNodeOrEdgeTag,
+    StructuralCostMismatch,
+    NegativeDagLimit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InvariantCode {
+    MissingRootEntry,
+    RefreshDisagreesWithExit,
+    StageDepthOverflow,
+    ImpossibleRunUntilFallthrough,
+}
+
+/// Opaque v1 negative artifact bytes.  CP4 does not add an emitter or checker;
+/// consequently production search can carry this only after a future emitter
+/// has constructed a complete artifact.  The private representation prevents
+/// a numeric `dn == 0` from fabricating candidate provenance.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NoTssCertificateV1 {
+    bytes: Box<[u8]>,
+}
+
+/// Internal stop provenance.  This is not a public verdict and, in particular,
+/// `RootRefutedCandidate` is pending independent checker acceptance.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SearchStop {
+    RootProven {
+        final_stage: u16,
+    },
+    RootRefutedCandidate {
+        final_stage: u16,
+        no_cert: NoTssCertificateV1,
+        structural_boundary_count: u64,
+    },
+    NodeCap {
+        stage: u16,
+        expansions: u64,
+        cap: u64,
+    },
+    CutoffNoProgress {
+        stage: u16,
+        encountered_depth: u16,
+    },
+    NonAdvancingCutoff {
+        stage: u16,
+        encountered_depth: u16,
+    },
+    Stalled {
+        stage: u16,
+    },
+    ExhaustionArtifactFailed {
+        stage: u16,
+        reason: NoEmitFailure,
+    },
+    MaterializationFailed {
+        reason: WinMaterializationFailure,
+    },
+    PreconditionRejected {
+        reason: PreconditionFailure,
+    },
+    InvariantViolation {
+        code: InvariantCode,
+    },
+}
+
+fn root_refuted_candidate_from_emitted(
+    final_stage: u16,
+    no_cert: NoTssCertificateV1,
+    structural_boundary_count: u64,
+) -> SearchStop {
+    SearchStop::RootRefutedCandidate {
+        final_stage,
+        no_cert,
+        structural_boundary_count,
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SearchStopClass {
+    WinCandidate,
+    RefutationCandidatePendingVerification,
+    UnknownCapped,
+    UnknownIncomplete,
+}
+
+#[cfg(test)]
+fn classify_search_stop(stop: &SearchStop) -> SearchStopClass {
+    match stop {
+        SearchStop::RootProven { .. } => SearchStopClass::WinCandidate,
+        SearchStop::RootRefutedCandidate { .. } => {
+            SearchStopClass::RefutationCandidatePendingVerification
+        }
+        SearchStop::NodeCap { .. } => SearchStopClass::UnknownCapped,
+        SearchStop::CutoffNoProgress { .. }
+        | SearchStop::NonAdvancingCutoff { .. }
+        | SearchStop::Stalled { .. }
+        | SearchStop::ExhaustionArtifactFailed { .. }
+        | SearchStop::MaterializationFailed { .. }
+        | SearchStop::PreconditionRejected { .. }
+        | SearchStop::InvariantViolation { .. } => SearchStopClass::UnknownIncomplete,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -3931,6 +4198,8 @@ struct WidePnSearch<'store> {
     incr_active_parent_snapshot: RefCell<Option<IncrDefenderSnapshot>>,
     #[cfg(test)]
     quotient_telemetry: Option<QuotientTelemetry>,
+    #[cfg(test)]
+    stage_events: Vec<StageEvent>,
     entries: Vec<WidePnEntry>,
     by_position: HashMap<WidePositionKey, usize>,
     /// Exact prospective identity for lazy defender thunks. This preserves the
@@ -4093,6 +4362,10 @@ impl<'store> WidePnSearch<'store> {
             stats,
             #[cfg(test)]
             tt_signature: Some(tt_signature),
+            #[cfg(test)]
+            search_stop: None,
+            #[cfg(test)]
+            stage_events: Vec::new(),
         }
     }
 
@@ -4196,6 +4469,8 @@ impl<'store> WidePnSearch<'store> {
             incr_active_parent_snapshot: RefCell::new(None),
             #[cfg(test)]
             quotient_telemetry: QuotientTelemetry::enabled(),
+            #[cfg(test)]
+            stage_events: Vec::new(),
             entries: Vec::new(),
             by_position: HashMap::new(),
             deferred_by_position: HashMap::new(),
@@ -4356,17 +4631,17 @@ impl<'store> WidePnSearch<'store> {
         }
     }
 
-    fn run(&mut self, root_state: &RustHexoState, root: usize) {
+    fn run(&mut self, root_state: &RustHexoState, root: usize) -> SearchStop {
         let final_depth = self.depth_cap;
         let mut stage_depth = 0usize;
 
         // The selected PN path discovers the next useful horizon. Every stage
         // shares the caller's one global node cap; there are no scouting quotas.
-        loop {
+        let stop = loop {
             self.depth_cap = stage_depth;
             self.reopen_depth_cutoffs(stage_depth);
             let is_final = stage_depth == final_depth;
-            let selected_cutoff = self.run_until(root_state, root, self.node_cap, !is_final);
+            let exit = self.run_until(root_state, root, self.node_cap, !is_final);
             // Transposed parents outside the active recursion also need to see
             // the selected cutoff (or proof) before the stage decision.
             self.refresh_all_bottom_up();
@@ -4378,26 +4653,102 @@ impl<'store> WidePnSearch<'store> {
             if self.trace_enabled() {
                 let root_entry = &self.entries[root];
                 eprintln!(
-                    "WIDTH_PN_STAGE stage_depth={stage_depth} expansions={} selected_cutoff={selected_cutoff:?} root_pn={} root_dn={}",
+                    "WIDTH_PN_STAGE stage_depth={stage_depth} expansions={} exit={exit:?} root_pn={} root_dn={}",
                     self.expansions, root_entry.pn, root_entry.dn
                 );
             }
 
-            if self.entries[root].pn == 0 || self.expansions >= self.node_cap || is_final {
-                break;
+            let Ok(stage) = u16::try_from(stage_depth) else {
+                break SearchStop::InvariantViolation {
+                    code: InvariantCode::StageDepthOverflow,
+                };
+            };
+            let Some(root_entry) = self.entries.get(root) else {
+                break SearchStop::InvariantViolation {
+                    code: InvariantCode::MissingRootEntry,
+                };
+            };
+
+            // CP-2.2 precedence after the mandatory refresh.
+            if root_entry.pn == 0 {
+                break SearchStop::RootProven { final_stage: stage };
             }
-            let Some(encountered_depth) = selected_cutoff else {
-                break;
+            let no_emit_failure = if root_entry.dn == 0 {
+                match self.try_emit_no_tss_v1(root) {
+                    Ok((no_cert, structural_boundary_count)) => {
+                        break root_refuted_candidate_from_emitted(
+                            stage,
+                            no_cert,
+                            structural_boundary_count,
+                        );
+                    }
+                    Err(reason) => Some(reason),
+                }
+            } else {
+                None
             };
-            let Some(next_depth) =
-                next_wide_stage_depth(stage_depth, encountered_depth, final_depth)
-            else {
-                break;
-            };
-            stage_depth = next_depth;
-        }
+            if let RunUntilExit::NodeCap { expansions, cap } = exit {
+                break SearchStop::NodeCap {
+                    stage,
+                    expansions,
+                    cap,
+                };
+            }
+            if self.expansions >= self.node_cap {
+                break SearchStop::NodeCap {
+                    stage,
+                    expansions: self.expansions,
+                    cap: self.node_cap,
+                };
+            }
+
+            match exit {
+                RunUntilExit::SelectedCutoff { depth } => {
+                    if is_final {
+                        break SearchStop::InvariantViolation {
+                            code: InvariantCode::RefreshDisagreesWithExit,
+                        };
+                    }
+                    #[cfg(test)]
+                    self.stage_events.push(StageEvent::SelectedCutoff {
+                        from_stage: stage,
+                        encountered_depth: depth,
+                    });
+                    let encountered_depth = usize::from(depth);
+                    let Some(next_depth) =
+                        next_wide_stage_depth(stage_depth, encountered_depth, final_depth)
+                    else {
+                        break SearchStop::NonAdvancingCutoff {
+                            stage,
+                            encountered_depth: depth,
+                        };
+                    };
+                    stage_depth = next_depth;
+                }
+                RunUntilExit::CutoffNoProgress { depth } => {
+                    break SearchStop::CutoffNoProgress {
+                        stage,
+                        encountered_depth: depth,
+                    };
+                }
+                RunUntilExit::Stalled => break SearchStop::Stalled { stage },
+                RunUntilExit::RootDnZero => {
+                    break SearchStop::ExhaustionArtifactFailed {
+                        stage,
+                        reason: no_emit_failure.unwrap_or(NoEmitFailure::UnsupportedNodeOrEdgeTag),
+                    };
+                }
+                RunUntilExit::RootPnZero => {
+                    break SearchStop::InvariantViolation {
+                        code: InvariantCode::RefreshDisagreesWithExit,
+                    };
+                }
+                RunUntilExit::NodeCap { .. } => unreachable!("node cap handled above"),
+            }
+        };
 
         self.depth_cap = final_depth;
+        stop
     }
 
     /// Test-only continuation driver. `stage_depth` and whether its cutoffs
@@ -4418,7 +4769,7 @@ impl<'store> WidePnSearch<'store> {
                 *stage_initialized = true;
             }
             let is_final = *stage_depth == final_depth;
-            let selected_cutoff = self.run_until(root_state, root, self.node_cap, !is_final);
+            let exit = self.run_until(root_state, root, self.node_cap, !is_final);
             self.refresh_all_bottom_up();
             if let Some(telemetry) = self.quotient_telemetry.as_mut() {
                 telemetry.observe_stage(&self.entries, &self.by_position, *stage_depth);
@@ -4426,7 +4777,7 @@ impl<'store> WidePnSearch<'store> {
             if self.trace_enabled() {
                 let root_entry = &self.entries[root];
                 eprintln!(
-                    "WIDTH_PN_RESUME_STAGE stage_depth={} expansions={} selected_cutoff={selected_cutoff:?} root_pn={} root_dn={}",
+                    "WIDTH_PN_RESUME_STAGE stage_depth={} expansions={} exit={exit:?} root_pn={} root_dn={}",
                     *stage_depth, self.expansions, root_entry.pn, root_entry.dn
                 );
             }
@@ -4434,9 +4785,15 @@ impl<'store> WidePnSearch<'store> {
             if self.entries[root].pn == 0 || self.expansions >= self.node_cap || is_final {
                 break;
             }
-            let Some(encountered_depth) = selected_cutoff else {
+            let RunUntilExit::SelectedCutoff { depth } = exit else {
                 break;
             };
+            #[cfg(test)]
+            self.stage_events.push(StageEvent::SelectedCutoff {
+                from_stage: u16::try_from(*stage_depth).unwrap_or(u16::MAX),
+                encountered_depth: depth,
+            });
+            let encountered_depth = usize::from(depth);
             let Some(next_depth) =
                 next_wide_stage_depth(*stage_depth, encountered_depth, final_depth)
             else {
@@ -4454,41 +4811,84 @@ impl<'store> WidePnSearch<'store> {
         root: usize,
         expansion_cap: u64,
         deepen_after_selected_cutoff: bool,
-    ) -> Option<usize> {
+    ) -> RunUntilExit {
         let mut work = root_state.clone();
-        while self.expansions < self.node_cap && self.expansions < expansion_cap {
+        loop {
+            if self.expansions >= self.node_cap || self.expansions >= expansion_cap {
+                return RunUntilExit::NodeCap {
+                    expansions: self.expansions,
+                    cap: self.node_cap.min(expansion_cap),
+                };
+            }
             self.recompute(root);
             let Some(entry) = self.entries.get(root) else {
-                break;
+                return RunUntilExit::Stalled;
             };
-            if entry.pn == 0 || entry.dn == 0 {
-                break;
+            if entry.pn == 0 {
+                return RunUntilExit::RootPnZero;
+            }
+            if entry.dn == 0 {
+                return RunUntilExit::RootDnZero;
             }
             match self.work(&mut work, root, false, u32::MAX, u32::MAX) {
                 WidePnStepOutcome::Progress => {}
                 WidePnStepOutcome::DepthCutoff { depth, .. } if deepen_after_selected_cutoff => {
-                    return Some(depth);
+                    return RunUntilExit::SelectedCutoff {
+                        depth: u16::try_from(depth)
+                            .expect("wide search depth is bounded by the CP1 structural cap"),
+                    };
                 }
                 WidePnStepOutcome::DepthCutoff {
                     made_progress: true,
                     ..
                 } => {}
                 WidePnStepOutcome::DepthCutoff {
+                    depth,
                     made_progress: false,
-                    ..
                 } => {
                     #[cfg(test)]
                     self.trace_selected_path(root_state, root, "cutoff_no_progress");
-                    break;
+                    return RunUntilExit::CutoffNoProgress {
+                        depth: u16::try_from(depth)
+                            .expect("wide search depth is bounded by the CP1 structural cap"),
+                    };
                 }
                 WidePnStepOutcome::Stalled => {
                     #[cfg(test)]
                     self.trace_selected_path(root_state, root, "stalled");
-                    break;
+                    return RunUntilExit::Stalled;
                 }
             }
         }
-        None
+    }
+
+    /// CP4 intentionally does not implement the v1 negative emitter.  This
+    /// provenance gate therefore fails closed for every current arena shape;
+    /// a future emitter must return a complete artifact here before the
+    /// candidate variant becomes production-reachable.
+    fn try_emit_no_tss_v1(&self, root: usize) -> Result<(NoTssCertificateV1, u64), NoEmitFailure> {
+        let Some(entry) = self.entries.get(root) else {
+            return Err(NoEmitFailure::UnsupportedNodeOrEdgeTag);
+        };
+        match &entry.node {
+            WidePnNode::Unexpanded => Err(NoEmitFailure::LiveUnexpanded),
+            WidePnNode::DepthCutoff => Err(NoEmitFailure::EligibleDepthCutoff),
+            WidePnNode::Branch { kind, children } => {
+                if children.iter().any(|child| {
+                    matches!(child.result, WidePnChildResult::Pending)
+                        && self.resolved_child_entry(child).is_none()
+                }) {
+                    Err(NoEmitFailure::UnlinkedLazyObligation)
+                } else if matches!(kind, WidePnKind::Choice) {
+                    Err(NoEmitFailure::ChoiceGeneratorNotExhausted)
+                } else {
+                    Err(NoEmitFailure::UnsupportedNodeOrEdgeTag)
+                }
+            }
+            WidePnNode::Refuted | WidePnNode::ProvenLeaf(_) | WidePnNode::ProvenFragment(_) => {
+                Err(NoEmitFailure::UnsupportedNodeOrEdgeTag)
+            }
+        }
     }
 
     fn reopen_depth_cutoffs(&mut self, depth_cap: usize) {
@@ -12440,8 +12840,8 @@ mod tests {
         replay(&[(0, 0), (0, 8), (2, 7), (1, 0), (4, 6), (6, 5), (8, 4)])
     }
 
-    fn xsnfyll_forced_defender_fixture() -> RustHexoState {
-        let mut state = replay(&[
+    fn xsnfyll_corpus_fixture() -> RustHexoState {
+        replay(&[
             (0, 0),
             (-1, 0),
             (1, -2),
@@ -12455,13 +12855,255 @@ mod tests {
             (1, -4),
             (3, -4),
             (3, -2),
-        ]);
+        ])
+    }
+
+    fn xsnfyll_forced_defender_fixture() -> RustHexoState {
+        let mut state = xsnfyll_corpus_fixture();
         assert_eq!(state.current_player(), Player::Player1);
         assert_eq!(state.phase(), TurnPhase::FirstStone);
         for coord in [HexCoord::new(-1, -1), HexCoord::new(1, -5)] {
             apply_placement(&mut state, Placement { coord }).unwrap();
         }
         state
+    }
+
+    fn stable_certificate_fingerprint(cert: &TssCertificate) -> u64 {
+        // Test/report fingerprint only.  FNV-1a over the fully explicit Debug
+        // representation is stable for this frozen type and avoids depending
+        // on randomized HashMap state or a production serialization format.
+        format!("{cert:?}")
+            .bytes()
+            .fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+            })
+    }
+
+    #[test]
+    #[ignore = "CP4 before/after official-profile identity smoke"]
+    fn cp4_xsnfyll_identity_smoke() {
+        let state = xsnfyll_corpus_fixture();
+        let mut solver = TssSolver::default();
+        solver.set_width_options(WidthOptions::vcf_pair_complete());
+        let result = solver.solve_goal(
+            &state,
+            &SolveCaps {
+                node_cap: 10_000,
+                tt_bytes_cap: 2usize << 30,
+                semantic_horizon: u32::MAX,
+            },
+            SolveGoal::Win,
+        );
+        let cert = result.cert.as_ref().expect("xsnfyll must prove at 10k");
+        assert_eq!(result.status, ProofStatus::Win);
+        assert!(TssVerifier.verify(&state, cert, ProofStatus::Win));
+        println!(
+            "CP4_IDENTITY status={:?} cert_nodes={} cert_fingerprint={:016x} nodes={} expansions={} tt_entries={}",
+            result.status,
+            cert.nodes.len(),
+            stable_certificate_fingerprint(cert),
+            result.stats.nodes,
+            result.stats.expansions,
+            result.stats.tt_entries,
+        );
+    }
+
+    fn cp4_search_stop_fixtures() -> Vec<(&'static str, SearchStop)> {
+        vec![
+            ("frozen_proof", SearchStop::RootProven { final_stage: 14 }),
+            (
+                "synthetic_emitter_output_pending_checker",
+                root_refuted_candidate_from_emitted(
+                    4,
+                    NoTssCertificateV1 {
+                        bytes: b"NTSSCP1\0fixture".to_vec().into_boxed_slice(),
+                    },
+                    3,
+                ),
+            ),
+            (
+                "one_expansion_cap",
+                SearchStop::NodeCap {
+                    stage: 0,
+                    expansions: 1,
+                    cap: 1,
+                },
+            ),
+            (
+                "selected_cutoff_revisited_without_progress",
+                SearchStop::CutoffNoProgress {
+                    stage: 6,
+                    encountered_depth: 7,
+                },
+            ),
+            (
+                "selected_cutoff_cannot_advance_stage",
+                SearchStop::NonAdvancingCutoff {
+                    stage: 8,
+                    encountered_depth: 8,
+                },
+            ),
+            (
+                "synthetic_no_work_progress",
+                SearchStop::Stalled { stage: 2 },
+            ),
+            (
+                "dn_zero_with_eligible_cutoff",
+                SearchStop::ExhaustionArtifactFailed {
+                    stage: 5,
+                    reason: NoEmitFailure::EligibleDepthCutoff,
+                },
+            ),
+            (
+                "positive_compaction_limit",
+                SearchStop::MaterializationFailed {
+                    reason: WinMaterializationFailure::CompactLimit,
+                },
+            ),
+            (
+                "zero_node_cap_precondition",
+                SearchStop::PreconditionRejected {
+                    reason: PreconditionFailure::ZeroNodeCap,
+                },
+            ),
+            (
+                "missing_root_negative_control",
+                SearchStop::InvariantViolation {
+                    code: InvariantCode::MissingRootEntry,
+                },
+            ),
+        ]
+    }
+
+    #[test]
+    fn cp4_search_stop_variant_and_mapping_fixtures() {
+        let fixtures = cp4_search_stop_fixtures();
+        assert_eq!(
+            fixtures.len(),
+            10,
+            "one fixture per closed SearchStop variant"
+        );
+
+        let classes = fixtures
+            .iter()
+            .map(|(name, stop)| (*name, classify_search_stop(stop)))
+            .collect::<Vec<_>>();
+        assert_eq!(classes[0].1, SearchStopClass::WinCandidate);
+        assert_eq!(
+            classes[1].1,
+            SearchStopClass::RefutationCandidatePendingVerification
+        );
+        assert_eq!(classes[2].1, SearchStopClass::UnknownCapped);
+        assert!(classes[3..]
+            .iter()
+            .all(|(_, class)| *class == SearchStopClass::UnknownIncomplete));
+
+        // The observation taxonomy has no sealed-negative projection.  Even
+        // the provenance-backed candidate remains public UNKNOWN until a
+        // future independent `checkNo` accepts it.
+        for (_, class) in &classes[1..] {
+            let public_status = match class {
+                SearchStopClass::WinCandidate => ProofStatus::Win,
+                SearchStopClass::RefutationCandidatePendingVerification
+                | SearchStopClass::UnknownCapped
+                | SearchStopClass::UnknownIncomplete => ProofStatus::Unknown,
+            };
+            assert_eq!(public_status, ProofStatus::Unknown);
+        }
+        println!("CP4_VARIANT_COVERAGE search_stops=10 mapping=PASS sealed_negative=UNREACHABLE");
+    }
+
+    #[test]
+    fn cp4_stage_event_is_intermediate_and_root_proof_is_terminal() {
+        let state = xsnfyll_corpus_fixture();
+        let mut solver = TssSolver::default();
+        solver.set_width_options(WidthOptions::vcf_pair_complete());
+        let result = solver.solve_goal(
+            &state,
+            &SolveCaps {
+                node_cap: 10_000,
+                tt_bytes_cap: 2usize << 30,
+                semantic_horizon: u32::MAX,
+            },
+            SolveGoal::Win,
+        );
+        assert_eq!(result.status, ProofStatus::Win);
+        assert!(matches!(
+            solver.last_search_stops(),
+            [SearchStop::RootProven { final_stage: 14 }]
+        ));
+        let events = solver.last_stage_events();
+        assert!(!events.is_empty(), "fixture must cross intermediate stages");
+        assert!(events.iter().all(|event| matches!(
+            event,
+            StageEvent::SelectedCutoff {
+                from_stage,
+                encountered_depth,
+            } if from_stage < encountered_depth
+        )));
+        assert!(events.windows(2).all(|pair| {
+            let StageEvent::SelectedCutoff {
+                from_stage: left, ..
+            } = pair[0];
+            let StageEvent::SelectedCutoff {
+                from_stage: right, ..
+            } = pair[1];
+            left < right
+        }));
+        println!(
+            "CP4_STAGE_EVENT kind=SelectedCutoff count={} terminal=RootProven final_stage=14",
+            events.len()
+        );
+    }
+
+    #[test]
+    fn cp4_attempt_result_observes_node_cap_without_changing_public_unknown() {
+        let state = xsnfyll_corpus_fixture();
+        let mut solver = TssSolver::default();
+        solver.set_width_options(WidthOptions::vcf_pair_complete());
+        let result = solver.solve_goal(
+            &state,
+            &SolveCaps {
+                // One public root examination plus one wide expansion.
+                node_cap: 2,
+                tt_bytes_cap: 2usize << 30,
+                semantic_horizon: u32::MAX,
+            },
+            SolveGoal::Win,
+        );
+        assert_eq!(result.status, ProofStatus::Unknown);
+        assert!(result.cert.is_none());
+        assert!(matches!(
+            solver.last_search_stops(),
+            [SearchStop::NodeCap {
+                stage: 0,
+                expansions: 1,
+                cap: 1,
+            }]
+        ));
+    }
+
+    #[test]
+    fn cp4_precondition_stop_is_test_only_and_public_unknown() {
+        let state = xsnfyll_corpus_fixture();
+        let mut solver = TssSolver::default();
+        solver.set_width_options(WidthOptions::vcf_pair_complete());
+        let result = solver.solve_goal(
+            &state,
+            &SolveCaps {
+                node_cap: 0,
+                tt_bytes_cap: 2usize << 30,
+                semantic_horizon: u32::MAX,
+            },
+            SolveGoal::Win,
+        );
+        assert_eq!(result.status, ProofStatus::Unknown);
+        assert!(matches!(
+            solver.last_search_stops(),
+            [SearchStop::PreconditionRejected {
+                reason: PreconditionFailure::ZeroNodeCap,
+            }]
+        ));
     }
 
     fn forced_defense_fixture() -> RustHexoState {
