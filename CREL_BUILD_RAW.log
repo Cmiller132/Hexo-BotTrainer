@@ -1,0 +1,105 @@
+RAM_GATE invocation=build available_gb=15.338 free_physical_gb=14.898 required_available_gb=10 required_free_physical_gb=5
+cargo :    Compiling cfg-if v1.0.4
+At line:2 char:556
++ ... rget-hunt'; cargo test -p hexfield_eq --release --target x86_64-pc-wi ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling cfg-if v1.0.4:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling once_cell v1.21.4
+   Compiling either v1.16.0
+   Compiling zerocopy v0.8.48
+   Compiling serde_core v1.0.228
+   Compiling crossbeam-utils v0.8.21
+   Compiling serde v1.0.228
+   Compiling getrandom v0.3.4
+   Compiling thiserror v1.0.69
+   Compiling getrandom v0.2.17
+   Compiling rayon-core v1.13.0
+   Compiling ahash v0.8.12
+   Compiling rand_core v0.6.4
+   Compiling crossbeam-epoch v0.9.18
+   Compiling crossbeam-deque v0.8.6
+   Compiling rayon v1.12.0
+   Compiling ppv-lite86 v0.2.21
+   Compiling half v2.7.1
+   Compiling hexo_engine v0.1.0 (E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-cert-support\packages\hexo_engine)
+   Compiling rand_chacha v0.3.1
+   Compiling rand v0.8.6
+   Compiling hexo_utils v0.1.0 (E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-cert-support\packages\hexo_utils)
+   Compiling hexfield_eq v0.1.0 (E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-cert-support\packages\hexfield_eq)
+error[E0277]: the trait bound `hexo_engine::HexCoord: Ord` is not satisfied
+    --> packages\hexfield_eq\rust\src\cert_support_hunt.rs:1039:47
+     |
+1039 |     let root_set = root.into_iter().collect::<BTreeSet<_>>();
+     |                                     -------   ^^^^^^^^^^^ the trait `Ord` is not implemented for 
+`hexo_engine::HexCoord`
+     |                                     |
+     |                                     required by a bound introduced by this call
+     |
+help: the trait `FromIterator<T>` is implemented for `BTreeSet<T>`
+    --> /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\alloc\src\collections\btree\set.rs:1468:0
+     = note: required for `BTreeSet<hexo_engine::HexCoord>` to implement `FromIterator<hexo_engine::HexCoord>`
+note: required by a bound in `collect`
+    --> /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\core\src\iter\traits\iterator.rs:2051:4
+
+error[E0277]: the trait bound `hexo_engine::HexCoord: Ord` is not satisfied
+    --> packages\hexfield_eq\rust\src\cert_support_hunt.rs:1046:23
+     |
+1046 |             !root_set.contains(anchor)
+     |                       ^^^^^^^^ the trait `Ord` is not implemented for `hexo_engine::HexCoord`
+     |
+note: required by a bound in `BTreeSet::<T, A>::contains`
+    --> /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\alloc\src\collections\btree\set.rs:604:4
+
+error[E0277]: the trait bound `hexo_engine::HexCoord: Ord` is not satisfied
+    --> packages\hexfield_eq\rust\src\cert_support_hunt.rs:1046:32
+     |
+1046 |             !root_set.contains(anchor)
+     |                       -------- ^^^^^^ the trait `Ord` is not implemented for `hexo_engine::HexCoord`
+     |                       |
+     |                       required by a bound introduced by this call
+     |
+note: required by a bound in `BTreeSet::<T, A>::contains`
+    --> /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\alloc\src\collections\btree\set.rs:604:4
+
+error[E0599]: no method named `cmp` found for reference `&Vec<hexo_engine::HexCoord>` in the current scope
+    --> packages\hexfield_eq\rust\src\cert_support_hunt.rs:1346:72
+     |
+1346 |     verifier_zones.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+     |                                                                        ^^^ `&Vec<hexo_engine::HexCoord>` is not 
+an iterator
+     |
+help: call `.into_iter()` first
+     |
+1346 |     verifier_zones.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.into_iter().cmp(b)));
+     |                                                                        ++++++++++++
+
+error[E0599]: no method named `cmp` found for reference `&Vec<hexo_engine::HexCoord>` in the current scope
+    --> packages\hexfield_eq\rust\src\cert_support_hunt.rs:1347:73
+     |
+1347 |     extracted_zones.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+     |                                                                         ^^^ `&Vec<hexo_engine::HexCoord>` is 
+not an iterator
+     |
+help: call `.into_iter()` first
+     |
+1347 |     extracted_zones.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.into_iter().cmp(b)));
+     |                                                                         ++++++++++++
+
+Some errors have detailed explanations: E0277, E0599.
+For more information about an error, try `rustc --explain E0277`.
+error: could not compile `hexfield_eq` (lib test) due to 5 previous errors
+warning: build failed, waiting for other jobs to finish...
+RAM_GATE invocation=build_retry available_gb=14.651 free_physical_gb=14.680 required_available_gb=10 required_free_physical_gb=5
+cargo :    Compiling hexfield_eq v0.1.0 
+(E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-cert-support\packages\hexfield_eq)
+At line:2 char:570
++ ... rget-hunt'; cargo test -p hexfield_eq --release --target x86_64-pc-wi ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling he...es\hexfield_eq):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Finished `release` profile [optimized] target(s) in 10.71s
+  Executable unittests rust\src\lib.rs 
+(.target-hunt\x86_64-pc-windows-msvc\release\deps\hexfield_eq-de26e3778420c4c2.exe)

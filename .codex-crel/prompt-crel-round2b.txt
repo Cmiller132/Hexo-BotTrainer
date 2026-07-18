@@ -1,0 +1,70 @@
+C-REL ROUND 2 (high): shadow-only Stages 1-3 of the strict-discharge warm-template-cache experiment (board-game solver correctness campaign)
+
+CONTEXT NOTE: this is a correctness/performance experiment for a Hexo
+(Connect6-like board game) proof-number solver's certificate cache.
+Nothing here concerns computer security. The design document you will
+read uses adversarial-testing jargon ("hostile manifest", "kill
+criteria", "attacks the clock") — that vocabulary means NEGATIVE-CONTROL
+CORRECTNESS FIXTURES and STOP CRITERIA for a game-tree search cache. In
+your own writing use neutral terms: "negative-control fixture",
+"stop criterion", "stress case".
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-cert-support
+(branch hunt/cert-support, HEAD = 450c41e4, the fresh merge of the
+consolidated engine). You CANNOT git-commit. You HAVE the host cargo slot
+(one cargo at a time host-wide; --target x86_64-pc-windows-msvc;
+CARGO_TARGET_DIR=.target-hunt). RAM gate before every cargo run: >=10 GB
+available and >=5 GB free physical, abort-and-note if failed. Deliverable:
+HUNT_REPORT_CREL_ROUND2.md + raw logs + cfg(test)-only code.
+
+## Mandate
+DESIGN_C_REL.md (round 1, commit 408dc5b6 — read IN FULL first, including
+§7.2's six named negative-control fixtures and the Stage table with stop
+criteria) is BINDING. Round 1's verdict: the support-only verifier design
+was closed at obligation O4; the salvage project is C_rel as a
+strict-discharge warm TEMPLATE cache — rootless certificate bodies routed
+to target positions where the existing STRICT verifier still replays the
+full proof; every hard verdict is still minted only by the unchanged
+strict verifier, so the cache can only save time, never change results.
+HUNT_REPORT_CERT_SUPPORT.md (3cd224fe) holds the retained shadow data
+(77.78-96.11% conditional rebind acceptance) and fixture identities.
+
+## Execute EXACTLY Stages 1-3 (shadow-only; no production hard values)
+- Stage 1 — consolidated shadow reproduction: cfg(test) relative-clock
+  converter/materializer against the consolidated engine; frozen
+  acquisition manifest + four deterministic balanced outside-footprint
+  mutations per K + strict-accepted hand Loss fixtures; unchanged-strict
+  transfer as the negative control; every rebound candidate goes through
+  the UNCHANGED strict verifier; record acquisition/rejection reasons and
+  M/V timers; compare conditional acceptance rates with the retained
+  77.78-96.11% range. Stop criteria per the design table: any hard result
+  emitted without strict acceptance = halt that path; no cross-root
+  strict acceptance beyond exact root equality = close the
+  full-certificate path.
+- Stage 2 — interface recorder + confusion matrix: extract the exact v1
+  projection/zone/WF declaration, evaluate it but BYPASS it in a parallel
+  shadow arm so unconditionally strict-acceptable bodies are known;
+  measure true/false probe classes, serialized bytes, candidate counts,
+  and per-phase timers. Apply the design's O12-equation stop condition.
+- Stage 3 — the six negative-control fixtures: run ONLY the six cases
+  named H1-H6 in §7.2, exactly as specified there (H2 uses the retained
+  0hz3hty far-five fixture, not any new coordinate set). These verify:
+  D6-image regeneration (H1), correct rejection of a remote defender
+  window (H2), saturated clock encoding rejection (H3), negative-cache
+  key isolation (H4), cache-coherence on position change (H5), and
+  cold-fallback state isolation (H6). Check each case's pass/fail
+  condition from the design table explicitly and report each by name.
+
+Stages 4-6 are OUT OF SCOPE this round (economics and any production
+gate candidate come only after these close green).
+
+## Rules
+cfg(test) only; tss_verify.rs UNTOUCHED; no production-path changes;
+RAM/runtime classes per the design table (Stage 1 M-class 64 MiB test TT,
+serial; Stages 2-3 fixture replays; each invocation < 10 min); ONE cargo
+at a time; chunk <= 2h per exec; incremental writes; raw logs UTF-8.
+An honest negative is a valid result — if a stop criterion fires, name
+it exactly and close the affected path. Final message: per-stage verdict
+(PASS / STOPPED with the specific criterion), the conditional acceptance
+rate vs the retained range, the six fixture outcomes one line each, and
+whether Stage-4 economics is justified.

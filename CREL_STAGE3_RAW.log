@@ -1,0 +1,24 @@
+RAM_GATE invocation=stage3_final available_gb=15.660 free_physical_gb=15.672 required_available_gb=10 required_free_physical_gb=5
+cargo.exe :     Finished `release` profile [optimized] target(s) in 0.06s
+At line:2 char:759
++ ... rget-hunt'; & cargo test -p hexfield_eq --release --target x86_64-pc- ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `r...get(s) in 0.06s:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running unittests rust\src\lib.rs 
+(.target-hunt\x86_64-pc-windows-msvc\release\deps\hexfield_eq-de26e3778420c4c2.exe)
+
+running 1 test
+test cert_support_hunt::crel_round2_stage_3_h1_h6 ... CREL_ROUND2_META stage=3 fixtures=H1_NQ2_REMOTE,H2_NQ3_FAR5,H3_CLOCK_SATURATION,H4_NEGATIVE_HORIZON_KEY,H5_STALE_DELIVERY,H6_FORCED_MISS_ISOLATION shadow_only=true tt_bytes=67108864 hard_mint_calls=0
+CREL_STAGE3_FIXTURE name=H1_NQ2_REMOTE outcome=PASS condition=source_and_all_D6_images_strict_accept horizon=66 node_cap=10000 solve_nodes=4959 images=12
+CREL_STAGE3_FIXTURE name=H2_NQ3_FAR5 outcome=PASS condition=unchanged_and_rebound_strict_reject unchanged=false rebound=false fixture=retained_0hz3hty_far_five additions=[(-8, 0), (-16, 0), (6, -1), (7, -1), (-24, 0), (-32, 0), (8, -1), (9, -1), (-40, 0), (-48, 0), (10, -1), (-56, 0)]
+CREL_STAGE3_FIXTURE name=H3_CLOCK_SATURATION outcome=PASS condition=saturated_source_encoding_rejected base=4294967294 logical_delta=2 stored=4294967295 reason=saturated_event_encoding
+CREL_STAGE3_FIXTURE name=H4_NEGATIVE_HORIZON_KEY outcome=PASS condition=h109_negative_does_not_suppress_h110 h109=forced_mismatch h110=strict_accepted
+CREL_STAGE3_FIXTURE name=H5_STALE_DELIVERY outcome=PASS condition=complete_binding_mismatch_returns_UNKNOWN chosen=[-8,0] delivered=Unknown
+CREL_STAGE3_FIXTURE name=H6_FORCED_MISS_ISOLATION outcome=PASS condition=post_miss_cold_equals_direct_cold status=Win cert_equal=true solver_visible_state_equal=true snapshot_root_equal=true nodes=82 tt_entries=148 peak_tt_bytes=14688 hard_mint_calls=0
+CREL_STAGE3_VERDICT verdict=PASS criterion=all_six_named_fixture_conditions_satisfied hard_mint_calls=0 elapsed_s=0.765
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 147 filtered out; finished in 0.77s
+
