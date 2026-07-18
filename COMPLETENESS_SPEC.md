@@ -684,3 +684,169 @@ NoNode :=
 **[DESIGN]** CP-O11/CP-O12/CP-O13 (L17 → T11/T11.1 → full T6 capstone) is the parallel semantic prerequisite for including the current full T6 region in group 2's grammar; it is not replaced by any operational obligation above.
 
 **[RISK — PROGRAM MAXIMUM]** The single largest risk is CP-O27: an exact, maintainable correspondence between the mutable Rust generator/search state and the finite Lean grammar. The T6 chain is difficult but already surrounded by substantial proved machinery; the Rust completeness boundary is genuinely new.
+
+## Session CP-2 addendum (2026-07-18) — Candidate C artifact, stop seam, and current-spine triage
+
+**[DOCUMENT STATUS]** THIS IS THE ONLY CP-2 EDIT REGION IN THIS FILE. It updates the planning snapshot without rewriting the authoritative CP-1 body above. `COMPLETENESS_CERT_SPEC.md` is the normative v1 byte/checker specification; conflicts are resolved in favor of the newer, narrower v1 document.
+
+### CP-2.1 Snapshot and statement-fidelity update
+
+**[DOCUMENT STATUS]** The engine source remains `hunt/completeness` at `ae034425fe0d7fd506b58bd182ccd215a2362461`; no production source was edited in CP-2.
+
+**[LEAN FACT]** The committed Lean snapshot inspected is `ad82f2226b2c09a546647686dc780cdf3e43083a`. S9S-33 through S9S-37 are landed; S9S-38 is live and uncommitted. The authoritative current ledger still gives L17, T11, and T11.1 status `UNSTATED` (`E:\tss-lean\LEDGER.md:114-116`).
+
+**[LEAN FACT]** S9S-30 through S9S-32 landed the ordinary-authority reifier, `TssZones.FHFixedWindowTrace`, the raw mapped-run/remainder carriers, and the matching completion upper/lower contradiction, including `TssZones.CouplingEvent.reifyInheritedOrdinaryAuthorityInputs`, `TssZones.FHFixedWindowTrace.completionSafe_of_omitted`, and `TssZones.CompilerCouplingInvariant.completionImpossible_of_omitted_run` (`E:\tss-lean\JOURNAL.md:2848-2902,2952-3003,3005-3057`).
+
+**[LEAN FACT]** S9S-33 landed the D17-authority protected-occupation carriers, including `TssZones.CouplingEvent.reifyInheritedD17AuthorityInputs`, `TssZones.CouplingEvent.fhD17InheritedD17Authority_newX_not_protected`, and `TssZones.CouplingEvent.fhD17Inherited_newX_not_protected` (`E:\tss-lean\JOURNAL.md:3227-3278`).
+
+**[LEAN FACT]** S9S-34 landed mapped FH/FH+D17 event assembly and continuing/LOSS/escape completion carriers, including `TssZones.CompilerCouplingInvariant.l17FH_createsX_not_protected`, `TssZones.CompilerCouplingInvariant.l17FHD17_createsX_not_protected`, and `TssZones.fhSelectedFirstFillCarriers` (`E:\tss-lean\JOURNAL.md:3312-3365`).
+
+**[LEAN FACT]** S9S-35 landed `TssZones.FHDefenderTerminalRun` and the run-level three-way selector `TssZones.FHDefenderTerminalRun.firstCompletionCase` (`E:\tss-lean\JOURNAL.md:3434-3490`).
+
+**[LEAN FACT]** S9S-36 and S9S-37 eliminated selector cases (iii) and (i) through `TssZones.FHDefenderTerminalRun.offKernelFirstFill_impossible`, `TssZones.FHDefenderTerminalRun.noDismissal_loss_impossible`, and `TssZones.FHDefenderTerminalRun.noDismissal_mappedOrdinary_impossible` (`E:\tss-lean\JOURNAL.md:3542-3578,3648-3674`).
+
+**[LEAN FACT — LIVE, NOT LANDED]** The observed S9S-38 diff adds the ordinary-authority case-(ii) adapters `TssZones.CouplingEvent.inheritedOrdinaryAuthority_completionUpper_D21`, `TssZones.CouplingEvent.fhInheritedOrdinaryAuthority_completionUpper`, and `TssZones.CouplingEvent.fhD17InheritedOrdinaryAuthority_completionUpper`; the live ledger explicitly says the direct/inherited D17 completion-clock adapter and final selector assembly remain. These declarations are not counted as landed or as a discharge in this addendum.
+
+**[DESIGN]** SOURCE_PROOF fidelity remains exact: L17 has two clauses—protected occupation while mapped/role abandonment at escape, and no defender completion before mapped or escape resolution (`E:\tss-lean\SOURCE_PROOF.md:1086-1094`). T11 and T11.1 remain downstream semantic soundness claims, not aliases for the individual carrier lemmas (`E:\tss-lean\SOURCE_PROOF.md:1174-1203`).
+
+### CP-2.2 Final UNKNOWN provenance seam
+
+**[CODE FACT]** `run` currently returns `()` and merges root proof, cap, and final-stage arrival in one break at lines 4386-4387; it separately merges a missing selected cutoff at lines 4389-4390 and a nonadvancing cutoff at lines 4392-4395 (`packages/hexfield_eq/rust/src/tss_solver.rs:4359-4401`).
+
+**[CODE FACT]** `run_until` currently returns `Option<usize>`. Its `None` merges loop-cap exit, root `pn==0`, root `dn==0`, cutoff-without-progress, and stall; only a selected intermediate cutoff is returned as `Some(depth)` (`packages/hexfield_eq/rust/src/tss_solver.rs:4451-4491`).
+
+**[CODE FACT]** After `run`, production materialization reduces every positive materialization/compaction/rebase failure to `cert=None`, while `AttemptResult` carries only that optional certificate and statistics (`packages/hexfield_eq/rust/src/tss_solver.rs:1092-1096,1170-1198,1262-1267,1707-1712`). The outer solve then merges every no-certificate attempt into `Unknown` (`packages/hexfield_eq/rust/src/tss_solver.rs:941-993,1725-1730`).
+
+**[PROPOSAL — NO CODE IN CP-2]** Replace `Option<usize>` with this exact internal result. It is deliberately narrower than a public verdict:
+
+```text
+StageEvent =
+  SelectedCutoff { from_stage: u16, encountered_depth: u16 }
+
+RunUntilExit =
+  RootPnZero
+  | RootDnZero
+  | NodeCap { expansions: u64, cap: u64 }
+  | SelectedCutoff { depth: u16 }
+  | CutoffNoProgress { depth: u16 }
+  | Stalled
+
+SearchStop =
+  RootProven { final_stage: u16 }
+  | RootRefutedCandidate {
+      final_stage: u16,
+      no_cert: NoTssCertificateV1,
+      structural_boundary_count: u64
+    }
+  | NodeCap { stage: u16, expansions: u64, cap: u64 }
+  | CutoffNoProgress { stage: u16, encountered_depth: u16 }
+  | NonAdvancingCutoff { stage: u16, encountered_depth: u16 }
+  | Stalled { stage: u16 }
+  | ExhaustionArtifactFailed { stage: u16, reason: NoEmitFailure }
+  | MaterializationFailed { reason: WinMaterializationFailure }
+  | PreconditionRejected { reason: PreconditionFailure }
+  | InvariantViolation { code: InvariantCode }
+```
+
+**[DESIGN]** The v1 reason enums are closed as follows; adding a variant is an observation-seam version change:
+
+```text
+PreconditionFailure =
+  ZeroNodeCap | HorizonBeforeRoot | RootTooLarge
+  | ImmediateBeyondHorizon | GoalFilteredImmediate
+  | UnsupportedCP1Root | UnsupportedProfile
+
+WinMaterializationFailure =
+  RootNotProvenTag | ProofBuildFailed | CompactLimit
+  | RebaseFailed | StrictPositiveVerificationFailed
+
+NoEmitFailure =
+  LiveUnexpanded | EligibleDepthCutoff | UnlinkedLazyObligation
+  | ChoiceGeneratorNotExhausted | UnsupportedNodeOrEdgeTag
+  | StructuralCostMismatch | NegativeDagLimit
+
+InvariantCode =
+  MissingRootEntry | RefreshDisagreesWithExit
+  | StageDepthOverflow | ImpossibleRunUntilFallthrough
+```
+
+**[CODE FACT]** The first three precondition reasons correspond to the current early merge at `caps.node_cap == 0`, expired semantic horizon, and oversized root; the next two correspond to an immediate result beyond the horizon or outside the requested goal (`packages/hexfield_eq/rust/src/tss_solver.rs:890-924`). The positive failure split names the current `materialize -> compact -> rebase/verify` chain (`packages/hexfield_eq/rust/src/tss_solver.rs:1170-1198`).
+
+**[DESIGN]** `SelectedCutoff` is a stage event, never a terminal `SearchStop`. `NoSelectedCutoff` is removed: once `run_until` returns a total tagged exit, that name would reintroduce the present ambiguity.
+
+**[DESIGN]** `RunUntilExit` maps mechanically onto the current merge points: root-number exits at lines 4461-4466; selected cutoff at 4467-4471; no-progress cutoff at 4472-4483; stall at 4484-4487; and the two while guards at 4459 become `NodeCap` (the production call passes the same cap at line 4369). No fallthrough `None` remains.
+
+**[DESIGN]** After the mandatory bottom-up refresh, `run` applies this precedence: a materializable `pn==0` root is `RootProven`; a `dn==0` root may become `RootRefutedCandidate` only if the v1 emitter constructs a complete skeleton with no live/eligible cutoff; an unresolved root at the bound is `NodeCap`; otherwise the exact `RunUntilExit` maps to its like-named incomplete stop. A `dn==0` number alone never creates `RootRefutedCandidate` because `DepthCutoff` and `Refuted` share numeric values (`packages/hexfield_eq/rust/src/tss_solver.rs:2355-2369,5596-5605`).
+
+**[DESIGN]** `RootRefutedCandidate` is still untrusted producer output. The public classification is:
+
+```text
+RootProven + strict positive verification       -> WIN(cert)
+RootRefutedCandidate + checkNo acceptance       -> NO_CONTRACT_WIN(no_cert)
+NodeCap                                          -> UNKNOWN(Capped)
+every other SearchStop or checker rejection     -> UNKNOWN(Incomplete)
+```
+
+**[DESIGN]** The queued engine session is mechanical: introduce `RunUntilExit`; record intermediate `StageEvent`s; return a `SearchStop` from `run`; thread it through `AttemptResult` in the default-off/test-only seam; add one fixture for every variant; and leave `ProofStatus`, `DeepResult`, hard-value minting, and production behavior unchanged. Public `ExhaustedPendingVerification` is unnecessary: pending verification is an internal `RootRefutedCandidate`, while only checker acceptance crosses the sealed result boundary.
+
+### CP-2.3 CP-O1 through CP-O29 triage against the current spine
+
+**[DESIGN]** “Discharged” below means the obligation as scoped in CP-1 already has the named kernel declarations. “Eased” means S9S-30–38 supplied a real dependency but the CP obligation remains. “Unchanged” means the new spine work did not close the CP-specific grammar/search/correspondence surface.
+
+| ID | CP-2 triage | Exact current reading |
+|---:|---|---|
+| CP-O1 | **Eased; open** | **[LEAN FACT]** The positive carrier vocabulary is richer, but no Lean declaration defines `CP1-a49e8abd-v1`, `AttackEdges_CP1`, `DefendEdges_CP1`, or `ContractWin`. S9S-33–38 reduces later T6/FH semantic case work only. |
+| CP-O2 | **Unchanged; open** | **[LEAN FACT]** D18 rank/DAG machinery remains reusable, but no exact CP1 generator-finiteness or atomic expanded-height theorem exists. |
+| CP-O3 | **Eased; open bridge** | **[LEAN FACT]** `TssZones.lambdaOne_win_sound`, `TssZones.lambdaOne_loss_sound`, and the positive compiler carriers are proved/current, but the Rust/CP1 tag, clock, and structural-cost bridge is still CP-O27 (`E:\tss-lean\LEDGER.md:32,50-56`). |
+| CP-O4 | **Discharged model-side** | **[LEAN FACT]** `TssZones.T3` and `TssZones.T3_soundDismissal` are `PROVEN` (`E:\tss-lean\LEDGER.md:80`). The Candidate C checker nevertheless regenerates global facts; it does not serialize a T3 marker. |
+| CP-O5 | **Discharged model-side** | **[LEAN FACT]** `TssZones.T4` is `PROVEN` (`E:\tss-lean\LEDGER.md:81`). Rust generator identification remains CP-O14/27. |
+| CP-O6 | **Discharged under its premises** | **[LEAN FACT]** `TssZones.T5` is `PROVEN` with all four source premises (`E:\tss-lean\LEDGER.md:84`). |
+| CP-O7 | **Discharged model-side** | **[LEAN FACT]** `TssZones.T9` and `TssZones.T9_soundDismissal` are `PROVEN` (`E:\tss-lean\LEDGER.md:127`). |
+| CP-O8 | **Discharged for positive base/D17 DAGs** | **[LEAN FACT]** `TssZones.T10_baseDAGSoundness`, `TssZones.T10_d17DAGSoundness`, and the dismissal transports are `PROVEN` (`E:\tss-lean\LEDGER.md:130-131`). The new negative DAG remains CP-O19. |
+| CP-O9 | **Discharged for named D19 local facts** | **[LEAN FACT]** Exact stored/off-kernel classification is supplied by `TssZones.GateValid_classify_stored_iff_extendableKernel` and `TssZones.GateValid_classify_offStoredMap_iff_offKernel`; kernel finiteness/nonemptiness and `TssZones.L15_protectedGateDichotomy` are proved (`E:\tss-lean\LEDGER.md:92-100,112`). |
+| CP-O10 | **Discharged for named D20/D21/L16 kernels** | **[LEAN FACT]** `TssZones.forcedRank_recurrence`, `TssZones.fhExposure_recurrence`, `TssZones.D21_localOmissionBounds`, and `TssZones.L16_weightedHazardBounds` supply the listed recurrences and inequalities (`E:\tss-lean\LEDGER.md:101-109,113`). |
+| CP-O11 | **Materially eased; not discharged** | **[LEAN FACT]** S9S-33–37 landed the D17/FH carriers, raw run, three-way selector, and complete exclusions of cases (i) and (iii). The live S9S-38 ordinary-authority adapter leaves the D17 completion-clock adapter and final assembly; ledger row 114 is still `UNSTATED`. |
+| CP-O12 | **Eased; open** | **[LEAN FACT]** T11/T11.1 checker/policy infrastructure exists, but `TssZones.T11_exactCopySoundness` and `TssZones.T11_1_d17Compatibility` remain `UNSTATED` until full L17 is consumed (`E:\tss-lean\LEDGER.md:115-116`). |
+| CP-O13 | **Eased; open** | **[LEAN FACT]** The T6 compiler, handoff/escape seams, and kernel calculus exist, but the full one-leading-region soundness capstone remains unstated; SOURCE T6 requires the exact kernel, typed terminal or valid handoff, and no recursive re-entry claim (`E:\tss-lean\SOURCE_PROOF.md:635-660`; `E:\tss-lean\LEDGER.md:85-86`). |
+| CP-O14 | **Unchanged; open** | **[LEAN FACT]** No S9S declaration models Rust claimant candidates, two-order pair promotion, `WideTurnGate`, or installed attack vectors. |
+| CP-O15 | **Unchanged; open** | **[LEAN FACT]** The semantic T6/D19 kernel helps, but no declaration proves the batch defender plan is the exact sequential quotient of `DefendEdges_CP1`. |
+| CP-O16 | **Unchanged; open/high risk** | **[CODE FACT]** The current terminal-always-refuted and missing exact generator-side height guards remain (`packages/hexfield_eq/rust/src/tss_solver.rs:5769-5776,5908,6104-6123,8523-8536`). |
+| CP-O17 | **Unchanged; open** | **[LEAN FACT]** No constructive negative `NoContractWin` grammar or finite-dual equivalence exists. |
+| CP-O18 | **Eased by CP-2 spec; open in Lean** | **[DESIGN]** `COMPLETENESS_CERT_SPEC.md` now fixes the v1 syntax and recursion, but no `NoTssCertificate`/`checkNo_sound` declaration has landed. |
+| CP-O19 | **Unchanged; open with proved pattern** | **[LEAN FACT]** T10 remains a positive-DAG template; no negative exact-proposition DAG unfolding theorem exists. |
+| CP-O20 | **Unchanged; open** | **[LEAN FACT]** No tagged PN/DN model has landed in the spine. |
+| CP-O21 | **Unchanged; open/potentially blocking** | **[LEAN FACT]** No threshold/saturation proof exists. The retained re-traversal work is research evidence, not a Lean declaration. |
+| CP-O22 | **Unchanged; open/very high** | **[LEAN FACT]** No global scheduler fairness theorem exists for ordinary selection, root probe, width tiers, or committed Universal yield. |
+| CP-O23 | **Unchanged; open** | **[LEAN FACT]** No mutable staged driver/refresh refinement theorem exists. V1 independently checks only boundaries actually used by an accepted negative. |
+| CP-O24 | **Unchanged; open** | **[LEAN FACT]** No eager/lazy bisimulation exists. Candidate C avoids trusting lazy bookkeeping but does not prove lazy liveness. |
+| CP-O25 | **Unchanged operationally; checker fallback specified** | **[DESIGN]** V1 regenerates canonical batch/sequential defense at every relevant node, so incremental output is never negative authority. Universal incremental=batch remains open for Candidate B/profile admission. |
+| CP-O26 | **Unchanged operationally** | **[LEAN FACT]** Positive T10 sharing does not prove cache erasure, arena-index refusal, or refresh scheduling. V1 exact primary replay makes checker truth retention-independent. |
+| CP-O27 | **Unchanged; program-critical** | **[LEAN FACT]** S9S semantics provide better model targets but no Rust-to-Lean state, primitive, generator, tag, or codec correspondence. The ledger still classifies engine/model comparisons as historical evidence (`E:\tss-lean\LEDGER.md:146`). |
+| CP-O28 | **Eased by final seam; implementation open** | **[DESIGN]** CP-2 fixes `StageEvent`, `RunUntilExit`, and `SearchStop` against the current merge points. The queued Rust task remains to implement the default-off observation seam and fixtures. |
+| CP-O29 | **Eased by v1 bounds; open/high** | **[DESIGN]** The byte format, strict limits, decreasing measures, replay strategy, and acceptance condition are fixed. Lean totality and executed-checker/codec correspondence remain unimplemented. |
+
+### CP-2.4 Revised estimate, critical path, and parallel lanes
+
+**[ESTIMATE]** After CP-2, the remaining completeness program is **20–36 focused CP sessions**. The first production Candidate C milestone is **11–19 sessions** of that total: 3–5 for CP1 grammar/finiteness/finite dual, 3–5 for unshared then DAG `checkNo_sound`, 3–6 for independent generator/state/codec correspondence, and 2–3 for emitter, hostile mutations, limits, and sealed integration. Overlap makes these ranges nonadditive at their upper edges.
+
+**[ESTIMATE]** The existing spine lane needs approximately **3–5 further focused sessions** for S9S-38 completion, L17 final assembly, T11/T11.1, and the T6 capstone. Those sessions are a semantic prerequisite for the full-profile grammar but can run in parallel with CP grammar/checker work; if serialized, the combined remaining total is roughly **23–41 sessions**.
+
+**[DESIGN]** The critical path to Candidate C kernel truth is:
+
+```text
+S9S-38 -> full L17 -> T11/T11.1 -> T6 capstone
+                                      |
+CP-O1/O2 grammar + finiteness --------+
+        -> CP-O17 finite dual
+        -> CP-O18 unshared checkNo_sound
+        -> CP-O19 exact negative DAG
+        -> CP-O29 executable bounded checker
+        -> CP-O27 state/generator/codec correspondence
+        -> CP-O28 emitter stop provenance + sealed mint
+```
+
+**[DESIGN]** Once the Lean lane is free, three workstreams can proceed in parallel without file overlap: (A) CP-O1/O2/O17/O18 in new Lean grammar/checker modules; (B) CP-O14/O15/O16 pure generator and structural-cost specification/fixtures; and (C) CP-O28 Rust stop instrumentation plus v1 emitter scaffolding in the cargo slot. CP-O27 joins A and B and is therefore the convergence point; CP-O29 then connects the proved checker to executed bytes.
+
+**[DESIGN]** Candidate B work is downstream but partly parallel after Candidate C's grammar freezes: CP-O20/21 tagged recurrence and saturation arithmetic; CP-O23 staged refresh; and CP-O24/25/26 optimization refinements can be separate sessions. CP-O22 global fairness cannot close until CP-O20/21/23 are stable.
+
+**[RISK — PROGRAM MAXIMUM, UNCHANGED]** The single riskiest remaining obligation is CP-O27. S9S-30–38 reduces semantic uncertainty, but the exact and maintainable correspondence between mutable Rust full-state generators/atomic edges and the finite Lean/checker grammar remains entirely new.

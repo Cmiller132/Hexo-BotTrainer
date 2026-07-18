@@ -1,0 +1,57 @@
+R-CP2 — COMPLETENESS PROGRAM SESSION 1 OF THE REOPENED RUN (high): Candidate C artifacts — certificate schema, checker spec, obligation triage
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-completeness
+(branch hunt/completeness, HEAD = ae034425). You CANNOT git-commit.
+NO cargo runs (slot busy) and NO Lean builds this session (spine lane
+holds Lean RAM priority) — this is a pure design/spec authoring session.
+Deliverables: COMPLETENESS_CERT_SPEC.md (new) + COMPLETENESS_SPEC.md
+edits ONLY in a clearly-marked "Session CP-2 addendum" section.
+
+## Context
+Owner has REOPENED the parked completeness program (ruling 07-18: attack
+parked/open problems at full Codex capacity). COMPLETENESS_SPEC.md
+(route (b): exact-root exhaustion certificates + independently specified
+verified checker; obligations CP-O1..O29) is the authoritative design —
+read it in full first. The Lean spine has advanced since the spec was
+written: S9S-33..37 landed the full D17/FH carrier layer, the run-level
+three-way selector, and case (i)+(iii) exclusions; S9S-38 (running) is
+the last L17 input, then T11/T11.1 and the T6 capstone. Read
+E:\tss-lean\LEDGER.md and the S9S-33..38 entries in E:\tss-lean\JOURNAL.md
+to see what now exists. Rust engine: packages/hexfield_eq/rust/src/
+(tss_solver.rs, tss_verify.rs, tss_corpus.rs) at this worktree's tip.
+
+## Objectives (priority order)
+1. **NoTssCertificate v1 schema (the Candidate C artifact).** A complete,
+   versioned, byte-level specification of the exhaustion certificate:
+   exact fields for root/grammar_id/horizons, the per-node exhaustion
+   records (which children were generated, which cutoffs selected, the
+   generator-exhaustion events per spec §3.3), compactness strategy
+   (the certificate must not be the whole search tree — design the
+   minimal regenerable skeleton per §5.3's regeneration principle:
+   checkNo re-derives legal/generator/remote-threat/terminal facts
+   globally, per the O4 ruling — trusted markers inherit C-REL's
+   failure class). State exact size estimates on the hard row.
+2. **checkNo total bounded checker spec.** Pseudocode-level: input
+   validation (WellFormedCP1), the regeneration loop, termination
+   argument (totality bound), and the exact acceptance condition.
+   Map each step to the CP-O obligations it discharges.
+3. **CP-O1..O29 triage against the CURRENT spine.** For each obligation:
+   unchanged / eased / discharged by S9S-30..38 landings (name the exact
+   Lean declaration when discharged), and the revised session estimate
+   for the remaining program. Identify the critical path to Candidate C
+   kernel truth and which items can run as parallel spec/Lean sessions
+   once the capstone frees the Lean lane.
+4. **UNKNOWN provenance seam refinement** (spec §2.2): finalize the
+   SearchStop enum against the CURRENT tss_solver.rs (line-cite the
+   actual merge points in run/run_until at this tip), so the engine-side
+   session that lands it (queued for the cargo slot) is a mechanical
+   implement-to-spec job.
+
+## Rules
+DESIGN/PROPOSAL/CODE-FACT labeling discipline exactly as the spec uses;
+every CODE FACT line-cited against this worktree's actual sources; no
+production edits, no Lean edits, no cargo, no Lean builds. Statement
+fidelity to SOURCE_PROOF.md and the LEDGER for anything Lean-adjacent.
+Incremental disk writes; chunk <= 2h per exec. Final message: certificate
+size estimate, revised total-session estimate, the critical path, and
+the single riskiest remaining obligation.
