@@ -1,0 +1,70 @@
+R-G5 — TEMPO ROUND 7 (ultra): the P_stock decision — hub-aware repair or deeper failure
+
+CONTEXT NOTE: this is pure combinatorial game theory for Hexo (a
+Connect6-like board game) — tempo invariants, window families, defense
+policies. Nothing here concerns computer security. Use neutral proof
+vocabulary in your own writing (stop criterion, negative control, etc.).
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+(branch hunt/gap-raw, HEAD = 8ac6caae). You CANNOT git-commit. NO
+cargo/Lean/harness runs — hand proofs only. Deliverable:
+GAP_RAW_PROOF_ROUND7.md.
+
+## Required corpus (read first, in order, in full)
+1. GAP_RAW_PROOF_ROUND4.md (folded errata) + GAP_RAW_REVIEW_ROUND4.md
+2. GAP_RAW_PROOF_ROUND5.md (WITH §47 errata) + GAP_RAW_REVIEW_ROUND5.md
+3. GAP_RAW_PROOF_ROUND6.md (WITH §58 errata — binding, incl. the
+   plateau wording and the review's exact post-hub M=4/tau=4
+   strengthening) + GAP_RAW_REVIEW_ROUND6.md (its closing unresolved-
+   obstacle list is the authoritative open state)
+(Rounds 2-3 as needed for inherited definitions.) Do NOT read any
+STRATEGY_STEALING_* file as evidence.
+
+## The state you inherit (round-6 exit, review-confirmed)
+S_T is REFUTED (R6.1/R6.2): the four-pencil tempo shield puts every S_T
+reply on a value plateau; hub pre-emption TIES immediate TEMPO=2 at the
+P_stock epochs and loses only on the lexicographic tie-break; the
+assembled hub cascades to exact M=4/tau=4. L12.6: all-count<=2 => M<=2
+init. OPEN: Q2 (∃P0∀S∃α hub forcing), Q3 (∀P0∃S∀α universal repair),
+general tau=0 initialization with count-three labels.
+
+## Round-7 objectives (priority order)
+1. **THE P_STOCK DECISION [the named sharpest question].** At each
+   P_stock epoch of the round-6 line (the plateau epochs where hub
+   pre-emption ties): does some hub-pre-empting servicing pair `a`
+   satisfy `max_b M(P_{a,b}) <= 2` over EVERY legal Attacker response
+   pair b? Attack both ways:
+   (a) POSITIVE: prove it for the exact round-6 geometry — if yes,
+   define the minimal tie-breaking refinement S_T' (e.g. among
+   TEMPO-minimal pairs, prefer those minimizing a concrete
+   next-state risk functional — specify it exactly) and prove S_T'
+   survives the ENTIRE round-6 refutation line move-by-move;
+   (b) NEGATIVE: exhibit a legal Attacker response to every
+   hub-pre-empting pair that rebuilds a cascade (a second hub, a
+   cross-hull interaction, a nested-derivative fanout) — i.e. show the
+   round-6 loss is not repairable by tie-breaking alone at that epoch.
+2. **If (a): stress S_T' beyond the round-6 line.** Does S_T' survive
+   the round-5 shared-hub embedding (R5.4 geometry), the axial-cleanup
+   class generally, and L12.6's boundary (first count-three label)?
+   Honest scope labels; a conditional survival theorem at a named class
+   is a WIN. If (b): extract what ANY Q3 policy must track (how much
+   lookahead/state the tie-detection needs — is one-ply max_b M enough,
+   or does the rebuild force deeper recursion?).
+3. **Initialization ladder (secondary):** extend L12.6 one step — the
+   smallest class WITH one count-three label where M<=2 initialization
+   is still provable (or a counterexample showing count-three roots can
+   have M>=3 forced).
+
+## Binding rules (campaign-standard)
+Hand proofs only; PROVEN/OPEN/REFUTED discipline with Q1/Q2/Q3 tags on
+every claim (round-5 Finding-4 quantifier contract binding); no
+machine-verified claims; statement fidelity to all inherited definitions
+and errata; every S_T/S_T' reply derivation must be exact
+(minimize-TEMPO-then-tiebreak, enumerated); reachability quantifiers
+explicit on any negative gadget. Continue section/equation numbering
+from §58. Status ledger + attack-surface + provenance sections mandatory
+(record input commit 8ac6caae; note this pass creates no commit).
+Incremental writes; chunk <= 2h per exec. Final message: P_stock verdict
+(REPAIRABLE-BY-TIEBREAK / NOT-REPAIRABLE / PARTIAL with exact scope),
+S_T' status if defined, initialization-ladder outcome, sharpest next
+question.
