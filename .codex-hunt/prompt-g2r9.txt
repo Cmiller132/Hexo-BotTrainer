@@ -1,0 +1,83 @@
+G2R9 — SHARED PROVEN-FRAGMENT TT (U18/U22): the T10-licensed DAG-sharing
+build, default-off, soundness-first.
+
+Context. The Lean spine PROVED T10 (DAG-unfolding soundness,
+E:\tss-lean\TssZones\DAGUnfoldingSoundness.lean, commit 69adffc): a
+DAG-shaped certificate — one stored copy of each shared sub-proof,
+referenced from many parents — unfolds to a valid tree certificate over
+the original compilers/horizon, in base and D17 regimes, with exact
+dismissal corollaries, PROVIDED labels at shared nodes are
+**max-dominant bounds over all path copies, not per-copy equalities**.
+That merge rule is the whole soundness content; getting it wrong mints
+silent wrong verdicts. Read the master plan's U18 and U22 sections
+(docs/PLAN_TSS_SOLVER_UPGRADES.md in THIS worktree) for the lever spec,
+and the NQ4 report (HUNT_REPORT_TURN_QUOTIENT.md §2) for the exact
+sound horizon-transfer rules any imported proof must obey (WIN upward;
+complete restricted refutation downward; UNKNOWN/caps/DepthCutoff
+NEVER; imported zone proofs additionally need the existing
+resolution_t / zone_build_t / rebase / verifier-preflight checks).
+Motivation: TT saturation is the measured #1 deep-solve bottleneck
+(round-8b: 512 MiB ≈ 1M nodes; 0l rows closed only at 2 GiB), and
+R-LF1 (PROOF_LAZY_FRONTIER.md, HUNT_REPORT_LAZY_FRONTIER.md, this
+worktree) just cut TT admissions ~2/3 — your build composes with it.
+Owner directive: the campaign goal is a dramatically more efficient
+solver.
+
+You are working in
+E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-turn-quotient (branch
+hunt/turn-quotient @86a6418c — includes the lazy frontier, default-off,
+and the NQ4 telemetry; keep both working). You CANNOT git-commit.
+Engine = packages/hexfield_eq/rust/src/tss_solver.rs (+ tss_verify.rs /
+tss_core.rs as the plan requires).
+
+## Work order
+1. DESIGN MEMO first (BUILD_SHARED_FRAGMENTS.md): what a stored
+   fragment is (key, payload, labels), the exact max-dominant merge
+   rule implemented and WHY it matches T10's licensed semantics (cite
+   the plan's U18/U22 contract), which lookups may consume a fragment
+   (with the NQ4 transfer rules embedded), and how the strict verifier
+   remains the single mint (a consumed fragment must never bypass
+   verification of the final certificate). State explicitly what is
+   IN scope this round (within-process cross-solve reuse; repeat/warm
+   solves) and OUT (on-disk persistence, cross-position C_rel-style
+   transfer — refuted for the current format by NQ3).
+2. IMPLEMENT behind one env flag (default OFF, zero behavior change
+   off; read once per solver construction). Compose correctly with
+   TSS_LAZY_FRONTIER both off and on.
+3. SOUNDNESS CAMPAIGN (test-gated): flag-on vs flag-off over all 19
+   forcing rows at 10k/100k + double_fork_compact + 100 human roots —
+   VERDICT IDENTITY everywhere; every returned certificate
+   verifier-accepted; any flip = STOP and write up. Then the WARM-REUSE
+   scenario (the point of the lever): per root, solve twice in one
+   process (cold then warm); report second-solve nodes/expansions/wall
+   flag-on vs flag-off. Add a mutation control: warm-solve a DIFFERENT
+   root after a first solve and show verdicts still identical (no
+   cross-contamination).
+4. THE BOTTLENECK METRIC: pick the heaviest official rows that
+   historically needed the 2 GiB profile (0l rows) and measure, flag-on
+   vs flag-off at REDUCED TT budgets (512 MiB, 1 GiB): does fragment
+   sharing close rows at budgets where they previously saturated?
+   Report honestly either way — a null result here is a finding, not a
+   failure.
+5. OFFICIAL GATE flag-on: TSS_BACKWALK_TT_BYTES=2147483648 single
+   process, tss_corpus_check -- --ignored --test-threads=1, expect
+   CORPUS_DONE failures=0 (>11 GB free RAM first). Also rerun it with
+   BOTH flags on (fragments + lazy frontier) — the composition must be
+   green too.
+6. MEASURE: headline table — cold-solve deltas, warm-solve deltas,
+   reduced-budget closures, fragment-store size/hit rates.
+
+## Rules
+CARGO_TARGET_DIR=.target-hunt; ONE cargo process; --test-threads=1;
+free RAM >9 GB before every cargo (powershell "Get-CimInstance
+Win32_OperatingSystem | % { $_.FreePhysicalMemory/1MB }") — THREE other
+sessions share this 31 GB host (Lean lane priority); if below, wait and
+re-check; >11 GB before any 2 GiB-profile run; official-gate runs are
+exempt from the 10-min single-run bound. No commits. This worktree
+only; siblings read-only. rustfmt --edition 2021 only on files you
+edit. Truthfulness outranks completeness; an honest blocker memo beats
+a forced merge rule — if the plan's U18/U22 contract and T10's
+semantics ever seem to disagree, STOP and write the discrepancy up
+instead of choosing silently. Final message: design verdict, soundness
+evidence, warm-reuse + reduced-budget headline tables, gate results,
+files, regen commands.

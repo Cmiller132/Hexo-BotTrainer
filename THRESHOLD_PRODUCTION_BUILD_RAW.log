@@ -1,0 +1,4 @@
+RAM_GATE kind=cargo command=production_build timestamp=2026-07-17T12:14:52.9649594-04:00 free_physical_gib=15.187 standby_normal_gib=3.098 availability_gib=18.285
+   Compiling hexfield_eq v0.1.0 (E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width\packages\hexfield_eq)
+    Finished `release` profile [optimized] target(s) in 4.76s
+EXIT_CODE=0

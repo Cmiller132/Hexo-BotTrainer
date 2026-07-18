@@ -1,0 +1,55 @@
+R-OS2 — LIVE WIRING A/B (high): zone_bound band-key child ordering (follow-on to R-OS1)
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width
+(branch claude/tss-vcf-width, HEAD = bb7efa44). You CANNOT git-commit.
+You HAVE the host cargo slot (one cargo at a time host-wide; always
+--target x86_64-pc-windows-msvc with CARGO_TARGET_DIR=.target-codex).
+RAM gate before every cargo run: >=10 GB available and >=5 GB free
+physical, abort-and-note if failed. Deliverable:
+HUNT_REPORT_ORDERING_WIRE.md + raw logs + the default-off implementation.
+
+## Mandate (from HUNT_REPORT_ORDERING_STUDY.md — read it first, plus its
+binding raw ORDERING_OFFICIAL_RAW.log)
+R-OS1 measured: winning children sit at median rank 6 under the current
+generator order; exact zone_bound (max claimant-support distance of the
+child pair) re-ranking moves median to 4 and top-4 coverage 36.91%->58.55%
+— but worsens mean rank 8.699->10.505 and triples the 33+ tail. Your job:
+wire it LIVE as a risk-controlled key and measure actual expansions/wall.
+
+## Implementation (binding constraints)
+1. New env-gated flag, DEFAULT OFF (e.g. TSS_ZONE_ORDER=1, plus
+   TSS_ZONE_ORDER_BAND for the band parameter). Production default
+   behavior byte-identical when off — prove with the standard identity
+   subset (mvp2lvc, xsnfyll + 2 more) run flag-off vs pre-change.
+2. Risk-controlled form per the study's recommendation 2: PRESERVE the
+   existing width/urgency/fork-prior classes; apply zone_bound only as a
+   tie/band key WITHIN an equivalence class (children whose existing
+   ordering keys are equal or within the band), never across classes.
+   d_stone as a secondary arm (TSS_ZONE_ORDER=2 or separate flag) — the
+   conservative control (mean/top-8/tail all improved offline).
+3. The strict verifier is UNTOUCHED. No change to generation SET —
+   ordering only. Sound-reveal/lazy-reveal semantics unchanged this
+   round (re-arming reveal is a LATER round; do not couple the two).
+4. Zone_bound computation must be cheap at generation time (the study
+   computed it from turn-start state + child coordinates; reuse that).
+   Note honestly any hot-path cost.
+
+## Measurement (binding)
+A/B on the full official corpus ladder under the official deep profile
+env (TSS_BACKWALK_TT_BYTES=1073741824, TSS_LAZY_FRONTIER=1,
+TSS_INTERIOR_CENSUS_GATE=1): arms = baseline (flag off), zone band-key,
+d_stone control. Binding gates:
+- per-row status identity: every row must solve with the SAME verdict at
+  the same-or-lower ladder rung; any verdict change = STOP and report;
+- per-row expansions + wall, with special attention to the three
+  tail-risk rows 0l4291i_live, lz60mfb, hayes_20260712_turn16;
+- strict verification must pass on every arm.
+Verdict: PROMOTE (expansion/wall win, no row regression beyond noise),
+NULL (no material win), or REGRESSION (tail dominates — report which
+rows). Include the exact flag-on/flag-off cost of the key computation.
+
+## Rules
+One cargo at a time; chunk <= 2h per exec; incremental writes; raw logs
+UTF-8. Honest failure welcome. Final message: verdict + headline numbers
+(hard-row expansions all arms) + whether a reveal-prefix follow-on is
+justified.

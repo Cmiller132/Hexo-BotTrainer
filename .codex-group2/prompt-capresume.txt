@@ -1,0 +1,74 @@
+R-CR1 — CAP-LADDER RESUME HUNT (ideation candidate 1, ranked #1)
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width
+(confirm HEAD = 6ef67cfe, the IDEATION_FINAL landing). You CANNOT
+git-commit. Deliverable: HUNT_REPORT_CAP_RESUME.md + a cfg(test)-gated
+implementation + retained raw logs.
+
+## The finding you are consuming (IDEATION_FINAL.md §1.2 + §2 — READ
+## IT FIRST, its protocol is binding)
+The official corpus harness re-solves each root fresh at every node-cap
+rung (10k -> 100k -> 1M -> 20M). Measured on the retained 1 GiB lazy
+transcript: 30.67% of summed solve wall (151.988 s of 495.592 s) and
+31.02% of expansions (1,398,409) are repeated lower-rung work.
+0l4291i_live alone repeats 1,109,997 expansions / 121.864 s before its
+closing rung starts. Nothing in the engine resumes an unfinished search:
+tss_corpus.rs constructs a fresh TssSolver per rung and
+prove_for_wide_pn drops its local WidePnSearch per call.
+
+## Goal
+Build a cfg(test)-only resumable-session API (tentatively
+`advance_to_node_cap`) that keeps one root's WidePnSearch alive across a
+monotonically rising node-cap ladder — arena, position index, deferred
+keys, pn/dn, commitment state, staged-depth cursor all retained — and
+measure whether it recovers >=5% of full official 1 GiB lazy+gate wall.
+
+## Soundness obligations (verbatim from the ideation gate; binding)
+- Bind the session to the exact RootBinding, claimant, goal, semantic
+  horizon, width, all search flags, hash mode, and TT cap. Any mismatch
+  = new session.
+- Permit ONLY a monotonically larger node cap.
+- Preserve the staged-depth cursor — calling run() naively again is
+  insufficient (it re-initializes local stage state).
+- Treat every lower-cap result as Unknown, never as a cached game fact.
+- Hard results use the ordinary materializer + UNCHANGED strict
+  verifier. Unfinished pn/dn never crosses the finder/verifier boundary.
+  The verifier is normative; you may not touch it.
+- On panic or binding mismatch, discard the session (no partial
+  recovery).
+- Default-off: production call paths must be byte-identical when the
+  session API is unused. No production behavior change in this round.
+
+## Protocol (milestones then full profile)
+1. Identity milestones: for each of 0l4291i_live, 94gnnol, lz60mfb,
+   mvp2lvc, both hayes rows, and one simple 10k closer — at each rung
+   10k/100k/1M/20M compare resumed root pn/dn, status, and cumulative
+   expansions against a fresh solve at that cap. Record every triple.
+2. Final-outcome check: resumed final outcome vs one uninterrupted
+   final-cap solve. Certificate bytes MAY differ only if pause unwinding
+   changes an otherwise-legal tie; status must not contradict; every
+   hard certificate must pass the strict verifier.
+3. Full official profile: the 1 GiB lazy+gate corpus run
+   (TSS_BACKWALK_TT_BYTES=1073741824, TSS_LAZY_FRONTIER=1,
+   TSS_INTERIOR_CENSUS_GATE=1, expect-flags asserted, fragments/k_reply
+   off) with rung-resume active in the harness, vs the retained baseline
+   transcript numbers. Report cumulative wall, nodes, pair/defender
+   GEN_PROFILE timers, peak bytes, re-entry count per root.
+4. Verdict gate: >=5% full-profile wall improvement = PROMOTE (report
+   the recommended default: harness-only vs an exposed in-process
+   session handle; serialization is OUT OF SCOPE). <5% = honest null
+   with the measured overhead decomposed.
+
+## Rules (campaign-standard)
+CARGO_TARGET_DIR=.target-codex; --target x86_64-pc-windows-msvc on
+EVERY cargo; ONE cargo process; --test-threads=1; free RAM >9 GB before
+every cargo and >11 GB before the 1 GiB profile runs (check immediately
+before, not at session start); gate-class runs <=45 min each; the Lean
+lane has RAM priority — if free RAM is below threshold, wait and
+re-check rather than proceeding. cfg(test)-gated code only; production
+paths byte-identical when unused (state how you verified this — e.g.
+the fast corpus subset with the feature unused, or an assert). No
+commits. This worktree only; siblings read-only. A clean honest stop
+with a partial report is success if the full profile cannot fit the
+budget. Final message: verdict, headline numbers vs the baseline
+transcript, identity-check results, files touched, regen commands.

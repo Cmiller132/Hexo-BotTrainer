@@ -1,0 +1,46 @@
+RAM_GATE kind=smoke timestamp=2026-07-17T23:18:43.7948923-04:00 free_physical_gib=14.771 standby_normal_gib=11.571 availability_gib=26.342 cargo_slot=free
+ENV TSS_BACKWALK_TT_BYTES=1073741824
+ENV TSS_CORPUS_EXPECT_CAP_RESUME=0
+ENV TSS_CORPUS_EXPECT_CLOSURE_COUNTERS=0
+ENV TSS_CORPUS_EXPECT_INTERIOR_CENSUS_GATE=1
+ENV TSS_CORPUS_EXPECT_K_REPLY_CONSUME=0
+ENV TSS_CORPUS_EXPECT_LAZY_FRONTIER=1
+ENV TSS_CORPUS_EXPECT_LIVE_GE3_SEED=0
+ENV TSS_CORPUS_EXPECT_SHARED_FRAGMENTS=0
+ENV TSS_CORPUS_EXPECT_THRESHOLD_COUNTERS=1
+ENV TSS_CORPUS_EXPECT_THRESHOLD_DELTA=2
+ENV TSS_CORPUS_ID=mvp2lvc
+ENV TSS_CORPUS_MAX_CAP=100000
+ENV TSS_INCR_DEFENDER=1
+ENV TSS_INTERIOR_CENSUS_GATE=1
+ENV TSS_LAZY_FRONTIER=1
+ENV TSS_THRESHOLD_COUNTERS=1
+ENV TSS_THRESHOLD_DELTA=2
+COMMAND cargo test --release --target x86_64-pc-windows-msvc -p hexfield_eq tss_corpus_check -- --ignored --test-threads=1 --nocapture
+    Finished `release` profile [optimized] target(s) in 0.05s
+     Running unittests rust\src\lib.rs (.target-codex\x86_64-pc-windows-msvc\release\deps\hexfield_eq-de26e3778420c4c2.exe)
+
+running 1 test
+test tss_corpus::tss_corpus_check ... CORPUS_MODE shared_fragments=off lazy_frontier=on interior_gate=on k_reply_consume=off cap_resume=off live_ge3_seed=off closure_counters=off threshold_counters=on threshold_delta=2 tt_bytes_cap=1073741824
+CORPUS id=mvp2lvc cap=10000 status=UNKNOWN expect=NO nodes=10000 expansions=9999 tt_entries=9972 tt_hits=489 tt_bytes_cap=1073741824 peak_tt_bytes=1947724 stage_refreshes=55 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=1169.8
+CLOSURE_ROW id=mvp2lvc cap=10000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=mvp2lvc cap=10000 visits=22398 revisits=12426 threshold_crosses=15640 reselections=17831 sibling_switches=12694 residencies=22398 residency_expansions=123358 expansion_bins=[2403, 13976, 1442, 1616, 1184, 801, 348, 628] descent_ms=163.315 state_ms=122.358
+FRONTIER_CENSUS_ROW id=mvp2lvc cap=10000 first_refusal=None choice_pre=[169, 507, 166, 0, 0, 0, 0, 405, 4612, 0, 0, 0, 0] choice_post=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] universal_pre=[171, 124, 0, 44, 50, 57, 0, 28, 3665, 0, 0, 0, 0] universal_post=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] unclassified_pre=1 unclassified_post=0 sentinel_inherited_hits=[28, 28] sentinel_inherited_clamps=[28, 28] sentinel_increment_hits=1154 sentinel_increment_clamps=1154 sentinel_sum_hits=[4116, 48932]
+FRAGMENT_PROFILE id=mvp2lvc cap=10000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=757 defender_ms=184 regen_ms=155 expand_ms=949 refresh_ms=50 insert_ms=3
+CORPUS id=mvp2lvc cap=100000 status=UNKNOWN expect=NO nodes=26843 expansions=26842 tt_entries=26808 tt_hits=631 tt_bytes_cap=1073741824 peak_tt_bytes=6170524 stage_refreshes=69 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=2730.7
+CLOSURE_ROW id=mvp2lvc cap=100000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=mvp2lvc cap=100000 visits=49109 revisits=22301 threshold_crosses=37501 reselections=40364 sibling_switches=30928 residencies=49109 residency_expansions=564768 expansion_bins=[4418, 32592, 2829, 3263, 2259, 1557, 676, 1515] descent_ms=374.387 state_ms=273.846
+FRONTIER_CENSUS_ROW id=mvp2lvc cap=100000 first_refusal=None choice_pre=[325, 1253, 589, 0, 0, 0, 0, 851, 16068, 0, 0, 0, 0] choice_post=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] universal_pre=[521, 464, 3, 49, 83, 118, 4, 57, 6456, 0, 0, 0, 0] universal_post=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] unclassified_pre=1 unclassified_post=0 sentinel_inherited_hits=[42, 42] sentinel_inherited_clamps=[35, 35] sentinel_increment_hits=2225 sentinel_increment_clamps=2225 sentinel_sum_hits=[17025, 110424]
+FRAGMENT_PROFILE id=mvp2lvc cap=100000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=2224 defender_ms=879 regen_ms=438 expand_ms=3136 refresh_ms=203 insert_ms=11
+CORPUS_FRAGMENTS lookups=0 hits=0 hit_rate_pct=0.000 imports=0 max_store_entries=0 max_store_bytes=0
+CLOSURE_DONE evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000 stage_refreshes=124 seed_scans=0 seed_ms=0.000
+THRESHOLD_DONE visits=71507 revisits=34727 threshold_crosses=53141 reselections=58195 sibling_switches=43622 residencies=71507 residency_expansions=688126 expansion_bins=[6821, 46568, 4271, 4879, 3443, 2358, 1024, 2143] descent_ms=537.702 state_ms=396.204
+FRONTIER_CENSUS_DONE first_refusal=None choice_pre=[494, 1760, 755, 0, 0, 0, 0, 1256, 20680, 0, 0, 0, 0] choice_post=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] universal_pre=[692, 588, 3, 93, 133, 175, 4, 85, 10121, 0, 0, 0, 0] universal_post=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] unclassified_pre=2 unclassified_post=0 sentinel_inherited_hits=[70, 70] sentinel_inherited_clamps=[63, 63] sentinel_increment_hits=3379 sentinel_increment_clamps=3379 sentinel_sum_hits=[21141, 159356]
+CORPUS_DONE failures=0 shared_fragments=off lazy_frontier=on interior_gate=on k_reply_consume=off cap_resume=off resume_wall_ms=0.000 resume_reentries=0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 140 filtered out; finished in 3.90s
+
+EXIT_CODE 0

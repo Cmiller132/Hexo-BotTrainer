@@ -1,0 +1,47 @@
+R-T1-REV — HOSTILE REVIEW (ultra): docs/DFPN_RETRAVERSAL_THEORY.md
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width
+(branch claude/tss-vcf-width, HEAD = 28a276e5). You CANNOT git-commit.
+DOC-ONLY round: NO cargo (host-wide slot is held by a wall-sensitive
+measurement job), no Lean builds. Deliverable:
+docs/DFPN_RETRAVERSAL_REVIEW.md + a short final message.
+
+## Task
+Hostile review of docs/DFPN_RETRAVERSAL_THEORY.md (877 lines, R-T1's
+output). It claims 8 PROVEN results (T1, F1, T2, T2b, C2, T3, T4, T5,
+T6, D1), 1 CONJECTURE (E1), plus SKETCH items. Your job is to try to
+BREAK each PROVEN claim. Default posture: a claim is guilty until its
+proof survives your attack.
+
+For every PROVEN item:
+1. Re-derive the construction/argument independently. Check the worst-
+   case families step by step — simulate the idealized df-pn descent on
+   the explicit trees BY HAND (small N) and verify the claimed expansion
+   counts exactly.
+2. Check model-to-engine fidelity: does the idealized class actually
+   capture the cited engine discipline (second-best thresholds eq. (1),
+   conjunctive budget subtraction, child-progress floor, saturated
+   recurrences at tss_solver.rs:4943-4976, PN_INFINITY sentinel)? Any
+   place where the model silently diverges from the code must be flagged
+   with file:line.
+3. Check every arithmetic derivation from the CITED counter values
+   (revisit ratios, attribution percentages, the 218-verdict recount and
+   the claimed "228 is a typo" finding) against the named raw files in
+   this worktree (HUNT_REPORT_THRESHOLD_SCALE.md,
+   THRESHOLD_COUNTER_FULL_RAW.log, THRESHOLD_DELTA2_FULL_RAW.log,
+   THRESHOLD_LEAF_AB_RAW.log — raws may be UTF-16: strip NULs before
+   grepping, e.g. tr -d '\0').
+4. Check status discipline: any PROVEN that is actually SKETCH (an
+   undischarged reduction), any CITED-FROM-MEMORY that is load-bearing,
+   any conclusion that overreaches its model scope.
+
+## Output conventions
+docs/DFPN_RETRAVERSAL_REVIEW.md: one finding per numbered entry with
+severity (FATAL / MAJOR / MINOR / NOTE), the exact quoted claim, your
+counter-derivation or confirmation, and a proposed repair where one
+exists. End with a verdict per PROVEN item: CONFIRMED /
+CONFIRMED-WITH-ERRATA / REFUTED / DOWNGRADE-TO-SKETCH, and an overall
+verdict for the document. No status inflation; if you cannot decide an
+item within budget, say UNRESOLVED and name the exact obstacle.
+Incremental disk writes; chunk <= 2h per exec. Final message: overall
+verdict, per-item verdict list, and the most severe finding.

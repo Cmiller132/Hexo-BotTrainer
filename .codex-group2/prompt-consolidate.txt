@@ -1,0 +1,77 @@
+CONSOLIDATION ROUND — merge every gated lever branch into
+claude/tss-vcf-width and re-verify EVERY gate at the merged tip.
+
+Context: three branches carry gated, pushed, default-off levers built
+on base 2430fc47 (all review/gate evidence in their commit messages and
+reports):
+- hunt/turn-quotient @5f836b70: NQ4 telemetry, R-LF1 lazy frontier
+  (TSS_LAZY_FRONTIER), G2R9b shared-fragment store
+  (TSS_SHARED_FRAGMENTS, monotone contract), R-LF2 memory-wall study
+  (report only), gate-strengthening CORPUS_MODE/expectation asserts in
+  tss_corpus.rs.
+- hunt/pn-init @2454fa91: NQ6 telemetry, R-IG1 interior census gate
+  (TSS_INTERIOR_CENSUS_GATE), R-FIX1 zone-clock fix (production
+  rebase_zone_distances correction — the ONLY always-on behavior
+  change, verifier-agreeing, regression-pinned), corpus stats fields
+  in tss_core.rs + print extensions.
+- THIS branch claude/tss-vcf-width @<HEAD>: G2R7 K_reply shadow +
+  G2R8 flag-gated consumption (TSS_K_REPLY_CONSUME, default off).
+Owner directive: dramatically more efficient solver; this round makes
+the levers one engine.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width
+(branch claude/tss-vcf-width; confirm HEAD is the G2R8 landing). You
+CANNOT git-commit — do ALL merge work in the working tree via `git
+merge --no-commit` (or manual application), resolve conflicts, and
+leave a committed-ready tree + MERGE_RESOLUTION.md documenting every
+conflict and its resolution. If a merge conflict forces a SEMANTIC
+choice (two levers touching the same logic where composition is
+unclear), STOP and write the choice up rather than deciding silently.
+
+## Expected conflict surfaces (from the orchestrator's diff knowledge)
+- tss_solver.rs: three-way — lazy frontier + fragments (WidePnSearch),
+  interior gate + zone-clock fix (narrow path + rebase), K_reply
+  consume + shadow (narrow fallback). Mostly disjoint functions; the
+  cfg(test) telemetry blocks from NQ4/NQ6/G2R7 must all survive.
+- tss_core.rs: SolveStats gained fields on pn-init side; keep all.
+- tss_corpus.rs: turn-quotient added CORPUS_MODE echo + expectation
+  asserts + hard-verdict-requires-cert; pn-init added stats printing;
+  G2R8 side may differ; merge ALL (echo should now also report
+  interior_gate and k_reply_consume flag states — extend CORPUS_MODE
+  accordingly, additive).
+- lib.rs: all cfg(test) module registrations survive.
+- tss_spare_corpus.rs: regression test from R-FIX1 + G2R7 visibility
+  change.
+
+## Verification battery at the merged tip (ALL must pass; RAM-gate
+## every cargo; --target x86_64-pc-windows-msvc ALWAYS in this tree)
+1. Full release suite default-flags (expect >=99 passed, 0 failed).
+2. Official gate, legacy profile: 2 GiB all flags off →
+   CORPUS_DONE failures=0.
+3. Official gate, NEW recommended profile: 1 GiB + TSS_LAZY_FRONTIER=1
+   (+expectation asserts) → failures=0.
+4. Official gate composition: 2 GiB + fragments + lazy → failures=0.
+5. Identity spot-checks, one per lever at merged tip: R-LF1
+   equivalence campaign (or its focused row), R-IG1 live campaign both
+   flag states (frozen baselines must hold), R-FIX1
+   bounded_horizon_compact_win_certificate_verifies, G2R8
+   double-fork identity, NQ4 telemetry identity row, NQ6 PNI identity
+   row, G2R9b fragment campaign single-root spot (eager).
+6. rustfmt --check on touched files; git diff --check.
+
+## Deliverable
+MERGE_RESOLUTION.md: per-conflict resolution log, the full battery
+results table with exact commands, and an honest note of anything that
+did not reproduce at the tip. Final message: battery table, conflicts
+summary, files, regen commands.
+
+## Rules
+CARGO_TARGET_DIR=.target-codex; --target x86_64-pc-windows-msvc on
+every cargo (Linux-triple artifacts in this target dir otherwise break
+the build, E0461); ONE cargo process; --test-threads=1; free RAM >9 GB
+before every cargo, >11 GB before 2 GiB-profile gates (gate-class runs
+exempt from the 10-min bound, <=45 min each); Lean lane has RAM
+priority. No commits. This worktree only; sibling worktrees READ-ONLY
+(fetch their branches via git — they are local branches in this repo).
+Truthfulness outranks completeness. Any verdict flip or gate failure at
+the tip = STOP and write up precisely which pairwise composition broke.

@@ -1,0 +1,52 @@
+cargo.exe :     Finished `release` profile [optimized] target(s) in 0.05s
+At line:2 char:1514
++ ... ELTA='off'; & cargo test --release --target x86_64-pc-windows-msvc -p ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `r...get(s) in 0.05s:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running unittests rust\src\lib.rs 
+(.target-codex\x86_64-pc-windows-msvc\release\deps\hexfield_eq-de26e3778420c4c2.exe)
+
+running 1 test
+test tss_corpus::tss_corpus_check ... CORPUS_MODE shared_fragments=off lazy_frontier=on interior_gate=on k_reply_consume=off cap_resume=off live_ge3_seed=off closure_counters=off ordering_study=off zone_order=zone_bound zone_order_band=0 threshold_counters=off threshold_delta=off tt_bytes_cap=1073741824
+CORPUS id=0hz3hty cap=10000 status=WIN expect=WIN nodes=2356 expansions=2355 tt_entries=2346 tt_hits=3 tt_bytes_cap=1073741824 peak_tt_bytes=278104 stage_refreshes=19 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=134.2
+CLOSURE_ROW id=0hz3hty cap=10000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=0hz3hty cap=10000 visits=0 revisits=0 threshold_crosses=0 reselections=0 sibling_switches=0 residencies=0 residency_expansions=0 expansion_bins=[0, 0, 0, 0, 0, 0, 0, 0] descent_ms=0.000 state_ms=0.000
+FRONTIER_CENSUS_ROW id=0hz3hty cap=10000 first_refusal=None choice_pre=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] choice_post=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] universal_pre=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] universal_post=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] unclassified_pre=0 unclassified_post=0 sentinel_inherited_hits=[0, 0] sentinel_inherited_clamps=[0, 0] sentinel_increment_hits=0 sentinel_increment_clamps=0 sentinel_sum_hits=[0, 0]
+FRAGMENT_PROFILE id=0hz3hty cap=10000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=50 defender_ms=40 regen_ms=8 expand_ms=92 refresh_ms=6 insert_ms=0 zone_contexts=457 zone_keys=3841 zone_context_ms=0.110 zone_key_ms=0.204
+CORPUS id=acly7kb cap=10000 status=WIN expect=WIN nodes=75 expansions=74 tt_entries=70 tt_hits=0 tt_bytes_cap=1073741824 peak_tt_bytes=18072 stage_refreshes=11 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=8.9
+CLOSURE_ROW id=acly7kb cap=10000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=acly7kb cap=10000 visits=0 revisits=0 threshold_crosses=0 reselections=0 sibling_switches=0 residencies=0 residency_expansions=0 expansion_bins=[0, 0, 0, 0, 0, 0, 0, 0] descent_ms=0.000 state_ms=0.000
+FRONTIER_CENSUS_ROW id=acly7kb cap=10000 first_refusal=None choice_pre=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] choice_post=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] universal_pre=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] universal_post=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] unclassified_pre=0 unclassified_post=0 sentinel_inherited_hits=[0, 0] sentinel_inherited_clamps=[0, 0] sentinel_increment_hits=0 sentinel_increment_clamps=0 sentinel_sum_hits=[0, 0]
+FRAGMENT_PROFILE id=acly7kb cap=10000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=55 defender_ms=42 regen_ms=9 expand_ms=100 refresh_ms=6 insert_ms=0 zone_contexts=478 zone_keys=3965 zone_context_ms=0.124 zone_key_ms=0.222
+CORPUS id=g2xx6wl cap=10000 status=WIN expect=WIN nodes=4180 expansions=4179 tt_entries=4171 tt_hits=0 tt_bytes_cap=1073741824 peak_tt_bytes=1515393 stage_refreshes=17 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=587.0
+CLOSURE_ROW id=g2xx6wl cap=10000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=g2xx6wl cap=10000 visits=0 revisits=0 threshold_crosses=0 reselections=0 sibling_switches=0 residencies=0 residency_expansions=0 expansion_bins=[0, 0, 0, 0, 0, 0, 0, 0] descent_ms=0.000 state_ms=0.000
+FRONTIER_CENSUS_ROW id=g2xx6wl cap=10000 first_refusal=None choice_pre=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] choice_post=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] universal_pre=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] universal_post=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] unclassified_pre=0 unclassified_post=0 sentinel_inherited_hits=[0, 0] sentinel_inherited_clamps=[0, 0] sentinel_increment_hits=0 sentinel_increment_clamps=0 sentinel_sum_hits=[0, 0]
+FRAGMENT_PROFILE id=g2xx6wl cap=10000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=367 defender_ms=249 regen_ms=68 expand_ms=623 refresh_ms=13 insert_ms=2 zone_contexts=955 zone_keys=13069 zone_context_ms=0.535 zone_key_ms=2.134
+CORPUS id=hayes_20260712_turn16 cap=10000 status=UNKNOWN expect=WIN nodes=10000 expansions=9999 tt_entries=9983 tt_hits=295 tt_bytes_cap=1073741824 peak_tt_bytes=1571394 stage_refreshes=33 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=1040.3
+CLOSURE_ROW id=hayes_20260712_turn16 cap=10000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=hayes_20260712_turn16 cap=10000 visits=0 revisits=0 threshold_crosses=0 reselections=0 sibling_switches=0 residencies=0 residency_expansions=0 expansion_bins=[0, 0, 0, 0, 0, 0, 0, 0] descent_ms=0.000 state_ms=0.000
+FRONTIER_CENSUS_ROW id=hayes_20260712_turn16 cap=10000 first_refusal=None choice_pre=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] choice_post=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] universal_pre=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] universal_post=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] unclassified_pre=0 unclassified_post=0 sentinel_inherited_hits=[0, 0] sentinel_inherited_clamps=[0, 0] sentinel_increment_hits=0 sentinel_increment_clamps=0 sentinel_sum_hits=[0, 0]
+FRAGMENT_PROFILE id=hayes_20260712_turn16 cap=10000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=1006 defender_ms=430 regen_ms=200 expand_ms=1451 refresh_ms=34 insert_ms=5 zone_contexts=4473 zone_keys=41240 zone_context_ms=1.742 zone_key_ms=4.304
+CORPUS id=hayes_20260712_turn16 cap=100000 status=WIN expect=WIN nodes=11633 expansions=11632 tt_entries=11616 tt_hits=315 tt_bytes_cap=1073741824 peak_tt_bytes=1834528 stage_refreshes=33 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=1219.1
+CLOSURE_ROW id=hayes_20260712_turn16 cap=100000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=hayes_20260712_turn16 cap=100000 visits=0 revisits=0 threshold_crosses=0 reselections=0 sibling_switches=0 residencies=0 residency_expansions=0 expansion_bins=[0, 0, 0, 0, 0, 0, 0, 0] descent_ms=0.000 state_ms=0.000
+FRONTIER_CENSUS_ROW id=hayes_20260712_turn16 cap=100000 first_refusal=None choice_pre=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] choice_post=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] universal_pre=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] universal_post=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] unclassified_pre=0 unclassified_post=0 sentinel_inherited_hits=[0, 0] sentinel_inherited_clamps=[0, 0] sentinel_increment_hits=0 sentinel_increment_clamps=0 sentinel_sum_hits=[0, 0]
+FRAGMENT_PROFILE id=hayes_20260712_turn16 cap=100000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=1742 defender_ms=646 regen_ms=351 expand_ms=2413 refresh_ms=60 insert_ms=9 zone_contexts=8369 zone_keys=78861 zone_context_ms=3.095 zone_key_ms=7.202
+CORPUS_FRAGMENTS lookups=0 hits=0 hit_rate_pct=0.000 imports=0 max_store_entries=0 max_store_bytes=0
+CLOSURE_DONE evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000 stage_refreshes=113 seed_scans=0 seed_ms=0.000
+THRESHOLD_DONE visits=0 revisits=0 threshold_crosses=0 reselections=0 sibling_switches=0 residencies=0 residency_expansions=0 expansion_bins=[0, 0, 0, 0, 0, 0, 0, 0] descent_ms=0.000 state_ms=0.000
+FRONTIER_CENSUS_DONE first_refusal=None choice_pre=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] choice_post=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] universal_pre=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] universal_post=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] unclassified_pre=0 unclassified_post=0 sentinel_inherited_hits=[0, 0] sentinel_inherited_clamps=[0, 0] sentinel_increment_hits=0 sentinel_increment_clamps=0 sentinel_sum_hits=[0, 0]
+CORPUS_DONE failures=0 shared_fragments=off lazy_frontier=on interior_gate=on k_reply_consume=off cap_resume=off resume_wall_ms=0.000 resume_reentries=0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 142 filtered out; finished in 3.01s
+
+EXIT_CODE=0

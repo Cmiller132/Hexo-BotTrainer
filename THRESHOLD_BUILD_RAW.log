@@ -1,0 +1,17 @@
+RAM_GATE kind=cargo free_physical_gib=7.378 standby_normal_gib=7.203 availability_gib=14.581
+RAM_GATE kind=cargo free_physical_gib=7.389 standby_normal_gib=7.243 availability_gib=14.632
+cargo :    Compiling hexfield_eq v0.1.0 (E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width\packages\hexfield_eq)
+At line:2 char:823
++ ... 'Continue'; cargo test --release --target x86_64-pc-windows-msvc -p h ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling he...es\hexfield_eq):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Finished `release` profile [optimized] target(s) in 7.57s
+     Running unittests rust\src\lib.rs 
+(.target-codex\x86_64-pc-windows-msvc\release\deps\hexfield_eq-de26e3778420c4c2.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 140 filtered out; finished in 0.00s
+

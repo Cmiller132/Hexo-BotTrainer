@@ -1,0 +1,72 @@
+R-LF1 — LAZY FRONTIER ADMISSION: prove the refinement lemma, build it
+default-off, prove equivalence, measure the win.
+
+Context: the NQ4 hunt (HUNT_REPORT_TURN_QUOTIENT.md in this worktree —
+READ IT FIRST, especially §5 and the Recommendation) measured that
+62.6-67.3% of retained wide-TT/arena entries are never expanded before
+proof or cap: the wide engine eagerly allocates and indexes a PN arena
+entry for every generated child. The fix is a frontier representation
+quotient: an unselected pending child stays a thunk (move, result,
+prior, exact future-key material) on its parent edge and acquires an
+arena/TT entry only on first selection. Owner directive: the campaign
+goal is a dramatically more efficient solver; this is the top-ranked
+unbuilt lever.
+
+You are working in
+E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-turn-quotient (branch
+hunt/turn-quotient @f30e3fb1). You CANNOT git-commit. Engine =
+packages/hexfield_eq/rust/src/tss_solver.rs (WidePnSearch). The NQ4
+telemetry in that file is #[cfg(test)]-gated — leave it working; it is
+how you will measure your win.
+
+## Work order
+1. PROOF FIRST: write PROOF_LAZY_FRONTIER.md stating and proving the
+   Lazy-Frontier Refinement Lemma AGAINST THE ACTUAL CODE (cite
+   functions/lines): replacing an unselected pending child entry by a
+   thunk preserving move/result/prior and exact future position key
+   preserves child_numbers, selection order, and all parent PN/DN
+   recomputations; on first selection, realization produces the
+   identical state/key and links to any existing transposition BEFORE
+   expansion; hence eager and lazy frontiers have the same reachable PN
+   fixed points and materializable certificates. Include the cap-aware
+   corollary: state honestly which counters/timings MAY differ under
+   node/TT caps and why proof validity is invariant. Walk every place
+   the code reads a child entry before its selection (mhs computation?
+   staged reopening? zone rebase? certificate assembly? tt_hits
+   accounting?) — each such read is a lemma obligation or a design
+   constraint; enumerate them exhaustively.
+2. IMPLEMENT behind env flag TSS_LAZY_FRONTIER=1, default OFF, zero
+   behavior change off (flag read once at search start). Keep the
+   telemetry counters meaningful in both modes.
+3. EQUIVALENCE HARNESS (test-gated, pattern of the NQ4 campaign): run
+   flag-off vs flag-on over all 19 forcing rows at 10k and 100k caps +
+   double_fork_compact + 20 deterministic human roots (reuse the NQ4
+   sampling, first 20). Require: identical verdicts, identical
+   certificate bytes, identical expanded-node counts. Retained/indexed
+   entry counts are EXPECTED to drop on-flag — report them. If exact
+   node identity is impossible for a principled reason, STOP treating it
+   as a target silently: document the exact divergence class, tie it to
+   the cap-aware corollary, and require verdict+certificate identity
+   plus a node-count bound instead. Any WIN/LOSS flip = STOP, write up.
+4. OFFICIAL GATE flag-on: TSS_BACKWALK_TT_BYTES=2147483648 single
+   process, tss_corpus_check -- --ignored --test-threads=1, expect
+   CORPUS_DONE failures=0 (~570s). Also rerun the NQ4
+   turn_quotient_campaign with flag ON and report the new
+   entries/retained/never-expanded numbers.
+5. MEASURE: headline table flag-off vs flag-on — indexed entries,
+   retained arena records, peak_tt_bytes, tt_hits, wall-clock per
+   cohort. The claim to beat: a large cut of the 62.6-67.3%
+   never-expanded share at equal verdicts/certificates.
+
+## Rules
+CARGO_TARGET_DIR=.target-hunt; ONE cargo process; --test-threads=1;
+free RAM >9 GB before every cargo (powershell "Get-CimInstance
+Win32_OperatingSystem | % { $_.FreePhysicalMemory/1MB }") — THREE other
+sessions share this 31 GB host (Lean lane priority); if below, wait and
+re-check. The official gate run is the one exception to the 10-min
+single-run bound (~570s, budget RAM for 2 GiB TT — check >11 GB free
+before it). No commits. This worktree only; siblings read-only. rustfmt
+--edition 2021 only on files you edit. Truthfulness outranks
+completeness; an honest blocker memo beats a forced implementation.
+Final message: lemma verdict, equivalence evidence, gate result,
+headline table, files, regen commands.

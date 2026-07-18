@@ -15,6 +15,13 @@
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
+use std::sync::Arc;
+
+#[cfg(test)]
+use std::cell::{Cell, RefCell};
+#[cfg(test)]
+use std::rc::Rc;
+use std::time::Instant;
 
 use hexo_engine::{
     apply_placement, hex_distance, Axis, HexCoord, HexoState as RustHexoState, Placement, Player,
@@ -23,13 +30,473 @@ use hexo_engine::{
 
 use crate::threats_shared as threats;
 use crate::tss_core::{
-    seed_band_radius, DeepResult, DeepSolve, ProofStatus, SolveCaps, SolveGoal, SolveStats,
-    ZoneSearchCaps,
+    seed_band_radius, CertVerify, DeepResult, DeepSolve, ProofStatus, SolveCaps, SolveGoal,
+    SolveStats, ZoneSearchCaps,
 };
+#[cfg(test)]
+use crate::tss_core::{ClosureDebtStats, ThresholdScaleStats};
 use crate::tss_verify::{
-    CertCommutation, CertEdge, CertNode, CertNodeId, RootBinding, TssCertificate, ZoneInfo,
-    MAX_CERT_COMMUTATIONS, MAX_CERT_DEPTH, MAX_CERT_EDGES, MAX_CERT_NODES, MAX_CERT_ROOT_STONES,
+    CertCommutation, CertEdge, CertNode, CertNodeId, RootBinding, TssCertificate, TssVerifier,
+    ZoneInfo, MAX_CERT_COMMUTATIONS, MAX_CERT_DEPTH, MAX_CERT_EDGES, MAX_CERT_NODES,
+    MAX_CERT_ROOT_STONES, MAX_CERT_WITNESSES,
 };
+
+#[cfg(test)]
+pub(crate) const ORDERING_STUDY_ORDERS: [&str; 7] = [
+    "baseline",
+    "zone_bound",
+    "census_distance",
+    "gate_adjacency",
+    "d_stone",
+    "census_zone_composite",
+    "zone_gate_composite",
+];
+
+/// One compact, post-solve observation. Per-child features live only on the
+/// cfg(test) child records; this is the offline result retained by the corpus
+/// harness instead of emitting a potentially enormous child trace.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OrderingStudyRecord {
+    pub(crate) depth: u32,
+    pub(crate) generated_children: u32,
+    pub(crate) pair_node: bool,
+    pub(crate) ranks: [u32; ORDERING_STUDY_ORDERS.len()],
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct OrderingStudyReport {
+    pub(crate) records: Vec<OrderingStudyRecord>,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static ORDERING_STUDY_REPORT: RefCell<OrderingStudyReport> = RefCell::new(OrderingStudyReport::default());
+}
+
+#[cfg(test)]
+pub(crate) fn begin_ordering_study_report() {
+    ORDERING_STUDY_REPORT.with(|slot| slot.borrow_mut().records.clear());
+}
+
+#[cfg(test)]
+pub(crate) fn take_ordering_study_report() -> OrderingStudyReport {
+    ORDERING_STUDY_REPORT.with(|slot| std::mem::take(&mut *slot.borrow_mut()))
+}
+
+// Test-only NQ6 census/PN telemetry. The production solver has no field,
+// branch, or callable entry point for this collector.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PnInitTelemetryMode {
+    WidePn,
+    NarrowCompat,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PnInitTelemetryOutcome {
+    Proven,
+    Refuted,
+    Unknown,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(crate) struct PnInitTelemetryNode {
+    pub(crate) serial: u64,
+    pub(crate) parent_serial: Option<u64>,
+    pub(crate) engine_node: u64,
+    pub(crate) mode: PnInitTelemetryMode,
+    pub(crate) depth: u32,
+    pub(crate) h_rem: Option<u32>,
+    pub(crate) phase_code: u8,
+    pub(crate) win_arm: bool,
+    pub(crate) census: Option<u8>,
+    pub(crate) lb_plies: Option<u8>,
+    pub(crate) gate: bool,
+    pub(crate) coordinate_safe: bool,
+    pub(crate) census_scan_nanos: u64,
+    pub(crate) live_ge4: u32,
+    pub(crate) live_ge3: u32,
+    pub(crate) disjoint_two_gap: u32,
+    pub(crate) outcome: PnInitTelemetryOutcome,
+    pub(crate) frozen_state: Option<String>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PnInitTelemetryReport {
+    pub(crate) nodes: Vec<PnInitTelemetryNode>,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct PnInitTelemetrySession {
+    report: PnInitTelemetryReport,
+    wide_last_event: HashMap<usize, u64>,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static PN_INIT_TELEMETRY: std::cell::RefCell<Option<PnInitTelemetrySession>> = const { std::cell::RefCell::new(None) };
+    static PN_INIT_WIDE_STACK: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+    static PN_INIT_NARROW_STACK: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub(crate) fn begin_pn_init_telemetry() {
+    PN_INIT_TELEMETRY.with(|slot| {
+        *slot.borrow_mut() = Some(PnInitTelemetrySession::default());
+    });
+    PN_INIT_WIDE_STACK.with(|stack| stack.borrow_mut().clear());
+    PN_INIT_NARROW_STACK.with(|stack| stack.borrow_mut().clear());
+}
+
+#[cfg(test)]
+pub(crate) fn take_pn_init_telemetry_report() -> Option<PnInitTelemetryReport> {
+    PN_INIT_WIDE_STACK.with(|stack| assert!(stack.borrow().is_empty()));
+    PN_INIT_NARROW_STACK.with(|stack| assert!(stack.borrow().is_empty()));
+    PN_INIT_TELEMETRY.with(|slot| slot.borrow_mut().take().map(|session| session.report))
+}
+
+fn interior_census_lb_plies(phase: TurnPhase, census: u8) -> Option<u8> {
+    if census > 5 {
+        return None;
+    }
+    let m = match phase {
+        TurnPhase::FirstStone if census >= 4 => 6 - census,
+        TurnPhase::FirstStone => (7 - census).min(6),
+        TurnPhase::SecondStone { .. } if census >= 3 => 6 - census,
+        TurnPhase::SecondStone { .. } => (7 - census).min(6),
+        TurnPhase::Opening => return None,
+    };
+    let index = usize::from(m.saturating_sub(1));
+    match phase {
+        TurnPhase::FirstStone => [1, 2, 5, 6, 9, 10].get(index).copied(),
+        TurnPhase::SecondStone { .. } => [1, 4, 5, 8, 9, 12].get(index).copied(),
+        TurnPhase::Opening => None,
+    }
+}
+
+fn interior_census_coordinate_safe(state: &RustHexoState, h_rem: i64) -> bool {
+    const SAFE: i64 = 16_383;
+    if h_rem < 0 {
+        return false;
+    }
+    let Some(radius) = h_rem.checked_add(1).and_then(|x| x.checked_mul(8)) else {
+        return false;
+    };
+    let Some(limit) = SAFE.checked_sub(radius) else {
+        return false;
+    };
+    state.board().occupied_cells().iter().all(|coord| {
+        let q = i64::from(coord.q);
+        let r = i64::from(coord.r);
+        q.checked_add(r)
+            .and_then(|sum| sum.checked_neg())
+            .and_then(|s| Some((q.checked_abs()?, r.checked_abs()?, s.checked_abs()?)))
+            .is_some_and(|(q_abs, r_abs, s_abs)| q_abs <= limit && r_abs <= limit && s_abs <= limit)
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+struct InteriorCensusGateEvaluation {
+    dismiss: bool,
+    nanos: u64,
+}
+
+/// Evaluate Contract 8.1/8.2 for one interior claimant-owned bounded WIN arm.
+/// `None` means the node is outside the proved/elected scope and no census was
+/// scanned. A non-dismissing `Some` is still a measured live evaluation.
+fn evaluate_interior_census_gate(
+    state: &RustHexoState,
+    claimant: Player,
+    root_ply: u32,
+    semantic_horizon: u32,
+) -> Option<InteriorCensusGateEvaluation> {
+    if state.is_terminal()
+        || state.current_player() != claimant
+        || state.placements_made() <= root_ply
+        || !matches!(
+            state.phase(),
+            TurnPhase::FirstStone | TurnPhase::SecondStone { .. }
+        )
+    {
+        return None;
+    }
+
+    // Contract 8.2 requires widened, checked absolute-to-relative arithmetic.
+    let base_wide = i64::from(state.placements_made());
+    let semantic_wide = i64::from(semantic_horizon);
+    let h_rem = semantic_wide.checked_sub(base_wide)?;
+    if !(0..=8).contains(&h_rem) || !interior_census_coordinate_safe(state, h_rem) {
+        return None;
+    }
+
+    let started = Instant::now();
+    let mut census = 0u8;
+    let mut invariant_ok = true;
+    for entry in state.board().windows().entries() {
+        let ac = entry.count(claimant);
+        let dc = entry.count(claimant.other());
+        if ac > 5 || dc > 5 {
+            invariant_ok = false;
+        }
+        if ac > 0 && dc == 0 {
+            census = census.max(ac);
+        }
+    }
+    let lb_plies = invariant_ok
+        .then(|| interior_census_lb_plies(state.phase(), census))
+        .flatten();
+    let dismiss = lb_plies.is_some_and(|lb| i64::from(lb) > h_rem);
+    let nanos = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+    Some(InteriorCensusGateEvaluation { dismiss, nanos })
+}
+
+#[cfg(test)]
+fn pn_init_frozen_state(state: &RustHexoState) -> String {
+    let mut stones = state
+        .board()
+        .occupied_cells()
+        .iter()
+        .map(|&coord| {
+            let owner = state.board().get(coord).expect("occupied cell has owner");
+            (coord.q, coord.r, owner.index())
+        })
+        .collect::<Vec<_>>();
+    stones.sort_unstable();
+    format!(
+        "placements={} player={} phase={:?} stones={stones:?}",
+        state.placements_made(),
+        state.current_player().index(),
+        state.phase()
+    )
+}
+
+#[cfg(test)]
+fn pn_init_census_features(state: &RustHexoState, attacker: Player) -> (u8, u64, u32, u32, u32) {
+    // Provenance: exact Contract-8.1 recipe copied from hunt-dtw-bounds at
+    // reviewed theorem commit ffdd414ad5197444eef44af4f28da376a5d95507.
+    let started = std::time::Instant::now();
+    let mut census = 0u8;
+    for entry in state.board().windows().entries() {
+        let ac = entry.count(attacker);
+        let dc = entry.count(attacker.other());
+        if ac > 0 && dc == 0 {
+            census = census.max(ac);
+        }
+    }
+    let census_scan_nanos = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+
+    let mut live_ge4 = 0u32;
+    let mut live_ge3 = 0u32;
+    let mut two_gap = Vec::new();
+    for entry in state.board().windows().entries() {
+        let ac = entry.count(attacker);
+        let dc = entry.count(attacker.other());
+        if ac == 0 || dc != 0 {
+            continue;
+        }
+        live_ge3 = live_ge3.saturating_add(u32::from(ac >= 3));
+        live_ge4 = live_ge4.saturating_add(u32::from(ac >= 4));
+        if ac == 4 {
+            let mut empties = entry.empty_cells();
+            empties.sort_unstable_by_key(|coord| (coord.q, coord.r));
+            if empties.len() == 2 {
+                two_gap.push((entry.key(), empties[0], empties[1]));
+            }
+        }
+    }
+    two_gap.sort_unstable_by_key(|(key, _, _)| (key.axis.index(), key.start.q, key.start.r));
+    let mut used = HashSet::new();
+    let mut disjoint_two_gap = 0u32;
+    for (_, left, right) in two_gap {
+        if !used.contains(&left) && !used.contains(&right) {
+            used.insert(left);
+            used.insert(right);
+            disjoint_two_gap = disjoint_two_gap.saturating_add(1);
+        }
+    }
+    (
+        census,
+        census_scan_nanos,
+        live_ge4,
+        live_ge3,
+        disjoint_two_gap,
+    )
+}
+
+#[cfg(test)]
+fn pn_init_record_node(
+    state: &RustHexoState,
+    claimant: Player,
+    root_ply: u32,
+    semantic_horizon: u32,
+    engine_node: u64,
+    mode: PnInitTelemetryMode,
+    parent_serial: Option<u64>,
+) -> Option<u64> {
+    PN_INIT_TELEMETRY.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let session = slot.as_mut()?;
+        let serial = session.report.nodes.len() as u64;
+        let depth = state.placements_made().checked_sub(root_ply)?;
+        let h_rem = semantic_horizon.checked_sub(state.placements_made());
+        let win_arm = state.current_player() == claimant;
+        let supported = matches!(
+            state.phase(),
+            TurnPhase::FirstStone | TurnPhase::SecondStone { .. }
+        );
+        let phase_code = match state.phase() {
+            TurnPhase::Opening => 0,
+            TurnPhase::FirstStone => 1,
+            TurnPhase::SecondStone { .. } => 2,
+        };
+        let should_scan = supported && h_rem.is_some_and(|h| h <= 16);
+        let (feature_census, feature_scan_nanos, live_ge4, live_ge3, disjoint_two_gap) =
+            if should_scan {
+                pn_init_census_features(state, claimant)
+            } else {
+                (0, 0, 0, 0, 0)
+            };
+        let census = win_arm.then_some(feature_census);
+        let census_scan_nanos = if win_arm { feature_scan_nanos } else { 0 };
+        let lb_plies = census.and_then(|c| interior_census_lb_plies(state.phase(), c));
+        let coordinate_safe = h_rem
+            .map(i64::from)
+            .is_some_and(|h| interior_census_coordinate_safe(state, h));
+        let gate = !state.is_terminal()
+            && win_arm
+            && supported
+            && census.is_some_and(|c| c <= 5)
+            && coordinate_safe
+            && h_rem.is_some_and(|h| h <= 8 && lb_plies.is_some_and(|lb| u32::from(lb) > h));
+        session.report.nodes.push(PnInitTelemetryNode {
+            serial,
+            parent_serial,
+            engine_node,
+            mode,
+            depth,
+            h_rem,
+            phase_code,
+            win_arm,
+            census,
+            lb_plies,
+            gate,
+            coordinate_safe,
+            census_scan_nanos,
+            live_ge4,
+            live_ge3,
+            disjoint_two_gap,
+            outcome: PnInitTelemetryOutcome::Unknown,
+            frozen_state: gate.then(|| pn_init_frozen_state(state)),
+        });
+        Some(serial)
+    })
+}
+
+#[cfg(test)]
+struct PnInitWideWorkGuard {
+    active: bool,
+}
+
+#[cfg(test)]
+impl PnInitWideWorkGuard {
+    fn enter(id: usize) -> Self {
+        let active = PN_INIT_TELEMETRY.with(|slot| slot.borrow().is_some());
+        if active {
+            PN_INIT_WIDE_STACK.with(|stack| stack.borrow_mut().push(id));
+        }
+        Self { active }
+    }
+}
+
+#[cfg(test)]
+impl Drop for PnInitWideWorkGuard {
+    fn drop(&mut self) {
+        if self.active {
+            PN_INIT_WIDE_STACK.with(|stack| {
+                stack
+                    .borrow_mut()
+                    .pop()
+                    .expect("wide telemetry stack underflow");
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+struct PnInitNarrowGuard {
+    serial: Option<u64>,
+}
+
+#[cfg(test)]
+impl PnInitNarrowGuard {
+    fn enter(
+        state: &RustHexoState,
+        claimant: Player,
+        root_ply: u32,
+        semantic_horizon: u32,
+    ) -> Self {
+        let parent_serial = PN_INIT_NARROW_STACK.with(|stack| stack.borrow().last().copied());
+        let engine_node = PN_INIT_TELEMETRY.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .map(|session| session.report.nodes.len() as u64)
+                .unwrap_or(0)
+        });
+        let serial = pn_init_record_node(
+            state,
+            claimant,
+            root_ply,
+            semantic_horizon,
+            engine_node,
+            PnInitTelemetryMode::NarrowCompat,
+            parent_serial,
+        );
+        if let Some(serial) = serial {
+            PN_INIT_NARROW_STACK.with(|stack| stack.borrow_mut().push(serial));
+        }
+        Self { serial }
+    }
+
+    fn finish(&mut self, proven: bool, hit_limit: bool) {
+        let Some(serial) = self.serial.take() else {
+            return;
+        };
+        PN_INIT_TELEMETRY.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let node =
+                &mut slot.as_mut().expect("active narrow telemetry").report.nodes[serial as usize];
+            node.outcome = if proven {
+                PnInitTelemetryOutcome::Proven
+            } else if hit_limit {
+                PnInitTelemetryOutcome::Unknown
+            } else {
+                PnInitTelemetryOutcome::Refuted
+            };
+        });
+        PN_INIT_NARROW_STACK.with(|stack| {
+            let popped = stack.borrow_mut().pop();
+            assert_eq!(popped, Some(serial));
+        });
+    }
+}
+
+#[cfg(test)]
+impl Drop for PnInitNarrowGuard {
+    fn drop(&mut self) {
+        if let Some(serial) = self.serial.take() {
+            PN_INIT_NARROW_STACK.with(|stack| {
+                let popped = stack.borrow_mut().pop();
+                assert_eq!(popped, Some(serial));
+            });
+        }
+    }
+}
 
 /// A second, fixed guard in addition to `SolveCaps::node_cap`.  It bounds stack
 /// depth even when a caller supplies an accidentally enormous node cap.
@@ -50,10 +517,86 @@ const TARGET_BYTES_PER_SHARED_TT_SLOT: usize = 512;
 /// successful attempt root is offered regardless of these two tuning limits.
 const MAX_PROMOTED_FRAGMENT_NODES: usize = 128;
 const MAX_PROMOTED_FRAGMENT_EDGES: usize = 512;
+/// Wide shared fragments may retain at most one eighth of the caller's TT cap.
+/// Slots are allocated lazily after a solve, and the next solve subtracts only
+/// bytes actually retained, so an empty/cold store leaves the historical wide
+/// search cap byte-for-byte intact.
+const WIDE_FRAGMENT_CAP_DIVISOR: usize = 8;
+/// Bounded independently verified descendants collected from one attempt.
+const MAX_WIDE_FRAGMENT_PROMOTIONS: usize = 64;
+/// Fragment slots are wider than key-only PN-index entries.
+const TARGET_BYTES_PER_PROVEN_FRAGMENT_SLOT: usize = 1024;
 /// Solve-local TT sentinel for a fully explored restricted position with no
 /// proof in the current wide/depth-bounded attempt. Certificate IDs can never
 /// approach this value (`MAX_CERT_NODES` is 100k).
 const LOCAL_TT_FAILED: CertNodeId = CertNodeId::MAX;
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct QuotientTelemetryReport {
+    pub retained_entries: u64,
+    pub indexed_entries: u64,
+    pub tt_hits: u64,
+    pub d6_index_duplicates: u64,
+    pub d6_index_denominator: u64,
+    pub expanded_unique_positions: u64,
+    pub d6_expanded_duplicates: u64,
+    pub d6_canonicalization_calls: u64,
+    pub d6_canonicalization_nanos: u64,
+    pub horizon_queries: u64,
+    pub horizon_exact_hits: u64,
+    pub horizon_clock_misses: u64,
+    pub horizon_monotone_hits: u64,
+    pub horizon_position_clock_entries: u64,
+    pub horizon_multi_clock_positions: u64,
+    pub horizon_positions: u64,
+    pub horizon_sound_wins: u64,
+    pub horizon_sound_refutations: u64,
+    pub horizon_staged_cutoffs_excluded: u64,
+    pub commutation_eligible_nodes: u64,
+    pub commutation_independent_nodes: u64,
+    pub commutation_shared_window: u64,
+    pub commutation_legality_coupling: u64,
+    pub commutation_threat_response: u64,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SharedFragmentStoreSnapshot {
+    pub enabled: bool,
+    pub entries: u64,
+    pub bytes: u64,
+    pub peak_bytes: u64,
+    pub stored_nodes: u64,
+    pub stored_edges: u64,
+    pub admissions: u64,
+    pub replacements: u64,
+    pub refusals: u64,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct LeafSurfaceReuseSnapshot {
+    pub(crate) shared_reconfigurations: u64,
+    pub(crate) fragment_reconfigurations: u64,
+    pub(crate) shared_slots: u64,
+    pub(crate) fragment_slots: u64,
+}
+
+#[cfg(test)]
+thread_local! {
+    static LAST_QUOTIENT_REPORT: RefCell<Option<QuotientTelemetryReport>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_quotient_telemetry_report() -> Option<QuotientTelemetryReport> {
+    LAST_QUOTIENT_REPORT.with(|slot| slot.borrow_mut().take())
+}
+
+#[cfg(test)]
+fn clear_quotient_telemetry_report() {
+    LAST_QUOTIENT_REPORT.with(|slot| *slot.borrow_mut() = None);
+}
 
 /// Optional attacker-universe expansions.  The default is deliberately the
 /// historical narrow generator so production callers retain byte-identical
@@ -71,6 +614,50 @@ pub(crate) struct WidthOptions {
     vcf_pair_complete: bool,
     quiet_turn_or_edges: Round3Flag,
     ranked_unforced_defender_zone: Round3Flag,
+}
+
+/// Test-only Q8 observation at one Consume quiet-fallback OR node. Production
+/// keeps the flag-gated kernel, while records and their sink remain absent
+/// from release builds.
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(crate) struct KReplyShadowRecord {
+    pub full_quiet: usize,
+    pub urgent: bool,
+    pub k_reply: Option<usize>,
+    pub proved_win: bool,
+    pub winning_edge: Option<HexCoord>,
+    pub winning_edge_in_k: Option<bool>,
+    pub position: Option<RootBinding>,
+    pub consumed: bool,
+    pub consumed_matches_shadow: Option<bool>,
+}
+
+#[cfg(test)]
+struct KReplyShadowTicket {
+    record: usize,
+    kernel: Vec<HexCoord>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct KReplyKernel {
+    pub eligible: bool,
+    pub urgent: bool,
+    pub cells: Vec<HexCoord>,
+}
+
+impl KReplyKernel {
+    /// Exact retained view. The common nonurgent case borrows `Legal(P)`
+    /// instead of allocating an identical vector.
+    pub(crate) fn retained<'a>(&'a self, legal: &'a [HexCoord]) -> &'a [HexCoord] {
+        if !self.eligible {
+            &[]
+        } else if self.urgent {
+            &self.cells
+        } else {
+            legal
+        }
+    }
 }
 
 impl WidthOptions {
@@ -116,27 +703,90 @@ pub(crate) struct TssSolver {
     tt_enabled: bool,
     hash_mask: u64,
     shared_tt: SharedProofCache,
+    /// Default-off T10/U22 wide proven-fragment path. Read once at construction.
+    shared_fragments_enabled: bool,
+    fragment_store: ProvenFragmentStore,
     zone: ZoneSearchCaps,
     width: WidthOptions,
     #[cfg(test)]
     last_narrow_signatures: Vec<NarrowAttemptSignature>,
+    #[cfg(test)]
+    last_k_reply_shadow: Vec<KReplyShadowRecord>,
+    #[cfg(test)]
+    leaf_surface_shared_reconfigurations: u64,
+    #[cfg(test)]
+    leaf_surface_fragment_reconfigurations: u64,
+    /// Test-only observation seam for cap-resume identity checks. Production
+    /// builds neither retain nor expose unfinished proof numbers.
+    #[cfg(test)]
+    last_wide_root_numbers: Option<(u32, u32)>,
 }
 
 impl Default for TssSolver {
     fn default() -> Self {
+        let shared_fragments_enabled =
+            std::env::var("TSS_SHARED_FRAGMENTS").ok().as_deref() == Some("1");
         Self {
             tt_enabled: true,
             hash_mask: u64::MAX,
             shared_tt: SharedProofCache::new(0, u64::MAX),
+            shared_fragments_enabled,
+            fragment_store: ProvenFragmentStore::new(0, u64::MAX),
             zone: ZoneSearchCaps::default(),
             width: WidthOptions::default(),
             #[cfg(test)]
             last_narrow_signatures: Vec::new(),
+            #[cfg(test)]
+            last_k_reply_shadow: Vec::new(),
+            #[cfg(test)]
+            leaf_surface_shared_reconfigurations: 0,
+            #[cfg(test)]
+            leaf_surface_fragment_reconfigurations: 0,
+            #[cfg(test)]
+            last_wide_root_numbers: None,
         }
     }
 }
 
 impl TssSolver {
+    #[cfg(test)]
+    pub(crate) fn leaf_surface_reuse_snapshot(&self) -> LeafSurfaceReuseSnapshot {
+        LeafSurfaceReuseSnapshot {
+            shared_reconfigurations: self.leaf_surface_shared_reconfigurations,
+            fragment_reconfigurations: self.leaf_surface_fragment_reconfigurations,
+            shared_slots: self.shared_tt.slots.len() as u64,
+            fragment_slots: self.fragment_store.slots.len() as u64,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_shared_fragments_for_test(&mut self, enabled: bool) {
+        if self.shared_fragments_enabled != enabled {
+            self.fragment_store.clear();
+        }
+        self.shared_fragments_enabled = enabled;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_wide_root_numbers(&self) -> Option<(u32, u32)> {
+        self.last_wide_root_numbers
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shared_fragment_store_snapshot(&self) -> SharedFragmentStoreSnapshot {
+        SharedFragmentStoreSnapshot {
+            enabled: self.shared_fragments_enabled,
+            entries: self.fragment_store.entry_count as u64,
+            bytes: self.fragment_store.current_bytes as u64,
+            peak_bytes: self.fragment_store.peak_bytes as u64,
+            stored_nodes: self.fragment_store.stored_nodes as u64,
+            stored_edges: self.fragment_store.stored_edges as u64,
+            admissions: self.fragment_store.admissions,
+            replacements: self.fragment_store.replacements,
+            refusals: self.fragment_store.refusals,
+        }
+    }
+
     /// Set the zone/commutation options for subsequent solves. Changing the
     /// options DROPS the persistent positive-fragment cache: cached fragments
     /// are verified proofs either way, but their node-cost provenance belongs
@@ -146,6 +796,7 @@ impl TssSolver {
     pub(crate) fn set_zone_options(&mut self, zone: ZoneSearchCaps) {
         if self.zone != zone {
             self.shared_tt.clear();
+            self.fragment_store.clear();
         }
         self.zone = zone;
     }
@@ -156,8 +807,14 @@ impl TssSolver {
     pub(crate) fn set_width_options(&mut self, width: WidthOptions) {
         if self.width != width {
             self.shared_tt.clear();
+            self.fragment_store.clear();
         }
         self.width = width;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn k_reply_shadow(&self) -> &[KReplyShadowRecord] {
+        &self.last_k_reply_shadow
     }
 
     #[cfg(test)]
@@ -166,9 +823,15 @@ impl TssSolver {
             tt_enabled: false,
             hash_mask: u64::MAX,
             shared_tt: SharedProofCache::new(0, u64::MAX),
+            shared_fragments_enabled: false,
+            fragment_store: ProvenFragmentStore::new(0, u64::MAX),
             zone: ZoneSearchCaps::default(),
             width: WidthOptions::default(),
             last_narrow_signatures: Vec::new(),
+            last_k_reply_shadow: Vec::new(),
+            leaf_surface_shared_reconfigurations: 0,
+            leaf_surface_fragment_reconfigurations: 0,
+            last_wide_root_numbers: None,
         }
     }
 
@@ -180,9 +843,15 @@ impl TssSolver {
             tt_enabled: true,
             hash_mask,
             shared_tt: SharedProofCache::new(0, hash_mask),
+            shared_fragments_enabled: false,
+            fragment_store: ProvenFragmentStore::new(0, hash_mask),
             zone: ZoneSearchCaps::default(),
             width: WidthOptions::default(),
             last_narrow_signatures: Vec::new(),
+            last_k_reply_shadow: Vec::new(),
+            leaf_surface_shared_reconfigurations: 0,
+            leaf_surface_fragment_reconfigurations: 0,
+            last_wide_root_numbers: None,
         }
     }
 
@@ -196,22 +865,69 @@ impl TssSolver {
         goal: SolveGoal,
     ) -> DeepResult<TssCertificate> {
         #[cfg(test)]
-        self.last_narrow_signatures.clear();
+        {
+            self.last_narrow_signatures.clear();
+            self.last_k_reply_shadow.clear();
+            self.last_wide_root_numbers = None;
+            clear_quotient_telemetry_report();
+        }
+
+        // Sample the process environment exactly once per public solve. The
+        // immutable result is threaded through every attempt and recursive
+        // fallback node in this solve.
+        let k_reply_consume = matches!(std::env::var("TSS_K_REPLY_CONSUME").as_deref(), Ok("1"));
+
+        // Read once per solve. Search hot paths receive only this boolean.
+        let interior_census_gate =
+            std::env::var_os("TSS_INTERIOR_CENSUS_GATE").is_some_and(|value| value == "1");
 
         let effective_tt_cap = if self.tt_enabled {
             caps.tt_bytes_cap
         } else {
             0
         };
-        let (local_tt_cap, shared_tt_cap) = if self.width.vcf_pair_complete {
+        let uses_wide_pn = self.width.vcf_pair_complete
+            && !(self.width.consumes_quiet_turns() && self.width.consumes_ranked_zone());
+        let fragment_store_cap = if uses_wide_pn && self.shared_fragments_enabled {
+            effective_tt_cap / WIDE_FRAGMENT_CAP_DIVISOR
+        } else {
+            0
+        };
+        #[cfg(test)]
+        if self.fragment_store.cap != fragment_store_cap
+            || self.fragment_store.hash_mask != self.hash_mask
+        {
+            self.leaf_surface_fragment_reconfigurations = self
+                .leaf_surface_fragment_reconfigurations
+                .saturating_add(1);
+        }
+        self.fragment_store
+            .reconfigure(fragment_store_cap, self.hash_mask);
+        let (local_tt_cap, shared_tt_cap) = if uses_wide_pn && self.shared_fragments_enabled {
+            (
+                effective_tt_cap.saturating_sub(self.fragment_store.current_bytes),
+                0,
+            )
+        } else if self.width.vcf_pair_complete {
             (effective_tt_cap, 0)
         } else {
             split_tt_cap(effective_tt_cap)
         };
+        #[cfg(test)]
+        if self.shared_tt.cap != shared_tt_cap || self.shared_tt.hash_mask != self.hash_mask {
+            self.leaf_surface_shared_reconfigurations =
+                self.leaf_surface_shared_reconfigurations.saturating_add(1);
+        }
         self.shared_tt.reconfigure(shared_tt_cap, self.hash_mask);
 
         let initial_stats = SolveStats {
-            peak_tt_bytes: self.shared_tt.current_bytes as u64,
+            peak_tt_bytes: self
+                .shared_tt
+                .current_bytes
+                .saturating_add(self.fragment_store.current_bytes)
+                as u64,
+            fragment_store_entries: self.fragment_store.entry_count as u64,
+            fragment_store_bytes: self.fragment_store.current_bytes as u64,
             ..SolveStats::default()
         };
         if caps.node_cap == 0
@@ -274,6 +990,8 @@ impl TssSolver {
                 caps.semantic_horizon,
                 self.zone,
                 self.width,
+                k_reply_consume,
+                interior_census_gate,
             );
             #[cfg(test)]
             if let Some(signature) = attempt.tt_signature.as_ref() {
@@ -298,6 +1016,8 @@ impl TssSolver {
                 caps.semantic_horizon,
                 self.zone,
                 self.width,
+                k_reply_consume,
+                interior_census_gate,
             );
             #[cfg(test)]
             if let Some(signature) = attempt.tt_signature.as_ref() {
@@ -335,6 +1055,8 @@ impl TssSolver {
         semantic_horizon: u32,
         zone: ZoneSearchCaps,
         width: WidthOptions,
+        k_reply_consume: bool,
+        interior_census_gate: bool,
     ) -> AttemptResult {
         if !width.vcf_pair_complete
             || (width.consumes_quiet_turns() && width.consumes_ranked_zone())
@@ -360,6 +1082,11 @@ impl TssSolver {
                 zone,
                 width,
                 MAX_SEARCH_DEPTH,
+                k_reply_consume,
+                #[cfg(test)]
+                (width.consumes_quiet_turns() && std::env::var_os("TSS_K_REPLY_SHADOW").is_some())
+                    .then_some(&mut self.last_k_reply_shadow),
+                interior_census_gate,
             );
         }
         let depth_cap = wide_search_final_depth(state.placements_made(), semantic_horizon);
@@ -372,6 +1099,7 @@ impl TssSolver {
             semantic_horizon,
             depth_cap,
             width,
+            interior_census_gate,
         )
     }
 
@@ -384,8 +1112,14 @@ impl TssSolver {
         semantic_horizon: u32,
         depth_cap: usize,
         width: WidthOptions,
+        interior_census_gate: bool,
     ) -> AttemptResult {
-        let shared_bytes = self.shared_tt.current_bytes;
+        let fragments_enabled = self.shared_fragments_enabled;
+        let shared_bytes = self
+            .shared_tt
+            .current_bytes
+            .saturating_add(self.fragment_store.current_bytes);
+        let fragment_store = fragments_enabled.then_some(&self.fragment_store);
         let mut search = WidePnSearch::new_with_width(
             claimant,
             state.placements_made(),
@@ -394,9 +1128,19 @@ impl TssSolver {
             semantic_horizon,
             depth_cap,
             width,
+            fragment_store,
         );
+        search.interior_census_gate = interior_census_gate;
         let root = search.insert_root(state);
         search.run(state, root);
+        #[cfg(test)]
+        search.finalize_ordering_study();
+        #[cfg(test)]
+        {
+            self.last_wide_root_numbers = Some((search.entries[root].pn, search.entries[root].dn));
+        }
+        #[cfg(test)]
+        pn_init_finalize_wide(&search);
         #[cfg(test)]
         if std::env::var_os("TSS_TRACE_PN").is_some() {
             eprintln!(
@@ -420,7 +1164,7 @@ impl TssSolver {
                 for (rank, child) in children.iter().take(32).enumerate() {
                     let child_fields = search.format_trace_child(child);
                     eprintln!("WIDTH_PN_ROOT rank={rank} mv={:?} {child_fields}", child.mv);
-                    if let Some(entry) = child.entry {
+                    if let Some(entry) = search.resolved_child_entry(child) {
                         if let WidePnNode::Branch {
                             children: replies, ..
                         } = &search.entries[entry].node
@@ -438,25 +1182,126 @@ impl TssSolver {
                 }
             }
         }
-        let stats = SolveStats {
+        let mut stats = SolveStats {
             nodes: search.expansions,
+            expansions: search.expansions,
             tt_hits: search.tt_hits,
+            tt_entries: (search.by_position.len() + self.shared_tt.entry_count()) as u64,
             peak_tt_bytes: shared_bytes.saturating_add(search.peak_bytes) as u64,
+            #[cfg(test)]
+            tt_admission_rejections: search.tt_index_rejections,
+            fragment_lookups: search.fragment_lookups,
+            fragment_hits: search.fragment_hits,
+            fragment_store_entries: self.fragment_store.entry_count as u64,
+            fragment_store_bytes: self.fragment_store.current_bytes as u64,
+            interior_gate_evaluations: search.interior_gate_evaluations,
+            interior_gate_dismissals: search.interior_gate_dismissals,
+            interior_gate_nanos: search.interior_gate_nanos,
+            #[cfg(test)]
+            stage_refreshes: search.stage_refreshes,
+            #[cfg(test)]
+            live_ge3_seed_scans: search.live_ge3_seed_scans.get(),
+            #[cfg(test)]
+            live_ge3_seed_nanos: search.live_ge3_seed_nanos.get(),
+            #[cfg(test)]
+            closure_debt: *search.closure_stats.borrow(),
+            #[cfg(test)]
+            threshold_scale: *search.threshold_stats.borrow(),
+            ..SolveStats::default()
         };
-        let cert = search
-            .materialize(state, root)
-            .and_then(|(arena, root_node)| {
-                let (nodes, root_node) = compact_certificate(&arena, root_node)?;
+        let mut promotions = Vec::new();
+        let cert = search.materialize(state, root).and_then(|materialized| {
+            let fragment_imports = materialized.fragment_imports;
+            let _dag_reuses = materialized.dag_reuses;
+            let (nodes, root_node) =
+                compact_certificate(&materialized.arena, materialized.root_node)?;
+            let mut cert = TssCertificate {
+                root: RootBinding::from_state(state),
+                claimant,
+                root_node,
+                nodes,
+                semantic_horizon,
+            };
+            if fragments_enabled {
+                rebase_shared_fragment_labels(&mut cert, state)?;
+                let claimed = status_for_claimant(state.current_player(), claimant);
+                if !TssVerifier.verify(state, &cert, claimed) {
+                    return None;
+                }
+                if let Some(proof) = CachedProof::from_compact(cert.nodes.clone(), cert.root_node) {
+                    promotions.push((PositionKey::from_state(state), proof));
+                }
+            } else {
+                rebase_zone_distances(&mut cert, state)?;
+            }
+            // Count only imports that survive compaction, dominant relabel,
+            // and (when enabled) strict final-certificate verification.
+            stats.fragment_imports = fragment_imports;
+            Some(cert)
+        });
+
+        if fragments_enabled {
+            let mut promoted_keys = promotions
+                .iter()
+                .map(|(key, _)| key.clone())
+                .collect::<HashSet<_>>();
+            for candidate in &search.proven_candidates {
+                if promotions.len() >= MAX_WIDE_FRAGMENT_PROMOTIONS {
+                    break;
+                }
+                let key = PositionKey::from_state(&candidate.state);
+                if promoted_keys.contains(&key) {
+                    continue;
+                }
+                let Some(materialized) = search.materialize(&candidate.state, candidate.id) else {
+                    continue;
+                };
+                let Some((nodes, root_node)) = compact_certificate_limited(
+                    &materialized.arena,
+                    materialized.root_node,
+                    MAX_PROMOTED_FRAGMENT_NODES,
+                    MAX_PROMOTED_FRAGMENT_EDGES,
+                ) else {
+                    continue;
+                };
                 let mut cert = TssCertificate {
-                    root: RootBinding::from_state(state),
+                    root: RootBinding::from_state(&candidate.state),
                     claimant,
                     root_node,
                     nodes,
                     semantic_horizon,
                 };
-                rebase_zone_distances(&mut cert, state)?;
-                Some(cert)
-            });
+                if rebase_shared_fragment_labels(&mut cert, &candidate.state).is_none() {
+                    continue;
+                }
+                let claimed = status_for_claimant(candidate.state.current_player(), claimant);
+                if !TssVerifier.verify(&candidate.state, &cert, claimed) {
+                    continue;
+                }
+                if let Some(proof) = CachedProof::from_compact(cert.nodes, cert.root_node) {
+                    promoted_keys.insert(key.clone());
+                    promotions.push((key, proof));
+                }
+            }
+        }
+        #[cfg(test)]
+        if let Some(telemetry) = search.quotient_telemetry.take() {
+            let report = telemetry.finish(&search.entries, &search.by_position, search.tt_hits);
+            LAST_QUOTIENT_REPORT.with(|slot| *slot.borrow_mut() = Some(report));
+        }
+        drop(search);
+        // The solved attempt root was queued first; admit it last so a direct-
+        // mapped collision with one of its descendants cannot erase the warm
+        // repeat entry in the same promotion batch.
+        promotions.reverse();
+        for (key, proof) in promotions {
+            self.fragment_store.insert(key, claimant, proof);
+        }
+        stats.fragment_store_entries = self.fragment_store.entry_count as u64;
+        stats.fragment_store_bytes = self.fragment_store.current_bytes as u64;
+        stats.peak_tt_bytes = stats
+            .peak_tt_bytes
+            .max(self.fragment_store.current_bytes as u64);
         AttemptResult {
             cert,
             stats,
@@ -466,10 +1311,259 @@ impl TssSolver {
     }
 }
 
-/// Imported zone fragments may have been built at a larger admissible
-/// horizon. Their searched set remains sound at a smaller T, but the carried
-/// D evidence must be relabelled to the assembled certificate's exact build
-/// horizon before solver-side preflight and independent verification.
+/// Test-only owner of one unfinished wide proof-number frontier. The session
+/// is deliberately not reachable from production call paths: this campaign
+/// must establish identity and value before any public API is proposed.
+#[cfg(test)]
+pub(crate) struct CapResumeSession {
+    binding: CapResumeBinding,
+    search: WidePnSearch<'static>,
+    root: usize,
+    stage_depth: usize,
+    stage_initialized: bool,
+    last_node_cap: u64,
+    advances: u64,
+    reentries: u64,
+    valid: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CapResumeBinding {
+    root: RootBinding,
+    claimant: Player,
+    goal: SolveGoal,
+    semantic_horizon: u32,
+    width: WidthOptions,
+    zone: ZoneSearchCaps,
+    tt_enabled: bool,
+    tt_bytes_cap: usize,
+    hash_mask: u64,
+    shared_fragments: bool,
+    lazy_frontier: bool,
+    lazy_key_validation: bool,
+    interior_census_gate: bool,
+    k_reply_consume: bool,
+    quotient_telemetry: bool,
+    max_depth_cap: usize,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CapResumeError {
+    Discarded,
+    BindingMismatch,
+    NonMonotoneNodeCap,
+    UnsupportedProfile,
+    VerifierRejected,
+}
+
+#[cfg(test)]
+pub(crate) struct CapResumeAdvance {
+    pub(crate) result: DeepResult<TssCertificate>,
+    pub(crate) root_pn: u32,
+    pub(crate) root_dn: u32,
+    pub(crate) stage_depth: usize,
+    pub(crate) advances: u64,
+    pub(crate) reentries: u64,
+}
+
+#[cfg(test)]
+impl CapResumeBinding {
+    fn capture(
+        solver: &TssSolver,
+        state: &RustHexoState,
+        caps: &SolveCaps,
+        goal: SolveGoal,
+    ) -> Result<Self, CapResumeError> {
+        let uses_wide_pn = solver.width.vcf_pair_complete
+            && !(solver.width.consumes_quiet_turns() && solver.width.consumes_ranked_zone());
+        if !uses_wide_pn
+            || solver.shared_fragments_enabled
+            || caps.node_cap == 0
+            || caps.semantic_horizon < state.placements_made()
+            || state.board().len() > MAX_CERT_ROOT_STONES
+            || immediate_winner(state, solver.width).is_some()
+        {
+            return Err(CapResumeError::UnsupportedProfile);
+        }
+        let claimant = match goal {
+            SolveGoal::Win | SolveGoal::Both => state.current_player(),
+            SolveGoal::Loss => state.current_player().other(),
+        };
+        Ok(Self {
+            root: RootBinding::from_state(state),
+            claimant,
+            goal,
+            semantic_horizon: caps.semantic_horizon,
+            width: solver.width,
+            zone: solver.zone,
+            tt_enabled: solver.tt_enabled,
+            tt_bytes_cap: caps.tt_bytes_cap,
+            hash_mask: solver.hash_mask,
+            shared_fragments: solver.shared_fragments_enabled,
+            lazy_frontier: std::env::var("TSS_LAZY_FRONTIER").ok().as_deref() == Some("1"),
+            lazy_key_validation: std::env::var_os("TSS_LAZY_FRONTIER_VALIDATE_KEYS").is_some(),
+            interior_census_gate: std::env::var_os("TSS_INTERIOR_CENSUS_GATE")
+                .is_some_and(|value| value == "1"),
+            k_reply_consume: matches!(std::env::var("TSS_K_REPLY_CONSUME").as_deref(), Ok("1")),
+            quotient_telemetry: std::env::var_os("TSS_TURN_QUOTIENT_TELEMETRY").is_some(),
+            max_depth_cap: wide_search_final_depth(state.placements_made(), caps.semantic_horizon),
+        })
+    }
+}
+
+#[cfg(test)]
+impl CapResumeSession {
+    pub(crate) fn new(
+        solver: &TssSolver,
+        state: &RustHexoState,
+        caps: &SolveCaps,
+        goal: SolveGoal,
+    ) -> Result<Self, CapResumeError> {
+        let binding = CapResumeBinding::capture(solver, state, caps, goal)?;
+        let local_tt_cap = if binding.tt_enabled {
+            binding.tt_bytes_cap
+        } else {
+            0
+        };
+        let mut search = WidePnSearch::new_with_width(
+            binding.claimant,
+            state.placements_made(),
+            0,
+            local_tt_cap,
+            binding.semantic_horizon,
+            binding.max_depth_cap,
+            binding.width,
+            None,
+        );
+        debug_assert_eq!(search.lazy_frontier, binding.lazy_frontier);
+        search.interior_census_gate = binding.interior_census_gate;
+        let root = search.insert_root(state);
+        Ok(Self {
+            binding,
+            search,
+            root,
+            stage_depth: 0,
+            stage_initialized: false,
+            last_node_cap: 0,
+            advances: 0,
+            reentries: 0,
+            valid: true,
+        })
+    }
+
+    /// Continue this exact query to a strictly larger total solve cap. The
+    /// session is invalidated before doing fallible search/materialization work;
+    /// consequently a caller that catches a panic cannot reuse partial state.
+    pub(crate) fn advance_to_node_cap(
+        &mut self,
+        solver: &TssSolver,
+        state: &RustHexoState,
+        caps: &SolveCaps,
+        goal: SolveGoal,
+    ) -> Result<CapResumeAdvance, CapResumeError> {
+        if !self.valid {
+            return Err(CapResumeError::Discarded);
+        }
+        // Invalidate before even rebuilding the proposed binding. A panic in
+        // binding capture, search, materialization, or verification therefore
+        // leaves no reusable partial session for a catch_unwind caller.
+        self.valid = false;
+        let binding = match CapResumeBinding::capture(solver, state, caps, goal) {
+            Ok(binding) => binding,
+            Err(error) => return Err(error),
+        };
+        if binding != self.binding {
+            return Err(CapResumeError::BindingMismatch);
+        }
+        if caps.node_cap <= self.last_node_cap {
+            return Err(CapResumeError::NonMonotoneNodeCap);
+        }
+
+        self.search.node_cap = caps.node_cap - 1;
+        if self.advances != 0 {
+            self.reentries = self.reentries.saturating_add(1);
+        }
+        self.advances = self.advances.saturating_add(1);
+        self.search.run_resumable(
+            state,
+            self.root,
+            &mut self.stage_depth,
+            &mut self.stage_initialized,
+        );
+        pn_init_finalize_wide(&self.search);
+
+        let root_pn = self.search.entries[self.root].pn;
+        let root_dn = self.search.entries[self.root].dn;
+        let claimed = status_for_claimant(state.current_player(), self.binding.claimant);
+        let cert = self
+            .search
+            .materialize(state, self.root)
+            .and_then(|materialized| {
+                let (nodes, root_node) =
+                    compact_certificate(&materialized.arena, materialized.root_node)?;
+                let mut cert = TssCertificate {
+                    root: RootBinding::from_state(state),
+                    claimant: self.binding.claimant,
+                    root_node,
+                    nodes,
+                    semantic_horizon: self.binding.semantic_horizon,
+                };
+                rebase_zone_distances(&mut cert, state)?;
+                Some(cert)
+            });
+        if cert
+            .as_ref()
+            .is_some_and(|certificate| !TssVerifier.verify(state, certificate, claimed))
+        {
+            return Err(CapResumeError::VerifierRejected);
+        }
+        let status = if cert.is_some() {
+            claimed
+        } else {
+            ProofStatus::Unknown
+        };
+        let result = DeepResult {
+            status,
+            cert,
+            stats: SolveStats {
+                nodes: self.search.expansions.saturating_add(1),
+                expansions: self.search.expansions,
+                tt_hits: self.search.tt_hits,
+                tt_entries: self.search.by_position.len() as u64,
+                peak_tt_bytes: self.search.peak_bytes as u64,
+                tt_admission_rejections: self.search.tt_index_rejections,
+                fragment_lookups: self.search.fragment_lookups,
+                fragment_hits: self.search.fragment_hits,
+                interior_gate_evaluations: self.search.interior_gate_evaluations,
+                interior_gate_dismissals: self.search.interior_gate_dismissals,
+                interior_gate_nanos: self.search.interior_gate_nanos,
+                stage_refreshes: self.search.stage_refreshes,
+                live_ge3_seed_scans: self.search.live_ge3_seed_scans.get(),
+                live_ge3_seed_nanos: self.search.live_ge3_seed_nanos.get(),
+                closure_debt: *self.search.closure_stats.borrow(),
+                threshold_scale: *self.search.threshold_stats.borrow(),
+                ..SolveStats::default()
+            },
+        };
+        self.last_node_cap = caps.node_cap;
+        self.valid = true;
+        Ok(CapResumeAdvance {
+            result,
+            root_pn,
+            root_dn,
+            stage_depth: self.stage_depth,
+            advances: self.advances,
+            reentries: self.reentries,
+        })
+    }
+}
+
+/// Imported zone fragments may have been built with a larger admissible
+/// budget. Their searched set remains sound for the selected proof, but the
+/// carried evidence must be relabelled from the assembled certificate itself:
+/// exact D14 local budgets and the certificate's exact build horizon.
 fn rebase_zone_distances(cert: &mut TssCertificate, root: &RustHexoState) -> Option<()> {
     let mut states = vec![None; cert.nodes.len()];
     let mut stack = vec![(cert.root_node, root.clone())];
@@ -504,22 +1598,138 @@ fn rebase_zone_distances(cert: &mut TssCertificate, root: &RustHexoState) -> Opt
             _ => {}
         }
     }
-    for (index, state) in states.into_iter().enumerate() {
-        let Some(state) = state else {
-            return None;
+    if states.iter().any(Option::is_none) {
+        return None;
+    }
+
+    // `compact_certificate` emits nodes in postorder, so every ordinary child
+    // precedes its parent. Reconstruct the same D14 recurrence as the
+    // independent verifier: factual WIN leaves consume no defender budget,
+    // LOSS leaves retain the current turn remainder, Choice passes the budget
+    // through, and Universal adds one to the maximum child budget.
+    let mut local_budgets = Vec::with_capacity(cert.nodes.len());
+    for (index, node) in cert.nodes.iter().enumerate() {
+        let local_budget = match node {
+            CertNode::OrCompletion { .. } | CertNode::Win { .. } => 0,
+            CertNode::Loss { .. } => {
+                let state = states.get(index)?.as_ref()?;
+                u32::from(threats::placements_remaining(state))
+            }
+            CertNode::Choice { child, .. } => {
+                let child = *child as usize;
+                if child >= index {
+                    return None;
+                }
+                *local_budgets.get(child)?
+            }
+            CertNode::Universal { edges, .. } => {
+                let mut maximum = 0u32;
+                for edge in edges {
+                    let child = edge.child as usize;
+                    if child >= index {
+                        return None;
+                    }
+                    maximum = maximum.max(*local_budgets.get(child)?);
+                }
+                maximum.saturating_add(1)
+            }
         };
+        local_budgets.push(local_budget);
+    }
+
+    let build_horizon = cert.semantic_horizon;
+    for (index, node) in cert.nodes.iter_mut().enumerate() {
+        if let CertNode::Universal {
+            zone: Some(zone), ..
+        } = node
+        {
+            let Some(&local_budget) = local_budgets.get(index) else {
+                return None;
+            };
+            zone.d = local_budget;
+            zone.build_horizon = build_horizon;
+        }
+    }
+    Some(())
+}
+
+/// T10/U18 relabelling for an assembled shared DAG. The current Rust grammar
+/// serializes D14's local budget but not D15/D16 tables, so the representable
+/// max-dominant join is the exact child-max recurrence below. Reachable
+/// protected/core obligations remain the union of the final outgoing DAG and
+/// are independently reconstructed by `TssVerifier`.
+fn rebase_shared_fragment_labels(cert: &mut TssCertificate, root: &RustHexoState) -> Option<u64> {
+    fn visit(
+        cert: &TssCertificate,
+        id: CertNodeId,
+        state: &RustHexoState,
+        memo: &mut [Option<(PositionKey, u32)>],
+        visiting: &mut [bool],
+        depth: usize,
+    ) -> Option<u32> {
+        if depth > MAX_CERT_DEPTH {
+            return None;
+        }
+        let index = id as usize;
+        let key = PositionKey::from_state(state);
+        if let Some((seen, budget)) = memo.get(index)?.as_ref() {
+            return (seen == &key).then_some(*budget);
+        }
+        if *visiting.get(index)? {
+            return None;
+        }
+        visiting[index] = true;
+        let budget = match cert.nodes.get(index)? {
+            CertNode::OrCompletion { .. } | CertNode::Win { .. } => 0,
+            CertNode::Loss { .. } => u32::from(threats::placements_remaining(state)),
+            CertNode::Choice { mv, child } => {
+                let mut next = state.clone();
+                let result = apply_placement(&mut next, Placement { coord: *mv }).ok()?;
+                if result.outcome.is_some() {
+                    return None;
+                }
+                visit(cert, *child, &next, memo, visiting, depth + 1)?
+            }
+            CertNode::Universal { edges, .. } => {
+                let mut maximum = 0u32;
+                for edge in edges {
+                    let mut next = state.clone();
+                    let result = apply_placement(&mut next, Placement { coord: edge.mv }).ok()?;
+                    if result.outcome.is_some() {
+                        return None;
+                    }
+                    maximum =
+                        maximum.max(visit(cert, edge.child, &next, memo, visiting, depth + 1)?);
+                }
+                maximum.saturating_add(1)
+            }
+        };
+        visiting[index] = false;
+        memo[index] = Some((key, budget));
+        Some(budget)
+    }
+
+    let mut memo = vec![None; cert.nodes.len()];
+    let mut visiting = vec![false; cert.nodes.len()];
+    visit(cert, cert.root_node, root, &mut memo, &mut visiting, 0)?;
+    if memo.iter().any(Option::is_none) {
+        return None;
+    }
+    let mut relabelled = 0u64;
+    for (index, labelled) in memo.into_iter().enumerate() {
+        let (_, budget) = labelled?;
         if let CertNode::Universal {
             zone: Some(zone), ..
         } = cert.nodes.get_mut(index)?
         {
-            zone.d = remaining_defender_placements_for_horizon(
-                &state,
-                cert.claimant,
-                cert.semantic_horizon,
-            )?;
+            relabelled = relabelled.saturating_add(u64::from(
+                zone.d != budget || zone.build_horizon != cert.semantic_horizon,
+            ));
+            zone.d = budget;
+            zone.build_horizon = cert.semantic_horizon;
         }
     }
-    Some(())
+    Some(relabelled)
 }
 
 fn split_tt_cap(total: usize) -> (usize, usize) {
@@ -564,8 +1774,40 @@ fn unknown<C>(stats: SolveStats) -> DeepResult<C> {
 
 fn merge_stats(total: &mut SolveStats, part: SolveStats) {
     total.nodes = total.nodes.saturating_add(part.nodes);
+    total.expansions = total.expansions.saturating_add(part.expansions);
     total.tt_hits = total.tt_hits.saturating_add(part.tt_hits);
+    total.tt_entries = total.tt_entries.max(part.tt_entries);
     total.peak_tt_bytes = total.peak_tt_bytes.max(part.peak_tt_bytes);
+    total.tt_evictions = total.tt_evictions.saturating_add(part.tt_evictions);
+    total.tt_admission_rejections = total
+        .tt_admission_rejections
+        .saturating_add(part.tt_admission_rejections);
+    total.fragment_lookups = total.fragment_lookups.saturating_add(part.fragment_lookups);
+    total.fragment_hits = total.fragment_hits.saturating_add(part.fragment_hits);
+    total.fragment_imports = total.fragment_imports.saturating_add(part.fragment_imports);
+    total.fragment_store_entries = part.fragment_store_entries;
+    total.fragment_store_bytes = part.fragment_store_bytes;
+    total.interior_gate_evaluations = total
+        .interior_gate_evaluations
+        .saturating_add(part.interior_gate_evaluations);
+    total.interior_gate_dismissals = total
+        .interior_gate_dismissals
+        .saturating_add(part.interior_gate_dismissals);
+    total.interior_gate_nanos = total
+        .interior_gate_nanos
+        .saturating_add(part.interior_gate_nanos);
+    #[cfg(test)]
+    {
+        total.stage_refreshes = total.stage_refreshes.saturating_add(part.stage_refreshes);
+        total.live_ge3_seed_scans = total
+            .live_ge3_seed_scans
+            .saturating_add(part.live_ge3_seed_scans);
+        total.live_ge3_seed_nanos = total
+            .live_ge3_seed_nanos
+            .saturating_add(part.live_ge3_seed_nanos);
+        total.closure_debt.merge(part.closure_debt);
+        total.threshold_scale.merge(part.threshold_scale);
+    }
 }
 
 fn status_for_claimant(root_player: Player, claimant: Player) -> ProofStatus {
@@ -781,6 +2023,76 @@ fn winner_from_analysis(
 const PN_INFINITY: u32 = 1_000_000_000;
 
 #[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThresholdDelta {
+    One,
+    Two,
+    Four,
+    MeanSiblingPrior,
+}
+
+#[cfg(test)]
+impl ThresholdDelta {
+    fn from_env() -> Option<Self> {
+        let value = std::env::var("TSS_THRESHOLD_DELTA").ok()?;
+        Some(match value.as_str() {
+            "1" => Self::One,
+            "2" => Self::Two,
+            "4" => Self::Four,
+            "mean" => Self::MeanSiblingPrior,
+            _ => panic!("TSS_THRESHOLD_DELTA must be one of 1, 2, 4, mean"),
+        })
+    }
+}
+
+/// Default-off live ordering arm for retained attacker-pair children. The
+/// numeric values are the public `TSS_ZONE_ORDER` contract.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ZoneOrderMode {
+    #[default]
+    Off,
+    ZoneBound,
+    DStone,
+}
+
+impl ZoneOrderMode {
+    fn from_env() -> Self {
+        match std::env::var("TSS_ZONE_ORDER").ok().as_deref() {
+            None | Some("") | Some("0") => Self::Off,
+            Some("1") => Self::ZoneBound,
+            Some("2") => Self::DStone,
+            Some(_) => panic!("TSS_ZONE_ORDER must be one of 0, 1, 2"),
+        }
+    }
+
+    fn enabled(self) -> bool {
+        self != Self::Off
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::ZoneBound => "zone_bound",
+            Self::DStone => "d_stone",
+        }
+    }
+}
+
+fn zone_order_band_from_env(mode: ZoneOrderMode) -> u32 {
+    if !mode.enabled() {
+        return 0;
+    }
+    std::env::var("TSS_ZONE_ORDER_BAND")
+        .ok()
+        .map(|value| {
+            value
+                .parse::<u32>()
+                .expect("TSS_ZONE_ORDER_BAND must be a nonnegative integer")
+        })
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
 static WIDE_GEN_PAIR_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(test)]
 static WIDE_GEN_DEFENDER_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -792,6 +2104,17 @@ static WIDE_EXPAND_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atom
 static WIDE_REFRESH_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(test)]
 static WIDE_INSERT_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+static WIDE_ZONE_ORDER_CONTEXTS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+static WIDE_ZONE_ORDER_CONTEXT_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+static WIDE_ZONE_ORDER_KEYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+static WIDE_ZONE_ORDER_KEY_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 /// Temporary hot-path attribution for the corpus harness: accumulated wall
 /// nanos of the wide generators/priors, read via `wide_gen_profile`.
@@ -832,6 +2155,25 @@ pub(crate) fn wide_gen_profile() -> (u64, u64, u64, u64, u64, u64) {
         WIDE_REFRESH_NANOS.load(std::sync::atomic::Ordering::Relaxed) / 1_000_000,
         WIDE_INSERT_NANOS.load(std::sync::atomic::Ordering::Relaxed) / 1_000_000,
     )
+}
+
+/// (context builds, retained-child keys, context nanos, key nanos) accumulated
+/// since process start. Only the live flag contributes; the offline R-OS1
+/// observer is deliberately excluded.
+#[cfg(test)]
+pub(crate) fn zone_order_profile() -> (u64, u64, u64, u64) {
+    (
+        WIDE_ZONE_ORDER_CONTEXTS.load(std::sync::atomic::Ordering::Relaxed),
+        WIDE_ZONE_ORDER_KEYS.load(std::sync::atomic::Ordering::Relaxed),
+        WIDE_ZONE_ORDER_CONTEXT_NANOS.load(std::sync::atomic::Ordering::Relaxed),
+        WIDE_ZONE_ORDER_KEY_NANOS.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn zone_order_config() -> (&'static str, u32) {
+    let mode = ZoneOrderMode::from_env();
+    (mode.name(), zone_order_band_from_env(mode))
 }
 /// Small conjunctions can exploit ordinary PN re-selection and shared TT work
 /// without the multiplicative interleaving measured at the four-way AND
@@ -915,11 +2257,144 @@ enum WidePnStepOutcome {
     Stalled,
 }
 
+/// Cheap generation-time observations used only by the offline ordering
+/// study. Smaller values are better except `gate_adjacency`, where larger is
+/// better. `zone_bound` is the maximum claimant-support distance needed to
+/// cover every placement in the child; `d_stone` is the corresponding minimum.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct OrderingChildFeatures {
+    zone_bound: u16,
+    census_distance: u16,
+    gate_adjacency: u16,
+    d_stone: u16,
+}
+
+struct OrderingFeatureContext {
+    claimant_stones: Vec<HexCoord>,
+    #[cfg(test)]
+    claimant_windows: Vec<(u8, Vec<HexCoord>)>,
+    #[cfg(test)]
+    defender_gate_cells: Vec<HexCoord>,
+}
+
+impl OrderingFeatureContext {
+    fn from_state(state: &RustHexoState, claimant: Player, observe_study: bool) -> Self {
+        let claimant_stones = state
+            .board()
+            .occupied_cells()
+            .iter()
+            .copied()
+            .filter(|&coord| state.board().get(coord) == Some(claimant))
+            .collect();
+        #[cfg(test)]
+        let mut claimant_windows = Vec::new();
+        #[cfg(test)]
+        let mut defender_gate_cells = Vec::new();
+        #[cfg(test)]
+        if observe_study {
+            for entry in state.board().windows().entries() {
+                let Some(owner) = entry.active_player() else {
+                    continue;
+                };
+                let count = entry.count(owner);
+                if owner == claimant && count > 0 {
+                    claimant_windows.push((count, entry.empty_cells()));
+                } else if owner == claimant.other() && count >= 4 {
+                    defender_gate_cells.extend(entry.empty_cells());
+                }
+            }
+            defender_gate_cells.sort_unstable_by_key(|coord| raw_coord_key(*coord));
+            defender_gate_cells.dedup();
+        }
+        #[cfg(not(test))]
+        let _ = observe_study;
+        Self {
+            claimant_stones,
+            #[cfg(test)]
+            claimant_windows,
+            #[cfg(test)]
+            defender_gate_cells,
+        }
+    }
+
+    fn pair_key(&self, first: HexCoord, second: HexCoord, mode: ZoneOrderMode) -> u16 {
+        let nearest = |placed| {
+            self.claimant_stones
+                .iter()
+                .map(|&stone| hex_distance(placed, stone))
+                .min()
+                .and_then(|distance| u16::try_from(distance).ok())
+                .unwrap_or(u16::MAX)
+        };
+        let first = nearest(first);
+        let second = nearest(second);
+        match mode {
+            ZoneOrderMode::Off => 0,
+            ZoneOrderMode::ZoneBound => first.max(second),
+            ZoneOrderMode::DStone => first.min(second),
+        }
+    }
+
+    #[cfg(test)]
+    fn features(&self, placements: &[HexCoord]) -> OrderingChildFeatures {
+        let distances = placements
+            .iter()
+            .map(|&placed| {
+                self.claimant_stones
+                    .iter()
+                    .map(|&stone| hex_distance(placed, stone))
+                    .min()
+                    .and_then(|distance| u16::try_from(distance).ok())
+                    .unwrap_or(u16::MAX)
+            })
+            .collect::<Vec<_>>();
+        let d_stone = distances.iter().copied().min().unwrap_or(u16::MAX);
+        let zone_bound = distances.iter().copied().max().unwrap_or(u16::MAX);
+        let post_census = self
+            .claimant_windows
+            .iter()
+            .map(|(count, empties)| {
+                count.saturating_add(
+                    placements
+                        .iter()
+                        .filter(|placed| empties.contains(placed))
+                        .count()
+                        .try_into()
+                        .unwrap_or(u8::MAX),
+                )
+            })
+            .max()
+            .unwrap_or(0)
+            .min(6);
+        let gate_adjacency = placements
+            .iter()
+            .filter(|&&placed| {
+                self.defender_gate_cells
+                    .iter()
+                    .any(|&gate| hex_distance(placed, gate) <= 1)
+            })
+            .count()
+            .try_into()
+            .unwrap_or(u16::MAX);
+        OrderingChildFeatures {
+            zone_bound,
+            census_distance: u16::from(6u8.saturating_sub(post_census)),
+            gate_adjacency,
+            d_stone,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct WidePnChild {
     mv: WidePnMove,
     result: WidePnChildResult,
     entry: Option<usize>,
+    /// Exact key retained in lazy mode until the edge links an arena entry.
+    /// Defender keys virtually represent the eager entry before selection;
+    /// historical attacker-lazy keys remain selection-only.
+    future_key: Option<WideFutureKey>,
     /// Static estimates used until the child position is linked. Completed
     /// attacker turns carry both their fork-derived PN and tau-derived DN so
     /// lazy linking cannot erase the principled ordering signal.
@@ -929,6 +2404,176 @@ struct WidePnChild {
     /// also the neutral value for one-placement and defender children, so the
     /// root-only tier prior cannot perturb their established ordering.
     first_width_tier: u8,
+    /// Live R-OS2 distance key. Zero is the inert default used by flag-off and
+    /// every non-pair child; selection consults it only when the solve-local
+    /// mode is enabled at an attacker Choice.
+    zone_order_key: u16,
+    #[cfg(test)]
+    ordering: OrderingChildFeatures,
+}
+
+#[derive(Clone, Debug)]
+enum WideFutureKey {
+    /// Historical attacker lazy edge: the key participates only when selected.
+    OnSelection(WidePositionKey),
+    /// R-LF1 defender thunk: pre-selection reads virtually observe the eager
+    /// entry represented by the deferred key.
+    Virtual(WidePositionKey),
+}
+
+impl WideFutureKey {
+    fn key(&self) -> &WidePositionKey {
+        match self {
+            Self::OnSelection(key) | Self::Virtual(key) => key,
+        }
+    }
+
+    fn virtual_key(&self) -> Option<&WidePositionKey> {
+        match self {
+            Self::Virtual(key) => Some(key),
+            Self::OnSelection(_) => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WideChildObligation<'a> {
+    Entry(usize),
+    FutureKey(&'a WidePositionKey),
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WideDeferredPosition {
+    depth: usize,
+    prior: WidePnPrior,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ThresholdBandSelection {
+    kind: WidePnKind,
+    gap_bin: usize,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+struct ClosurePairNodeProfile {
+    evaluated: u64,
+    second_candidate_nanos: u64,
+    pair_evaluation_nanos: u64,
+    dedup_nanos: u64,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+struct ClosurePairChildProfile {
+    evaluation_ordinal: u64,
+    second_candidate_nanos: u64,
+    pair_evaluation_nanos: u64,
+    dedup_nanos: u64,
+    selected: bool,
+    linked: bool,
+    expanded: bool,
+}
+
+#[cfg(test)]
+struct ThresholdResidencyGuard {
+    enabled: bool,
+    stats: Rc<RefCell<ThresholdScaleStats>>,
+    expansion_clock: Rc<Cell<u64>>,
+    start_expansions: u64,
+    active_since: Option<Instant>,
+    exclusive_nanos: u64,
+}
+
+#[cfg(test)]
+impl ThresholdResidencyGuard {
+    fn disabled(stats: Rc<RefCell<ThresholdScaleStats>>, expansion_clock: Rc<Cell<u64>>) -> Self {
+        Self {
+            enabled: false,
+            stats,
+            expansion_clock,
+            start_expansions: 0,
+            active_since: None,
+            exclusive_nanos: 0,
+        }
+    }
+
+    fn enabled(stats: Rc<RefCell<ThresholdScaleStats>>, expansion_clock: Rc<Cell<u64>>) -> Self {
+        let start_expansions = expansion_clock.get();
+        Self {
+            enabled: true,
+            stats,
+            expansion_clock,
+            start_expansions,
+            active_since: Some(Instant::now()),
+            exclusive_nanos: 0,
+        }
+    }
+
+    fn pause(&mut self) {
+        if let Some(started) = self.active_since.take() {
+            self.exclusive_nanos = self
+                .exclusive_nanos
+                .saturating_add(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX));
+        }
+    }
+
+    fn resume(&mut self) {
+        if self.enabled {
+            debug_assert!(self.active_since.is_none());
+            self.active_since = Some(Instant::now());
+        }
+    }
+
+    fn state_started(&self) -> Option<Instant> {
+        self.enabled.then(Instant::now)
+    }
+
+    fn record_state_elapsed(&self, started: Option<Instant>) {
+        let Some(started) = started else {
+            return;
+        };
+        let nanos = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let mut stats = self.stats.borrow_mut();
+        stats.state_apply_undo_nanos = stats.state_apply_undo_nanos.saturating_add(nanos);
+    }
+
+    fn record_threshold_cross(&self) {
+        if self.enabled {
+            let mut stats = self.stats.borrow_mut();
+            stats.threshold_cross_returns = stats.threshold_cross_returns.saturating_add(1);
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ThresholdResidencyGuard {
+    fn drop(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        self.pause();
+        let expansions = self
+            .expansion_clock
+            .get()
+            .saturating_sub(self.start_expansions);
+        let bin = match expansions {
+            0 => 0,
+            1 => 1,
+            2 => 2,
+            3..=4 => 3,
+            5..=8 => 4,
+            9..=16 => 5,
+            17..=32 => 6,
+            _ => 7,
+        };
+        let mut stats = self.stats.borrow_mut();
+        stats.residencies = stats.residencies.saturating_add(1);
+        stats.residency_expansions = stats.residency_expansions.saturating_add(expansions);
+        stats.residency_expansion_bins[bin] = stats.residency_expansion_bins[bin].saturating_add(1);
+        stats.descent_nanos = stats.descent_nanos.saturating_add(self.exclusive_nanos);
+    }
 }
 
 fn turn_start_defender_blocks(candidates: &[Candidate]) -> HashSet<HexCoord> {
@@ -955,6 +2600,9 @@ fn wide_choice_has_urgent_block(children: &[WidePnChild]) -> bool {
 enum WidePnNode {
     Unexpanded,
     ProvenLeaf(CertNode),
+    /// Independently verified, exact-key positive proof retained by the
+    /// solver-owned cross-solve store. The Arc is immutable for this run.
+    ProvenFragment(Arc<ProvenFragment>),
     /// This restricted horizon did not reach a proof. Unlike a genuine
     /// refutation, the node is reopened when the retained search deepens.
     DepthCutoff,
@@ -970,6 +2618,7 @@ fn wide_pn_node_tag(node: &WidePnNode) -> &'static str {
     match node {
         WidePnNode::Unexpanded => "unexpanded",
         WidePnNode::ProvenLeaf(_) => "proven_leaf",
+        WidePnNode::ProvenFragment(_) => "proven_fragment",
         WidePnNode::DepthCutoff => "depth_cutoff",
         WidePnNode::Refuted => "refuted",
         WidePnNode::Branch {
@@ -998,6 +2647,12 @@ struct WidePnEntry {
     /// proves or refutes. This does not participate in PN/DN recomputation or
     /// certificate materialization.
     universal_obligation: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
+struct WideProvenCandidate {
+    id: usize,
+    state: RustHexoState,
 }
 
 /// Exact, compact key used only by the wide proof-number frontier. Coordinates
@@ -1055,8 +2710,178 @@ impl WidePositionKey {
         }
     }
 
+    /// Exact nonterminal key after a legal two-stone turn. The wide attacker
+    /// pair gate is deliberately stateless, so constructing the thunk key
+    /// directly avoids cloning/applying the engine state for every retained
+    /// pair.
+    fn after_completed_pair(state: &RustHexoState, first: HexCoord, second: HexCoord) -> Self {
+        debug_assert!(matches!(state.phase(), TurnPhase::FirstStone));
+        let owner = player_code(state.current_player());
+        let mut stones = state
+            .board()
+            .occupied_cells()
+            .iter()
+            .map(|&coord| {
+                (
+                    coord.q,
+                    coord.r,
+                    player_code(state.board().get(coord).expect("occupied cell has owner")),
+                )
+            })
+            .collect::<Vec<_>>();
+        stones.push((first.q, first.r, owner));
+        stones.push((second.q, second.r, owner));
+        stones.sort_unstable();
+
+        let mut encoded = Vec::with_capacity(stones.len().saturating_mul(3).saturating_add(12));
+        encoded.push(player_code(state.current_player().other()));
+        push_wide_varint(&mut encoded, state.placements_made().saturating_add(2));
+        encoded.push(1); // TurnPhase::FirstStone after a completed turn.
+        encoded.push(0); // Retained Pending pairs are nonterminal.
+        for (q, r, owner) in stones {
+            push_wide_varint(
+                &mut encoded,
+                zigzag_i16(q).saturating_mul(2) | u32::from(owner),
+            );
+            push_wide_varint(&mut encoded, zigzag_i16(r));
+        }
+        Self {
+            bytes: encoded.into_boxed_slice(),
+        }
+    }
+
+    #[cfg(test)]
+    fn from_position_key(key: &PositionKey) -> Self {
+        let mut encoded = Vec::with_capacity(key.stones.len().saturating_mul(3).saturating_add(12));
+        encoded.push(key.current_player);
+        push_wide_varint(&mut encoded, key.placements_made);
+        match key.phase {
+            KeyPhase::Opening => encoded.push(0),
+            KeyPhase::FirstStone => encoded.push(1),
+            KeyPhase::SecondStone { q, r } => {
+                encoded.push(2);
+                push_wide_varint(&mut encoded, zigzag_i16(q));
+                push_wide_varint(&mut encoded, zigzag_i16(r));
+            }
+        }
+        match key.terminal {
+            None => encoded.push(0),
+            Some(terminal) => {
+                encoded.push(1 + terminal.winner);
+                push_wide_varint(&mut encoded, terminal.placements);
+            }
+        }
+        for stone in &key.stones {
+            push_wide_varint(
+                &mut encoded,
+                zigzag_i16(stone.q).saturating_mul(2) | u32::from(stone.owner),
+            );
+            push_wide_varint(&mut encoded, zigzag_i16(stone.r));
+        }
+        Self {
+            bytes: encoded.into_boxed_slice(),
+        }
+    }
+
     fn heap_bytes(&self) -> usize {
         self.bytes.len()
+    }
+
+    #[cfg(test)]
+    fn d6_canonical(&self) -> Self {
+        fn take_varint(bytes: &[u8], cursor: &mut usize) -> u32 {
+            let mut value = 0u32;
+            let mut shift = 0u32;
+            loop {
+                let byte = bytes[*cursor];
+                *cursor += 1;
+                value |= u32::from(byte & 0x7f) << shift;
+                if byte & 0x80 == 0 {
+                    return value;
+                }
+                shift += 7;
+                assert!(shift < 35, "wide-position varint overflow");
+            }
+        }
+        fn unzigzag(value: u32) -> i16 {
+            let signed = ((value >> 1) as i32) ^ -((value & 1) as i32);
+            i16::try_from(signed).expect("wide-position coordinate is i16")
+        }
+
+        let mut cursor = 0usize;
+        let current_player = self.bytes[cursor];
+        cursor += 1;
+        let placements_made = take_varint(&self.bytes, &mut cursor);
+        let phase_tag = self.bytes[cursor];
+        cursor += 1;
+        let phase_first = if phase_tag == 2 {
+            Some((
+                unzigzag(take_varint(&self.bytes, &mut cursor)),
+                unzigzag(take_varint(&self.bytes, &mut cursor)),
+            ))
+        } else {
+            None
+        };
+        let terminal_tag = self.bytes[cursor];
+        cursor += 1;
+        let terminal_placements = if terminal_tag == 0 {
+            None
+        } else {
+            Some(take_varint(&self.bytes, &mut cursor))
+        };
+        let mut stones = Vec::new();
+        while cursor < self.bytes.len() {
+            let packed_q = take_varint(&self.bytes, &mut cursor);
+            let owner = (packed_q & 1) as u8;
+            let q = unzigzag(packed_q >> 1);
+            let r = unzigzag(take_varint(&self.bytes, &mut cursor));
+            stones.push((HexCoord::new(q, r), owner));
+        }
+
+        let mut best: Option<Vec<u8>> = None;
+        for symmetry in 0..12u8 {
+            let mut transformed = stones
+                .iter()
+                .map(|&(coord, owner)| {
+                    let (q, r) = d6_coord_i32(coord, symmetry);
+                    (
+                        i16::try_from(q).expect("D6 q remains i16"),
+                        i16::try_from(r).expect("D6 r remains i16"),
+                        owner,
+                    )
+                })
+                .collect::<Vec<_>>();
+            transformed.sort_unstable();
+            let mut encoded = Vec::with_capacity(self.bytes.len());
+            encoded.push(current_player);
+            push_wide_varint(&mut encoded, placements_made);
+            encoded.push(phase_tag);
+            if let Some((q, r)) = phase_first {
+                let (q, r) = d6_coord_i32(HexCoord::new(q, r), symmetry);
+                push_wide_varint(&mut encoded, zigzag_i16(q as i16));
+                push_wide_varint(&mut encoded, zigzag_i16(r as i16));
+            }
+            encoded.push(terminal_tag);
+            if let Some(placements) = terminal_placements {
+                push_wide_varint(&mut encoded, placements);
+            }
+            for (q, r, owner) in transformed {
+                push_wide_varint(
+                    &mut encoded,
+                    zigzag_i16(q).saturating_mul(2) | u32::from(owner),
+                );
+                push_wide_varint(&mut encoded, zigzag_i16(r));
+            }
+            if best
+                .as_ref()
+                .is_none_or(|old| encoded.as_slice() < old.as_slice())
+            {
+                best = Some(encoded);
+            }
+        }
+        Self {
+            bytes: best.expect("D6 contains identity").into_boxed_slice(),
+        }
     }
 
     /// The key of the NONTERMINAL claimant FirstStone position reached after
@@ -1316,18 +3141,405 @@ fn push_wide_varint(out: &mut Vec<u8>, mut value: u32) {
     out.push(value as u8);
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QuotientSoundVerdict {
+    Win,
+    Refutation,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct HorizonHistory {
+    clocks: HashSet<usize>,
+    sound_wins: Vec<usize>,
+    sound_refutations: Vec<usize>,
+}
+
+#[cfg(test)]
+struct QuotientTelemetry {
+    report: QuotientTelemetryReport,
+    entry_keys: Vec<(WidePositionKey, WidePositionKey)>,
+    expanded_raw: HashSet<WidePositionKey>,
+    expanded_canonical: HashMap<WidePositionKey, WidePositionKey>,
+    horizon: HashMap<WidePositionKey, HorizonHistory>,
+}
+
+#[cfg(test)]
+impl QuotientTelemetry {
+    fn enabled() -> Option<Self> {
+        std::env::var_os("TSS_TURN_QUOTIENT_TELEMETRY").map(|_| Self {
+            report: QuotientTelemetryReport::default(),
+            entry_keys: Vec::new(),
+            expanded_raw: HashSet::new(),
+            expanded_canonical: HashMap::new(),
+            horizon: HashMap::new(),
+        })
+    }
+
+    fn canonicalize(&mut self, raw: &WidePositionKey) -> WidePositionKey {
+        let started = Instant::now();
+        let canonical = raw.d6_canonical();
+        self.report.d6_canonicalization_calls =
+            self.report.d6_canonicalization_calls.saturating_add(1);
+        self.report.d6_canonicalization_nanos = self
+            .report
+            .d6_canonicalization_nanos
+            .saturating_add(started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
+        canonical
+    }
+
+    fn observe_insert(&mut self, raw: &WidePositionKey) {
+        let canonical = self.canonicalize(raw);
+        self.entry_keys.push((raw.clone(), canonical));
+    }
+
+    fn observe_expand(&mut self, id: usize, state: &RustHexoState) {
+        let Some((raw, canonical)) = self.entry_keys.get(id).cloned() else {
+            return;
+        };
+        if !self.expanded_raw.insert(raw.clone()) {
+            return;
+        }
+        self.report.expanded_unique_positions =
+            self.report.expanded_unique_positions.saturating_add(1);
+        if self
+            .expanded_canonical
+            .get(&canonical)
+            .is_some_and(|first_raw| first_raw != &raw)
+        {
+            self.report.d6_expanded_duplicates =
+                self.report.d6_expanded_duplicates.saturating_add(1);
+        } else {
+            self.expanded_canonical.insert(canonical, raw);
+        }
+
+        if let Some(interaction) = classify_last_two_turns(state) {
+            self.report.commutation_eligible_nodes =
+                self.report.commutation_eligible_nodes.saturating_add(1);
+            if interaction == 0 {
+                self.report.commutation_independent_nodes =
+                    self.report.commutation_independent_nodes.saturating_add(1);
+            }
+            if interaction & 1 != 0 {
+                self.report.commutation_shared_window =
+                    self.report.commutation_shared_window.saturating_add(1);
+            }
+            if interaction & 2 != 0 {
+                self.report.commutation_legality_coupling =
+                    self.report.commutation_legality_coupling.saturating_add(1);
+            }
+            if interaction & 4 != 0 {
+                self.report.commutation_threat_response =
+                    self.report.commutation_threat_response.saturating_add(1);
+            }
+        }
+    }
+
+    fn observe_stage(
+        &mut self,
+        entries: &[WidePnEntry],
+        by_position: &HashMap<WidePositionKey, usize>,
+        stage_depth: usize,
+    ) {
+        let verdicts = sound_verdicts(entries, by_position);
+        for (id, entry) in entries.iter().enumerate() {
+            if entry.depth > stage_depth {
+                continue;
+            }
+            let Some((raw, _)) = self.entry_keys.get(id) else {
+                continue;
+            };
+            let clock = stage_depth - entry.depth;
+            self.report.horizon_queries = self.report.horizon_queries.saturating_add(1);
+            let history = self.horizon.entry(raw.clone()).or_default();
+            if history.clocks.contains(&clock) {
+                self.report.horizon_exact_hits = self.report.horizon_exact_hits.saturating_add(1);
+            } else {
+                self.report.horizon_clock_misses =
+                    self.report.horizon_clock_misses.saturating_add(1);
+                let monotone = history.sound_wins.iter().any(|&old| old <= clock)
+                    || history.sound_refutations.iter().any(|&old| old >= clock);
+                if monotone {
+                    self.report.horizon_monotone_hits =
+                        self.report.horizon_monotone_hits.saturating_add(1);
+                }
+                history.clocks.insert(clock);
+            }
+            match verdicts.get(id).copied().flatten() {
+                Some(QuotientSoundVerdict::Win) => {
+                    if !history.sound_wins.contains(&clock) {
+                        history.sound_wins.push(clock);
+                        self.report.horizon_sound_wins =
+                            self.report.horizon_sound_wins.saturating_add(1);
+                    }
+                }
+                Some(QuotientSoundVerdict::Refutation) => {
+                    if !history.sound_refutations.contains(&clock) {
+                        history.sound_refutations.push(clock);
+                        self.report.horizon_sound_refutations =
+                            self.report.horizon_sound_refutations.saturating_add(1);
+                    }
+                }
+                None => {}
+            }
+            if matches!(entry.node, WidePnNode::DepthCutoff) {
+                self.report.horizon_staged_cutoffs_excluded = self
+                    .report
+                    .horizon_staged_cutoffs_excluded
+                    .saturating_add(1);
+            }
+        }
+
+        self.report.indexed_entries = by_position.len() as u64;
+    }
+
+    fn finish(
+        mut self,
+        entries: &[WidePnEntry],
+        by_position: &HashMap<WidePositionKey, usize>,
+        tt_hits: u64,
+    ) -> QuotientTelemetryReport {
+        self.report.retained_entries = entries.len() as u64;
+        self.report.indexed_entries = by_position.len() as u64;
+        self.report.tt_hits = tt_hits;
+        let mut canonical = HashSet::new();
+        for &id in by_position.values() {
+            if let Some((_, key)) = self.entry_keys.get(id) {
+                canonical.insert(key.clone());
+            }
+        }
+        self.report.d6_index_denominator = by_position.len() as u64;
+        self.report.d6_index_duplicates =
+            (by_position.len().saturating_sub(canonical.len())) as u64;
+        self.report.horizon_positions = self.horizon.len() as u64;
+        self.report.horizon_position_clock_entries = self
+            .horizon
+            .values()
+            .map(|history| history.clocks.len() as u64)
+            .sum();
+        self.report.horizon_multi_clock_positions = self
+            .horizon
+            .values()
+            .filter(|history| history.clocks.len() > 1)
+            .count() as u64;
+        self.report
+    }
+}
+
+#[cfg(test)]
+fn child_sound_verdict(
+    child: &WidePnChild,
+    verdicts: &[Option<QuotientSoundVerdict>],
+    by_position: &HashMap<WidePositionKey, usize>,
+) -> Option<QuotientSoundVerdict> {
+    match child.result {
+        WidePnChildResult::ClaimantCompletion | WidePnChildResult::ClaimantTactical => {
+            Some(QuotientSoundVerdict::Win)
+        }
+        WidePnChildResult::Refuted => Some(QuotientSoundVerdict::Refutation),
+        WidePnChildResult::Pending => child
+            .entry
+            .or_else(|| {
+                child
+                    .future_key
+                    .as_ref()
+                    .and_then(WideFutureKey::virtual_key)
+                    .and_then(|key| by_position.get(key).copied())
+            })
+            .and_then(|id| verdicts.get(id).copied().flatten()),
+    }
+}
+
+#[cfg(test)]
+fn sound_verdicts(
+    entries: &[WidePnEntry],
+    by_position: &HashMap<WidePositionKey, usize>,
+) -> Vec<Option<QuotientSoundVerdict>> {
+    let mut verdicts = vec![None; entries.len()];
+    let mut ids = (0..entries.len()).collect::<Vec<_>>();
+    ids.sort_unstable_by_key(|&id| Reverse(entries[id].depth));
+    for id in ids {
+        verdicts[id] = match &entries[id].node {
+            WidePnNode::ProvenLeaf(_) | WidePnNode::ProvenFragment(_) => {
+                Some(QuotientSoundVerdict::Win)
+            }
+            WidePnNode::Refuted => Some(QuotientSoundVerdict::Refutation),
+            WidePnNode::Unexpanded | WidePnNode::DepthCutoff => None,
+            WidePnNode::Branch { kind, children } => match kind {
+                WidePnKind::Choice => {
+                    if children.iter().any(|child| {
+                        child_sound_verdict(child, &verdicts, by_position)
+                            == Some(QuotientSoundVerdict::Win)
+                    }) {
+                        Some(QuotientSoundVerdict::Win)
+                    } else if children.iter().all(|child| {
+                        child_sound_verdict(child, &verdicts, by_position)
+                            == Some(QuotientSoundVerdict::Refutation)
+                    }) {
+                        Some(QuotientSoundVerdict::Refutation)
+                    } else {
+                        None
+                    }
+                }
+                WidePnKind::Universal { .. } => {
+                    if children.iter().all(|child| {
+                        child_sound_verdict(child, &verdicts, by_position)
+                            == Some(QuotientSoundVerdict::Win)
+                    }) {
+                        Some(QuotientSoundVerdict::Win)
+                    } else if children.iter().any(|child| {
+                        child_sound_verdict(child, &verdicts, by_position)
+                            == Some(QuotientSoundVerdict::Refutation)
+                    }) {
+                        Some(QuotientSoundVerdict::Refutation)
+                    } else {
+                        None
+                    }
+                }
+            },
+        };
+    }
+    verdicts
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct TelemetryTurn {
+    player: Player,
+    placements: Vec<HexCoord>,
+}
+
+#[cfg(test)]
+fn last_two_complete_turns(state: &RustHexoState) -> Option<(TelemetryTurn, TelemetryTurn)> {
+    let history = state.placement_history();
+    let last = history.last()?;
+    if !matches!(last.phase, TurnPhase::SecondStone { .. }) || history.len() < 4 {
+        return None;
+    }
+    let last_first = history.get(history.len() - 2)?;
+    if !matches!(last_first.phase, TurnPhase::FirstStone) || last_first.player != last.player {
+        return None;
+    }
+    let previous_last = history.get(history.len() - 3)?;
+    if !matches!(previous_last.phase, TurnPhase::SecondStone { .. }) {
+        return None;
+    }
+    let previous_first = history.get(history.len() - 4)?;
+    if !matches!(previous_first.phase, TurnPhase::FirstStone)
+        || previous_first.player != previous_last.player
+        || previous_last.player == last.player
+    {
+        return None;
+    }
+    Some((
+        TelemetryTurn {
+            player: previous_last.player,
+            placements: vec![previous_first.coord, previous_last.coord],
+        },
+        TelemetryTurn {
+            player: last.player,
+            placements: vec![last_first.coord, last.coord],
+        },
+    ))
+}
+
+#[cfg(test)]
+fn coords_share_window(left: HexCoord, right: HexCoord) -> bool {
+    let dq = i32::from(left.q) - i32::from(right.q);
+    let dr = i32::from(left.r) - i32::from(right.r);
+    (dq == 0 && dr.abs() <= 5) || (dr == 0 && dq.abs() <= 5) || (dq == -dr && dq.abs() <= 5)
+}
+
+#[cfg(test)]
+fn classify_last_two_turns(state: &RustHexoState) -> Option<u8> {
+    let (first, second) = last_two_complete_turns(state)?;
+    let mut flags = 0u8;
+    if first.placements.iter().any(|&left| {
+        second
+            .placements
+            .iter()
+            .any(|&right| coords_share_window(left, right))
+    }) {
+        flags |= 1;
+    }
+
+    let excluded = first
+        .placements
+        .iter()
+        .chain(second.placements.iter())
+        .copied()
+        .collect::<HashSet<_>>();
+    let mut available = state
+        .board()
+        .occupied_cells()
+        .iter()
+        .copied()
+        .filter(|coord| !excluded.contains(coord))
+        .collect::<Vec<_>>();
+    for &coord in &second.placements {
+        if !available
+            .iter()
+            .any(|&support| hex_distance(coord, support) <= 8)
+        {
+            flags |= 2;
+            break;
+        }
+        available.push(coord);
+    }
+
+    let first_hits_second = first.placements.iter().any(|&coord| {
+        state.board().windows().entries().any(|entry| {
+            if !entry.key().contains(coord) {
+                return false;
+            }
+            let later = second
+                .placements
+                .iter()
+                .filter(|&&placed| entry.key().contains(placed))
+                .count() as u8;
+            entry.count(second.player).saturating_sub(later) >= 3
+        })
+    });
+    let second_hits_first = second.placements.iter().any(|&coord| {
+        state
+            .board()
+            .windows()
+            .entries()
+            .any(|entry| entry.key().contains(coord) && entry.count(first.player) >= 3)
+    });
+    if first_hits_second || second_hits_first {
+        flags |= 4;
+    }
+    Some(flags)
+}
+
 /// Wide VCF search keeps a persistent proof-number frontier.  Unlike the
 /// quota-based DFS experiments, expanding a sibling never discards work in an
 /// earlier forcing turn. Claimant pairs are represented as one OR edge, so
 /// turn-forcing is structural rather than an after-the-fact recursive filter.
-struct WidePnSearch {
+struct WidePnSearch<'store> {
     claimant: Player,
     root_ply: u32,
     node_cap: u64,
     tt_bytes_cap: usize,
     semantic_horizon: u32,
     depth_cap: usize,
+    /// Final solve depth; staged deepening mutates `depth_cap` below.
+    max_depth_cap: usize,
     width: WidthOptions,
+    /// Solve-local, read-once R-OS2 ordering configuration. Off takes the
+    /// historical selector branch without computing or consulting a key.
+    zone_order_mode: ZoneOrderMode,
+    zone_order_band: u32,
+    /// Read once when this solve-local search is created. Default-off keeps the
+    /// historical eager defender-frontier admission path byte-for-byte in the
+    /// decision logic.
+    lazy_frontier: bool,
+    interior_census_gate: bool,
+    interior_gate_evaluations: u64,
+    interior_gate_dismissals: u64,
+    interior_gate_nanos: u64,
     expansions: u64,
     tt_hits: u64,
     current_bytes: usize,
@@ -1343,11 +3555,115 @@ struct WidePnSearch {
     tt_first_rejection: Option<(u64, usize)>,
     #[cfg(test)]
     stage_refreshes: u64,
+    #[cfg(test)]
+    live_ge3_seed: bool,
+    #[cfg(test)]
+    live_ge3_seed_scans: std::cell::Cell<u64>,
+    #[cfg(test)]
+    live_ge3_seed_nanos: std::cell::Cell<u64>,
+    #[cfg(test)]
+    closure_counters: bool,
+    #[cfg(test)]
+    ordering_study: bool,
+    #[cfg(test)]
+    closure_stats: RefCell<ClosureDebtStats>,
+    #[cfg(test)]
+    closure_pair_nodes: HashMap<usize, ClosurePairNodeProfile>,
+    #[cfg(test)]
+    closure_pair_children: HashMap<(usize, usize), ClosurePairChildProfile>,
+    #[cfg(test)]
+    closure_last_pair_node: std::cell::Cell<ClosurePairNodeProfile>,
+    #[cfg(test)]
+    closure_last_pair_children: RefCell<Vec<ClosurePairChildProfile>>,
+    #[cfg(test)]
+    threshold_counters: bool,
+    #[cfg(test)]
+    threshold_delta: Option<ThresholdDelta>,
+    #[cfg(test)]
+    threshold_stats: Rc<RefCell<ThresholdScaleStats>>,
+    #[cfg(test)]
+    threshold_expansion_clock: Rc<Cell<u64>>,
+    #[cfg(test)]
+    threshold_entry_visits: Vec<u64>,
+    #[cfg(test)]
+    threshold_last_selected: Vec<Option<usize>>,
+    #[cfg(test)]
+    threshold_band_stack: Vec<ThresholdBandSelection>,
+    #[cfg(test)]
+    quotient_telemetry: Option<QuotientTelemetry>,
     entries: Vec<WidePnEntry>,
     by_position: HashMap<WidePositionKey, usize>,
+    /// Exact prospective identity for lazy defender thunks. This preserves the
+    /// first eager admission's prior/depth and lets a selected attacker thunk
+    /// recover that transposed state without pre-linking an arena/TT entry.
+    deferred_by_position: HashMap<WidePositionKey, WideDeferredPosition>,
+    fragment_store: Option<&'store ProvenFragmentStore>,
+    fragment_lookups: u64,
+    fragment_hits: u64,
+    proven_candidate_ids: HashSet<usize>,
+    proven_candidates: Vec<WideProvenCandidate>,
 }
 
-impl WidePnSearch {
+#[cfg(test)]
+fn pn_init_record_wide_expansion(search: &WidePnSearch<'_>, state: &RustHexoState, id: usize) {
+    let parent_engine = PN_INIT_WIDE_STACK.with(|stack| {
+        let stack = stack.borrow();
+        stack
+            .len()
+            .checked_sub(2)
+            .and_then(|index| stack.get(index).copied())
+    });
+    let parent_serial = PN_INIT_TELEMETRY.with(|slot| {
+        let slot = slot.borrow();
+        let session = slot.as_ref()?;
+        parent_engine.and_then(|parent| session.wide_last_event.get(&parent).copied())
+    });
+    let serial = pn_init_record_node(
+        state,
+        search.claimant,
+        search.root_ply,
+        search.semantic_horizon,
+        id as u64,
+        PnInitTelemetryMode::WidePn,
+        parent_serial,
+    );
+    if let Some(serial) = serial {
+        PN_INIT_TELEMETRY.with(|slot| {
+            slot.borrow_mut()
+                .as_mut()
+                .expect("active wide telemetry")
+                .wide_last_event
+                .insert(id, serial);
+        });
+    }
+}
+
+#[cfg(test)]
+fn pn_init_finalize_wide(search: &WidePnSearch<'_>) {
+    PN_INIT_TELEMETRY.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(session) = slot.as_mut() else {
+            return;
+        };
+        for node in &mut session.report.nodes {
+            if node.mode != PnInitTelemetryMode::WidePn {
+                continue;
+            }
+            let Some(entry) = search.entries.get(node.engine_node as usize) else {
+                continue;
+            };
+            node.outcome = if entry.pn == 0 {
+                PnInitTelemetryOutcome::Proven
+            } else if entry.dn == 0 && !matches!(entry.node, WidePnNode::DepthCutoff) {
+                PnInitTelemetryOutcome::Refuted
+            } else {
+                PnInitTelemetryOutcome::Unknown
+            };
+        }
+    });
+}
+
+impl<'store> WidePnSearch<'store> {
     /// C1 migration mode: preserve the narrow DFS's recursive expansion order
     /// while entering through the wide engine seam.  Reusing the PN frontier
     /// here would change node counts even when it found the same proof, which
@@ -1364,6 +3680,9 @@ impl WidePnSearch {
         zone: ZoneSearchCaps,
         width: WidthOptions,
         depth_cap: usize,
+        k_reply_consume: bool,
+        #[cfg(test)] k_reply_shadow: Option<&mut Vec<KReplyShadowRecord>>,
+        interior_census_gate: bool,
     ) -> AttemptResult {
         debug_assert!(
             !width.vcf_pair_complete
@@ -1383,16 +3702,15 @@ impl WidePnSearch {
             zone,
             width,
             depth_cap,
+            k_reply_consume,
+            #[cfg(test)]
+            k_reply_shadow,
+            interior_census_gate,
         );
         let proof = search.prove(&mut work, claimant, root_ply, None);
 
         debug_assert_eq!(entry_key, PositionKey::from_state(&work));
 
-        let stats = SolveStats {
-            nodes: search.nodes,
-            tt_hits: search.tt_hits,
-            peak_tt_bytes: search.peak_tt_bytes as u64,
-        };
         let cert = proof.and_then(|root| {
             let (nodes, root_node) = compact_certificate(&search.arena, root)?;
             if search.can_admit_compact(&entry_key, &nodes) {
@@ -1411,14 +3729,30 @@ impl WidePnSearch {
             Some(cert)
         });
         let stats = SolveStats {
+            nodes: search.nodes,
+            expansions: search.nodes,
+            tt_hits: search.tt_hits,
+            tt_entries: search.tt_entry_count() as u64,
             peak_tt_bytes: search.peak_tt_bytes as u64,
-            ..stats
+            tt_evictions: search.tt.replacements,
+            tt_admission_rejections: search.tt.refusals,
+            interior_gate_evaluations: search.interior_gate_evaluations,
+            interior_gate_dismissals: search.interior_gate_dismissals,
+            interior_gate_nanos: search.interior_gate_nanos,
+            ..SolveStats::default()
         };
+        #[cfg(test)]
+        let tt_signature = search.tt_behavior_signature();
+        #[cfg(test)]
+        if let Some(telemetry) = search.quotient_telemetry.take() {
+            let report = telemetry.finish(&search.tt, search.tt_hits);
+            LAST_QUOTIENT_REPORT.with(|slot| *slot.borrow_mut() = Some(report));
+        }
         AttemptResult {
             cert,
             stats,
             #[cfg(test)]
-            tt_signature: Some(search.tt_behavior_signature()),
+            tt_signature: Some(tt_signature),
         }
     }
 
@@ -1438,6 +3772,7 @@ impl WidePnSearch {
             semantic_horizon,
             depth_cap,
             WidthOptions::vcf_pair_complete(),
+            None,
         )
     }
 
@@ -1449,7 +3784,11 @@ impl WidePnSearch {
         semantic_horizon: u32,
         depth_cap: usize,
         width: WidthOptions,
+        fragment_store: Option<&'store ProvenFragmentStore>,
     ) -> Self {
+        let lazy_frontier = std::env::var("TSS_LAZY_FRONTIER").ok().as_deref() == Some("1");
+        let zone_order_mode = ZoneOrderMode::from_env();
+        let zone_order_band = zone_order_band_from_env(zone_order_mode);
         Self {
             claimant,
             root_ply,
@@ -1457,7 +3796,15 @@ impl WidePnSearch {
             tt_bytes_cap,
             semantic_horizon,
             depth_cap,
+            max_depth_cap: depth_cap,
             width,
+            zone_order_mode,
+            zone_order_band,
+            lazy_frontier,
+            interior_census_gate: false,
+            interior_gate_evaluations: 0,
+            interior_gate_dismissals: 0,
+            interior_gate_nanos: 0,
             expansions: 0,
             tt_hits: 0,
             current_bytes: 0,
@@ -1469,9 +3816,67 @@ impl WidePnSearch {
             tt_first_rejection: None,
             #[cfg(test)]
             stage_refreshes: 0,
+            #[cfg(test)]
+            live_ge3_seed: std::env::var("TSS_LIVE_GE3_SEED").ok().as_deref() == Some("1"),
+            #[cfg(test)]
+            live_ge3_seed_scans: std::cell::Cell::new(0),
+            #[cfg(test)]
+            live_ge3_seed_nanos: std::cell::Cell::new(0),
+            #[cfg(test)]
+            closure_counters: std::env::var("TSS_CLOSURE_COUNTERS").ok().as_deref() == Some("1"),
+            #[cfg(test)]
+            ordering_study: std::env::var("TSS_ORDERING_STUDY").ok().as_deref() == Some("1"),
+            #[cfg(test)]
+            closure_stats: RefCell::new(ClosureDebtStats::default()),
+            #[cfg(test)]
+            closure_pair_nodes: HashMap::new(),
+            #[cfg(test)]
+            closure_pair_children: HashMap::new(),
+            #[cfg(test)]
+            closure_last_pair_node: std::cell::Cell::new(ClosurePairNodeProfile::default()),
+            #[cfg(test)]
+            closure_last_pair_children: RefCell::new(Vec::new()),
+            #[cfg(test)]
+            threshold_counters: std::env::var("TSS_THRESHOLD_COUNTERS").ok().as_deref()
+                == Some("1"),
+            #[cfg(test)]
+            threshold_delta: ThresholdDelta::from_env(),
+            #[cfg(test)]
+            threshold_stats: Rc::new(RefCell::new(ThresholdScaleStats::default())),
+            #[cfg(test)]
+            threshold_expansion_clock: Rc::new(Cell::new(0)),
+            #[cfg(test)]
+            threshold_entry_visits: Vec::new(),
+            #[cfg(test)]
+            threshold_last_selected: Vec::new(),
+            #[cfg(test)]
+            threshold_band_stack: Vec::new(),
+            #[cfg(test)]
+            quotient_telemetry: QuotientTelemetry::enabled(),
             entries: Vec::new(),
             by_position: HashMap::new(),
+            deferred_by_position: HashMap::new(),
+            fragment_store,
+            fragment_lookups: 0,
+            fragment_hits: 0,
+            proven_candidate_ids: HashSet::new(),
+            proven_candidates: Vec::new(),
         }
+    }
+
+    fn remember_proven_candidate(&mut self, state: &RustHexoState, id: usize) {
+        if self.fragment_store.is_none()
+            || self.proven_candidates.len() >= MAX_WIDE_FRAGMENT_PROMOTIONS
+            || self.proven_candidate_ids.contains(&id)
+            || !matches!(self.entries[id].node, WidePnNode::Branch { .. })
+        {
+            return;
+        }
+        self.proven_candidate_ids.insert(id);
+        self.proven_candidates.push(WideProvenCandidate {
+            id,
+            state: state.clone(),
+        });
     }
 
     fn insert_root(&mut self, state: &RustHexoState) -> usize {
@@ -1486,12 +3891,23 @@ impl WidePnSearch {
             self.tt_hits = self.tt_hits.saturating_add(1);
             return id;
         }
+        let deferred = self
+            .lazy_frontier
+            .then(|| self.deferred_by_position.remove(&key))
+            .flatten();
+        let (depth, prior) = deferred
+            .map(|deferred| (deferred.depth, deferred.prior))
+            .unwrap_or((depth, prior));
 
         // The retained PN frontier is the search arena, not the transposition
         // index.  A full (or disabled) TT must only stop indexing new keys;
         // refusing the arena entry would strand the selected Pending edge and
         // make a memory-profile choice alter frontier progress.
         let id = self.entries.len();
+        #[cfg(test)]
+        if let Some(telemetry) = self.quotient_telemetry.as_mut() {
+            telemetry.observe_insert(&key);
+        }
         self.entries.push(WidePnEntry {
             pn: prior.pn,
             dn: prior.dn,
@@ -1509,29 +3925,77 @@ impl WidePnSearch {
         } else {
             #[cfg(test)]
             if self.tt_bytes_cap > 0 {
+                let first_rejection = self.tt_first_rejection.is_none();
                 self.tt_index_rejections = self.tt_index_rejections.saturating_add(1);
                 self.tt_first_rejection
                     .get_or_insert((self.expansions, self.entries.len()));
+                if first_rejection && self.threshold_counters {
+                    self.threshold_stats.borrow_mut().first_admission_refusal = Some((
+                        self.expansions,
+                        self.entries.len() as u64,
+                        self.current_bytes as u64,
+                    ));
+                }
             }
         }
         id
+    }
+
+    fn defer_position(&mut self, key: &WidePositionKey, depth: usize, prior: WidePnPrior) {
+        if self.by_position.contains_key(key) {
+            return;
+        }
+        self.deferred_by_position
+            .entry(key.clone())
+            .or_insert(WideDeferredPosition { depth, prior });
     }
 
     fn position_prior(&self, state: &RustHexoState) -> WidePnPrior {
         #[cfg(test)]
         let _gen_timer = WideGenTimer::start(&WIDE_GEN_PRIOR_NANOS);
         if state.current_player() == self.claimant {
-            WidePnPrior {
-                pn: pn_from_fork_degree(attacker_fork_degree(state, self.claimant)),
-                dn: 1,
-            }
+            let pn = pn_from_fork_degree(attacker_fork_degree(state, self.claimant));
+            #[cfg(test)]
+            let pn = if self.live_ge3_seed {
+                self.live_ge3_seed_prior(state)
+            } else {
+                pn
+            };
+            WidePnPrior { pn, dn: 1 }
         } else {
             let analysis = threats::analyze(state);
+            #[cfg(test)]
+            let pn = if self.live_ge3_seed {
+                self.live_ge3_seed_prior(state)
+            } else {
+                1
+            };
+            #[cfg(not(test))]
+            let pn = 1;
             WidePnPrior {
-                pn: 1,
+                pn,
                 dn: dn_from_tau(analysis.min_hitting_set),
             }
         }
+    }
+
+    #[cfg(test)]
+    fn live_ge3_seed_prior(&self, state: &RustHexoState) -> u32 {
+        let started = Instant::now();
+        let live_ge3 = state
+            .board()
+            .windows()
+            .entries()
+            .filter(|entry| {
+                entry.count(self.claimant) >= 3 && entry.count(self.claimant.other()) == 0
+            })
+            .count();
+        let nanos = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.live_ge3_seed_scans
+            .set(self.live_ge3_seed_scans.get().saturating_add(1));
+        self.live_ge3_seed_nanos
+            .set(self.live_ge3_seed_nanos.get().saturating_add(nanos));
+        pn_from_fork_degree(live_ge3)
     }
 
     /// The immutable first-placement width class is a root bootstrap only.
@@ -1544,8 +4008,15 @@ impl WidePnSearch {
     fn completed_turn_prior(&self, state: &RustHexoState) -> WidePnPrior {
         debug_assert_ne!(state.current_player(), self.claimant);
         let analysis = threats::analyze(state);
+        let pn = pn_from_fork_degree(analysis.opp_threat_count);
+        #[cfg(test)]
+        let pn = if self.live_ge3_seed {
+            self.live_ge3_seed_prior(state)
+        } else {
+            pn
+        };
         WidePnPrior {
-            pn: pn_from_fork_degree(analysis.opp_threat_count),
+            pn,
             dn: dn_from_tau(analysis.min_hitting_set),
         }
     }
@@ -1564,6 +4035,10 @@ impl WidePnSearch {
             // Transposed parents outside the active recursion also need to see
             // the selected cutoff (or proof) before the stage decision.
             self.refresh_all_bottom_up();
+            #[cfg(test)]
+            if let Some(telemetry) = self.quotient_telemetry.as_mut() {
+                telemetry.observe_stage(&self.entries, &self.by_position, stage_depth);
+            }
             #[cfg(test)]
             if self.trace_enabled() {
                 let root_entry = &self.entries[root];
@@ -1587,6 +4062,54 @@ impl WidePnSearch {
             stage_depth = next_depth;
         }
 
+        self.depth_cap = final_depth;
+    }
+
+    /// Test-only continuation driver. `stage_depth` and whether its cutoffs
+    /// have already been reopened are session state, not call-local state.
+    #[cfg(test)]
+    fn run_resumable(
+        &mut self,
+        root_state: &RustHexoState,
+        root: usize,
+        stage_depth: &mut usize,
+        stage_initialized: &mut bool,
+    ) {
+        let final_depth = self.max_depth_cap;
+        loop {
+            self.depth_cap = *stage_depth;
+            if !*stage_initialized {
+                self.reopen_depth_cutoffs(*stage_depth);
+                *stage_initialized = true;
+            }
+            let is_final = *stage_depth == final_depth;
+            let selected_cutoff = self.run_until(root_state, root, self.node_cap, !is_final);
+            self.refresh_all_bottom_up();
+            if let Some(telemetry) = self.quotient_telemetry.as_mut() {
+                telemetry.observe_stage(&self.entries, &self.by_position, *stage_depth);
+            }
+            if self.trace_enabled() {
+                let root_entry = &self.entries[root];
+                eprintln!(
+                    "WIDTH_PN_RESUME_STAGE stage_depth={} expansions={} selected_cutoff={selected_cutoff:?} root_pn={} root_dn={}",
+                    *stage_depth, self.expansions, root_entry.pn, root_entry.dn
+                );
+            }
+
+            if self.entries[root].pn == 0 || self.expansions >= self.node_cap || is_final {
+                break;
+            }
+            let Some(encountered_depth) = selected_cutoff else {
+                break;
+            };
+            let Some(next_depth) =
+                next_wide_stage_depth(*stage_depth, encountered_depth, final_depth)
+            else {
+                break;
+            };
+            *stage_depth = next_depth;
+            *stage_initialized = false;
+        }
         self.depth_cap = final_depth;
     }
 
@@ -1683,6 +4206,146 @@ impl WidePnSearch {
         outcome
     }
 
+    #[cfg(test)]
+    fn start_threshold_residency(&mut self, id: usize) -> ThresholdResidencyGuard {
+        if !self.threshold_counters {
+            return ThresholdResidencyGuard::disabled(
+                Rc::clone(&self.threshold_stats),
+                Rc::clone(&self.threshold_expansion_clock),
+            );
+        }
+        if self.threshold_entry_visits.len() <= id {
+            self.threshold_entry_visits.resize(id + 1, 0);
+        }
+        let prior_visits = self.threshold_entry_visits[id];
+        self.threshold_entry_visits[id] = prior_visits.saturating_add(1);
+        {
+            let mut stats = self.threshold_stats.borrow_mut();
+            stats.recursive_node_visits = stats.recursive_node_visits.saturating_add(1);
+            if prior_visits != 0 {
+                stats.expanded_node_revisits = stats.expanded_node_revisits.saturating_add(1);
+            }
+        }
+        ThresholdResidencyGuard::enabled(
+            Rc::clone(&self.threshold_stats),
+            Rc::clone(&self.threshold_expansion_clock),
+        )
+    }
+
+    #[cfg(test)]
+    fn record_threshold_selection(&mut self, parent: usize, child: usize) {
+        if !self.threshold_counters {
+            return;
+        }
+        if self.threshold_last_selected.len() <= parent {
+            self.threshold_last_selected.resize(parent + 1, None);
+        }
+        if let Some(previous) = self.threshold_last_selected[parent] {
+            let mut stats = self.threshold_stats.borrow_mut();
+            stats.same_parent_reselections = stats.same_parent_reselections.saturating_add(1);
+            if previous != child {
+                stats.sibling_switches = stats.sibling_switches.saturating_add(1);
+            }
+        }
+        self.threshold_last_selected[parent] = Some(child);
+    }
+
+    #[cfg(test)]
+    fn threshold_band_selection(
+        &self,
+        kind: WidePnKind,
+        children: &[WidePnChild],
+        selected: usize,
+    ) -> ThresholdBandSelection {
+        let selected_score = match kind {
+            WidePnKind::Choice => self.child_numbers(&children[selected]).0,
+            WidePnKind::Universal { .. } => self.child_numbers(&children[selected]).1,
+        };
+        let second_best = children
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != selected)
+            .map(|(_, child)| match kind {
+                WidePnKind::Choice => self.child_numbers(child).0,
+                WidePnKind::Universal { .. } => self.child_numbers(child).1,
+            })
+            .min();
+        let gap_bin = match second_best {
+            None => 0,
+            Some(second) if selected_score < second => match second - selected_score {
+                33.. => 1,
+                17..=32 => 2,
+                9..=16 => 3,
+                5..=8 => 4,
+                3..=4 => 5,
+                2 => 6,
+                1 => 7,
+                _ => unreachable!(),
+            },
+            Some(second) if selected_score == second => 8,
+            Some(second) => match selected_score - second {
+                1 => 9,
+                2 => 10,
+                3..=4 => 11,
+                _ => 12,
+            },
+        };
+        ThresholdBandSelection { kind, gap_bin }
+    }
+
+    #[cfg(test)]
+    fn selected_threshold_delta(
+        &self,
+        kind: WidePnKind,
+        children: &[WidePnChild],
+        selected: usize,
+    ) -> u32 {
+        match self.threshold_delta {
+            None | Some(ThresholdDelta::One) => 1,
+            Some(ThresholdDelta::Two) => 2,
+            Some(ThresholdDelta::Four) => 4,
+            Some(ThresholdDelta::MeanSiblingPrior) => {
+                let mut sum = 0u64;
+                let mut count = 0u64;
+                for (index, child) in children.iter().enumerate() {
+                    if index == selected {
+                        continue;
+                    }
+                    let prior = match kind {
+                        WidePnKind::Choice => child.prior.pn,
+                        WidePnKind::Universal { .. } => child.prior.dn,
+                    };
+                    sum = sum.saturating_add(u64::from(prior));
+                    count = count.saturating_add(1);
+                }
+                if count == 0 {
+                    1
+                } else {
+                    u32::try_from(sum / count).unwrap_or(PN_INFINITY).max(1)
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn threshold_increment(&self, value: u32, delta: u32) -> u32 {
+        let incremented = value.saturating_add(delta);
+        if self.threshold_delta.is_some() {
+            let result = incremented.min(PN_INFINITY);
+            if self.threshold_counters && result == PN_INFINITY {
+                let mut stats = self.threshold_stats.borrow_mut();
+                stats.sentinel_increment_hits = stats.sentinel_increment_hits.saturating_add(1);
+                if incremented > PN_INFINITY {
+                    stats.sentinel_increment_clamps =
+                        stats.sentinel_increment_clamps.saturating_add(1);
+                }
+            }
+            result
+        } else {
+            incremented
+        }
+    }
+
     /// Threshold-bounded proof-number descent (df-pn scheduling). The node
     /// keeps driving its selected child while its own numbers stay below the
     /// caller-supplied thresholds, so consecutive expansions land at the
@@ -1703,6 +4366,36 @@ impl WidePnSearch {
         pn_threshold: u32,
         dn_threshold: u32,
     ) -> WidePnStepOutcome {
+        #[cfg(test)]
+        let _pn_init_work_guard = PnInitWideWorkGuard::enter(id);
+        #[cfg(test)]
+        let mut threshold_residency = self.start_threshold_residency(id);
+        #[cfg(test)]
+        if self.threshold_counters && self.threshold_delta.is_some() {
+            let mut stats = self.threshold_stats.borrow_mut();
+            for (index, threshold) in [pn_threshold, dn_threshold].into_iter().enumerate() {
+                if threshold >= PN_INFINITY {
+                    stats.sentinel_inherited_threshold_hits[index] =
+                        stats.sentinel_inherited_threshold_hits[index].saturating_add(1);
+                }
+                if threshold > PN_INFINITY {
+                    stats.sentinel_inherited_threshold_clamps[index] =
+                        stats.sentinel_inherited_threshold_clamps[index].saturating_add(1);
+                }
+            }
+        }
+        #[cfg(test)]
+        let pn_threshold = if self.threshold_delta.is_some() {
+            pn_threshold.min(PN_INFINITY)
+        } else {
+            pn_threshold
+        };
+        #[cfg(test)]
+        let dn_threshold = if self.threshold_delta.is_some() {
+            dn_threshold.min(PN_INFINITY)
+        } else {
+            dn_threshold
+        };
         let mut any_progress = false;
         let mut yielded_universal_children = Vec::new();
         loop {
@@ -1713,7 +4406,12 @@ impl WidePnSearch {
                 };
             }
             if matches!(self.entries[id].node, WidePnNode::Unexpanded) {
-                match self.expand(state, id) {
+                #[cfg(test)]
+                threshold_residency.pause();
+                let expansion_outcome = self.expand(state, id);
+                #[cfg(test)]
+                threshold_residency.resume();
+                match expansion_outcome {
                     WidePnStepOutcome::Progress => {
                         any_progress = true;
                         if !matches!(self.entries[id].node, WidePnNode::Branch { .. }) {
@@ -1725,6 +4423,9 @@ impl WidePnSearch {
             }
             self.recompute(id);
             if self.entries[id].pn == 0 || self.entries[id].dn == 0 {
+                if self.entries[id].pn == 0 {
+                    self.remember_proven_candidate(state, id);
+                }
                 return if any_progress {
                     WidePnStepOutcome::Progress
                 } else {
@@ -1734,6 +4435,8 @@ impl WidePnSearch {
             if self.entries[id].pn >= pn_threshold || self.entries[id].dn >= dn_threshold {
                 // Thresholds crossed: the parent re-decides. Any expansion or
                 // refutation made here already counts as progress.
+                #[cfg(test)]
+                threshold_residency.record_threshold_cross();
                 return WidePnStepOutcome::Progress;
             }
             if self.expansions >= self.node_cap || self.expansions >= self.soft_expansion_cap {
@@ -1784,11 +4487,24 @@ impl WidePnSearch {
                     WidePnStepOutcome::Stalled
                 };
             };
+            #[cfg(test)]
+            self.record_closure_pair_selected(id, child_index);
+            #[cfg(test)]
+            self.record_threshold_selection(id, child_index);
+            #[cfg(test)]
+            let mut threshold_band_selection = None;
             let (kind, child, child_pn_threshold, child_dn_threshold, _root_children_unlinked) = {
                 let WidePnNode::Branch { kind, children } = &self.entries[id].node else {
                     return WidePnStepOutcome::Stalled;
                 };
                 let (child_pn, child_dn) = self.child_numbers(&children[child_index]);
+                #[cfg(test)]
+                let threshold_delta = self.selected_threshold_delta(*kind, children, child_index);
+                #[cfg(test)]
+                if self.threshold_counters {
+                    threshold_band_selection =
+                        Some(self.threshold_band_selection(*kind, children, child_index));
+                }
                 let (child_pn_threshold, child_dn_threshold) = match kind {
                     WidePnKind::Choice => {
                         let mut second_pn = u32::MAX;
@@ -1797,20 +4513,34 @@ impl WidePnSearch {
                                 second_pn = second_pn.min(self.child_numbers(other).0);
                             }
                         }
-                        let pn_t = pn_threshold
-                            .min(second_pn.saturating_add(1))
-                            .max(child_pn.saturating_add(1));
+                        #[cfg(test)]
+                        let second_pn_limit = self.threshold_increment(second_pn, threshold_delta);
+                        #[cfg(not(test))]
+                        let second_pn_limit = second_pn.saturating_add(1);
+                        #[cfg(test)]
+                        let child_pn_floor = self.threshold_increment(child_pn, 1);
+                        #[cfg(not(test))]
+                        let child_pn_floor = child_pn.saturating_add(1);
+                        #[cfg(test)]
+                        let child_dn_floor = self.threshold_increment(child_dn, 1);
+                        #[cfg(not(test))]
+                        let child_dn_floor = child_dn.saturating_add(1);
+                        let pn_t = pn_threshold.min(second_pn_limit).max(child_pn_floor);
                         let dn_t = dn_threshold
                             .saturating_sub(self.entries[id].dn.saturating_sub(child_dn))
-                            .max(child_dn.saturating_add(1));
+                            .max(child_dn_floor);
                         (pn_t, dn_t)
                     }
                     WidePnKind::Universal { .. } => {
                         let committed = self.entries[id].universal_obligation == Some(child_index);
+                        #[cfg(test)]
+                        let child_dn_floor = self.threshold_increment(child_dn, 1);
+                        #[cfg(not(test))]
+                        let child_dn_floor = child_dn.saturating_add(1);
                         let dn_t = if committed {
                             // Commitment domains drive the obligation to a
                             // verdict; sibling DN must not unseat it.
-                            dn_threshold.max(child_dn.saturating_add(1))
+                            dn_threshold.max(child_dn_floor)
                         } else {
                             let mut second_dn = u32::MAX;
                             for (rank, other) in children.iter().enumerate() {
@@ -1818,16 +4548,30 @@ impl WidePnSearch {
                                     second_dn = second_dn.min(self.child_numbers(other).1);
                                 }
                             }
-                            dn_threshold
-                                .min(second_dn.saturating_add(1))
-                                .max(child_dn.saturating_add(1))
+                            #[cfg(test)]
+                            let second_dn_limit =
+                                self.threshold_increment(second_dn, threshold_delta);
+                            #[cfg(not(test))]
+                            let second_dn_limit = second_dn.saturating_add(1);
+                            dn_threshold.min(second_dn_limit).max(child_dn_floor)
                         };
+                        #[cfg(test)]
+                        let child_pn_floor = self.threshold_increment(child_pn, 1);
+                        #[cfg(not(test))]
+                        let child_pn_floor = child_pn.saturating_add(1);
                         let pn_t = pn_threshold
                             .saturating_sub(self.entries[id].pn.saturating_sub(child_pn))
-                            .max(child_pn.saturating_add(1));
+                            .max(child_pn_floor);
                         (pn_t, dn_t)
                     }
                 };
+                #[cfg(test)]
+                if self.threshold_delta.is_some() {
+                    debug_assert!(child_pn_threshold > child_pn);
+                    debug_assert!(child_dn_threshold > child_dn);
+                    debug_assert!(child_pn_threshold <= PN_INFINITY);
+                    debug_assert!(child_dn_threshold <= PN_INFINITY);
+                }
                 (
                     *kind,
                     children[child_index].clone(),
@@ -1857,8 +4601,17 @@ impl WidePnSearch {
 
             let outcome = match child.mv {
                 WidePnMove::One(coord) => {
-                    let linked = child.entry.is_none();
-                    let Ok((_result, delta)) = state.apply_with_delta(Placement { coord }) else {
+                    // Historical attacker edges count first linking as local
+                    // progress. A key-bearing defender thunk refines an eager
+                    // edge whose arena link already existed, so admission must
+                    // not add a progress event that eager never reported.
+                    let linked = child.entry.is_none() && matches!(kind, WidePnKind::Choice);
+                    #[cfg(test)]
+                    let state_started = threshold_residency.state_started();
+                    let applied = state.apply_with_delta(Placement { coord });
+                    #[cfg(test)]
+                    threshold_residency.record_state_elapsed(state_started);
+                    let Ok((_result, delta)) = applied else {
                         self.set_child_refuted(id, child_index);
                         self.refresh(id);
                         any_progress = true;
@@ -1868,9 +4621,25 @@ impl WidePnSearch {
                         let depth =
                             usize::try_from(state.placements_made().saturating_sub(self.root_ply))
                                 .unwrap_or(usize::MAX);
-                        self.insert_position(WidePositionKey::from_state(state), depth, child.prior)
+                        let key = child
+                            .future_key
+                            .as_ref()
+                            .map(|future| future.key().clone())
+                            .unwrap_or_else(|| WidePositionKey::from_state(state));
+                        debug_assert_eq!(key, WidePositionKey::from_state(state));
+                        #[cfg(test)]
+                        if std::env::var_os("TSS_LAZY_FRONTIER_VALIDATE_KEYS").is_some() {
+                            assert_eq!(key, WidePositionKey::from_state(state));
+                        }
+                        self.insert_position(key, depth, child.prior)
                     });
                     self.set_child_entry(id, child_index, child_id);
+                    #[cfg(test)]
+                    threshold_residency.pause();
+                    #[cfg(test)]
+                    if let Some(selection) = threshold_band_selection {
+                        self.threshold_band_stack.push(selection);
+                    }
                     let outcome = self.work(
                         state,
                         child_id,
@@ -1878,7 +4647,17 @@ impl WidePnSearch {
                         child_pn_threshold,
                         child_dn_threshold,
                     );
+                    #[cfg(test)]
+                    if let Some(selection) = threshold_band_selection {
+                        debug_assert_eq!(self.threshold_band_stack.pop(), Some(selection));
+                    }
+                    #[cfg(test)]
+                    threshold_residency.resume();
+                    #[cfg(test)]
+                    let state_started = threshold_residency.state_started();
                     state.undo(delta);
+                    #[cfg(test)]
+                    threshold_residency.record_state_elapsed(state_started);
                     match outcome {
                         WidePnStepOutcome::DepthCutoff {
                             depth,
@@ -1893,19 +4672,29 @@ impl WidePnSearch {
                     }
                 }
                 WidePnMove::Pair(first, second) | WidePnMove::DefenderPair(first, second) => {
-                    let linked = child.entry.is_none();
-                    let Ok((_first_result, first_delta)) =
-                        state.apply_with_delta(Placement { coord: first })
-                    else {
+                    let linked = child.entry.is_none() && matches!(kind, WidePnKind::Choice);
+                    #[cfg(test)]
+                    let state_started = threshold_residency.state_started();
+                    let first_applied = state.apply_with_delta(Placement { coord: first });
+                    #[cfg(test)]
+                    threshold_residency.record_state_elapsed(state_started);
+                    let Ok((_first_result, first_delta)) = first_applied else {
                         self.set_child_refuted(id, child_index);
                         self.refresh(id);
                         any_progress = true;
                         continue;
                     };
-                    let Ok((_second_result, second_delta)) =
-                        state.apply_with_delta(Placement { coord: second })
-                    else {
+                    #[cfg(test)]
+                    let state_started = threshold_residency.state_started();
+                    let second_applied = state.apply_with_delta(Placement { coord: second });
+                    #[cfg(test)]
+                    threshold_residency.record_state_elapsed(state_started);
+                    let Ok((_second_result, second_delta)) = second_applied else {
+                        #[cfg(test)]
+                        let state_started = threshold_residency.state_started();
                         state.undo(first_delta);
+                        #[cfg(test)]
+                        threshold_residency.record_state_elapsed(state_started);
                         self.set_child_refuted(id, child_index);
                         self.refresh(id);
                         any_progress = true;
@@ -1915,9 +4704,34 @@ impl WidePnSearch {
                         let depth =
                             usize::try_from(state.placements_made().saturating_sub(self.root_ply))
                                 .unwrap_or(usize::MAX);
-                        self.insert_position(WidePositionKey::from_state(state), depth, child.prior)
+                        let key = child
+                            .future_key
+                            .as_ref()
+                            .map(|future| future.key().clone())
+                            .unwrap_or_else(|| WidePositionKey::from_state(state));
+                        debug_assert_eq!(key, WidePositionKey::from_state(state));
+                        #[cfg(test)]
+                        if std::env::var_os("TSS_LAZY_FRONTIER_VALIDATE_KEYS").is_some() {
+                            assert_eq!(key, WidePositionKey::from_state(state));
+                        }
+                        self.insert_position(key, depth, child.prior)
                     });
                     self.set_child_entry(id, child_index, child_id);
+                    #[cfg(test)]
+                    if linked {
+                        self.record_closure_pair_linked(id, child_index);
+                    }
+                    #[cfg(test)]
+                    let closure_was_unexpanded = matches!(
+                        self.entries.get(child_id).map(|entry| &entry.node),
+                        Some(WidePnNode::Unexpanded)
+                    );
+                    #[cfg(test)]
+                    threshold_residency.pause();
+                    #[cfg(test)]
+                    if let Some(selection) = threshold_band_selection {
+                        self.threshold_band_stack.push(selection);
+                    }
                     let outcome = self.work(
                         state,
                         child_id,
@@ -1925,8 +4739,27 @@ impl WidePnSearch {
                         child_pn_threshold,
                         child_dn_threshold,
                     );
+                    #[cfg(test)]
+                    if let Some(selection) = threshold_band_selection {
+                        debug_assert_eq!(self.threshold_band_stack.pop(), Some(selection));
+                    }
+                    #[cfg(test)]
+                    threshold_residency.resume();
+                    #[cfg(test)]
+                    if closure_was_unexpanded
+                        && !matches!(
+                            self.entries.get(child_id).map(|entry| &entry.node),
+                            Some(WidePnNode::Unexpanded)
+                        )
+                    {
+                        self.record_closure_pair_expanded(id, child_index);
+                    }
+                    #[cfg(test)]
+                    let state_started = threshold_residency.state_started();
                     state.undo(second_delta);
                     state.undo(first_delta);
+                    #[cfg(test)]
+                    threshold_residency.record_state_elapsed(state_started);
                     match outcome {
                         WidePnStepOutcome::DepthCutoff {
                             depth,
@@ -1988,12 +4821,50 @@ impl WidePnSearch {
     fn set_child_entry(&mut self, parent: usize, child: usize, entry: usize) {
         if let WidePnNode::Branch { children, .. } = &mut self.entries[parent].node {
             children[child].entry = Some(entry);
+            children[child].future_key = None;
+        }
+    }
+
+    #[cfg(test)]
+    fn record_closure_pair_selected(&mut self, parent: usize, child: usize) {
+        let Some(profile) = self.closure_pair_children.get_mut(&(parent, child)) else {
+            return;
+        };
+        if !profile.selected {
+            profile.selected = true;
+            let stats = self.closure_stats.get_mut();
+            stats.pairs_selected = stats.pairs_selected.saturating_add(1);
+        }
+    }
+
+    #[cfg(test)]
+    fn record_closure_pair_linked(&mut self, parent: usize, child: usize) {
+        let Some(profile) = self.closure_pair_children.get_mut(&(parent, child)) else {
+            return;
+        };
+        if !profile.linked {
+            profile.linked = true;
+            let stats = self.closure_stats.get_mut();
+            stats.pairs_linked = stats.pairs_linked.saturating_add(1);
+        }
+    }
+
+    #[cfg(test)]
+    fn record_closure_pair_expanded(&mut self, parent: usize, child: usize) {
+        let Some(profile) = self.closure_pair_children.get_mut(&(parent, child)) else {
+            return;
+        };
+        if !profile.expanded {
+            profile.expanded = true;
+            let stats = self.closure_stats.get_mut();
+            stats.pairs_expanded = stats.pairs_expanded.saturating_add(1);
         }
     }
 
     fn set_child_refuted(&mut self, parent: usize, child: usize) {
         if let WidePnNode::Branch { children, .. } = &mut self.entries[parent].node {
             children[child].result = WidePnChildResult::Refuted;
+            children[child].future_key = None;
         }
     }
 
@@ -2003,12 +4874,33 @@ impl WidePnSearch {
                 (0, PN_INFINITY)
             }
             WidePnChildResult::Refuted => (PN_INFINITY, 0),
-            WidePnChildResult::Pending => child
-                .entry
+            WidePnChildResult::Pending => self
+                .resolved_child_entry(child)
                 .and_then(|id| self.entries.get(id))
                 .map(|entry| (entry.pn, entry.dn))
+                .or_else(|| {
+                    child
+                        .future_key
+                        .as_ref()
+                        .and_then(WideFutureKey::virtual_key)
+                        .and_then(|key| self.deferred_by_position.get(key))
+                        .map(|deferred| (deferred.prior.pn, deferred.prior.dn))
+                })
                 .unwrap_or((child.prior.pn, child.prior.dn)),
         }
+    }
+
+    /// A thunk remains edge-local, but its exact key is also a virtual link to
+    /// a transposition admitted through another parent. Every pre-selection
+    /// read must observe that live entry just as an eagerly linked edge would.
+    fn resolved_child_entry(&self, child: &WidePnChild) -> Option<usize> {
+        child.entry.or_else(|| {
+            child
+                .future_key
+                .as_ref()
+                .and_then(WideFutureKey::virtual_key)
+                .and_then(|key| self.by_position.get(key).copied())
+        })
     }
 
     fn choice_order_pn(&self, child: &WidePnChild) -> u32 {
@@ -2028,7 +4920,7 @@ impl WidePnSearch {
     #[cfg(test)]
     fn format_trace_child(&self, child: &WidePnChild) -> String {
         let (pn, dn) = self.child_numbers(child);
-        let (entry_id, entry_depth, entry_node, cutoff) = match child.entry {
+        let (entry_id, entry_depth, entry_node, cutoff) = match self.resolved_child_entry(child) {
             Some(id) => match self.entries.get(id) {
                 Some(entry) => (
                     id.to_string(),
@@ -2141,7 +5033,7 @@ impl WidePnSearch {
             if child.result != WidePnChildResult::Pending {
                 return;
             }
-            let Some(next_entry) = child.entry else {
+            let Some(next_entry) = self.resolved_child_entry(child) else {
                 return;
             };
             let applied = match child.mv {
@@ -2174,6 +5066,92 @@ impl WidePnSearch {
     }
 
     fn select_child_index_with_tier(
+        &self,
+        kind: WidePnKind,
+        children: &[WidePnChild],
+        sequential_root_probe: bool,
+        prefer_width_tier: bool,
+    ) -> Option<usize> {
+        if kind != WidePnKind::Choice || !self.zone_order_mode.enabled() {
+            return self.select_child_index_baseline(
+                kind,
+                children,
+                sequential_root_probe,
+                prefer_width_tier,
+            );
+        }
+
+        let baseline = self.select_child_index_baseline(
+            kind,
+            children,
+            sequential_root_probe,
+            prefer_width_tier,
+        )?;
+        let baseline_child = &children[baseline];
+
+        if sequential_root_probe {
+            let baseline_class = (
+                self.child_numbers(baseline_child).0 != 0,
+                !baseline_child.urgent_block,
+                if prefer_width_tier {
+                    baseline_child.first_width_tier
+                } else {
+                    0
+                },
+                baseline_child.prior.pn,
+            );
+            return children
+                .iter()
+                .enumerate()
+                .filter(|(_, child)| !self.child_is_genuinely_refuted(child))
+                .filter(|(_, child)| {
+                    (
+                        self.child_numbers(child).0 != 0,
+                        !child.urgent_block,
+                        if prefer_width_tier {
+                            child.first_width_tier
+                        } else {
+                            0
+                        },
+                        child.prior.pn,
+                    ) == baseline_class
+                })
+                .min_by_key(|(rank, child)| (child.zone_order_key, *rank))
+                .map(|(index, _)| index);
+        }
+
+        // Width tier and immutable fork prior are hard classes. Start with the
+        // class selected by the historical policy, then admit only its current
+        // PN tie/band. This cannot pull a child across any established class.
+        let baseline_width = if prefer_width_tier {
+            baseline_child.first_width_tier
+        } else {
+            0
+        };
+        let baseline_prior = baseline_child.prior.pn;
+        let band_limit = self
+            .choice_order_pn(baseline_child)
+            .saturating_add(self.zone_order_band);
+        children
+            .iter()
+            .enumerate()
+            .filter(|(_, child)| !self.child_is_genuinely_refuted(child))
+            .filter(|(_, child)| {
+                (if prefer_width_tier {
+                    child.first_width_tier
+                } else {
+                    0
+                }) == baseline_width
+                    && child.prior.pn == baseline_prior
+                    && self.choice_order_pn(child) <= band_limit
+            })
+            .min_by_key(|(rank, child)| (child.zone_order_key, *rank))
+            .map(|(index, _)| index)
+    }
+
+    /// Historical selector kept as a separate off-path so R-OS2 cannot alter
+    /// default scheduling through a changed tuple or filter.
+    fn select_child_index_baseline(
         &self,
         kind: WidePnKind,
         children: &[WidePnChild],
@@ -2244,27 +5222,52 @@ impl WidePnSearch {
     /// prove so a qualifying Universal stays sequential through its binary
     /// tail instead of changing policy mid-proof.
     fn has_commitment_fanout(&self, children: &[WidePnChild]) -> bool {
-        let mut unique = [0usize; MIN_COMMITTED_UNIVERSAL_OBLIGATIONS];
-        let mut unique_len = 0usize;
+        let mut unique = Vec::with_capacity(MIN_COMMITTED_UNIVERSAL_OBLIGATIONS);
         for child in children {
             let WidePnChildResult::Pending = child.result else {
                 continue;
             };
-            let Some(entry) = child
-                .entry
-                .filter(|&entry| self.entries.get(entry).is_some())
-            else {
+            let Some(identity) = self.child_obligation_identity(child) else {
                 return false;
             };
-            if unique[..unique_len].contains(&entry) {
+            if unique.contains(&identity) {
                 continue;
             }
-            if unique_len < unique.len() {
-                unique[unique_len] = entry;
-                unique_len += 1;
+            if unique.len() < MIN_COMMITTED_UNIVERSAL_OBLIGATIONS {
+                unique.push(identity);
             }
         }
-        unique_len >= MIN_COMMITTED_UNIVERSAL_OBLIGATIONS
+        unique.len() >= MIN_COMMITTED_UNIVERSAL_OBLIGATIONS
+    }
+
+    fn child_obligation_identity<'a>(
+        &'a self,
+        child: &'a WidePnChild,
+    ) -> Option<WideChildObligation<'a>> {
+        if let Some(entry) = self
+            .resolved_child_entry(child)
+            .filter(|&entry| self.entries.get(entry).is_some())
+        {
+            return Some(WideChildObligation::Entry(entry));
+        }
+        let key = child.future_key.as_ref()?.virtual_key()?;
+        Some(
+            self.by_position
+                .get(key)
+                .copied()
+                .map(WideChildObligation::Entry)
+                .unwrap_or(WideChildObligation::FutureKey(key)),
+        )
+    }
+
+    fn same_child_obligation(&self, left: &WidePnChild, right: &WidePnChild) -> bool {
+        match (
+            self.child_obligation_identity(left),
+            self.child_obligation_identity(right),
+        ) {
+            (Some(left), Some(right)) => left == right,
+            _ => false,
+        }
     }
 
     fn universal_commitment_active(&self, id: usize, children: &[WidePnChild]) -> bool {
@@ -2288,13 +5291,10 @@ impl WidePnSearch {
         yielded: &[usize],
     ) -> Option<usize> {
         let selectable = |index: usize, child: &WidePnChild| {
-            let yielded_same_entry = child.entry.is_some_and(|entry| {
-                yielded.iter().any(|&yielded_index| {
-                    children
-                        .get(yielded_index)
-                        .and_then(|yielded_child| yielded_child.entry)
-                        == Some(entry)
-                })
+            let yielded_same_entry = yielded.iter().any(|&yielded_index| {
+                children
+                    .get(yielded_index)
+                    .is_some_and(|yielded_child| self.same_child_obligation(child, yielded_child))
             });
             !yielded.contains(&index)
                 && !yielded_same_entry
@@ -2383,8 +5383,8 @@ impl WidePnSearch {
     fn child_is_genuinely_refuted(&self, child: &WidePnChild) -> bool {
         match child.result {
             WidePnChildResult::Refuted => true,
-            WidePnChildResult::Pending => child
-                .entry
+            WidePnChildResult::Pending => self
+                .resolved_child_entry(child)
                 .and_then(|id| self.entries.get(id))
                 .is_some_and(|entry| {
                     entry.dn == 0 && !matches!(entry.node, WidePnNode::DepthCutoff)
@@ -2396,8 +5396,8 @@ impl WidePnSearch {
     fn child_is_genuinely_proven(&self, child: &WidePnChild) -> bool {
         match child.result {
             WidePnChildResult::ClaimantCompletion | WidePnChildResult::ClaimantTactical => true,
-            WidePnChildResult::Pending => child
-                .entry
+            WidePnChildResult::Pending => self
+                .resolved_child_entry(child)
                 .and_then(|id| self.entries.get(id))
                 .is_some_and(|entry| entry.pn == 0),
             WidePnChildResult::Refuted => false,
@@ -2411,7 +5411,7 @@ impl WidePnSearch {
                 let prior = self.entries[id].prior;
                 (prior.pn, prior.dn)
             }
-            WidePnNode::ProvenLeaf(_) => (0, PN_INFINITY),
+            WidePnNode::ProvenLeaf(_) | WidePnNode::ProvenFragment(_) => (0, PN_INFINITY),
             WidePnNode::DepthCutoff | WidePnNode::Refuted => (PN_INFINITY, 0),
             WidePnNode::Branch { kind, children } => match kind {
                 WidePnKind::Choice => {
@@ -2440,9 +5440,159 @@ impl WidePnSearch {
                 }
             },
         };
+        #[cfg(test)]
+        if self.threshold_counters {
+            let sum_kind = match &self.entries[id].node {
+                WidePnNode::Branch {
+                    kind: WidePnKind::Choice,
+                    ..
+                } if numbers.1 == PN_INFINITY => Some(0),
+                WidePnNode::Branch {
+                    kind: WidePnKind::Universal { .. },
+                    ..
+                } if numbers.0 == PN_INFINITY => Some(1),
+                _ => None,
+            };
+            if let Some(index) = sum_kind {
+                let mut stats = self.threshold_stats.borrow_mut();
+                stats.sentinel_sum_hits[index] = stats.sentinel_sum_hits[index].saturating_add(1);
+            }
+        }
         self.entries[id].pn = numbers.0;
         self.entries[id].dn = numbers.1;
+        #[cfg(test)]
+        if self.closure_counters && previous.0 != 0 && numbers.0 == 0 {
+            self.record_closure_winning_rank(id);
+        }
         previous != numbers
+    }
+
+    #[cfg(test)]
+    fn record_closure_winning_rank(&mut self, id: usize) {
+        let winning_index = match &self.entries[id].node {
+            WidePnNode::Branch {
+                kind: WidePnKind::Choice,
+                children,
+            } => children
+                .iter()
+                .position(|child| self.child_numbers(child).0 == 0),
+            _ => None,
+        };
+        let Some(winning_index) = winning_index else {
+            return;
+        };
+        let rank = winning_index.saturating_add(1);
+        let bin = match rank {
+            1 => 0,
+            2 => 1,
+            3 => 2,
+            4 => 3,
+            5..=8 => 4,
+            9..=16 => 5,
+            17..=32 => 6,
+            _ => 7,
+        };
+        let mut stats = self.closure_stats.borrow_mut();
+        stats.winning_choice_nodes = stats.winning_choice_nodes.saturating_add(1);
+        stats.winning_rank_bins[bin] = stats.winning_rank_bins[bin].saturating_add(1);
+        let Some(node_profile) = self.closure_pair_nodes.get(&id).copied() else {
+            return;
+        };
+        let Some(child_profile) = self
+            .closure_pair_children
+            .get(&(id, winning_index))
+            .copied()
+        else {
+            return;
+        };
+        stats.reveal_pair_evaluated = stats
+            .reveal_pair_evaluated
+            .saturating_add(node_profile.evaluated);
+        stats.reveal_pair_prefix = stats
+            .reveal_pair_prefix
+            .saturating_add(child_profile.evaluation_ordinal);
+        stats.avoidable_second_candidate_nanos =
+            stats.avoidable_second_candidate_nanos.saturating_add(
+                node_profile
+                    .second_candidate_nanos
+                    .saturating_sub(child_profile.second_candidate_nanos),
+            );
+        stats.avoidable_pair_evaluation_nanos =
+            stats.avoidable_pair_evaluation_nanos.saturating_add(
+                node_profile
+                    .pair_evaluation_nanos
+                    .saturating_sub(child_profile.pair_evaluation_nanos),
+            );
+        stats.avoidable_dedup_nanos = stats.avoidable_dedup_nanos.saturating_add(
+            node_profile
+                .dedup_nanos
+                .saturating_sub(child_profile.dedup_nanos),
+        );
+    }
+
+    #[cfg(test)]
+    fn finalize_ordering_study(&self) {
+        if !self.ordering_study {
+            return;
+        }
+        let mut records = Vec::new();
+        for entry in &self.entries {
+            let WidePnNode::Branch {
+                kind: WidePnKind::Choice,
+                children,
+            } = &entry.node
+            else {
+                continue;
+            };
+            if entry.pn != 0 || children.is_empty() {
+                continue;
+            }
+            let Some(winning_index) = children
+                .iter()
+                .position(|child| self.child_numbers(child).0 == 0)
+            else {
+                continue;
+            };
+            let key = |order: usize, index: usize, feature: OrderingChildFeatures| {
+                let baseline = u32::try_from(index).unwrap_or(u32::MAX);
+                let zone = u32::from(feature.zone_bound);
+                let census = u32::from(feature.census_distance);
+                let gate = u32::from(u16::MAX.saturating_sub(feature.gate_adjacency));
+                let stone = u32::from(feature.d_stone);
+                match order {
+                    0 => [baseline, 0, 0, 0, 0],
+                    1 => [zone, baseline, 0, 0, 0],
+                    2 => [census, baseline, 0, 0, 0],
+                    3 => [gate, baseline, 0, 0, 0],
+                    4 => [stone, baseline, 0, 0, 0],
+                    5 => [census, zone, stone, gate, baseline],
+                    6 => [zone, gate, census, stone, baseline],
+                    _ => unreachable!("ordering study key index"),
+                }
+            };
+            let winning_feature = children[winning_index].ordering;
+            let ranks = std::array::from_fn(|order| {
+                let winning_key = key(order, winning_index, winning_feature);
+                1u32.saturating_add(
+                    children
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, child)| key(order, *index, child.ordering) < winning_key)
+                        .count()
+                        .try_into()
+                        .unwrap_or(u32::MAX),
+                )
+            });
+            records.push(OrderingStudyRecord {
+                depth: u32::try_from(entry.depth).unwrap_or(u32::MAX),
+                generated_children: u32::try_from(children.len()).unwrap_or(u32::MAX),
+                pair_node: children
+                    .iter()
+                    .all(|child| matches!(child.mv, WidePnMove::Pair(_, _))),
+                ranks,
+            });
+        }
+        ORDERING_STUDY_REPORT.with(|slot| slot.borrow_mut().records.extend(records));
     }
 
     fn refresh(&mut self, id: usize) {
@@ -2456,6 +5606,55 @@ impl WidePnSearch {
             return WidePnStepOutcome::Stalled;
         }
         self.expansions += 1;
+        #[cfg(test)]
+        {
+            if self.threshold_counters {
+                self.threshold_expansion_clock.set(self.expansions);
+                let post_saturation = self.tt_first_rejection.is_some();
+                let selection = self.threshold_band_stack.last().copied();
+                let mut stats = self.threshold_stats.borrow_mut();
+                match (selection, post_saturation) {
+                    (Some(selection), false) => match selection.kind {
+                        WidePnKind::Choice => {
+                            stats.choice_gap_expansions_pre_saturation[selection.gap_bin] = stats
+                                .choice_gap_expansions_pre_saturation[selection.gap_bin]
+                                .saturating_add(1);
+                        }
+                        WidePnKind::Universal { .. } => {
+                            stats.universal_gap_expansions_pre_saturation[selection.gap_bin] =
+                                stats.universal_gap_expansions_pre_saturation[selection.gap_bin]
+                                    .saturating_add(1);
+                        }
+                    },
+                    (Some(selection), true) => match selection.kind {
+                        WidePnKind::Choice => {
+                            stats.choice_gap_expansions_post_saturation[selection.gap_bin] = stats
+                                .choice_gap_expansions_post_saturation[selection.gap_bin]
+                                .saturating_add(1);
+                        }
+                        WidePnKind::Universal { .. } => {
+                            stats.universal_gap_expansions_post_saturation[selection.gap_bin] =
+                                stats.universal_gap_expansions_post_saturation[selection.gap_bin]
+                                    .saturating_add(1);
+                        }
+                    },
+                    (None, false) => {
+                        stats.unclassified_expansions_pre_saturation = stats
+                            .unclassified_expansions_pre_saturation
+                            .saturating_add(1);
+                    }
+                    (None, true) => {
+                        stats.unclassified_expansions_post_saturation = stats
+                            .unclassified_expansions_post_saturation
+                            .saturating_add(1);
+                    }
+                }
+            }
+            if let Some(telemetry) = self.quotient_telemetry.as_mut() {
+                telemetry.observe_expand(id, state);
+            }
+            pn_init_record_wide_expansion(self, state, id);
+        }
         let depth = usize::try_from(state.placements_made().saturating_sub(self.root_ply))
             .unwrap_or(usize::MAX);
         if depth > self.depth_cap {
@@ -2470,6 +5669,35 @@ impl WidePnSearch {
             self.entries[id].node = WidePnNode::Refuted;
             self.refresh(id);
             return WidePnStepOutcome::Progress;
+        }
+        if let Some(store) = self.fragment_store.filter(|store| store.entry_count != 0) {
+            self.fragment_lookups = self.fragment_lookups.saturating_add(1);
+            let key = PositionKey::from_state(state);
+            if let Some(fragment) = store.lookup(&key, self.claimant) {
+                let proof = &fragment.proof;
+                let root_is_universal = matches!(
+                    proof.nodes.get(proof.root_node as usize),
+                    Some(CertNode::Universal { .. })
+                );
+                let compatible = proof.validate().is_some()
+                    && proof.resolution_t <= self.semantic_horizon
+                    && proof
+                        .zone_build_t
+                        .is_none_or(|build_t| self.semantic_horizon <= build_t)
+                    && depth
+                        .checked_add(proof.height)
+                        .is_some_and(|height| height <= self.max_depth_cap)
+                    // Parent commutation permissions are path-local. A cached
+                    // Universal is consumed only at the solve root, whose
+                    // verifier context is known to be empty.
+                    && (depth == 0 || !root_is_universal);
+                if compatible {
+                    self.fragment_hits = self.fragment_hits.saturating_add(1);
+                    self.entries[id].node = WidePnNode::ProvenFragment(fragment);
+                    self.refresh(id);
+                    return WidePnStepOutcome::Progress;
+                }
+            }
         }
         if let Some(outcome) = state.terminal() {
             self.entries[id].node = if outcome.winner == self.claimant {
@@ -2504,6 +5732,25 @@ impl WidePnSearch {
             }
         }
 
+        if self.interior_census_gate && state.current_player() == self.claimant {
+            if let Some(evaluation) = evaluate_interior_census_gate(
+                state,
+                self.claimant,
+                self.root_ply,
+                self.semantic_horizon,
+            ) {
+                self.interior_gate_evaluations = self.interior_gate_evaluations.saturating_add(1);
+                self.interior_gate_nanos =
+                    self.interior_gate_nanos.saturating_add(evaluation.nanos);
+                if evaluation.dismiss {
+                    self.interior_gate_dismissals = self.interior_gate_dismissals.saturating_add(1);
+                    self.entries[id].node = WidePnNode::Refuted;
+                    self.refresh(id);
+                    return WidePnStepOutcome::Progress;
+                }
+            }
+        }
+
         let (kind, mut children) = if state.current_player() == self.claimant {
             (WidePnKind::Choice, self.attack_children(state, depth))
         } else {
@@ -2520,12 +5767,32 @@ impl WidePnSearch {
             let children = self.defender_boundary_children(state, analysis.b);
             (WidePnKind::Universal { implicit_dispatch }, children)
         };
+        #[cfg(test)]
+        let closure_pair_profiles = if self.closure_counters
+            && kind == WidePnKind::Choice
+            && matches!(state.phase(), TurnPhase::FirstStone)
+        {
+            Some((
+                self.closure_last_pair_node.get(),
+                std::mem::take(&mut *self.closure_last_pair_children.borrow_mut()),
+            ))
+        } else {
+            None
+        };
         children.shrink_to_fit();
         self.entries[id].node = if children.is_empty() {
             WidePnNode::Refuted
         } else {
             WidePnNode::Branch { kind, children }
         };
+        #[cfg(test)]
+        if let Some((node_profile, child_profiles)) = closure_pair_profiles {
+            self.closure_pair_nodes.insert(id, node_profile);
+            for (child_index, profile) in child_profiles.into_iter().enumerate() {
+                self.closure_pair_children
+                    .insert((id, child_index), profile);
+            }
+        }
         self.refresh(id);
         WidePnStepOutcome::Progress
     }
@@ -2551,13 +5818,67 @@ impl WidePnSearch {
         first: HexCoord,
         second: HexCoord,
     ) -> Option<(WidePnChildResult, WidePnPrior)> {
-        gate.evaluate_pair(first, second, self.semantic_horizon)
+        let (result, prior) = gate.evaluate_pair(first, second, self.semantic_horizon)?;
+        #[cfg(test)]
+        let prior = if self.live_ge3_seed {
+            let started = Instant::now();
+            let live_ge3 = gate.live_ge3_after_pair(first, second);
+            let nanos = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            self.live_ge3_seed_scans
+                .set(self.live_ge3_seed_scans.get().saturating_add(1));
+            self.live_ge3_seed_nanos
+                .set(self.live_ge3_seed_nanos.get().saturating_add(nanos));
+            WidePnPrior {
+                pn: pn_from_fork_degree(live_ge3),
+                dn: prior.dn,
+            }
+        } else {
+            prior
+        };
+        Some((result, prior))
     }
 
     fn attack_pair_children(&self, state: &mut RustHexoState, _depth: usize) -> Vec<WidePnChild> {
         #[cfg(test)]
         let _gen_timer = WideGenTimer::start(&WIDE_GEN_PAIR_NANOS);
+        #[cfg(test)]
+        let closure_started = self.closure_counters.then(Instant::now);
+        #[cfg(test)]
+        let gate_started = self.closure_counters.then(Instant::now);
         let gate = WideTurnGate::build(state, self.claimant);
+        #[cfg(test)]
+        let observe_ordering_study = self.ordering_study;
+        #[cfg(not(test))]
+        let observe_ordering_study = false;
+        let ordering_context = if self.zone_order_mode.enabled() || observe_ordering_study {
+            #[cfg(test)]
+            let context_started = self.zone_order_mode.enabled().then(Instant::now);
+            let context =
+                OrderingFeatureContext::from_state(state, self.claimant, observe_ordering_study);
+            #[cfg(test)]
+            if let Some(started) = context_started {
+                WIDE_ZONE_ORDER_CONTEXTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                WIDE_ZONE_ORDER_CONTEXT_NANOS.fetch_add(
+                    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
+            Some(context)
+        } else {
+            None
+        };
+        #[cfg(test)]
+        let gate_build_nanos = gate_started
+            .map(|started| u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX))
+            .unwrap_or(0);
+        #[cfg(test)]
+        let mut pair_profile = ClosurePairNodeProfile::default();
+        #[cfg(test)]
+        let mut pair_child_profiles = Vec::new();
+        #[cfg(test)]
+        let mut accepted = 0u64;
+        #[cfg(test)]
+        let mut retained = 0u64;
         let first_candidates = ordered_threat_creating_moves_with_width(
             state,
             self.claimant,
@@ -2580,44 +5901,144 @@ impl WidePnSearch {
             {
                 #[cfg(test)]
                 let _regen_timer = WideGenTimer::start(&WIDE_GEN_PRIOR_NANOS);
+                #[cfg(test)]
+                let second_started = self.closure_counters.then(Instant::now);
                 gate.second_candidates(
                     first,
                     &first_candidates,
                     &mut second_coords,
                     &mut second_seen,
                 );
+                #[cfg(test)]
+                if let Some(started) = second_started {
+                    pair_profile.second_candidate_nanos =
+                        pair_profile.second_candidate_nanos.saturating_add(
+                            u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                        );
+                }
             }
             for &second in &second_coords {
                 // Stateless classification from the turn-start window
                 // snapshot: no engine applies in the pair double loop.
+                #[cfg(test)]
+                let evaluation_started = self.closure_counters.then(Instant::now);
                 let evaluated = self.evaluate_wide_pair_at_gate(&gate, first, second);
+                #[cfg(test)]
+                if let Some(started) = evaluation_started {
+                    pair_profile.evaluated = pair_profile.evaluated.saturating_add(1);
+                    pair_profile.pair_evaluation_nanos =
+                        pair_profile.pair_evaluation_nanos.saturating_add(
+                            u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                        );
+                }
                 if let Some((result, prior)) = evaluated {
+                    #[cfg(test)]
+                    if self.closure_counters {
+                        accepted = accepted.saturating_add(1);
+                    }
                     // Deduplicate the two legal orders by their actual
                     // unordered coordinate pair. Candidate membership is not
                     // monotone: a defender-block coordinate can disappear
                     // after the other stone, so coordinate-order pruning can
                     // incorrectly discard the only generated ordering.
-                    let first_key = raw_coord_key(first);
-                    let second_key = raw_coord_key(second);
-                    let pair_key = if first_key <= second_key {
-                        (first_key, second_key)
-                    } else {
-                        (second_key, first_key)
+                    #[cfg(test)]
+                    let dedup_started = self.closure_counters.then(Instant::now);
+                    let inserted = {
+                        let first_key = raw_coord_key(first);
+                        let second_key = raw_coord_key(second);
+                        let pair_key = if first_key <= second_key {
+                            (first_key, second_key)
+                        } else {
+                            (second_key, first_key)
+                        };
+                        seen_pairs.insert(pair_key)
                     };
-                    if !seen_pairs.insert(pair_key) {
+                    #[cfg(test)]
+                    if let Some(started) = dedup_started {
+                        pair_profile.dedup_nanos = pair_profile.dedup_nanos.saturating_add(
+                            u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                        );
+                    }
+                    if !inserted {
                         continue;
                     }
+                    #[cfg(test)]
+                    if self.closure_counters {
+                        retained = retained.saturating_add(1);
+                        pair_child_profiles.push(ClosurePairChildProfile {
+                            evaluation_ordinal: pair_profile.evaluated,
+                            second_candidate_nanos: pair_profile.second_candidate_nanos,
+                            pair_evaluation_nanos: pair_profile.pair_evaluation_nanos,
+                            dedup_nanos: pair_profile.dedup_nanos,
+                            ..ClosurePairChildProfile::default()
+                        });
+                    }
                     let mv = WidePnMove::Pair(first, second);
+                    let zone_order_key = if self.zone_order_mode.enabled() {
+                        #[cfg(test)]
+                        let key_started = Instant::now();
+                        let key = ordering_context
+                            .as_ref()
+                            .expect("live zone ordering builds a turn-start context")
+                            .pair_key(first, second, self.zone_order_mode);
+                        #[cfg(test)]
+                        {
+                            WIDE_ZONE_ORDER_KEYS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            WIDE_ZONE_ORDER_KEY_NANOS.fetch_add(
+                                u64::try_from(key_started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
+                        }
+                        key
+                    } else {
+                        0
+                    };
                     children.push(WidePnChild {
                         mv,
                         result,
                         entry: None,
+                        future_key: (self.lazy_frontier && result == WidePnChildResult::Pending)
+                            .then(|| {
+                                WideFutureKey::OnSelection(WidePositionKey::after_completed_pair(
+                                    state, first, second,
+                                ))
+                            }),
                         prior,
                         urgent_block: wide_move_contains_defender_block(mv, &defender_blocks),
                         first_width_tier,
+                        zone_order_key,
+                        #[cfg(test)]
+                        ordering: ordering_context
+                            .as_ref()
+                            .map(|context| context.features(&[first, second]))
+                            .unwrap_or_default(),
                     });
                 }
             }
+        }
+        #[cfg(test)]
+        if self.closure_counters {
+            let pair_generation_nanos = closure_started
+                .map(|started| u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX))
+                .unwrap_or(0);
+            let mut stats = self.closure_stats.borrow_mut();
+            stats.pairs_evaluated = stats.pairs_evaluated.saturating_add(pair_profile.evaluated);
+            stats.pairs_accepted = stats.pairs_accepted.saturating_add(accepted);
+            stats.pairs_retained = stats.pairs_retained.saturating_add(retained);
+            stats.pair_generation_nanos = stats
+                .pair_generation_nanos
+                .saturating_add(pair_generation_nanos);
+            stats.gate_build_nanos = stats.gate_build_nanos.saturating_add(gate_build_nanos);
+            stats.second_candidate_nanos = stats
+                .second_candidate_nanos
+                .saturating_add(pair_profile.second_candidate_nanos);
+            stats.pair_evaluation_nanos = stats
+                .pair_evaluation_nanos
+                .saturating_add(pair_profile.pair_evaluation_nanos);
+            stats.dedup_nanos = stats.dedup_nanos.saturating_add(pair_profile.dedup_nanos);
+            drop(stats);
+            self.closure_last_pair_node.set(pair_profile);
+            *self.closure_last_pair_children.borrow_mut() = pair_child_profiles;
         }
         children
     }
@@ -2633,8 +6054,17 @@ impl WidePnSearch {
             self.claimant,
             WidthOptions::vcf_pair_complete(),
         );
+        #[cfg(test)]
+        let ordering_context = self
+            .ordering_study
+            .then(|| OrderingFeatureContext::from_state(state, self.claimant, true));
         let mut children = Vec::new();
         for candidate in candidates {
+            #[cfg(test)]
+            let ordering = ordering_context
+                .as_ref()
+                .map(|context| context.features(&[candidate.coord]))
+                .unwrap_or_default();
             let Ok((result, delta)) = state.apply_with_delta(Placement {
                 coord: candidate.coord,
             }) else {
@@ -2684,15 +6114,22 @@ impl WidePnSearch {
                     },
                 )
             };
+            let future_key = (self.lazy_frontier
+                && child_result == Some(WidePnChildResult::Pending))
+            .then(|| WideFutureKey::OnSelection(WidePositionKey::from_state(state)));
             state.undo(delta);
             if let Some(result) = child_result {
                 children.push(WidePnChild {
                     mv: WidePnMove::One(candidate.coord),
                     result,
                     entry: None,
+                    future_key,
                     prior,
                     urgent_block: candidate.defender_block,
                     first_width_tier: 0,
+                    zone_order_key: 0,
+                    #[cfg(test)]
+                    ordering,
                 });
             }
         }
@@ -2727,19 +6164,31 @@ impl WidePnSearch {
             let prior = (child_result == WidePnChildResult::Pending)
                 .then(|| self.position_prior(state))
                 .unwrap_or(WidePnPrior::UNIFORM);
-            let entry = (child_result == WidePnChildResult::Pending).then(|| {
+            let (entry, future_key) = if child_result == WidePnChildResult::Pending {
                 let depth = usize::try_from(state.placements_made().saturating_sub(self.root_ply))
                     .unwrap_or(usize::MAX);
-                self.insert_position(WidePositionKey::from_state(state), depth, prior)
-            });
+                let key = WidePositionKey::from_state(state);
+                if self.lazy_frontier {
+                    self.defer_position(&key, depth, prior);
+                    (None, Some(WideFutureKey::Virtual(key)))
+                } else {
+                    (Some(self.insert_position(key, depth, prior)), None)
+                }
+            } else {
+                (None, None)
+            };
             state.undo(delta);
             children.push(WidePnChild {
                 mv: WidePnMove::One(coord),
                 result: child_result,
                 entry,
+                future_key,
                 prior,
                 urgent_block: false,
                 first_width_tier: 0,
+                zone_order_key: 0,
+                #[cfg(test)]
+                ordering: OrderingChildFeatures::default(),
             });
         }
         children
@@ -2773,25 +6222,53 @@ impl WidePnSearch {
             plan.pairs
                 .into_iter()
                 .map(|pair| {
-                    let entry = self.insert_position(pair.final_key, depth, pair.final_prior);
+                    #[cfg(test)]
+                    let final_prior = if self.live_ge3_seed {
+                        let (_, first_delta) = state
+                            .apply_with_delta(Placement { coord: pair.first })
+                            .expect("validated defender-pair first move");
+                        let (_, second_delta) = state
+                            .apply_with_delta(Placement { coord: pair.second })
+                            .expect("validated defender-pair second move");
+                        let prior = WidePnPrior {
+                            pn: self.live_ge3_seed_prior(state),
+                            dn: pair.final_prior.dn,
+                        };
+                        state.undo(second_delta);
+                        state.undo(first_delta);
+                        prior
+                    } else {
+                        pair.final_prior
+                    };
+                    #[cfg(not(test))]
+                    let final_prior = pair.final_prior;
+                    let (entry, future_key) = if self.lazy_frontier {
+                        self.defer_position(&pair.final_key, depth, final_prior);
+                        (None, Some(WideFutureKey::Virtual(pair.final_key)))
+                    } else {
+                        (
+                            Some(self.insert_position(pair.final_key, depth, final_prior)),
+                            None,
+                        )
+                    };
                     WidePnChild {
                         mv: WidePnMove::DefenderPair(pair.first, pair.second),
                         result: WidePnChildResult::Pending,
-                        entry: Some(entry),
-                        prior: pair.final_prior,
+                        entry,
+                        future_key,
+                        prior: final_prior,
                         urgent_block: false,
                         first_width_tier: 0,
+                        zone_order_key: 0,
+                        #[cfg(test)]
+                        ordering: OrderingChildFeatures::default(),
                     }
                 })
                 .collect(),
         )
     }
 
-    fn materialize(
-        &self,
-        state: &RustHexoState,
-        root: usize,
-    ) -> Option<(Vec<CertNode>, CertNodeId)> {
+    fn materialize(&self, state: &RustHexoState, root: usize) -> Option<WideMaterializedProof> {
         if self.entries.get(root)?.pn != 0 {
             return None;
         }
@@ -2801,25 +6278,44 @@ impl WidePnSearch {
             arena: Vec::new(),
             edge_count: 0,
             commutation_count: 0,
+            witness_count: 0,
+            fragment_imports: 0,
+            dag_reuses: 0,
             memo: HashMap::new(),
         };
         let root_node = builder.build(&mut work, root)?;
-        Some((builder.arena, root_node))
+        Some(WideMaterializedProof {
+            arena: builder.arena,
+            root_node,
+            fragment_imports: builder.fragment_imports,
+            dag_reuses: builder.dag_reuses,
+        })
     }
 }
 
-struct WideProofMaterializer<'a> {
-    search: &'a WidePnSearch,
+struct WideMaterializedProof {
+    arena: Vec<CertNode>,
+    root_node: CertNodeId,
+    fragment_imports: u64,
+    dag_reuses: u64,
+}
+
+struct WideProofMaterializer<'search, 'store> {
+    search: &'search WidePnSearch<'store>,
     arena: Vec<CertNode>,
     edge_count: usize,
     commutation_count: usize,
+    witness_count: usize,
+    fragment_imports: u64,
+    dag_reuses: u64,
     memo: HashMap<PositionKey, CertNodeId>,
 }
 
-impl<'a> WideProofMaterializer<'a> {
+impl WideProofMaterializer<'_, '_> {
     fn build(&mut self, state: &mut RustHexoState, id: usize) -> Option<CertNodeId> {
         let key = PositionKey::from_state(state);
         if let Some(&node) = self.memo.get(&key) {
+            self.dag_reuses = self.dag_reuses.saturating_add(1);
             return Some(node);
         }
         let entry = self.search.entries.get(id)?;
@@ -2828,6 +6324,12 @@ impl<'a> WideProofMaterializer<'a> {
         }
         let node = match entry.node.clone() {
             WidePnNode::ProvenLeaf(leaf) => self.alloc(leaf, 0)?,
+            WidePnNode::ProvenFragment(fragment) => {
+                if fragment.claimant != self.search.claimant || fragment.key != key {
+                    return None;
+                }
+                self.import_fragment(state, &fragment.proof)?
+            }
             WidePnNode::Branch {
                 kind: WidePnKind::Choice,
                 children,
@@ -2846,6 +6348,46 @@ impl<'a> WideProofMaterializer<'a> {
         };
         self.memo.insert(key, node);
         Some(node)
+    }
+
+    fn import_fragment(
+        &mut self,
+        state: &RustHexoState,
+        proof: &CachedProof,
+    ) -> Option<CertNodeId> {
+        proof.validate()?;
+        let depth =
+            usize::try_from(state.placements_made().saturating_sub(self.search.root_ply)).ok()?;
+        if proof.resolution_t > self.search.semantic_horizon
+            || proof
+                .zone_build_t
+                .is_some_and(|build_t| self.search.semantic_horizon > build_t)
+            || depth.checked_add(proof.height)? > self.search.max_depth_cap
+            || self.arena.len().checked_add(proof.nodes.len())? > MAX_CERT_NODES
+            || self.edge_count.checked_add(proof.explicit_edges)? > MAX_CERT_EDGES
+            || self
+                .commutation_count
+                .checked_add(proof.commutation_count)?
+                > MAX_CERT_COMMUTATIONS
+            || self.witness_count.checked_add(proof.witness_count)? > MAX_CERT_WITNESSES
+        {
+            return None;
+        }
+
+        let base = self.arena.len();
+        let final_len = base.checked_add(proof.nodes.len())?;
+        u32::try_from(final_len).ok()?;
+        let mut nodes = proof.nodes.clone();
+        for node in &mut nodes {
+            remap_node_ids_with_offset(node, base, final_len)?;
+        }
+        let root = offset_node_id(proof.root_node, base, final_len)?;
+        self.arena.append(&mut nodes);
+        self.edge_count += proof.explicit_edges;
+        self.commutation_count += proof.commutation_count;
+        self.witness_count += proof.witness_count;
+        self.fragment_imports = self.fragment_imports.saturating_add(1);
+        Some(root)
     }
 
     fn build_choice(
@@ -2895,7 +6437,7 @@ impl<'a> WideProofMaterializer<'a> {
                         )?
                     }
                     WidePnChildResult::Pending => {
-                        let child_id = child.entry?;
+                        let child_id = self.search.resolved_child_entry(child)?;
                         let proof = self.build(state, child_id);
                         state.undo(delta);
                         self.alloc(
@@ -2979,7 +6521,7 @@ impl<'a> WideProofMaterializer<'a> {
                         )?
                     }
                     WidePnChildResult::Pending => {
-                        let proof = self.build(state, child.entry?);
+                        let proof = self.build(state, self.search.resolved_child_entry(child)?);
                         state.undo(second_delta);
                         state.undo(first_delta);
                         let second_choice = self.alloc(
@@ -3038,7 +6580,7 @@ impl<'a> WideProofMaterializer<'a> {
                 return None;
             };
             let (_result, delta) = state.apply_with_delta(Placement { coord }).ok()?;
-            let proof = self.build(state, child.entry?);
+            let proof = self.build(state, self.search.resolved_child_entry(child)?);
             state.undo(delta);
             edges.push(CertEdge {
                 mv: coord,
@@ -3114,7 +6656,7 @@ impl<'a> WideProofMaterializer<'a> {
                 state.undo(first_delta);
                 return None;
             }
-            let Some(child_id) = child.entry else {
+            let Some(child_id) = self.search.resolved_child_entry(child) else {
                 state.undo(second_delta);
                 state.undo(first_delta);
                 return None;
@@ -3198,9 +6740,16 @@ impl<'a> WideProofMaterializer<'a> {
             CertNode::Universal { commutations, .. } => commutations.len(),
             _ => 0,
         };
+        let added_witnesses = match &node {
+            CertNode::OrCompletion { .. } | CertNode::Win { .. } => 1,
+            CertNode::Loss { witnesses, .. } => witnesses.len(),
+            CertNode::Choice { .. } | CertNode::Universal { .. } => 0,
+        };
         if self.arena.len() >= MAX_CERT_NODES
             || self.edge_count.saturating_add(added_edges) > MAX_CERT_EDGES
             || self.commutation_count.saturating_add(added_commutations) > MAX_CERT_COMMUTATIONS
+            || (self.search.fragment_store.is_some()
+                && self.witness_count.saturating_add(added_witnesses) > MAX_CERT_WITNESSES)
         {
             return None;
         }
@@ -3208,6 +6757,7 @@ impl<'a> WideProofMaterializer<'a> {
         self.arena.push(node);
         self.edge_count += added_edges;
         self.commutation_count += added_commutations;
+        self.witness_count += added_witnesses;
         Some(id)
     }
 }
@@ -3257,12 +6807,170 @@ struct NarrowCompatSearch<'a> {
     zone: ZoneSearchCaps,
     width: WidthOptions,
     depth_cap: usize,
+    /// Immutable solve-level opt-in. Environment lookup happens in
+    /// `TssSolver::solve_goal`, never on the recursive search path.
+    k_reply_consume: bool,
+    #[cfg(test)]
+    k_reply_shadow: Option<&'a mut Vec<KReplyShadowRecord>>,
+    #[cfg(test)]
+    quotient_telemetry: Option<NarrowQuotientTelemetry>,
+    interior_census_gate: bool,
+    interior_gate_evaluations: u64,
+    interior_gate_dismissals: u64,
+    interior_gate_nanos: u64,
+}
+
+#[cfg(test)]
+struct NarrowQuotientTelemetry {
+    report: QuotientTelemetryReport,
+    expanded_raw: HashSet<WidePositionKey>,
+    expanded_canonical: HashMap<WidePositionKey, WidePositionKey>,
+}
+
+#[cfg(test)]
+impl NarrowQuotientTelemetry {
+    fn enabled() -> Option<Self> {
+        std::env::var_os("TSS_TURN_QUOTIENT_TELEMETRY").map(|_| Self {
+            report: QuotientTelemetryReport::default(),
+            expanded_raw: HashSet::new(),
+            expanded_canonical: HashMap::new(),
+        })
+    }
+
+    fn observe_expand(&mut self, state: &RustHexoState) {
+        let raw = WidePositionKey::from_state(state);
+        let started = Instant::now();
+        let canonical = raw.d6_canonical();
+        self.report.d6_canonicalization_calls =
+            self.report.d6_canonicalization_calls.saturating_add(1);
+        self.report.d6_canonicalization_nanos = self
+            .report
+            .d6_canonicalization_nanos
+            .saturating_add(started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
+        if !self.expanded_raw.insert(raw.clone()) {
+            return;
+        }
+        self.report.expanded_unique_positions =
+            self.report.expanded_unique_positions.saturating_add(1);
+        if self
+            .expanded_canonical
+            .get(&canonical)
+            .is_some_and(|first_raw| first_raw != &raw)
+        {
+            self.report.d6_expanded_duplicates =
+                self.report.d6_expanded_duplicates.saturating_add(1);
+        } else {
+            self.expanded_canonical.insert(canonical, raw);
+        }
+        if let Some(interaction) = classify_last_two_turns(state) {
+            self.report.commutation_eligible_nodes =
+                self.report.commutation_eligible_nodes.saturating_add(1);
+            if interaction == 0 {
+                self.report.commutation_independent_nodes =
+                    self.report.commutation_independent_nodes.saturating_add(1);
+            }
+            if interaction & 1 != 0 {
+                self.report.commutation_shared_window =
+                    self.report.commutation_shared_window.saturating_add(1);
+            }
+            if interaction & 2 != 0 {
+                self.report.commutation_legality_coupling =
+                    self.report.commutation_legality_coupling.saturating_add(1);
+            }
+            if interaction & 4 != 0 {
+                self.report.commutation_threat_response =
+                    self.report.commutation_threat_response.saturating_add(1);
+            }
+        }
+    }
+
+    fn finish(mut self, tt: &BoundedTt, tt_hits: u64) -> QuotientTelemetryReport {
+        let entries = tt.slots.iter().flatten().collect::<Vec<_>>();
+        let mut canonical = HashSet::new();
+        for entry in &entries {
+            canonical.insert(WidePositionKey::from_position_key(&entry.key).d6_canonical());
+        }
+        self.report.retained_entries = entries.len() as u64;
+        self.report.indexed_entries = entries.len() as u64;
+        self.report.tt_hits = tt_hits;
+        self.report.d6_index_denominator = entries.len() as u64;
+        self.report.d6_index_duplicates = entries.len().saturating_sub(canonical.len()) as u64;
+        self.report.horizon_queries = self.report.expanded_unique_positions;
+        self.report.horizon_clock_misses = self.report.expanded_unique_positions;
+        self.report.horizon_positions = self.report.expanded_unique_positions;
+        self.report.horizon_position_clock_entries = self.report.expanded_unique_positions;
+        self.report
+    }
 }
 
 #[derive(Clone, Debug)]
 struct PairContext {
     first: HexCoord,
     turn_start_legal: Vec<HexCoord>,
+}
+
+/// Exact Q8 reply-survival kernel from the NQ2 proof. Urgency is deliberately
+/// scoped to the theorem's nonterminal attacker SecondStone position. Defender
+/// windows come from the engine's incrementally maintained exact mirror of all
+/// active count-4+ windows; tests bind that mirror to a full `entries()` scan.
+fn k_reply_eligible(state: &RustHexoState, claimant: Player) -> bool {
+    state.terminal().is_none()
+        && state.current_player() == claimant
+        && matches!(state.phase(), TurnPhase::SecondStone { .. })
+}
+
+pub(crate) fn k_reply_kernel(
+    state: &RustHexoState,
+    claimant: Player,
+    legal: &[HexCoord],
+) -> KReplyKernel {
+    let eligible = k_reply_eligible(state, claimant);
+    let defender = claimant.other();
+    let mut defender_windows = Vec::new();
+    let mut win_now_windows = Vec::new();
+    if eligible {
+        // `live_threat_entries` is an exact, placement/undo-maintained mirror
+        // of `entries().filter_map(threat_player)`. Iterate every member of
+        // that complete active family, then apply Q8's exact owner/count cuts.
+        for (owner, entry) in state.board().windows().live_threat_entries() {
+            if owner == defender
+                && entry.active_player() == Some(defender)
+                && matches!(entry.count(defender), 4 | 5)
+            {
+                defender_windows.push(entry.key());
+            } else if owner == claimant
+                && entry.active_player() == Some(claimant)
+                && entry.count(claimant) == 5
+            {
+                win_now_windows.push(entry.key());
+            }
+        }
+    }
+    let urgent = !defender_windows.is_empty();
+    let cells = if !eligible {
+        Vec::new()
+    } else if urgent {
+        legal
+            .iter()
+            .copied()
+            .filter(|coord| {
+                let wins_now = win_now_windows.iter().any(|window| window.contains(*coord));
+                wins_now
+                    || defender_windows
+                        .iter()
+                        .all(|window| window.contains(*coord))
+            })
+            .collect()
+    } else {
+        // Q8 defines BlockAll_D(P)=Legal(P) for the empty defender-window
+        // family. `retained()` returns Legal(P) without copying it.
+        Vec::new()
+    };
+    KReplyKernel {
+        eligible,
+        urgent,
+        cells,
+    }
 }
 
 impl NarrowCompatSearch<'static> {
@@ -3285,6 +6993,15 @@ impl NarrowCompatSearch<'static> {
             zone: ZoneSearchCaps::default(),
             width: WidthOptions::default(),
             depth_cap: MAX_SEARCH_DEPTH,
+            k_reply_consume: false,
+            #[cfg(test)]
+            k_reply_shadow: None,
+            #[cfg(test)]
+            quotient_telemetry: NarrowQuotientTelemetry::enabled(),
+            interior_census_gate: false,
+            interior_gate_evaluations: 0,
+            interior_gate_dismissals: 0,
+            interior_gate_nanos: 0,
         }
     }
 }
@@ -3300,6 +7017,9 @@ impl<'a> NarrowCompatSearch<'a> {
         zone: ZoneSearchCaps,
         width: WidthOptions,
         depth_cap: usize,
+        k_reply_consume: bool,
+        #[cfg(test)] k_reply_shadow: Option<&'a mut Vec<KReplyShadowRecord>>,
+        interior_census_gate: bool,
     ) -> Self {
         let tt = BoundedTt::new(tt_bytes_cap, hash_mask);
         let peak_tt_bytes = tt.current_bytes.saturating_add(shared_tt.current_bytes);
@@ -3320,7 +7040,25 @@ impl<'a> NarrowCompatSearch<'a> {
             zone,
             width,
             depth_cap,
+            k_reply_consume,
+            #[cfg(test)]
+            k_reply_shadow,
+            #[cfg(test)]
+            quotient_telemetry: NarrowQuotientTelemetry::enabled(),
+            interior_census_gate,
+            interior_gate_evaluations: 0,
+            interior_gate_dismissals: 0,
+            interior_gate_nanos: 0,
         }
+    }
+
+    fn tt_entry_count(&self) -> usize {
+        self.tt.entry_count()
+            + self
+                .shared_tt
+                .as_ref()
+                .map(|shared| shared.entry_count())
+                .unwrap_or(0)
     }
 
     #[cfg(test)]
@@ -3332,6 +7070,66 @@ impl<'a> NarrowCompatSearch<'a> {
             arena_len: self.arena.len(),
             edge_count: self.edge_count,
             local_tt: format!("{:?}", self.tt),
+        }
+    }
+
+    #[cfg(test)]
+    fn begin_k_reply_shadow(
+        &mut self,
+        full_legal_len: usize,
+        enumerated: &[HexCoord],
+        eligible: bool,
+        urgent: bool,
+        kernel: Option<&KReplyKernel>,
+    ) -> Option<KReplyShadowTicket> {
+        if self.k_reply_shadow.is_none() {
+            return None;
+        }
+        let consumed = self.k_reply_consume && urgent;
+        let kernel_cells = kernel
+            .map(|kernel| kernel.cells.as_slice())
+            .unwrap_or_default();
+        let records = self
+            .k_reply_shadow
+            .as_deref_mut()
+            .expect("checked Q8 shadow sink");
+        let record = records.len();
+        records.push(KReplyShadowRecord {
+            full_quiet: full_legal_len,
+            urgent,
+            k_reply: urgent.then_some(kernel_cells.len()),
+            proved_win: false,
+            winning_edge: None,
+            winning_edge_in_k: None,
+            position: None,
+            consumed,
+            consumed_matches_shadow: consumed.then(|| enumerated == kernel_cells),
+        });
+        debug_assert!(!urgent || eligible);
+        Some(KReplyShadowTicket {
+            record,
+            kernel: kernel_cells.to_vec(),
+        })
+    }
+
+    #[cfg(test)]
+    fn mark_k_reply_shadow_win(
+        &mut self,
+        ticket: &KReplyShadowTicket,
+        state: &RustHexoState,
+        edge: HexCoord,
+    ) {
+        let record = self
+            .k_reply_shadow
+            .as_deref_mut()
+            .expect("Q8 shadow ticket requires sink")
+            .get_mut(ticket.record)
+            .expect("Q8 shadow ticket indexes its record");
+        record.proved_win = true;
+        record.winning_edge = Some(edge);
+        record.winning_edge_in_k = record.urgent.then(|| ticket.kernel.contains(&edge));
+        if record.winning_edge_in_k == Some(false) {
+            record.position = Some(RootBinding::from_state(state));
         }
     }
 
@@ -3362,68 +7160,102 @@ impl<'a> NarrowCompatSearch<'a> {
             return None;
         }
         self.nodes += 1;
+        #[cfg(test)]
+        if let Some(telemetry) = self.quotient_telemetry.as_mut() {
+            telemetry.observe_expand(state);
+        }
 
-        let key = PositionKey::from_state(state);
-        if pair.is_none() {
-            if let Some(node) = self.tt.lookup(&key, claimant) {
-                if node == LOCAL_TT_FAILED && self.width.vcf_pair_complete {
-                    self.tt_hits += 1;
-                    return None;
+        #[cfg(test)]
+        let mut pn_init_guard =
+            PnInitNarrowGuard::enter(state, claimant, self.root_ply, self.semantic_horizon);
+        let pn_init_result = (|| {
+            let key = PositionKey::from_state(state);
+            if pair.is_none() {
+                if let Some(node) = self.tt.lookup(&key, claimant) {
+                    if node == LOCAL_TT_FAILED && self.width.vcf_pair_complete {
+                        self.tt_hits += 1;
+                        return None;
+                    }
+                    if (node as usize) < self.arena.len() {
+                        self.tt_hits += 1;
+                        return Some(node);
+                    }
                 }
-                if (node as usize) < self.arena.len() {
+                if let Some(node) = self.lookup_shared(&key, claimant, depth) {
+                    self.tt.insert(key, claimant, node);
                     self.tt_hits += 1;
+                    self.observe_tt_bytes();
                     return Some(node);
                 }
             }
-            if let Some(node) = self.lookup_shared(&key, claimant, depth) {
-                self.tt.insert(key, claimant, node);
-                self.tt_hits += 1;
-                self.observe_tt_bytes();
-                return Some(node);
+
+            if let Some(outcome) = state.terminal() {
+                let _ = outcome;
+                // A claimant completion is represented at its parent by the typed
+                // OrCompletion leaf; defender-terminal edges are not certifiable.
+                return None;
             }
-        }
 
-        if let Some(outcome) = state.terminal() {
-            let _ = outcome;
-            // A claimant completion is represented at its parent by the typed
-            // OrCompletion leaf; defender-terminal edges are not certifiable.
-            return None;
-        }
+            // Analyze each non-terminal node exactly once.  Universal dispatch
+            // consumes this same immutable result instead of repeating the scan.
+            let analysis = threats::analyze(state);
+            if !matches!(state.phase(), TurnPhase::Opening) {
+                if let Some(winner) = winner_from_analysis(state, &analysis) {
+                    if winner != claimant {
+                        return None;
+                    }
+                    let leaf = typed_lambda_leaf(state, winner, &analysis, self.width)?;
+                    if node_resolution(&leaf) > self.semantic_horizon {
+                        return None;
+                    }
+                    let node = self.alloc_node(leaf, 0)?;
+                    self.remember_proof(key, claimant, node);
+                    return Some(node);
+                }
+            }
 
-        // Analyze each non-terminal node exactly once.  Universal dispatch
-        // consumes this same immutable result instead of repeating the scan.
-        let analysis = threats::analyze(state);
-        if !matches!(state.phase(), TurnPhase::Opening) {
-            if let Some(winner) = winner_from_analysis(state, &analysis) {
-                if winner != claimant {
-                    return None;
+            let gate_dismissed = if self.interior_census_gate && state.current_player() == claimant
+            {
+                evaluate_interior_census_gate(state, claimant, self.root_ply, self.semantic_horizon)
+                    .is_some_and(|evaluation| {
+                        self.interior_gate_evaluations =
+                            self.interior_gate_evaluations.saturating_add(1);
+                        self.interior_gate_nanos =
+                            self.interior_gate_nanos.saturating_add(evaluation.nanos);
+                        if evaluation.dismiss {
+                            self.interior_gate_dismissals =
+                                self.interior_gate_dismissals.saturating_add(1);
+                        }
+                        evaluation.dismiss
+                    })
+            } else {
+                false
+            };
+
+            let node = if state.current_player() == claimant {
+                if gate_dismissed {
+                    None
+                } else {
+                    self.prove_choice(state, claimant, ply, &analysis, pair)
                 }
-                let leaf = typed_lambda_leaf(state, winner, &analysis, self.width)?;
-                if node_resolution(&leaf) > self.semantic_horizon {
-                    return None;
+            } else {
+                self.prove_universal(state, claimant, ply, &analysis, pair)
+            };
+            let Some(node) = node else {
+                if self.width.vcf_pair_complete && !self.hit_limit && pair.is_none() {
+                    self.tt.insert(key, claimant, LOCAL_TT_FAILED);
+                    self.observe_tt_bytes();
                 }
-                let node = self.alloc_node(leaf, 0)?;
+                return None;
+            };
+            if pair.is_none() {
                 self.remember_proof(key, claimant, node);
-                return Some(node);
             }
-        }
-
-        let node = if state.current_player() == claimant {
-            self.prove_choice(state, claimant, ply, pair)
-        } else {
-            self.prove_universal(state, claimant, ply, &analysis, pair)
-        };
-        let Some(node) = node else {
-            if self.width.vcf_pair_complete && !self.hit_limit && pair.is_none() {
-                self.tt.insert(key, claimant, LOCAL_TT_FAILED);
-                self.observe_tt_bytes();
-            }
-            return None;
-        };
-        if pair.is_none() {
-            self.remember_proof(key, claimant, node);
-        }
-        Some(node)
+            Some(node)
+        })();
+        #[cfg(test)]
+        pn_init_guard.finish(pn_init_result.is_some(), self.hit_limit);
+        pn_init_result
     }
 
     fn prove_choice(
@@ -3431,6 +7263,7 @@ impl<'a> NarrowCompatSearch<'a> {
         state: &mut RustHexoState,
         claimant: Player,
         ply: u32,
+        analysis: &threats::ThreatAnalysis,
         pair: Option<&PairContext>,
     ) -> Option<CertNodeId> {
         // Descending line count is the static proof-number initialization:
@@ -3540,6 +7373,40 @@ impl<'a> NarrowCompatSearch<'a> {
         if self.width.consumes_quiet_turns() {
             let mut complete = Vec::new();
             state.write_legal_moves(&mut complete);
+            #[cfg(test)]
+            let full_legal_len = complete.len();
+            let eligible = k_reply_eligible(state, claimant);
+            // `analysis` was recomputed from this exact current/post-first
+            // state immediately before dispatch to `prove_choice`. Because
+            // current_player == claimant here, its opponent threat family is
+            // exactly T_D(P); no second active-window walk is needed merely
+            // to establish the overwhelmingly common nonurgent case.
+            let urgent = eligible && analysis.opp_threat_count > 0;
+            #[cfg(not(test))]
+            let observe_k_reply = false;
+            #[cfg(test)]
+            let observe_k_reply = self.k_reply_shadow.is_some();
+            let k_reply = (urgent && (self.k_reply_consume || observe_k_reply))
+                .then(|| k_reply_kernel(state, claimant, &complete));
+            if self.k_reply_consume && urgent {
+                let kernel = k_reply
+                    .as_ref()
+                    .expect("urgent Q8 consumption computes its kernel");
+                debug_assert!(kernel.eligible && kernel.urgent);
+                complete.clone_from(&kernel.cells);
+            }
+            #[cfg(test)]
+            let k_reply_ticket = observe_k_reply
+                .then(|| {
+                    self.begin_k_reply_shadow(
+                        full_legal_len,
+                        &complete,
+                        eligible,
+                        urgent,
+                        k_reply.as_ref(),
+                    )
+                })
+                .flatten();
             if let Some(pair) = pair {
                 restrict_pair_candidates(&mut complete, pair);
             }
@@ -3563,7 +7430,14 @@ impl<'a> NarrowCompatSearch<'a> {
                         .then(|| wide_completion_node(state, claimant, coord, completion_ply))
                         .flatten();
                     state.undo(delta);
-                    return self.alloc_node(completion?, 0);
+                    let node = self.alloc_node(completion?, 0);
+                    #[cfg(test)]
+                    if node.is_some() {
+                        if let Some(ticket) = &k_reply_ticket {
+                            self.mark_k_reply_shadow_win(ticket, state, coord);
+                        }
+                    }
+                    return node;
                 }
                 if result.outcome.is_some() {
                     state.undo(delta);
@@ -3578,7 +7452,14 @@ impl<'a> NarrowCompatSearch<'a> {
                 let child = self.prove(state, claimant, completion_ply, pair_context.as_ref());
                 state.undo(delta);
                 if let Some(child) = child {
-                    return self.alloc_node(CertNode::Choice { mv: coord, child }, 1);
+                    let node = self.alloc_node(CertNode::Choice { mv: coord, child }, 1);
+                    #[cfg(test)]
+                    if node.is_some() {
+                        if let Some(ticket) = &k_reply_ticket {
+                            self.mark_k_reply_shadow_win(ticket, state, coord);
+                        }
+                    }
+                    return node;
                 }
                 if self.hit_limit {
                     return None;
@@ -4283,6 +8164,8 @@ struct WideTurnGate {
     weak_windows_by_cell: HashMap<HexCoord, Vec<WidePairWindow>>,
     /// Empties of every live defender >=4 window (the hit/block sets).
     defender_threats: Vec<Vec<HexCoord>>,
+    #[cfg(test)]
+    live_claimant_windows: Vec<WidePairWindow>,
     /// `placements_made` at turn start.
     start_placements: u32,
 }
@@ -4292,6 +8175,8 @@ impl WideTurnGate {
         let mut windows_by_cell: HashMap<HexCoord, Vec<WidePairWindow>> = HashMap::new();
         let mut weak_windows_by_cell: HashMap<HexCoord, Vec<WidePairWindow>> = HashMap::new();
         let mut defender_threats = Vec::new();
+        #[cfg(test)]
+        let mut live_claimant_windows = Vec::new();
         for entry in state.board().windows().entries() {
             let Some(owner) = entry.active_player() else {
                 continue;
@@ -4305,6 +8190,8 @@ impl WideTurnGate {
                         strength: count,
                         empties: empties.clone(),
                     };
+                    #[cfg(test)]
+                    live_claimant_windows.push(window.clone());
                     let sink = if count >= 2 {
                         &mut windows_by_cell
                     } else {
@@ -4322,8 +8209,23 @@ impl WideTurnGate {
             windows_by_cell,
             weak_windows_by_cell,
             defender_threats,
+            #[cfg(test)]
+            live_claimant_windows,
             start_placements: state.placements_made(),
         }
+    }
+
+    #[cfg(test)]
+    fn live_ge3_after_pair(&self, first: HexCoord, second: HexCoord) -> usize {
+        self.live_claimant_windows
+            .iter()
+            .filter(|window| {
+                window.strength
+                    + u8::from(window.empties.contains(&first))
+                    + u8::from(window.empties.contains(&second))
+                    >= 3
+            })
+            .count()
     }
 
     /// The second-ply candidate coordinates after the claimant plays `first`,
@@ -5388,6 +9290,8 @@ struct BoundedTt {
     current_bytes: usize,
     peak_bytes: usize,
     hash_mask: u64,
+    replacements: u64,
+    refusals: u64,
 }
 
 impl BoundedTt {
@@ -5400,6 +9304,8 @@ impl BoundedTt {
                 current_bytes: 0,
                 peak_bytes: 0,
                 hash_mask,
+                replacements: 0,
+                refusals: 0,
             };
         }
         let mut slots = Vec::with_capacity(slot_count);
@@ -5415,6 +9321,8 @@ impl BoundedTt {
                 current_bytes: 0,
                 peak_bytes: 0,
                 hash_mask,
+                replacements: 0,
+                refusals: 0,
             };
         }
         Self {
@@ -5423,6 +9331,8 @@ impl BoundedTt {
             current_bytes: base,
             peak_bytes: base,
             hash_mask,
+            replacements: 0,
+            refusals: 0,
         }
     }
 
@@ -5435,6 +9345,10 @@ impl BoundedTt {
         let entry = self.slots[index].as_ref()?;
         (entry.hash == hash && entry.claimant == claimant && entry.key == *key)
             .then_some(entry.node)
+    }
+
+    fn entry_count(&self) -> usize {
+        self.slots.iter().flatten().count()
     }
 
     fn insert(&mut self, key: PositionKey, claimant: Player, node: CertNodeId) {
@@ -5453,7 +9367,14 @@ impl BoundedTt {
             .saturating_sub(old_heap)
             .saturating_add(new_heap);
         if candidate_bytes > self.cap {
+            self.refusals = self.refusals.saturating_add(1);
             return;
+        }
+        if self.slots[index]
+            .as_ref()
+            .is_some_and(|old| old.hash != hash || old.claimant != claimant || old.key != key)
+        {
+            self.replacements = self.replacements.saturating_add(1);
         }
         self.slots[index] = Some(TtEntry {
             hash,
@@ -5471,6 +9392,8 @@ struct CachedProof {
     nodes: Vec<CertNode>,
     root_node: CertNodeId,
     explicit_edges: usize,
+    commutation_count: usize,
+    witness_count: usize,
     /// Maximum number of certificate edges below `root_node`.
     height: usize,
     /// Maximum exact resolution label over all contained typed leaves.
@@ -5496,10 +9419,24 @@ impl CachedProof {
         }
         let mut heights = vec![0usize; nodes.len()];
         let mut explicit_edges = 0usize;
+        let mut commutation_count = 0usize;
+        let mut witness_count = 0usize;
         let mut resolution_t = 0u32;
         let mut zone_build_t: Option<u32> = None;
         for (index, node) in nodes.iter().enumerate() {
             resolution_t = resolution_t.max(node_resolution(node));
+            match node {
+                CertNode::OrCompletion { .. } | CertNode::Win { .. } => {
+                    witness_count = witness_count.checked_add(1)?;
+                }
+                CertNode::Loss { witnesses, .. } => {
+                    witness_count = witness_count.checked_add(witnesses.len())?;
+                }
+                CertNode::Universal { commutations, .. } => {
+                    commutation_count = commutation_count.checked_add(commutations.len())?;
+                }
+                CertNode::Choice { .. } => {}
+            }
             if let CertNode::Universal {
                 zone: Some(zone), ..
             } = node
@@ -5549,6 +9486,8 @@ impl CachedProof {
             nodes,
             root_node,
             explicit_edges,
+            commutation_count,
+            witness_count,
             height,
             resolution_t,
             zone_build_t,
@@ -5570,6 +9509,8 @@ impl CachedProof {
         (rebuilt
             == (
                 self.explicit_edges,
+                self.commutation_count,
+                self.witness_count,
                 self.height,
                 self.resolution_t,
                 self.zone_build_t,
@@ -5580,13 +9521,27 @@ impl CachedProof {
     fn from_compact_unchecked_metadata(
         nodes: &[CertNode],
         root_node: CertNodeId,
-    ) -> Option<(usize, usize, u32, Option<u32>)> {
+    ) -> Option<(usize, usize, usize, usize, u32, Option<u32>)> {
         let mut heights = vec![0usize; nodes.len()];
         let mut explicit_edges = 0usize;
+        let mut commutation_count = 0usize;
+        let mut witness_count = 0usize;
         let mut resolution_t = 0u32;
         let mut zone_build_t: Option<u32> = None;
         for (index, node) in nodes.iter().enumerate() {
             resolution_t = resolution_t.max(node_resolution(node));
+            match node {
+                CertNode::OrCompletion { .. } | CertNode::Win { .. } => {
+                    witness_count = witness_count.checked_add(1)?;
+                }
+                CertNode::Loss { witnesses, .. } => {
+                    witness_count = witness_count.checked_add(witnesses.len())?;
+                }
+                CertNode::Universal { commutations, .. } => {
+                    commutation_count = commutation_count.checked_add(commutations.len())?;
+                }
+                CertNode::Choice { .. } => {}
+            }
             if let CertNode::Universal {
                 zone: Some(zone), ..
             } = node
@@ -5633,6 +9588,8 @@ impl CachedProof {
         }
         Some((
             explicit_edges,
+            commutation_count,
+            witness_count,
             heights[root_node as usize],
             resolution_t,
             zone_build_t,
@@ -5753,6 +9710,10 @@ impl SharedProofCache {
             .then(|| entry.proof.clone())
     }
 
+    fn entry_count(&self) -> usize {
+        self.slots.iter().flatten().count()
+    }
+
     fn could_admit_minimal(&self, key: &PositionKey) -> bool {
         self.could_admit_heap(key, allocation_bytes(1, size_of::<CertNode>()))
     }
@@ -5836,6 +9797,196 @@ impl SharedProofCache {
                 .iter()
                 .flatten()
                 .map(SharedTtEntry::heap_bytes)
+                .sum::<usize>(),
+        )
+    }
+}
+
+/// One immutable positive proof proposition. `key` and `claimant` are part of
+/// the owned Arc so every live wide-PN handle can recheck identity without
+/// cloning either the key or certificate payload.
+#[derive(Debug, PartialEq, Eq)]
+struct ProvenFragment {
+    key: PositionKey,
+    claimant: Player,
+    proof: CachedProof,
+}
+
+impl ProvenFragment {
+    fn heap_bytes(&self) -> usize {
+        self.key
+            .heap_bytes()
+            .saturating_add(self.proof.heap_bytes())
+            .saturating_add(size_of::<Self>())
+            .saturating_add(ALLOC_OVERHEAD)
+    }
+}
+
+#[derive(Debug)]
+struct ProvenFragmentEntry {
+    hash: u64,
+    fragment: Arc<ProvenFragment>,
+}
+
+#[derive(Debug)]
+struct ProvenFragmentStore {
+    slots: Vec<Option<ProvenFragmentEntry>>,
+    cap: usize,
+    current_bytes: usize,
+    peak_bytes: usize,
+    hash_mask: u64,
+    entry_count: usize,
+    stored_nodes: usize,
+    stored_edges: usize,
+    admissions: u64,
+    replacements: u64,
+    refusals: u64,
+}
+
+impl ProvenFragmentStore {
+    fn new(cap: usize, hash_mask: u64) -> Self {
+        Self {
+            // A fresh official-corpus solver is cold. Reserving a full direct
+            // table here would steal search TT without enabling a single hit.
+            // Allocate it only when a verified proof is actually promoted.
+            slots: Vec::new(),
+            cap,
+            current_bytes: 0,
+            peak_bytes: 0,
+            hash_mask,
+            entry_count: 0,
+            stored_nodes: 0,
+            stored_edges: 0,
+            admissions: 0,
+            replacements: 0,
+            refusals: 0,
+        }
+    }
+
+    fn reconfigure(&mut self, cap: usize, hash_mask: u64) {
+        if self.cap != cap || self.hash_mask != hash_mask {
+            *self = Self::new(cap, hash_mask);
+        } else {
+            self.peak_bytes = self.current_bytes;
+        }
+    }
+
+    fn clear(&mut self) {
+        *self = Self::new(self.cap, self.hash_mask);
+    }
+
+    fn ensure_slots(&mut self) -> bool {
+        if !self.slots.is_empty() {
+            return true;
+        }
+        let slot_count = (self.cap / TARGET_BYTES_PER_PROVEN_FRAGMENT_SLOT).min(MAX_TT_SLOTS);
+        if slot_count == 0 {
+            return false;
+        }
+        let mut slots = Vec::with_capacity(slot_count);
+        slots.resize_with(slot_count, || None);
+        let base = allocation_bytes(slots.capacity(), size_of::<Option<ProvenFragmentEntry>>());
+        if base > self.cap {
+            return false;
+        }
+        self.slots = slots;
+        self.current_bytes = base;
+        self.peak_bytes = self.peak_bytes.max(base);
+        true
+    }
+
+    fn lookup(&self, key: &PositionKey, claimant: Player) -> Option<Arc<ProvenFragment>> {
+        if self.slots.is_empty() {
+            return None;
+        }
+        let hash = key.stable_hash() & self.hash_mask;
+        let index = (hash as usize) % self.slots.len();
+        let entry = self.slots[index].as_ref()?;
+        (entry.hash == hash && entry.fragment.claimant == claimant && entry.fragment.key == *key)
+            .then(|| Arc::clone(&entry.fragment))
+    }
+
+    fn insert(&mut self, key: PositionKey, claimant: Player, proof: CachedProof) -> bool {
+        if proof.validate().is_none() || !self.ensure_slots() {
+            self.refusals = self.refusals.saturating_add(1);
+            return false;
+        }
+        let hash = key.stable_hash() & self.hash_mask;
+        let index = (hash as usize) % self.slots.len();
+        let old = self.slots[index].as_ref();
+
+        // Alternative proof graphs are never structurally unioned. For the
+        // identical proposition replace only when the new admissible horizon
+        // interval contains the old one (or the interval is identical and the
+        // payload is smaller). Resolution/build intervals can otherwise be
+        // incomparable, so a lexicographic choice would silently discard
+        // useful warm queries. This is cache policy, not a proof-label merge.
+        if let Some(old) = old.filter(|old| {
+            old.hash == hash && old.fragment.claimant == claimant && old.fragment.key == key
+        }) {
+            let old_build = old.fragment.proof.zone_build_t.unwrap_or(u32::MAX);
+            let new_build = proof.zone_build_t.unwrap_or(u32::MAX);
+            let interval_dominates =
+                proof.resolution_t <= old.fragment.proof.resolution_t && new_build >= old_build;
+            let interval_is_strict =
+                proof.resolution_t < old.fragment.proof.resolution_t || new_build > old_build;
+            let new_is_better = interval_dominates
+                && (interval_is_strict || proof.heap_bytes() < old.fragment.proof.heap_bytes());
+            if !new_is_better {
+                self.refusals = self.refusals.saturating_add(1);
+                return false;
+            }
+        }
+
+        let fragment = Arc::new(ProvenFragment {
+            key,
+            claimant,
+            proof,
+        });
+        let new_heap = fragment.heap_bytes();
+        let old_heap = old.map(|entry| entry.fragment.heap_bytes()).unwrap_or(0);
+        let candidate_bytes = self
+            .current_bytes
+            .saturating_sub(old_heap)
+            .saturating_add(new_heap);
+        if candidate_bytes > self.cap {
+            self.refusals = self.refusals.saturating_add(1);
+            return false;
+        }
+
+        if let Some(old) = old {
+            self.stored_nodes = self
+                .stored_nodes
+                .saturating_sub(old.fragment.proof.nodes.len());
+            self.stored_edges = self
+                .stored_edges
+                .saturating_sub(old.fragment.proof.explicit_edges);
+            self.replacements = self.replacements.saturating_add(1);
+        } else {
+            self.entry_count = self.entry_count.saturating_add(1);
+        }
+        self.stored_nodes = self.stored_nodes.saturating_add(fragment.proof.nodes.len());
+        self.stored_edges = self
+            .stored_edges
+            .saturating_add(fragment.proof.explicit_edges);
+        self.slots[index] = Some(ProvenFragmentEntry { hash, fragment });
+        self.current_bytes = candidate_bytes;
+        self.peak_bytes = self.peak_bytes.max(candidate_bytes);
+        self.admissions = self.admissions.saturating_add(1);
+        true
+    }
+
+    #[cfg(test)]
+    fn recomputed_bytes(&self) -> usize {
+        allocation_bytes(
+            self.slots.capacity(),
+            size_of::<Option<ProvenFragmentEntry>>(),
+        )
+        .saturating_add(
+            self.slots
+                .iter()
+                .flatten()
+                .map(|entry| entry.fragment.heap_bytes())
                 .sum::<usize>(),
         )
     }
@@ -6057,6 +10208,76 @@ mod tests {
             .unwrap();
         }
         state
+    }
+
+    #[test]
+    fn interior_census_phase_tables_match_contract_8_1() {
+        let first = [10, 10, 9, 6, 2, 1];
+        let second = [12, 12, 9, 5, 4, 1];
+        for census in 0..=5u8 {
+            assert_eq!(
+                interior_census_lb_plies(TurnPhase::FirstStone, census),
+                Some(first[census as usize])
+            );
+            assert_eq!(
+                interior_census_lb_plies(
+                    TurnPhase::SecondStone {
+                        first: HexCoord::ZERO,
+                    },
+                    census,
+                ),
+                Some(second[census as usize])
+            );
+        }
+        assert_eq!(interior_census_lb_plies(TurnPhase::FirstStone, 6), None);
+        assert_eq!(interior_census_lb_plies(TurnPhase::Opening, 0), None);
+    }
+
+    #[test]
+    fn interior_census_secondstone_c3_uses_strict_ply_five_boundary() {
+        let state = replay(&[
+            (0, 0),
+            (2, 1),
+            (3, 1),
+            (-1, 0),
+            (0, -1),
+            (4, 1),
+            (1, 2),
+            (-1, 1),
+            (1, -1),
+            (1, 3),
+            (1, 4),
+            (-2, 0),
+            (0, -2),
+            (2, 0),
+            (3, -1),
+            (-2, 1),
+            (-1, -2),
+            (4, -2),
+        ]);
+        assert!(matches!(state.phase(), TurnPhase::SecondStone { .. }));
+        assert_eq!(
+            pn_init_census_features(&state, state.current_player()).0,
+            3,
+            "binding reachable witness must retain exact census c=3"
+        );
+        let root_ply = state.placements_made() - 1;
+        let through_four = evaluate_interior_census_gate(
+            &state,
+            state.current_player(),
+            root_ply,
+            state.placements_made() + 4,
+        )
+        .expect("eligible c=3 SecondStone evaluation");
+        assert!(through_four.dismiss);
+        let through_five = evaluate_interior_census_gate(
+            &state,
+            state.current_player(),
+            root_ply,
+            state.placements_made() + 5,
+        )
+        .expect("eligible c=3 SecondStone evaluation");
+        assert!(!through_five.dismiss, "LB == h must not gate");
     }
 
     fn cache_test_leaf() -> CertNode {
@@ -6326,9 +10547,12 @@ mod tests {
             mv,
             result: WidePnChildResult::Pending,
             entry: None,
+            future_key: None,
             prior: WidePnPrior::UNIFORM,
             urgent_block: wide_move_contains_defender_block(mv, &defender_blocks),
             first_width_tier: 0,
+            zone_order_key: 0,
+            ordering: OrderingChildFeatures::default(),
         };
         let mut children = vec![
             child(WidePnMove::One(ordinary)),
@@ -6383,12 +10607,15 @@ mod tests {
             mv: WidePnMove::One(HexCoord::new(q, 0)),
             result: WidePnChildResult::Pending,
             entry: None,
+            future_key: None,
             prior: WidePnPrior {
                 pn: pn_from_fork_degree(fork_degree),
                 dn: 1,
             },
             urgent_block: false,
             first_width_tier: 0,
+            zone_order_key: 0,
+            ordering: OrderingChildFeatures::default(),
         };
         let tied = [child(5, 3), child(-5, 3)];
         assert_eq!(
@@ -6439,6 +10666,183 @@ mod tests {
     }
 
     #[test]
+    fn ordering_study_offline_pass_reranks_without_mutating_children() {
+        begin_ordering_study_report();
+        let state = RustHexoState::new();
+        let mut search = WidePnSearch::new(Player::Player0, 0, 10, 0, 100, 10);
+        search.ordering_study = true;
+        let root = search.insert_root(&state);
+        let child = |q, result, ordering| WidePnChild {
+            mv: WidePnMove::Pair(HexCoord::new(q, 0), HexCoord::new(q + 1, 0)),
+            result,
+            entry: None,
+            future_key: None,
+            prior: WidePnPrior::UNIFORM,
+            urgent_block: false,
+            first_width_tier: 0,
+            zone_order_key: 0,
+            ordering,
+        };
+        let original = vec![
+            child(
+                0,
+                WidePnChildResult::Pending,
+                OrderingChildFeatures {
+                    zone_bound: 2,
+                    census_distance: 3,
+                    gate_adjacency: 0,
+                    d_stone: 5,
+                },
+            ),
+            child(
+                3,
+                WidePnChildResult::Pending,
+                OrderingChildFeatures {
+                    zone_bound: 1,
+                    census_distance: 2,
+                    gate_adjacency: 1,
+                    d_stone: 4,
+                },
+            ),
+            child(
+                6,
+                WidePnChildResult::ClaimantTactical,
+                OrderingChildFeatures {
+                    zone_bound: 0,
+                    census_distance: 1,
+                    gate_adjacency: 2,
+                    d_stone: 3,
+                },
+            ),
+        ];
+        search.entries[root].node = WidePnNode::Branch {
+            kind: WidePnKind::Choice,
+            children: original.clone(),
+        };
+        search.recompute(root);
+        search.finalize_ordering_study();
+        let report = take_ordering_study_report();
+        assert_eq!(report.records.len(), 1);
+        assert_eq!(report.records[0].ranks, [3, 1, 1, 1, 1, 1, 1]);
+        let WidePnNode::Branch { children, .. } = &search.entries[root].node else {
+            panic!("synthetic ordering root must remain a branch")
+        };
+        assert_eq!(children[0].mv, original[0].mv);
+        assert_eq!(children[1].mv, original[1].mv);
+        assert_eq!(children[2].mv, original[2].mv);
+    }
+
+    #[test]
+    fn live_zone_order_respects_pn_band_and_hard_classes() {
+        let context = OrderingFeatureContext {
+            claimant_stones: vec![HexCoord::new(0, 0)],
+            claimant_windows: Vec::new(),
+            defender_gate_cells: Vec::new(),
+        };
+        assert_eq!(
+            context.pair_key(
+                HexCoord::new(1, 0),
+                HexCoord::new(3, 0),
+                ZoneOrderMode::ZoneBound,
+            ),
+            3
+        );
+        assert_eq!(
+            context.pair_key(
+                HexCoord::new(1, 0),
+                HexCoord::new(3, 0),
+                ZoneOrderMode::DStone,
+            ),
+            1
+        );
+
+        let mut search = WidePnSearch::new(Player::Player0, 0, 10, 0, 100, 10);
+        search.zone_order_mode = ZoneOrderMode::Off;
+        let child = |q, prior_pn, zone_order_key| WidePnChild {
+            mv: WidePnMove::Pair(HexCoord::new(q, 0), HexCoord::new(q + 1, 0)),
+            result: WidePnChildResult::Pending,
+            entry: None,
+            future_key: None,
+            prior: WidePnPrior {
+                pn: prior_pn,
+                dn: 1,
+            },
+            urgent_block: false,
+            first_width_tier: 0,
+            zone_order_key,
+            ordering: OrderingChildFeatures::default(),
+        };
+        let tied = [child(0, 5, 4), child(3, 5, 1)];
+        assert_eq!(
+            search.select_child_index_with_tier(WidePnKind::Choice, &tied, false, false),
+            Some(0),
+            "flag off retains the historical generator tie break"
+        );
+        search.zone_order_mode = ZoneOrderMode::ZoneBound;
+        assert_eq!(
+            search.select_child_index_with_tier(WidePnKind::Choice, &tied, false, false),
+            Some(1),
+            "the live key breaks an exact PN/prior tie"
+        );
+
+        let mut urgent = tied[0].clone();
+        urgent.urgent_block = true;
+        assert_eq!(
+            search.select_child_index_with_tier(
+                WidePnKind::Choice,
+                &[urgent, tied[1].clone()],
+                true,
+                false,
+            ),
+            Some(0),
+            "zone distance cannot cross the urgent-root class"
+        );
+        let mut wider = tied[1].clone();
+        wider.first_width_tier = 1;
+        assert_eq!(
+            search.select_child_index_with_tier(
+                WidePnKind::Choice,
+                &[tied[0].clone(), wider],
+                false,
+                true,
+            ),
+            Some(0),
+            "zone distance cannot cross the width class"
+        );
+        let different_prior = [child(0, 5, 4), child(3, 6, 1)];
+        search.zone_order_band = 10;
+        assert_eq!(
+            search
+                .select_child_index_with_tier(WidePnKind::Choice, &different_prior, false, false,),
+            Some(0),
+            "the numeric band cannot cross an immutable fork-prior class"
+        );
+
+        let first_entry = search.entries.len();
+        search
+            .entries
+            .push(wide_pn_test_entry(5, WidePnNode::Unexpanded, 2));
+        let second_entry = search.entries.len();
+        search
+            .entries
+            .push(wide_pn_test_entry(6, WidePnNode::Unexpanded, 2));
+        let mut linked = tied.clone();
+        linked[0].entry = Some(first_entry);
+        linked[1].entry = Some(second_entry);
+        search.zone_order_band = 0;
+        assert_eq!(
+            search.select_child_index_with_tier(WidePnKind::Choice, &linked, false, false),
+            Some(0)
+        );
+        search.zone_order_band = 1;
+        assert_eq!(
+            search.select_child_index_with_tier(WidePnKind::Choice, &linked, false, false),
+            Some(1),
+            "band one admits the adjacent current-PN child inside one hard class"
+        );
+    }
+
+    #[test]
     fn wide_pn_sequential_root_honors_width_tier_after_urgency() {
         let search = WidePnSearch::new(Player::Player0, 0, 10, 0, 100, 10);
         assert!(search.prefer_width_tier_at_depth(0));
@@ -6448,12 +10852,15 @@ mod tests {
             mv: WidePnMove::Pair(HexCoord::new(q, 0), HexCoord::new(q + 1, 0)),
             result: WidePnChildResult::Pending,
             entry: None,
+            future_key: None,
             prior: WidePnPrior {
                 pn: prior_pn,
                 dn: 1,
             },
             urgent_block: false,
             first_width_tier,
+            zone_order_key: 0,
+            ordering: OrderingChildFeatures::default(),
         };
         let tier_zero = child(0, 20, 0);
         let tier_one = child(3, 3, 1);
@@ -6525,9 +10932,12 @@ mod tests {
             mv: WidePnMove::Pair(HexCoord::new(first_q, 0), HexCoord::new(first_q + 1, 0)),
             result: WidePnChildResult::Pending,
             entry: Some(entry),
+            future_key: None,
             prior: WidePnPrior::UNIFORM,
             urgent_block: false,
             first_width_tier,
+            zone_order_key: 0,
+            ordering: OrderingChildFeatures::default(),
         };
         let children = [
             pair_child(0, tier_zero_entry, 0),
@@ -6602,12 +11012,15 @@ mod tests {
             mv: WidePnMove::One(HexCoord::new(q, 0)),
             result: WidePnChildResult::Pending,
             entry,
+            future_key: None,
             prior: WidePnPrior {
                 pn: PN_INFINITY,
                 dn: 1,
             },
             urgent_block: false,
             first_width_tier: 0,
+            zone_order_key: 0,
+            ordering: OrderingChildFeatures::default(),
         };
         let children = [child(0, Some(refuted)), child(1, None), child(2, None)];
 
@@ -6637,12 +11050,15 @@ mod tests {
             mv: WidePnMove::One(HexCoord::new(q, 0)),
             result: WidePnChildResult::Pending,
             entry,
+            future_key: None,
             prior: WidePnPrior {
                 pn: 1,
                 dn: PN_INFINITY,
             },
             urgent_block: false,
             first_width_tier: 0,
+            zone_order_key: 0,
+            ordering: OrderingChildFeatures::default(),
         };
         let children = [child(0, Some(proven)), child(1, None), child(2, None)];
 
@@ -6691,9 +11107,12 @@ mod tests {
             mv: WidePnMove::One(HexCoord::new(q, 0)),
             result: WidePnChildResult::Pending,
             entry: Some(entry),
+            future_key: None,
             prior: WidePnPrior::UNIFORM,
             urgent_block: false,
             first_width_tier: 0,
+            zone_order_key: 0,
+            ordering: OrderingChildFeatures::default(),
         };
         search.entries[root].node = WidePnNode::Branch {
             kind: WidePnKind::Universal {
@@ -6774,9 +11193,12 @@ mod tests {
             mv: WidePnMove::One(HexCoord::new(q, 0)),
             result: WidePnChildResult::Pending,
             entry: Some(entry),
+            future_key: None,
             prior: WidePnPrior::UNIFORM,
             urgent_block: false,
             first_width_tier: 0,
+            zone_order_key: 0,
+            ordering: OrderingChildFeatures::default(),
         };
         search.entries[root].node = WidePnNode::Branch {
             kind: WidePnKind::Universal {
@@ -6839,9 +11261,12 @@ mod tests {
                 mv: WidePnMove::One(HexCoord::new(i16::try_from(q).unwrap(), 0)),
                 result: WidePnChildResult::Pending,
                 entry: Some(entry),
+                future_key: None,
                 prior: WidePnPrior::UNIFORM,
                 urgent_block: false,
                 first_width_tier: 0,
+                zone_order_key: 0,
+                ordering: OrderingChildFeatures::default(),
             })
             .collect();
         search.entries[root].node = WidePnNode::Branch {
@@ -6884,9 +11309,12 @@ mod tests {
             mv: WidePnMove::One(HexCoord::new(q, 0)),
             result,
             entry: None,
+            future_key: None,
             prior: WidePnPrior::UNIFORM,
             urgent_block: false,
             first_width_tier: 0,
+            zone_order_key: 0,
+            ordering: OrderingChildFeatures::default(),
         };
 
         let refuted = vec![
@@ -6979,17 +11407,23 @@ mod tests {
                     mv: WidePnMove::One(HexCoord::new(3, 0)),
                     result: WidePnChildResult::Pending,
                     entry: None,
+                    future_key: None,
                     prior: WidePnPrior { pn: 1, dn: 1 },
                     urgent_block: false,
                     first_width_tier: 0,
+                    zone_order_key: 0,
+                    ordering: OrderingChildFeatures::default(),
                 },
                 WidePnChild {
                     mv: WidePnMove::One(HexCoord::new(6, 0)),
                     result: WidePnChildResult::Pending,
                     entry: None,
+                    future_key: None,
                     prior: WidePnPrior { pn: 2, dn: 1 },
                     urgent_block: false,
                     first_width_tier: 0,
+                    zone_order_key: 0,
+                    ordering: OrderingChildFeatures::default(),
                 },
             ],
         };
@@ -7063,9 +11497,12 @@ mod tests {
                     mv: WidePnMove::One(moves[depth]),
                     result: WidePnChildResult::Pending,
                     entry,
+                    future_key: None,
                     prior,
                     urgent_block: false,
                     first_width_tier: 0,
+                    zone_order_key: 0,
+                    ordering: OrderingChildFeatures::default(),
                 }],
             };
         }
@@ -7122,9 +11559,12 @@ mod tests {
             mv: WidePnMove::Pair(HexCoord::new(2, 0), HexCoord::new(3, 0)),
             result: WidePnChildResult::Pending,
             entry: None,
+            future_key: None,
             prior,
             urgent_block: false,
             first_width_tier: 0,
+            zone_order_key: 0,
+            ordering: OrderingChildFeatures::default(),
         };
         assert_eq!(search.child_numbers(&lazy), (prior.pn, prior.dn));
     }
@@ -7153,6 +11593,43 @@ mod tests {
     }
 
     #[test]
+    fn wide_lazy_frontier_distinguishes_virtual_and_selection_only_keys() {
+        let state = RustHexoState::new();
+        let key = WidePositionKey::from_state(&state);
+        let first_prior = WidePnPrior { pn: 9, dn: 4 };
+        let edge_prior = WidePnPrior { pn: 3, dn: 2 };
+        let mut search = WidePnSearch::new(Player::Player0, 0, 10, 1 << 20, 100, 10);
+        search.lazy_frontier = true;
+        search.defer_position(&key, 4, first_prior);
+
+        let child = |future_key| WidePnChild {
+            mv: WidePnMove::One(HexCoord::new(1, 0)),
+            result: WidePnChildResult::Pending,
+            entry: None,
+            future_key: Some(future_key),
+            prior: edge_prior,
+            urgent_block: false,
+            first_width_tier: 0,
+            zone_order_key: 0,
+            ordering: OrderingChildFeatures::default(),
+        };
+        let virtual_child = child(WideFutureKey::Virtual(key.clone()));
+        let attacker_child = child(WideFutureKey::OnSelection(key.clone()));
+
+        assert_eq!(search.child_numbers(&virtual_child), (9, 4));
+        assert_eq!(search.child_numbers(&attacker_child), (3, 2));
+        assert!(search.entries.is_empty());
+        assert!(search.by_position.is_empty());
+
+        let id = search.insert_position(key, 99, edge_prior);
+        assert_eq!(search.entries[id].depth, 4);
+        assert_eq!(search.entries[id].prior, first_prior);
+        assert!(search.deferred_by_position.is_empty());
+        assert_eq!(search.child_numbers(&virtual_child), (9, 4));
+        assert_eq!(search.child_numbers(&attacker_child), (3, 2));
+    }
+
+    #[test]
     fn wide_pn_trace_child_format_is_compact_and_structural() {
         let state = RustHexoState::new();
         let prior = WidePnPrior { pn: 7, dn: 2 };
@@ -7164,9 +11641,12 @@ mod tests {
             mv: WidePnMove::One(HexCoord::new(3, -2)),
             result: WidePnChildResult::Pending,
             entry: Some(entry),
+            future_key: None,
             prior,
             urgent_block: true,
             first_width_tier: 0,
+            zone_order_key: 0,
+            ordering: OrderingChildFeatures::default(),
         };
 
         assert_eq!(
@@ -7198,9 +11678,12 @@ mod tests {
                 mv: WidePnMove::One(mv),
                 result: WidePnChildResult::Pending,
                 entry: None,
+                future_key: None,
                 prior,
                 urgent_block: false,
                 first_width_tier: 0,
+                zone_order_key: 0,
+                ordering: OrderingChildFeatures::default(),
             }],
         };
         search.recompute(root);
@@ -7277,9 +11760,12 @@ mod tests {
                 mv: WidePnMove::One(mv),
                 result: WidePnChildResult::Pending,
                 entry: None,
+                future_key: None,
                 prior,
                 urgent_block: false,
                 first_width_tier: 0,
+                zone_order_key: 0,
+                ordering: OrderingChildFeatures::default(),
             }],
         };
         search.recompute(root);
@@ -7602,14 +12088,14 @@ mod tests {
         let root = search.insert_root(&state);
         search.run(&state, root);
         assert_eq!(search.entries[root].pn, 0);
-        let (nodes, root_node) = search
+        let materialized = search
             .materialize(&state, root)
             .expect("collapsed defender proof must materialize");
         let cert = TssCertificate {
             root: RootBinding::from_state(&state),
             claimant,
-            root_node,
-            nodes,
+            root_node: materialized.root_node,
+            nodes: materialized.arena,
             semantic_horizon: u32::MAX,
         };
         let CertNode::Universal {
@@ -7665,6 +12151,7 @@ mod tests {
             u32::MAX,
             64,
             WidthOptions::vcf_pair_complete(),
+            false,
         );
         let cert = attempt.cert.expect("xsnfyll continuation must prove");
         assert!(attempt.stats.nodes < 10_000);
@@ -8745,6 +13232,91 @@ mod tests {
     }
 
     #[test]
+    fn wide_shared_fragments_warm_exact_root_and_verify() {
+        let state = xsnfyll_forced_defender_fixture();
+        let caps = SolveCaps {
+            node_cap: 10_000,
+            tt_bytes_cap: 64 << 20,
+            semantic_horizon: u32::MAX,
+        };
+        let mut cold_solver = TssSolver::default();
+        cold_solver.set_width_options(WidthOptions::vcf_pair_complete());
+        let cold = cold_solver.solve_goal(&state, &caps, SolveGoal::Loss);
+
+        let mut warm_solver = TssSolver::default();
+        warm_solver.set_shared_fragments_for_test(true);
+        warm_solver.set_width_options(WidthOptions::vcf_pair_complete());
+        let first = warm_solver.solve_goal(&state, &caps, SolveGoal::Loss);
+        let warm = warm_solver.solve_goal(&state, &caps, SolveGoal::Loss);
+
+        for result in [&cold, &first, &warm] {
+            assert_eq!(result.status, ProofStatus::Loss);
+            assert!(TssVerifier.verify(&state, result.cert.as_ref().unwrap(), result.status));
+            assert!(result.stats.peak_tt_bytes <= caps.tt_bytes_cap as u64);
+        }
+        assert_eq!(cold.status, first.status);
+        assert_eq!(first.status, warm.status);
+        assert_eq!(cold.stats.nodes, first.stats.nodes);
+        assert_eq!(cold.stats.tt_hits, first.stats.tt_hits);
+        assert_eq!(first.stats.fragment_lookups, 0);
+        assert!(first.stats.fragment_store_entries > 0);
+        assert_eq!(warm.stats.fragment_hits, 1);
+        assert_eq!(warm.stats.fragment_imports, 1);
+        assert!(warm.stats.nodes < first.stats.nodes);
+        let snapshot = warm_solver.shared_fragment_store_snapshot();
+        assert!(snapshot.enabled);
+        assert!(snapshot.entries > 0);
+        assert!(snapshot.stored_nodes > 0);
+        assert_eq!(
+            snapshot.bytes as usize,
+            warm_solver.fragment_store.recomputed_bytes()
+        );
+    }
+
+    #[test]
+    fn wide_shared_fragments_forced_collision_never_cross_contaminates() {
+        let a = xsnfyll_forced_defender_fixture();
+        let b = transformed_state(&a, 1);
+        let caps = SolveCaps {
+            node_cap: 10_000,
+            tt_bytes_cap: 64 << 20,
+            semantic_horizon: u32::MAX,
+        };
+        let mut solver = TssSolver::with_hash_mask(0);
+        solver.set_shared_fragments_for_test(true);
+        solver.set_width_options(WidthOptions::vcf_pair_complete());
+        let first_a = solver.solve_goal(&a, &caps, SolveGoal::Loss);
+        let first_b = solver.solve_goal(&b, &caps, SolveGoal::Loss);
+        let second_a = solver.solve_goal(&a, &caps, SolveGoal::Loss);
+        for (state, result) in [(&a, &first_a), (&b, &first_b), (&a, &second_a)] {
+            assert_eq!(result.status, ProofStatus::Loss);
+            assert!(TssVerifier.verify(state, result.cert.as_ref().unwrap(), result.status));
+            assert!(result.stats.peak_tt_bytes <= caps.tt_bytes_cap as u64);
+        }
+        // B may evict A's direct-mapped entry, but it can never answer A.
+        assert_eq!(first_b.stats.fragment_hits, 0);
+        assert_eq!(second_a.status, first_a.status);
+    }
+
+    #[test]
+    fn shared_fragment_store_full_key_claimant_and_accounting() {
+        let state = deep_universal_fixture();
+        let other = transformed_state(&state, 1);
+        let proof = CachedProof::from_compact(vec![cache_test_leaf()], 0).unwrap();
+        let mut store = ProvenFragmentStore::new(64 << 10, 0);
+        let key = PositionKey::from_state(&state);
+        assert!(store.insert(key.clone(), Player::Player0, proof));
+        assert!(store.lookup(&key, Player::Player0).is_some());
+        assert!(store.lookup(&key, Player::Player1).is_none());
+        assert!(store
+            .lookup(&PositionKey::from_state(&other), Player::Player0)
+            .is_none());
+        assert_eq!(store.current_bytes, store.recomputed_bytes());
+        assert!(store.current_bytes <= store.cap);
+        assert!(store.peak_bytes <= store.cap);
+    }
+
+    #[test]
     fn shared_tt_survives_origin_arena_drop() {
         let state = quiet_fixture();
         let key = PositionKey::from_state(&state);
@@ -8792,6 +13364,9 @@ mod tests {
                 ZoneSearchCaps::default(),
                 WidthOptions::default(),
                 MAX_SEARCH_DEPTH,
+                false,
+                None,
+                false,
             );
             let root = context
                 .prove(&mut work, claimant, descendant_root.placements_made(), None)

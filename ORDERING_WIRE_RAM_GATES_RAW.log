@@ -1,0 +1,9 @@
+﻿2026-07-18T00:29:21.1410169-04:00 purpose=prechange_identity available_gib=15.199 free_physical_gib=15.19 cargo_processes=0
+2026-07-18T00:35:27.2489443-04:00 purpose=zone_order_unit available_gib=15.291 free_physical_gib=15.337 cargo_processes=0
+2026-07-18T00:36:35.4459694-04:00 purpose=postchange_flag_off_identity available_gib=15.92 free_physical_gib=15.921 cargo_processes=0
+2026-07-18T00:37:03.4605898-04:00 purpose=zone_band0_smoke available_gib=16.069 free_physical_gib=16.075 cargo_processes=0
+2026-07-18T00:37:24.8342342-04:00 purpose=zone_band1_smoke available_gib=16.074 free_physical_gib=16.082 cargo_processes=0
+2026-07-18T00:37:50.3612988-04:00 purpose=official_baseline available_gib=15.929 free_physical_gib=15.935 cargo_processes=0
+2026-07-18T00:45:54.0642458-04:00 purpose=official_zone_band1 available_gib=12.915 free_physical_gib=12.941 cargo_processes=0
+2026-07-18T00:53:23.6418371-04:00 purpose=official_dstone_band1 available_gib=14.348 free_physical_gib=14.358 cargo_processes=0
+2026-07-18T01:02:06.6947135-04:00 purpose=production_release_build available_gib=14.384 free_physical_gib=14.381 cargo_processes=0

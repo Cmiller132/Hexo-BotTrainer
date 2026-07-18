@@ -1,0 +1,71 @@
+RAM_GATE kind=cargo test=threshold_scale_leaf_ab timestamp=2026-07-17T12:14:22.4098944-04:00 free_physical_gib=15.212 standby_normal_gib=3.066 availability_gib=18.277
+    Finished `release` profile [optimized] target(s) in 0.36s
+     Running unittests rust\src\lib.rs (.target-codex\x86_64-pc-windows-msvc\release\deps\hexfield_eq-de26e3778420c4c2.exe)
+
+running 1 test
+test tss_leaf_surface_hunt::threshold_scale_leaf_ab ... LEAF_SURFACE_SETUP corpus=E:/Hexo-BotTrainer-hexgt/data/hexo-bootstrap-corpus/hexo_human_corpus.jsonl eligible_games=6902 games=50 window_states=6 solves_per_cell=300 seed=0x9E3779B97F4A7C15 tt_bytes=262144 caps=[500, 2000, 8000] horizons=[8, 16]
+LEAF_SURFACE_BATCH index=0 game_hash=bc478d8046d5017e start_ply=37 end_ply=42
+LEAF_SURFACE_BATCH index=1 game_hash=98fb843545f250cd start_ply=53 end_ply=58
+LEAF_SURFACE_BATCH index=2 game_hash=9ce320049f36648d start_ply=46 end_ply=51
+LEAF_SURFACE_BATCH index=3 game_hash=6340b4c95b24d76b start_ply=66 end_ply=71
+LEAF_SURFACE_BATCH index=4 game_hash=647f270619337e53 start_ply=12 end_ply=17
+LEAF_SURFACE_BATCH index=5 game_hash=4f18135e4944a544 start_ply=17 end_ply=22
+LEAF_SURFACE_BATCH index=6 game_hash=99de9c73f8b8c66e start_ply=14 end_ply=19
+LEAF_SURFACE_BATCH index=7 game_hash=a3f49ffd0960a2f9 start_ply=160 end_ply=165
+LEAF_SURFACE_BATCH index=8 game_hash=03a6019558c32958 start_ply=24 end_ply=29
+LEAF_SURFACE_BATCH index=9 game_hash=7cb6df410fe07f04 start_ply=21 end_ply=26
+LEAF_SURFACE_BATCH index=10 game_hash=2cadcb776f42b4ef start_ply=16 end_ply=21
+LEAF_SURFACE_BATCH index=11 game_hash=8119a8427bc7f8f2 start_ply=37 end_ply=42
+LEAF_SURFACE_BATCH index=12 game_hash=00fc5b3b18e73e3a start_ply=15 end_ply=20
+LEAF_SURFACE_BATCH index=13 game_hash=50ebeaff84ad62f6 start_ply=35 end_ply=40
+LEAF_SURFACE_BATCH index=14 game_hash=95d9ca887c388a9c start_ply=23 end_ply=28
+LEAF_SURFACE_BATCH index=15 game_hash=9f8f43c272b51504 start_ply=9 end_ply=14
+LEAF_SURFACE_BATCH index=16 game_hash=ca17d70817bff3be start_ply=32 end_ply=37
+LEAF_SURFACE_BATCH index=17 game_hash=ef2b11ddf7160557 start_ply=10 end_ply=15
+LEAF_SURFACE_BATCH index=18 game_hash=0b41a6b38aec5277 start_ply=29 end_ply=34
+LEAF_SURFACE_BATCH index=19 game_hash=b5947c3b66b40e5b start_ply=72 end_ply=77
+LEAF_SURFACE_BATCH index=20 game_hash=b21577d1bc09a742 start_ply=51 end_ply=56
+LEAF_SURFACE_BATCH index=21 game_hash=244708446ddd4a0a start_ply=29 end_ply=34
+LEAF_SURFACE_BATCH index=22 game_hash=e6c57267a74b200d start_ply=24 end_ply=29
+LEAF_SURFACE_BATCH index=23 game_hash=dec5c590b8277a47 start_ply=10 end_ply=15
+LEAF_SURFACE_BATCH index=24 game_hash=0cf7c7971eeb0b52 start_ply=27 end_ply=32
+LEAF_SURFACE_BATCH index=25 game_hash=3a1cb5cd5c4ce541 start_ply=11 end_ply=16
+LEAF_SURFACE_BATCH index=26 game_hash=4468fb054d07b3bc start_ply=14 end_ply=19
+LEAF_SURFACE_BATCH index=27 game_hash=78acf975ab239736 start_ply=23 end_ply=28
+LEAF_SURFACE_BATCH index=28 game_hash=a5aae1e94694a2b3 start_ply=19 end_ply=24
+LEAF_SURFACE_BATCH index=29 game_hash=f54a326060bb1927 start_ply=28 end_ply=33
+LEAF_SURFACE_BATCH index=30 game_hash=9b11129772455c2d start_ply=8 end_ply=13
+LEAF_SURFACE_BATCH index=31 game_hash=a11ee8c9644a252f start_ply=13 end_ply=18
+LEAF_SURFACE_BATCH index=32 game_hash=88bda4f254103ff8 start_ply=10 end_ply=15
+LEAF_SURFACE_BATCH index=33 game_hash=a1bca2c1b2a01a07 start_ply=15 end_ply=20
+LEAF_SURFACE_BATCH index=34 game_hash=ff7b0ad7b56405bd start_ply=17 end_ply=22
+LEAF_SURFACE_BATCH index=35 game_hash=9c1f9039b518499d start_ply=94 end_ply=99
+LEAF_SURFACE_BATCH index=36 game_hash=5416e3843ab1f3b7 start_ply=9 end_ply=14
+LEAF_SURFACE_BATCH index=37 game_hash=0c87c3d991d69be9 start_ply=21 end_ply=26
+LEAF_SURFACE_BATCH index=38 game_hash=75cf19983806e7d0 start_ply=53 end_ply=58
+LEAF_SURFACE_BATCH index=39 game_hash=332b60922adb5721 start_ply=16 end_ply=21
+LEAF_SURFACE_BATCH index=40 game_hash=d4a44f90a33d7f0a start_ply=54 end_ply=59
+LEAF_SURFACE_BATCH index=41 game_hash=bc6b4b43290e9dc3 start_ply=48 end_ply=53
+LEAF_SURFACE_BATCH index=42 game_hash=a43b4b28ff29cea3 start_ply=50 end_ply=55
+LEAF_SURFACE_BATCH index=43 game_hash=2b6876c8b1974459 start_ply=22 end_ply=27
+LEAF_SURFACE_BATCH index=44 game_hash=15d5d0022bb1ad69 start_ply=22 end_ply=27
+LEAF_SURFACE_BATCH index=45 game_hash=305b189754ef482a start_ply=8 end_ply=13
+LEAF_SURFACE_BATCH index=46 game_hash=791fbea3e7833838 start_ply=8 end_ply=13
+LEAF_SURFACE_BATCH index=47 game_hash=26d3569da9545881 start_ply=13 end_ply=18
+LEAF_SURFACE_BATCH index=48 game_hash=25fae328fea1a099 start_ply=28 end_ply=33
+LEAF_SURFACE_BATCH index=49 game_hash=bf08680b2ecc5112 start_ply=26 end_ply=31
+THRESHOLD_LEAF_MODE config=D_WIDE_LAZY_GATE cap=500 horizons=8,16 tt_bytes=262144 cap_resume=off shared_fragments=off k_reply=off
+THRESHOLD_LEAF_ROW arm=1 horizon=8 cap=500 verdicts=16 regressions=0 improvements=0 contradictions=0 expansions=1852 tt_hits=0 stage_refreshes=650 sibling_switches=1146 reselections=1474 threshold_crosses=600 visits=2725 descent_ms=16.168 verified=16 wall_ms=75.512
+THRESHOLD_LEAF_ROW arm=2 horizon=8 cap=500 verdicts=16 regressions=0 improvements=0 contradictions=0 expansions=1852 tt_hits=0 stage_refreshes=650 sibling_switches=1146 reselections=1474 threshold_crosses=600 visits=2725 descent_ms=16.217 verified=16 wall_ms=75.325
+THRESHOLD_LEAF_ROW arm=4 horizon=8 cap=500 verdicts=16 regressions=0 improvements=0 contradictions=0 expansions=1852 tt_hits=0 stage_refreshes=650 sibling_switches=1145 reselections=1472 threshold_crosses=598 visits=2723 descent_ms=16.200 verified=16 wall_ms=75.398
+THRESHOLD_LEAF_ROW arm=mean horizon=8 cap=500 verdicts=16 regressions=0 improvements=0 contradictions=0 expansions=1852 tt_hits=0 stage_refreshes=650 sibling_switches=1124 reselections=1431 threshold_crosses=557 visits=2682 descent_ms=15.905 verified=16 wall_ms=74.836
+THRESHOLD_LEAF_ROW arm=1 horizon=16 cap=500 verdicts=39 regressions=0 improvements=0 contradictions=0 expansions=6649 tt_hits=39 stage_refreshes=980 sibling_switches=7068 reselections=9112 threshold_crosses=6794 visits=12226 descent_ms=78.510 verified=39 wall_ms=492.782
+THRESHOLD_LEAF_ROW arm=2 horizon=16 cap=500 verdicts=39 regressions=0 improvements=0 contradictions=0 expansions=6726 tt_hits=36 stage_refreshes=992 sibling_switches=6821 reselections=8771 threshold_crosses=6448 visits=11942 descent_ms=76.917 verified=39 wall_ms=493.136
+THRESHOLD_LEAF_ROW arm=4 horizon=16 cap=500 verdicts=38 regressions=1 improvements=0 contradictions=0 expansions=7106 tt_hits=36 stage_refreshes=998 sibling_switches=6820 reselections=8652 threshold_crosses=6351 visits=11850 descent_ms=77.306 verified=38 wall_ms=499.379
+THRESHOLD_LEAF_ROW arm=mean horizon=16 cap=500 verdicts=38 regressions=1 improvements=0 contradictions=0 expansions=7135 tt_hits=35 stage_refreshes=998 sibling_switches=6605 reselections=8342 threshold_crosses=5998 visits=11516 descent_ms=76.186 verified=38 wall_ms=493.741
+THRESHOLD_LEAF_DONE result=PASS
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 140 filtered out; finished in 2.34s
+
+EXIT_CODE=0

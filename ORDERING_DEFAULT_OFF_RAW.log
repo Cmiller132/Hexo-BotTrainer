@@ -1,0 +1,35 @@
+2026-07-18T00:07:37.4019443-04:00 purpose=default_off_identity available_gib=15.682 free_physical_gib=15.681 cargo_processes=0
+   Compiling hexfield_eq v0.1.0 (E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width\packages\hexfield_eq)
+    Finished `release` profile [optimized] target(s) in 9.29s
+     Running unittests rust\src\lib.rs (.target-codex\x86_64-pc-windows-msvc\release\deps\hexfield_eq-de26e3778420c4c2.exe)
+
+running 1 test
+test tss_corpus::tss_corpus_check ... CORPUS_MODE shared_fragments=off lazy_frontier=on interior_gate=on k_reply_consume=off cap_resume=off live_ge3_seed=off closure_counters=off ordering_study=off threshold_counters=off threshold_delta=off tt_bytes_cap=1073741824
+CORPUS id=mvp2lvc cap=10000 status=UNKNOWN expect=NO nodes=10000 expansions=9999 tt_entries=9972 tt_hits=93 tt_bytes_cap=1073741824 peak_tt_bytes=1948056 stage_refreshes=55 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=1194.6
+CLOSURE_ROW id=mvp2lvc cap=10000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=mvp2lvc cap=10000 visits=0 revisits=0 threshold_crosses=0 reselections=0 sibling_switches=0 residencies=0 residency_expansions=0 expansion_bins=[0, 0, 0, 0, 0, 0, 0, 0] descent_ms=0.000 state_ms=0.000
+FRONTIER_CENSUS_ROW id=mvp2lvc cap=10000 first_refusal=None choice_pre=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] choice_post=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] universal_pre=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] universal_post=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] unclassified_pre=0 unclassified_post=0 sentinel_inherited_hits=[0, 0] sentinel_inherited_clamps=[0, 0] sentinel_increment_hits=0 sentinel_increment_clamps=0 sentinel_sum_hits=[0, 0]
+FRAGMENT_PROFILE id=mvp2lvc cap=10000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=780 defender_ms=182 regen_ms=159 expand_ms=970 refresh_ms=57 insert_ms=3
+CORPUS id=mvp2lvc cap=100000 status=UNKNOWN expect=NO nodes=17957 expansions=17956 tt_entries=17922 tt_hits=175 tt_bytes_cap=1073741824 peak_tt_bytes=3928520 stage_refreshes=69 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=2074.8
+CLOSURE_ROW id=mvp2lvc cap=100000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=mvp2lvc cap=100000 visits=0 revisits=0 threshold_crosses=0 reselections=0 sibling_switches=0 residencies=0 residency_expansions=0 expansion_bins=[0, 0, 0, 0, 0, 0, 0, 0] descent_ms=0.000 state_ms=0.000
+FRONTIER_CENSUS_ROW id=mvp2lvc cap=100000 first_refusal=None choice_pre=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] choice_post=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] universal_pre=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] universal_post=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] unclassified_pre=0 unclassified_post=0 sentinel_inherited_hits=[0, 0] sentinel_inherited_clamps=[0, 0] sentinel_increment_hits=0 sentinel_increment_clamps=0 sentinel_sum_hits=[0, 0]
+FRAGMENT_PROFILE id=mvp2lvc cap=100000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=1940 defender_ms=618 regen_ms=385 expand_ms=2583 refresh_ms=231 insert_ms=11
+CORPUS id=xsnfyll cap=10000 status=WIN expect=WIN nodes=82 expansions=81 tt_entries=74 tt_hits=1 tt_bytes_cap=1073741824 peak_tt_bytes=7156 stage_refreshes=15 gate_evals=0 gate_dismissals=0 gate_us=0.000 seed_scans=0 seed_ms=0.000 ms=7.6
+CLOSURE_ROW id=xsnfyll cap=10000 evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000
+THRESHOLD_ROW id=xsnfyll cap=10000 visits=0 revisits=0 threshold_crosses=0 reselections=0 sibling_switches=0 residencies=0 residency_expansions=0 expansion_bins=[0, 0, 0, 0, 0, 0, 0, 0] descent_ms=0.000 state_ms=0.000
+FRONTIER_CENSUS_ROW id=xsnfyll cap=10000 first_refusal=None choice_pre=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] choice_post=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] universal_pre=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] universal_post=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] unclassified_pre=0 unclassified_post=0 sentinel_inherited_hits=[0, 0] sentinel_inherited_clamps=[0, 0] sentinel_increment_hits=0 sentinel_increment_clamps=0 sentinel_sum_hits=[0, 0]
+FRAGMENT_PROFILE id=xsnfyll cap=10000 lookups=0 hits=0 imports=0 store_entries=0 store_bytes=0
+GEN_PROFILE pair_ms=1944 defender_ms=619 regen_ms=386 expand_ms=2588 refresh_ms=231 insert_ms=11
+CORPUS_FRAGMENTS lookups=0 hits=0 hit_rate_pct=0.000 imports=0 max_store_entries=0 max_store_bytes=0
+CLOSURE_DONE evaluated=0 accepted=0 retained=0 selected=0 linked=0 expanded=0 winning_choices=0 winning_rank_bins=[0, 0, 0, 0, 0, 0, 0, 0] reveal_evaluated=0 reveal_prefix=0 pair_ms=0.000 gate_ms=0.000 second_ms=0.000 eval_ms=0.000 dedup_ms=0.000 avoid_second_ms=0.000 avoid_eval_ms=0.000 avoid_dedup_ms=0.000 stage_refreshes=139 seed_scans=0 seed_ms=0.000
+THRESHOLD_DONE visits=0 revisits=0 threshold_crosses=0 reselections=0 sibling_switches=0 residencies=0 residency_expansions=0 expansion_bins=[0, 0, 0, 0, 0, 0, 0, 0] descent_ms=0.000 state_ms=0.000
+FRONTIER_CENSUS_DONE first_refusal=None choice_pre=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] choice_post=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] universal_pre=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] universal_post=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] unclassified_pre=0 unclassified_post=0 sentinel_inherited_hits=[0, 0] sentinel_inherited_clamps=[0, 0] sentinel_increment_hits=0 sentinel_increment_clamps=0 sentinel_sum_hits=[0, 0]
+CORPUS_DONE failures=0 shared_fragments=off lazy_frontier=on interior_gate=on k_reply_consume=off cap_resume=off resume_wall_ms=0.000 resume_reentries=0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 141 filtered out; finished in 3.28s
+
+EXIT_CODE=0

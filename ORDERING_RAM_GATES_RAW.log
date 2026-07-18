@@ -1,0 +1,8 @@
+2026-07-18T00:05:05.3112915-04:00 purpose=cargo_fmt available_gib=15.468 free_physical_gib=15.804 cargo_processes=0
+2026-07-18T00:06:06.6333871-04:00 purpose=ordering_unit available_gib=15.957 free_physical_gib=15.423 cargo_processes=0
+2026-07-18T00:06:22.0259177-04:00 purpose=ordering_unit_retry available_gib=15.437 free_physical_gib=15.437 cargo_processes=0
+2026-07-18T00:06:57.6131264-04:00 purpose=ordering_smoke available_gib=15.4 free_physical_gib=15.391 cargo_processes=0
+2026-07-18T00:07:37.4019443-04:00 purpose=default_off_identity available_gib=15.682 free_physical_gib=15.681 cargo_processes=0
+2026-07-18T00:08:33.0697875-04:00 purpose=official_ordering_ladder available_gib=15.64 free_physical_gib=15.663 cargo_processes=0
+2026-07-18T00:18:08.2925684-04:00 purpose=production_release_build available_gib=15.369 free_physical_gib=15.37 cargo_processes=0
+2026-07-18T00:19:16.2531089-04:00 purpose=ordering_unit_final available_gib=15.343 free_physical_gib=15.332 cargo_processes=0

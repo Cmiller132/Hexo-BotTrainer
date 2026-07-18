@@ -1,0 +1,27 @@
+R-TS1b — CONTINUATION of R-TS1 (prior-scale-aware df-pn thresholds; counter-first)
+
+Your predecessor session died on an API outage MID-IMPLEMENTATION. Read
+.codex-group2/prompt-threshold.txt first — every rule and the full
+protocol there is binding on you (RAM gates, cargo target/dir rules,
+94gnnol exclusion, deliverables). This file only tells you where it
+stopped.
+
+State on disk (uncommitted, in this worktree): partial Phase-1 counter
+instrumentation already exists in packages/hexfield_eq/rust/src/
+(tss_core.rs, tss_solver.rs, tss_corpus.rs, tss_leaf_surface_hunt.rs) —
+a threshold_residency/pause-resume style time-accounting layer behind
+TSS_THRESHOLD_COUNTERS. It was NEVER compiled or run. Do not assume it
+is correct or complete: review it, finish or fix it (you may rewrite it
+if that is cleaner), verify production byte-identity when the flag is
+off via the fast subset, then run Phase 1 (the official 1 GiB lazy+gate
+profile with counters on) and make the Phase-1 decision per the binding
+prompt: avoidable re-traversal must plausibly reach >=5% of full wall or
+the lever is recorded DRY — a complete, successful round either way.
+Phase 2 only if Phase 1 justifies it.
+
+Another lane (R-KT1, kernel taxonomy) may be running cargo in a
+different worktree: ONE cargo process host-wide — check Get-Process
+cargo before every cargo invocation and wait in a sleep-300 loop while
+any exists. Deliverable unchanged: HUNT_REPORT_THRESHOLD_SCALE.md +
+retained raw logs + regen commands. Honest partial stop at a clean
+boundary is success.

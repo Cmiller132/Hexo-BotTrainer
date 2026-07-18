@@ -1,0 +1,63 @@
+R-OS1 — MEASUREMENT ROUND (high): rank-of-winning-child ordering study (agenda §1.5)
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width
+(branch claude/tss-vcf-width, HEAD = 224a3682). You CANNOT git-commit.
+You HAVE the host cargo slot (one cargo at a time host-wide; always
+--target x86_64-pc-windows-msvc with CARGO_TARGET_DIR=.target-codex).
+RAM gate before every cargo run: >=10 GB available and >=5 GB free
+physical (PowerShell Win32_OperatingSystem), abort-and-note if failed.
+Deliverable: HUNT_REPORT_ORDERING_STUDY.md + raw logs + cfg(test)-only
+code changes. Raw logs UTF-8 (avoid PowerShell UTF-16 redirection).
+
+## The question (RESEARCH_AGENDA.md §1.5 — the primary remaining generator attack)
+Pair generation is >50% of official wall; its sound-reveal ceiling is
+closed (R-CD1: 7.83% < 11.5% bar) — but that ceiling was measured UNDER
+THE CURRENT GENERATOR RANK ORDER. If winning children sit deep in rank
+order, that is a property of our ordering, not the game. Measure: where
+do eventually-winning children actually sit in the current generation
+order, and would cheap zone-guided keys move them forward? If yes,
+(i) expansions drop directly, (ii) the lazy-reveal lever re-arms.
+
+## Method (binding)
+1. Read HUNT_REPORT_THRESHOLD_SCALE.md, the R-CD1/R-PC1 sections of
+   docs/PLAN_TSS_SOLVER_UPGRADES.md, and the pair-generation + child
+   ordering code in packages/hexfield_eq/rust/src/tss_solver.rs before
+   designing counters.
+2. Add cfg(test)-gated instrumentation ONLY (default off behind an env
+   flag, e.g. TSS_ORDERING_STUDY=1; production semantics untouched;
+   strict verifier untouched): at each Choice (attacker) node that is
+   proven WIN during the solve, record (a) the generation-order rank of
+   the child through which the WIN was proven, (b) the number of
+   generated children, and (c) per-child cheap features sufficient to
+   re-rank offline: zone-distance bound, census distance, gate
+   adjacency, d_stone (whichever of these are already computed or
+   cheaply computable at generation time — document exactly which).
+   Emit compact per-node records or in-memory aggregation; aggregate
+   histograms are the deliverable, not gigabyte traces.
+3. Compute, in the same test harness (offline pass over the recorded
+   features), the rank the winning child WOULD have under each candidate
+   ordering: current baseline, each single-key zone-guided order, and at
+   most two composite orders you justify. Report per-ordering: rank-1
+   hit rate, median rank, mean rank, CDF at ranks 1/2/4/8/16, split by
+   solve depth band if the data supports it.
+4. Rows: official corpus rows that solve WIN under the official deep
+   profile env (TSS_BACKWALK_TT_BYTES=1073741824, TSS_LAZY_FRONTIER=1,
+   TSS_INTERIOR_CENSUS_GATE=1) — use the standard ladder; include the
+   hard row 0l4291i_live and at least 6 additional solved rows for
+   breadth. Note honestly any row whose behavior changed at tip.
+5. Verdict: does any zone-guided ordering PROMISE a material expansion
+   reduction (winning children move materially forward, e.g. clear
+   rank-1/top-4 gains over baseline), and does it re-arm lazy-reveal
+   (winning child inside the revealed prefix materially more often)?
+   This is an OFFLINE promise measurement — do NOT wire a new ordering
+   into the search in this round.
+
+## Rules
+Counters cfg(test) + env-gated default off; production paths and strict
+verifier untouched; ONE cargo at a time; chunk <= 2h per exec with
+incremental writes. Honest nulls welcome: if winning children already
+sit at rank 1-2 under the current order, say so plainly — that CLOSES
+§1.5's premise and the generator attack with it. Final message: verdict
+(PROMISING with the best key + expected headroom / NULL with the
+measured baseline distribution), which features were available, and
+whether a live wiring round is justified.

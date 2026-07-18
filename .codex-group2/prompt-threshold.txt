@@ -1,0 +1,66 @@
+R-TS1 — PRIOR-SCALE-AWARE DF-PN THRESHOLDS (ideation candidate 2; counter-first)
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width
+(confirm HEAD = 369e6969 or later). You CANNOT git-commit. Deliverable:
+HUNT_REPORT_THRESHOLD_SCALE.md + cfg(test) instrumentation + retained
+raw logs. Read IDEATION_FINAL.md §3 first — its protocol is binding —
+plus HUNT_REPORT_CLOSURE_DEBTS.md (the counter instrumentation style to
+imitate) and HUNT_REPORT_CAP_RESUME.md (the current baselines).
+
+## The mismatch you are testing
+The wide engine initializes proof numbers from fork degree (1..37) and
+disproof numbers from tau, but descent still gives the selected child a
+second-best-sibling threshold of second+1 (with the child+1 progress
+floor). The proof-number literature (Kishimoto et al. survey; Pawlewicz
+& Lew 1+epsilon) names exactly this: heuristic initial values larger
+than 1 make +1 increments too small, causing excessive internal
+re-traversal. docs/TSS_SOLVER_PROOF.md explicitly states there is no
+epsilon.
+
+## Phase 1 — counters (decision gate; run FIRST)
+Default-off cfg(test) counters (TSS_THRESHOLD_COUNTERS=1):
+threshold-cross returns, same-parent sibling switches/reselections,
+recursive node visits, expansions per residency, and time in
+descent/state apply-undo OUTSIDE expansion. Run the official 1 GiB
+lazy+gate profile (TSS_CAP_RESUME off for baseline comparability).
+DECISION: if avoidable re-traversal cannot plausibly account for >=5%
+of full wall, STOP and record the lever dry — that is a complete,
+successful round. (Context: total non-expansion residue is 15.06% of
+wall; you need roughly a third of it.)
+
+## Phase 2 — A/B (only if Phase 1 justifies)
+Scheduling-only threshold variants behind one default-off env
+(TSS_THRESHOLD_DELTA=1|2|4|mean): +1 baseline, delta 2, delta 4, delta
+= mean immutable sibling prior. Only if one of those wins materially,
+try epsilon {1/8, 1/4, 1/2}. Soundness constraints (binding): min/sum
+recurrences, child universe, terminal classification, and certificate
+construction UNCHANGED; child thresholds strictly above the child's
+current number; saturate at PN_INFINITY; commitment-domain behavior
+unchanged; finite-cap statuses may change only toward a differently
+discovered verified proof or Unknown; every hard result passes the
+UNCHANGED strict verifier; no WIN/LOSS contradiction anywhere.
+Measure: full 1 GiB lazy+gate corpus + isolated 0l4291i_live and
+lz60mfb + the selected Phase-3 D cells (h8 and h16, cap 500) from
+HUNT_REPORT_LEAF_SURFACE.md. Report wall, expansions, TT hits, stage
+refreshes, sibling switches, verifier results per arm. PROMOTE bar:
+>=5% aggregate deep improvement with NO material Phase-3 leaf
+regression; ONE global parameter (never per-root tuning).
+
+NOTE (owner ruling 07-17): 94gnnol is OUT OF SCOPE entirely (corpus row
+from another dev) — exclude it from isolated-row lists; the official
+corpus rows stand as-is.
+
+## Rules (RAM per the RELAXED 07-17 protocol)
+CARGO_TARGET_DIR=.target-codex; --target x86_64-pc-windows-msvc on
+EVERY cargo; ONE cargo process host-wide; --test-threads=1. RAM gates
+(owner-relaxed 07-17): before any cargo, availability (= free-physical
++ standby cache via Get-Counter '\Memory\Standby Cache Normal Priority
+Bytes') >= 10 GB AND free-physical >= 5 GB; before each gate-class 1
+GiB profile, availability >= 12 GB AND free-physical >= 6 GB. Record
+both readings. A Lean spine lane is running and keeps priority on
+contention. cfg(test)-gated default-off instrumentation only;
+production byte-identity when unused (verify via the fast subset);
+strict verifier untouched. No commits. This worktree only. Honest
+partial stop at a clean boundary is success. Final message: Phase-1
+decision with numbers, Phase-2 verdicts per arm (if run), files, regen
+commands.

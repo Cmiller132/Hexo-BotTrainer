@@ -1,0 +1,18 @@
+cargo.exe :    Compiling hexfield_eq v0.1.0 
+(E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width\packages\hexfield_eq)
+At line:2 char:994
++ ... get-codex'; & cargo test --release --target x86_64-pc-windows-msvc -p ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling he...es\hexfield_eq):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Finished `release` profile [optimized] target(s) in 8.99s
+     Running unittests rust\src\lib.rs 
+(.target-codex\x86_64-pc-windows-msvc\release\deps\hexfield_eq-de26e3778420c4c2.exe)
+
+running 1 test
+test tss_solver::tests::live_zone_order_respects_pn_band_and_hard_classes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 142 filtered out; finished in 0.00s
+
+EXIT_CODE=0

@@ -138,11 +138,247 @@ pub enum SolveGoal {
 }
 
 /// Per-solve diagnostics (telemetry only — never consulted for soundness).
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ClosureDebtStats {
+    pub(crate) pairs_evaluated: u64,
+    pub(crate) pairs_accepted: u64,
+    pub(crate) pairs_retained: u64,
+    pub(crate) pairs_selected: u64,
+    pub(crate) pairs_linked: u64,
+    pub(crate) pairs_expanded: u64,
+    pub(crate) winning_choice_nodes: u64,
+    pub(crate) winning_rank_bins: [u64; 8],
+    pub(crate) reveal_pair_evaluated: u64,
+    pub(crate) reveal_pair_prefix: u64,
+    pub(crate) pair_generation_nanos: u64,
+    pub(crate) gate_build_nanos: u64,
+    pub(crate) second_candidate_nanos: u64,
+    pub(crate) pair_evaluation_nanos: u64,
+    pub(crate) dedup_nanos: u64,
+    pub(crate) avoidable_second_candidate_nanos: u64,
+    pub(crate) avoidable_pair_evaluation_nanos: u64,
+    pub(crate) avoidable_dedup_nanos: u64,
+}
+
+/// Test-only accounting for the prior-scale threshold hunt. These values are
+/// observational only and are never consulted by the search.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ThresholdScaleStats {
+    pub(crate) recursive_node_visits: u64,
+    pub(crate) expanded_node_revisits: u64,
+    pub(crate) threshold_cross_returns: u64,
+    pub(crate) same_parent_reselections: u64,
+    pub(crate) sibling_switches: u64,
+    pub(crate) residencies: u64,
+    pub(crate) residency_expansions: u64,
+    /// Expansion deltas in bins 0, 1, 2, 3-4, 5-8, 9-16, 17-32, 33+.
+    pub(crate) residency_expansion_bins: [u64; 8],
+    /// First indexed-TT admission refusal as
+    /// (expansion clock, retained arena entries, indexed bytes).
+    pub(crate) first_admission_refusal: Option<(u64, u64, u64)>,
+    /// Selection-score gap bins are: no sibling; selected better by 33+,
+    /// 17-32, 9-16, 5-8, 3-4, 2, 1; tie; selected worse by 1, 2, 3-4, 5+.
+    /// Each expansion is charged to its immediate parent's selection snapshot.
+    pub(crate) choice_gap_expansions_pre_saturation: [u64; 13],
+    pub(crate) choice_gap_expansions_post_saturation: [u64; 13],
+    pub(crate) universal_gap_expansions_pre_saturation: [u64; 13],
+    pub(crate) universal_gap_expansions_post_saturation: [u64; 13],
+    /// Root (or otherwise parentless) expansions, split at first refusal.
+    pub(crate) unclassified_expansions_pre_saturation: u64,
+    pub(crate) unclassified_expansions_post_saturation: u64,
+    /// PN and DN inherited-threshold sentinel hits and strict clamp events.
+    pub(crate) sentinel_inherited_threshold_hits: [u64; 2],
+    pub(crate) sentinel_inherited_threshold_clamps: [u64; 2],
+    /// `value + delta` expressions that reached the sentinel, and those whose
+    /// unclamped result was strictly above it.
+    pub(crate) sentinel_increment_hits: u64,
+    pub(crate) sentinel_increment_clamps: u64,
+    /// Choice-DN and Universal-PN branch sums that reached the sentinel.
+    pub(crate) sentinel_sum_hits: [u64; 2],
+    /// Exclusive time in `WidePnSearch::work`, with expansion and recursive
+    /// child time paused so every wall interval is counted at most once.
+    pub(crate) descent_nanos: u64,
+    /// Apply/undo time on descent edges; this is a subset of `descent_nanos`.
+    pub(crate) state_apply_undo_nanos: u64,
+}
+
+#[cfg(test)]
+impl ThresholdScaleStats {
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.recursive_node_visits = self
+            .recursive_node_visits
+            .saturating_add(other.recursive_node_visits);
+        self.expanded_node_revisits = self
+            .expanded_node_revisits
+            .saturating_add(other.expanded_node_revisits);
+        self.threshold_cross_returns = self
+            .threshold_cross_returns
+            .saturating_add(other.threshold_cross_returns);
+        self.same_parent_reselections = self
+            .same_parent_reselections
+            .saturating_add(other.same_parent_reselections);
+        self.sibling_switches = self.sibling_switches.saturating_add(other.sibling_switches);
+        self.residencies = self.residencies.saturating_add(other.residencies);
+        self.residency_expansions = self
+            .residency_expansions
+            .saturating_add(other.residency_expansions);
+        for (target, value) in self
+            .residency_expansion_bins
+            .iter_mut()
+            .zip(other.residency_expansion_bins)
+        {
+            *target = target.saturating_add(value);
+        }
+        if self.first_admission_refusal.is_none() {
+            self.first_admission_refusal = other.first_admission_refusal;
+        }
+        for (target_bins, source_bins) in [
+            (
+                &mut self.choice_gap_expansions_pre_saturation,
+                other.choice_gap_expansions_pre_saturation,
+            ),
+            (
+                &mut self.choice_gap_expansions_post_saturation,
+                other.choice_gap_expansions_post_saturation,
+            ),
+            (
+                &mut self.universal_gap_expansions_pre_saturation,
+                other.universal_gap_expansions_pre_saturation,
+            ),
+            (
+                &mut self.universal_gap_expansions_post_saturation,
+                other.universal_gap_expansions_post_saturation,
+            ),
+        ] {
+            for (target, value) in target_bins.iter_mut().zip(source_bins) {
+                *target = target.saturating_add(value);
+            }
+        }
+        self.unclassified_expansions_pre_saturation = self
+            .unclassified_expansions_pre_saturation
+            .saturating_add(other.unclassified_expansions_pre_saturation);
+        self.unclassified_expansions_post_saturation = self
+            .unclassified_expansions_post_saturation
+            .saturating_add(other.unclassified_expansions_post_saturation);
+        for (target, value) in self
+            .sentinel_inherited_threshold_hits
+            .iter_mut()
+            .zip(other.sentinel_inherited_threshold_hits)
+        {
+            *target = target.saturating_add(value);
+        }
+        for (target, value) in self
+            .sentinel_inherited_threshold_clamps
+            .iter_mut()
+            .zip(other.sentinel_inherited_threshold_clamps)
+        {
+            *target = target.saturating_add(value);
+        }
+        self.sentinel_increment_hits = self
+            .sentinel_increment_hits
+            .saturating_add(other.sentinel_increment_hits);
+        self.sentinel_increment_clamps = self
+            .sentinel_increment_clamps
+            .saturating_add(other.sentinel_increment_clamps);
+        for (target, value) in self
+            .sentinel_sum_hits
+            .iter_mut()
+            .zip(other.sentinel_sum_hits)
+        {
+            *target = target.saturating_add(value);
+        }
+        self.descent_nanos = self.descent_nanos.saturating_add(other.descent_nanos);
+        self.state_apply_undo_nanos = self
+            .state_apply_undo_nanos
+            .saturating_add(other.state_apply_undo_nanos);
+    }
+}
+
+#[cfg(test)]
+impl ClosureDebtStats {
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.pairs_evaluated = self.pairs_evaluated.saturating_add(other.pairs_evaluated);
+        self.pairs_accepted = self.pairs_accepted.saturating_add(other.pairs_accepted);
+        self.pairs_retained = self.pairs_retained.saturating_add(other.pairs_retained);
+        self.pairs_selected = self.pairs_selected.saturating_add(other.pairs_selected);
+        self.pairs_linked = self.pairs_linked.saturating_add(other.pairs_linked);
+        self.pairs_expanded = self.pairs_expanded.saturating_add(other.pairs_expanded);
+        self.winning_choice_nodes = self
+            .winning_choice_nodes
+            .saturating_add(other.winning_choice_nodes);
+        for (target, value) in self
+            .winning_rank_bins
+            .iter_mut()
+            .zip(other.winning_rank_bins)
+        {
+            *target = target.saturating_add(value);
+        }
+        self.reveal_pair_evaluated = self
+            .reveal_pair_evaluated
+            .saturating_add(other.reveal_pair_evaluated);
+        self.reveal_pair_prefix = self
+            .reveal_pair_prefix
+            .saturating_add(other.reveal_pair_prefix);
+        self.pair_generation_nanos = self
+            .pair_generation_nanos
+            .saturating_add(other.pair_generation_nanos);
+        self.gate_build_nanos = self.gate_build_nanos.saturating_add(other.gate_build_nanos);
+        self.second_candidate_nanos = self
+            .second_candidate_nanos
+            .saturating_add(other.second_candidate_nanos);
+        self.pair_evaluation_nanos = self
+            .pair_evaluation_nanos
+            .saturating_add(other.pair_evaluation_nanos);
+        self.dedup_nanos = self.dedup_nanos.saturating_add(other.dedup_nanos);
+        self.avoidable_second_candidate_nanos = self
+            .avoidable_second_candidate_nanos
+            .saturating_add(other.avoidable_second_candidate_nanos);
+        self.avoidable_pair_evaluation_nanos = self
+            .avoidable_pair_evaluation_nanos
+            .saturating_add(other.avoidable_pair_evaluation_nanos);
+        self.avoidable_dedup_nanos = self
+            .avoidable_dedup_nanos
+            .saturating_add(other.avoidable_dedup_nanos);
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SolveStats {
     pub nodes: u64,
+    pub expansions: u64,
     pub tt_hits: u64,
+    pub tt_entries: u64,
     pub peak_tt_bytes: u64,
+    /// Direct-map slot replacements in the solve-local TT. These are cache
+    /// evictions, not proof-semantic events.
+    pub tt_evictions: u64,
+    /// TT/index insertions refused because the caller's byte cap was full.
+    pub tt_admission_rejections: u64,
+    /// Exact-key positive-fragment queries made by the wide solver.
+    pub fragment_lookups: u64,
+    /// Queries that passed full-key, claimant, horizon, and depth checks.
+    pub fragment_hits: u64,
+    /// Shared fragment roots actually imported into the returned certificate.
+    pub fragment_imports: u64,
+    /// Resident entries after this solve (telemetry only).
+    pub fragment_store_entries: u64,
+    /// Resident byte-accounted fragment-store charge after this solve.
+    pub fragment_store_bytes: u64,
+    pub interior_gate_evaluations: u64,
+    pub interior_gate_dismissals: u64,
+    pub interior_gate_nanos: u64,
+    #[cfg(test)]
+    pub(crate) stage_refreshes: u64,
+    #[cfg(test)]
+    pub(crate) live_ge3_seed_scans: u64,
+    #[cfg(test)]
+    pub(crate) live_ge3_seed_nanos: u64,
+    #[cfg(test)]
+    pub(crate) closure_debt: ClosureDebtStats,
+    #[cfg(test)]
+    pub(crate) threshold_scale: ThresholdScaleStats,
 }
 
 /// A deep solve's outcome: a typed status, an optional replayable certificate

@@ -20,8 +20,14 @@ use std::time::Instant;
 
 use hexo_engine::{apply_placement, HexCoord, HexoState, Placement, Player, TurnPhase};
 
-use crate::tss_core::{CertVerify, DeepSolve, ProofStatus, SolveCaps, SolveGoal};
-use crate::tss_solver::{round3_shadow_certificate, TssSolver, WidthOptions};
+use crate::tss_core::{
+    CertVerify, ClosureDebtStats, DeepSolve, ProofStatus, SolveCaps, SolveGoal, ThresholdScaleStats,
+};
+use crate::tss_solver::{
+    begin_ordering_study_report, round3_shadow_certificate, take_ordering_study_report,
+    CapResumeError, CapResumeSession, OrderingStudyReport, TssSolver, WidthOptions,
+    ORDERING_STUDY_ORDERS,
+};
 use crate::tss_verify::TssVerifier;
 
 const DEFAULT_TSS_TEST_TT_BYTES: usize = 512 << 20;
@@ -47,10 +53,91 @@ fn status_name(status: ProofStatus) -> &'static str {
     }
 }
 
-struct CorpusPosition {
-    id: String,
-    expect_win: bool,
-    state: HexoState,
+fn ordering_rank_bin(rank: u32) -> usize {
+    match rank {
+        1 => 0,
+        2 => 1,
+        3 => 2,
+        4 => 3,
+        5..=8 => 4,
+        9..=16 => 5,
+        17..=32 => 6,
+        _ => 7,
+    }
+}
+
+fn print_ordering_summaries(label: &str, report: &OrderingStudyReport) {
+    let scopes = [
+        ("all_choice", None, None),
+        ("pair", Some(true), None),
+        ("pair", Some(true), Some((0u32, 7u32))),
+        ("pair", Some(true), Some((8u32, 15u32))),
+        ("pair", Some(true), Some((16u32, u32::MAX))),
+    ];
+    for (scope, pair_only, depth_band) in scopes {
+        let selected = report
+            .records
+            .iter()
+            .filter(|record| pair_only.is_none_or(|pair| record.pair_node == pair))
+            .filter(|record| {
+                depth_band.is_none_or(|(low, high)| (low..=high).contains(&record.depth))
+            })
+            .collect::<Vec<_>>();
+        if selected.is_empty() {
+            continue;
+        }
+        let band = depth_band
+            .map(|(low, high)| {
+                if high == u32::MAX {
+                    format!("{low}plus")
+                } else {
+                    format!("{low}-{high}")
+                }
+            })
+            .unwrap_or_else(|| "all".to_owned());
+        let mut child_counts = selected
+            .iter()
+            .map(|record| record.generated_children)
+            .collect::<Vec<_>>();
+        child_counts.sort_unstable();
+        let child_sum = child_counts
+            .iter()
+            .map(|&value| u64::from(value))
+            .sum::<u64>();
+        let child_median = child_counts[(child_counts.len() - 1) / 2];
+        for (order, order_name) in ORDERING_STUDY_ORDERS.iter().enumerate() {
+            let mut ranks = selected
+                .iter()
+                .map(|record| record.ranks[order])
+                .collect::<Vec<_>>();
+            ranks.sort_unstable();
+            let mut hist = [0u64; 8];
+            for &rank in &ranks {
+                hist[ordering_rank_bin(rank)] = hist[ordering_rank_bin(rank)].saturating_add(1);
+            }
+            let count = u64::try_from(ranks.len()).unwrap_or(u64::MAX);
+            let rank_sum = ranks.iter().map(|&rank| u64::from(rank)).sum::<u64>();
+            let cdf = |limit: u32| ranks.iter().filter(|&&rank| rank <= limit).count();
+            let rank_median = ranks[(ranks.len() - 1) / 2];
+            println!(
+                "ORDERING_SUMMARY label={label} scope={scope} band={band} order={order_name} nodes={count} rank1={} median={rank_median} mean={:.6} cdf1={} cdf2={} cdf4={} cdf8={} cdf16={} hist={hist:?} children_median={child_median} children_mean={:.6}",
+                cdf(1),
+                rank_sum as f64 / count as f64,
+                cdf(1),
+                cdf(2),
+                cdf(4),
+                cdf(8),
+                cdf(16),
+                child_sum as f64 / count as f64,
+            );
+        }
+    }
+}
+
+pub(crate) struct CorpusPosition {
+    pub(crate) id: String,
+    pub(crate) expect_win: bool,
+    pub(crate) state: HexoState,
 }
 
 struct ForcingLine {
@@ -58,7 +145,7 @@ struct ForcingLine {
     moves: Vec<HexCoord>,
 }
 
-fn load_corpus() -> Vec<CorpusPosition> {
+pub(crate) fn load_corpus() -> Vec<CorpusPosition> {
     let path = std::env::var("TSS_CORPUS_FILE").unwrap_or_else(|_| {
         format!(
             "{}/rust/corpus/forcing_corpus_moves.txt",
@@ -180,6 +267,101 @@ fn load_forcing_lines() -> Vec<ForcingLine> {
 fn tss_corpus_check() {
     let corpus = load_corpus();
     let tt_bytes_cap = test_tt_bytes_cap();
+    let shared_fragments = std::env::var("TSS_SHARED_FRAGMENTS").ok().as_deref() == Some("1");
+    let lazy_frontier = std::env::var("TSS_LAZY_FRONTIER").ok().as_deref() == Some("1");
+    let interior_gate = std::env::var("TSS_INTERIOR_CENSUS_GATE").ok().as_deref() == Some("1");
+    let k_reply_consume = std::env::var("TSS_K_REPLY_CONSUME").ok().as_deref() == Some("1");
+    let cap_resume = std::env::var("TSS_CAP_RESUME").ok().as_deref() == Some("1");
+    let live_ge3_seed = std::env::var("TSS_LIVE_GE3_SEED").ok().as_deref() == Some("1");
+    let closure_counters = std::env::var("TSS_CLOSURE_COUNTERS").ok().as_deref() == Some("1");
+    let ordering_study = std::env::var("TSS_ORDERING_STUDY").ok().as_deref() == Some("1");
+    let (zone_order, zone_order_band) = crate::tss_solver::zone_order_config();
+    let threshold_counters = std::env::var("TSS_THRESHOLD_COUNTERS").ok().as_deref() == Some("1");
+    let threshold_delta = std::env::var("TSS_THRESHOLD_DELTA").unwrap_or_else(|_| "off".to_owned());
+    if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_SHARED_FRAGMENTS") {
+        assert_eq!(
+            expected,
+            if shared_fragments { "1" } else { "0" },
+            "TSS_SHARED_FRAGMENTS does not match gate expectation",
+        );
+    }
+    if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_LAZY_FRONTIER") {
+        assert_eq!(
+            expected,
+            if lazy_frontier { "1" } else { "0" },
+            "TSS_LAZY_FRONTIER does not match gate expectation",
+        );
+    }
+    if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_INTERIOR_CENSUS_GATE") {
+        assert_eq!(
+            expected,
+            if interior_gate { "1" } else { "0" },
+            "TSS_INTERIOR_CENSUS_GATE does not match gate expectation",
+        );
+    }
+    if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_K_REPLY_CONSUME") {
+        assert_eq!(
+            expected,
+            if k_reply_consume { "1" } else { "0" },
+            "TSS_K_REPLY_CONSUME does not match gate expectation",
+        );
+    }
+    if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_CAP_RESUME") {
+        assert_eq!(
+            expected,
+            if cap_resume { "1" } else { "0" },
+            "TSS_CAP_RESUME does not match gate expectation",
+        );
+    }
+    if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_LIVE_GE3_SEED") {
+        assert_eq!(
+            expected,
+            if live_ge3_seed { "1" } else { "0" },
+            "TSS_LIVE_GE3_SEED does not match gate expectation",
+        );
+    }
+    if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_CLOSURE_COUNTERS") {
+        assert_eq!(
+            expected,
+            if closure_counters { "1" } else { "0" },
+            "TSS_CLOSURE_COUNTERS does not match gate expectation",
+        );
+    }
+    if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_THRESHOLD_COUNTERS") {
+        assert_eq!(
+            expected,
+            if threshold_counters { "1" } else { "0" },
+            "TSS_THRESHOLD_COUNTERS does not match gate expectation",
+        );
+    }
+    if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_ORDERING_STUDY") {
+        assert_eq!(
+            expected,
+            if ordering_study { "1" } else { "0" },
+            "TSS_ORDERING_STUDY does not match gate expectation",
+        );
+    }
+    if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_THRESHOLD_DELTA") {
+        assert_eq!(
+            expected, threshold_delta,
+            "TSS_THRESHOLD_DELTA does not match gate expectation",
+        );
+    }
+    println!(
+        "CORPUS_MODE shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={} cap_resume={} live_ge3_seed={} closure_counters={} ordering_study={} zone_order={} zone_order_band={} threshold_counters={} threshold_delta={} tt_bytes_cap={tt_bytes_cap}",
+        if shared_fragments { "on" } else { "off" },
+        if lazy_frontier { "on" } else { "off" },
+        if interior_gate { "on" } else { "off" },
+        if k_reply_consume { "on" } else { "off" },
+        if cap_resume { "on" } else { "off" },
+        if live_ge3_seed { "on" } else { "off" },
+        if closure_counters { "on" } else { "off" },
+        if ordering_study { "on" } else { "off" },
+        zone_order,
+        zone_order_band,
+        if threshold_counters { "on" } else { "off" },
+        threshold_delta,
+    );
     let selected_ids = std::env::var("TSS_CORPUS_ID").ok().map(|value| {
         let mut ids = value
             .split(',')
@@ -211,6 +393,19 @@ fn tss_corpus_check() {
 
     let mut failures: Vec<String> = Vec::new();
     let mut selected = 0usize;
+    let mut fragment_lookups = 0u64;
+    let mut fragment_hits = 0u64;
+    let mut fragment_imports = 0u64;
+    let mut max_fragment_store_entries = 0u64;
+    let mut max_fragment_store_bytes = 0u64;
+    let mut resume_total_ms = 0.0f64;
+    let mut resume_total_reentries = 0u64;
+    let mut closure_total = ClosureDebtStats::default();
+    let mut threshold_total = ThresholdScaleStats::default();
+    let mut ordering_total = OrderingStudyReport::default();
+    let mut stage_refresh_total = 0u64;
+    let mut live_ge3_seed_scans = 0u64;
+    let mut live_ge3_seed_nanos = 0u64;
     for pos in &corpus {
         if selected_ids
             .as_ref()
@@ -220,40 +415,211 @@ fn tss_corpus_check() {
         }
         selected += 1;
         let mut final_status = ProofStatus::Unknown;
+        let resume_solver = cap_resume.then(|| {
+            let mut solver = TssSolver::default();
+            solver.set_width_options(WidthOptions::vcf_pair_complete());
+            solver
+        });
+        let mut resume_session = None::<CapResumeSession>;
+        let mut resume_unsupported = false;
+        let mut resume_root_ms = 0.0f64;
+        let mut resume_root_reentries = 0u64;
         for (i, cap) in ladder.iter().enumerate() {
             if !pos.expect_win && *cap > 1_000_000 {
                 break;
             }
-            let mut solver = TssSolver::default();
-            solver.set_width_options(WidthOptions::vcf_pair_complete());
             let caps = SolveCaps {
                 node_cap: *cap,
                 tt_bytes_cap,
                 semantic_horizon: u32::MAX,
             };
+            begin_ordering_study_report();
             let t0 = Instant::now();
-            let result = solver.solve(&pos.state, &caps);
+            let (result, resume_meta) = if let Some(solver) = resume_solver.as_ref() {
+                if resume_session.is_none() && !resume_unsupported {
+                    match CapResumeSession::new(solver, &pos.state, &caps, SolveGoal::Both) {
+                        Ok(session) => resume_session = Some(session),
+                        Err(CapResumeError::UnsupportedProfile) => {
+                            resume_unsupported = true;
+                            println!(
+                                "CAP_RESUME_FALLBACK id={} cap={cap} reason=no_unfinished_wide_frontier",
+                                pos.id
+                            );
+                        }
+                        Err(error) => {
+                            panic!("{}: cap-resume session creation: {error:?}", pos.id)
+                        }
+                    }
+                }
+                if let Some(session) = resume_session.as_mut() {
+                    let advance = session
+                        .advance_to_node_cap(solver, &pos.state, &caps, SolveGoal::Both)
+                        .unwrap_or_else(|error| {
+                            panic!("{} cap={cap}: cap-resume advance: {error:?}", pos.id)
+                        });
+                    let meta = (
+                        advance.root_pn,
+                        advance.root_dn,
+                        advance.stage_depth,
+                        advance.advances,
+                        advance.reentries,
+                    );
+                    (advance.result, Some(meta))
+                } else {
+                    let mut fresh_solver = TssSolver::default();
+                    fresh_solver.set_width_options(WidthOptions::vcf_pair_complete());
+                    (fresh_solver.solve(&pos.state, &caps), None)
+                }
+            } else {
+                let mut solver = TssSolver::default();
+                solver.set_width_options(WidthOptions::vcf_pair_complete());
+                (solver.solve(&pos.state, &caps), None)
+            };
             let ms = t0.elapsed().as_secs_f64() * 1e3;
+            let ordering_report = take_ordering_study_report();
+            if cap_resume {
+                resume_root_ms += ms;
+                resume_total_ms += ms;
+            }
+            assert!(
+                result.status == ProofStatus::Unknown || result.cert.is_some(),
+                "{}: hard {} verdict without certificate at cap={cap}",
+                pos.id,
+                status_name(result.status),
+            );
+            if let Some(cert) = &result.cert {
+                assert!(
+                    TssVerifier.verify(&pos.state, cert, result.status),
+                    "{}: strict verifier rejected returned {} certificate at cap={cap}",
+                    pos.id,
+                    status_name(result.status),
+                );
+            }
+            fragment_lookups = fragment_lookups.saturating_add(result.stats.fragment_lookups);
+            fragment_hits = fragment_hits.saturating_add(result.stats.fragment_hits);
+            fragment_imports = fragment_imports.saturating_add(result.stats.fragment_imports);
+            max_fragment_store_entries =
+                max_fragment_store_entries.max(result.stats.fragment_store_entries);
+            max_fragment_store_bytes =
+                max_fragment_store_bytes.max(result.stats.fragment_store_bytes);
             println!(
-                "CORPUS id={} cap={cap} status={} expect={} nodes={} tt_hits={} tt_bytes_cap={} peak_tt_bytes={} ms={ms:.1}",
+                "CORPUS id={} cap={cap} status={} expect={} nodes={} expansions={} tt_entries={} tt_hits={} tt_bytes_cap={} peak_tt_bytes={} stage_refreshes={} gate_evals={} gate_dismissals={} gate_us={:.3} seed_scans={} seed_ms={:.3} ms={ms:.1}",
                 pos.id,
                 status_name(result.status),
                 if pos.expect_win { "WIN" } else { "NO" },
                 result.stats.nodes,
+                result.stats.expansions,
+                result.stats.tt_entries,
                 result.stats.tt_hits,
                 tt_bytes_cap,
                 result.stats.peak_tt_bytes,
+                result.stats.stage_refreshes,
+                result.stats.interior_gate_evaluations,
+                result.stats.interior_gate_dismissals,
+                result.stats.interior_gate_nanos as f64 / 1_000.0,
+                result.stats.live_ge3_seed_scans,
+                result.stats.live_ge3_seed_nanos as f64 / 1_000_000.0,
+            );
+            if ordering_study {
+                print_ordering_summaries(&format!("{}@{cap}", pos.id), &ordering_report);
+                if result.status == ProofStatus::Win {
+                    ordering_total.records.extend(ordering_report.records);
+                }
+            }
+            stage_refresh_total = stage_refresh_total.saturating_add(result.stats.stage_refreshes);
+            live_ge3_seed_scans =
+                live_ge3_seed_scans.saturating_add(result.stats.live_ge3_seed_scans);
+            live_ge3_seed_nanos =
+                live_ge3_seed_nanos.saturating_add(result.stats.live_ge3_seed_nanos);
+            closure_total.merge(result.stats.closure_debt);
+            threshold_total.merge(result.stats.threshold_scale);
+            let closure = result.stats.closure_debt;
+            println!(
+                "CLOSURE_ROW id={} cap={cap} evaluated={} accepted={} retained={} selected={} linked={} expanded={} winning_choices={} winning_rank_bins={:?} reveal_evaluated={} reveal_prefix={} pair_ms={:.3} gate_ms={:.3} second_ms={:.3} eval_ms={:.3} dedup_ms={:.3} avoid_second_ms={:.3} avoid_eval_ms={:.3} avoid_dedup_ms={:.3}",
+                pos.id,
+                closure.pairs_evaluated,
+                closure.pairs_accepted,
+                closure.pairs_retained,
+                closure.pairs_selected,
+                closure.pairs_linked,
+                closure.pairs_expanded,
+                closure.winning_choice_nodes,
+                closure.winning_rank_bins,
+                closure.reveal_pair_evaluated,
+                closure.reveal_pair_prefix,
+                closure.pair_generation_nanos as f64 / 1e6,
+                closure.gate_build_nanos as f64 / 1e6,
+                closure.second_candidate_nanos as f64 / 1e6,
+                closure.pair_evaluation_nanos as f64 / 1e6,
+                closure.dedup_nanos as f64 / 1e6,
+                closure.avoidable_second_candidate_nanos as f64 / 1e6,
+                closure.avoidable_pair_evaluation_nanos as f64 / 1e6,
+                closure.avoidable_dedup_nanos as f64 / 1e6,
+            );
+            let threshold = result.stats.threshold_scale;
+            println!(
+                "THRESHOLD_ROW id={} cap={cap} visits={} revisits={} threshold_crosses={} reselections={} sibling_switches={} residencies={} residency_expansions={} expansion_bins={:?} descent_ms={:.3} state_ms={:.3}",
+                pos.id,
+                threshold.recursive_node_visits,
+                threshold.expanded_node_revisits,
+                threshold.threshold_cross_returns,
+                threshold.same_parent_reselections,
+                threshold.sibling_switches,
+                threshold.residencies,
+                threshold.residency_expansions,
+                threshold.residency_expansion_bins,
+                threshold.descent_nanos as f64 / 1e6,
+                threshold.state_apply_undo_nanos as f64 / 1e6,
+            );
+            println!(
+                "FRONTIER_CENSUS_ROW id={} cap={cap} first_refusal={:?} choice_pre={:?} choice_post={:?} universal_pre={:?} universal_post={:?} unclassified_pre={} unclassified_post={} sentinel_inherited_hits={:?} sentinel_inherited_clamps={:?} sentinel_increment_hits={} sentinel_increment_clamps={} sentinel_sum_hits={:?}",
+                pos.id,
+                threshold.first_admission_refusal,
+                threshold.choice_gap_expansions_pre_saturation,
+                threshold.choice_gap_expansions_post_saturation,
+                threshold.universal_gap_expansions_pre_saturation,
+                threshold.universal_gap_expansions_post_saturation,
+                threshold.unclassified_expansions_pre_saturation,
+                threshold.unclassified_expansions_post_saturation,
+                threshold.sentinel_inherited_threshold_hits,
+                threshold.sentinel_inherited_threshold_clamps,
+                threshold.sentinel_increment_hits,
+                threshold.sentinel_increment_clamps,
+                threshold.sentinel_sum_hits,
+            );
+            if let Some((pn, dn, stage_depth, advances, reentries)) = resume_meta {
+                println!(
+                    "CAP_RESUME_PROFILE id={} cap={cap} pn={pn} dn={dn} status={} cumulative_expansions={} incremental_ms={ms:.3} root_cumulative_ms={resume_root_ms:.3} stage_depth={stage_depth} advances={advances} reentries={reentries}",
+                    pos.id,
+                    status_name(result.status),
+                    result.stats.expansions,
+                );
+                resume_root_reentries = reentries;
+            }
+            println!(
+                "FRAGMENT_PROFILE id={} cap={cap} lookups={} hits={} imports={} store_entries={} store_bytes={}",
+                pos.id,
+                result.stats.fragment_lookups,
+                result.stats.fragment_hits,
+                result.stats.fragment_imports,
+                result.stats.fragment_store_entries,
+                result.stats.fragment_store_bytes,
             );
             let (pair_ms, defender_ms, regen_ms, expand_ms, refresh_ms, insert_ms) =
                 crate::tss_solver::wide_gen_profile();
+            let (zone_contexts, zone_keys, zone_context_ns, zone_key_ns) =
+                crate::tss_solver::zone_order_profile();
             println!(
-                "GEN_PROFILE pair_ms={pair_ms} defender_ms={defender_ms} regen_ms={regen_ms} expand_ms={expand_ms} refresh_ms={refresh_ms} insert_ms={insert_ms}"
+                "GEN_PROFILE pair_ms={pair_ms} defender_ms={defender_ms} regen_ms={regen_ms} expand_ms={expand_ms} refresh_ms={refresh_ms} insert_ms={insert_ms} zone_contexts={zone_contexts} zone_keys={zone_keys} zone_context_ms={:.3} zone_key_ms={:.3}",
+                zone_context_ns as f64 / 1_000_000.0,
+                zone_key_ns as f64 / 1_000_000.0,
             );
             final_status = result.status;
             if result.status != ProofStatus::Unknown || i == ladder.len() - 1 {
                 break;
             }
         }
+        resume_total_reentries = resume_total_reentries.saturating_add(resume_root_reentries);
         if pos.expect_win && final_status != ProofStatus::Win {
             failures.push(format!(
                 "{}: expected WIN, got {}",
@@ -272,7 +638,78 @@ fn tss_corpus_check() {
             "TSS_CORPUS_ID contained an unknown corpus entry"
         );
     }
-    println!("CORPUS_DONE failures={}", failures.len());
+    let fragment_hit_rate = if fragment_lookups == 0 {
+        0.0
+    } else {
+        fragment_hits as f64 * 100.0 / fragment_lookups as f64
+    };
+    println!(
+        "CORPUS_FRAGMENTS lookups={fragment_lookups} hits={fragment_hits} hit_rate_pct={fragment_hit_rate:.3} imports={fragment_imports} max_store_entries={max_fragment_store_entries} max_store_bytes={max_fragment_store_bytes}"
+    );
+    println!(
+        "CLOSURE_DONE evaluated={} accepted={} retained={} selected={} linked={} expanded={} winning_choices={} winning_rank_bins={:?} reveal_evaluated={} reveal_prefix={} pair_ms={:.3} gate_ms={:.3} second_ms={:.3} eval_ms={:.3} dedup_ms={:.3} avoid_second_ms={:.3} avoid_eval_ms={:.3} avoid_dedup_ms={:.3} stage_refreshes={} seed_scans={} seed_ms={:.3}",
+        closure_total.pairs_evaluated,
+        closure_total.pairs_accepted,
+        closure_total.pairs_retained,
+        closure_total.pairs_selected,
+        closure_total.pairs_linked,
+        closure_total.pairs_expanded,
+        closure_total.winning_choice_nodes,
+        closure_total.winning_rank_bins,
+        closure_total.reveal_pair_evaluated,
+        closure_total.reveal_pair_prefix,
+        closure_total.pair_generation_nanos as f64 / 1e6,
+        closure_total.gate_build_nanos as f64 / 1e6,
+        closure_total.second_candidate_nanos as f64 / 1e6,
+        closure_total.pair_evaluation_nanos as f64 / 1e6,
+        closure_total.dedup_nanos as f64 / 1e6,
+        closure_total.avoidable_second_candidate_nanos as f64 / 1e6,
+        closure_total.avoidable_pair_evaluation_nanos as f64 / 1e6,
+        closure_total.avoidable_dedup_nanos as f64 / 1e6,
+        stage_refresh_total,
+        live_ge3_seed_scans,
+        live_ge3_seed_nanos as f64 / 1e6,
+    );
+    println!(
+        "THRESHOLD_DONE visits={} revisits={} threshold_crosses={} reselections={} sibling_switches={} residencies={} residency_expansions={} expansion_bins={:?} descent_ms={:.3} state_ms={:.3}",
+        threshold_total.recursive_node_visits,
+        threshold_total.expanded_node_revisits,
+        threshold_total.threshold_cross_returns,
+        threshold_total.same_parent_reselections,
+        threshold_total.sibling_switches,
+        threshold_total.residencies,
+        threshold_total.residency_expansions,
+        threshold_total.residency_expansion_bins,
+        threshold_total.descent_nanos as f64 / 1e6,
+        threshold_total.state_apply_undo_nanos as f64 / 1e6,
+    );
+    println!(
+        "FRONTIER_CENSUS_DONE first_refusal={:?} choice_pre={:?} choice_post={:?} universal_pre={:?} universal_post={:?} unclassified_pre={} unclassified_post={} sentinel_inherited_hits={:?} sentinel_inherited_clamps={:?} sentinel_increment_hits={} sentinel_increment_clamps={} sentinel_sum_hits={:?}",
+        threshold_total.first_admission_refusal,
+        threshold_total.choice_gap_expansions_pre_saturation,
+        threshold_total.choice_gap_expansions_post_saturation,
+        threshold_total.universal_gap_expansions_pre_saturation,
+        threshold_total.universal_gap_expansions_post_saturation,
+        threshold_total.unclassified_expansions_pre_saturation,
+        threshold_total.unclassified_expansions_post_saturation,
+        threshold_total.sentinel_inherited_threshold_hits,
+        threshold_total.sentinel_inherited_threshold_clamps,
+        threshold_total.sentinel_increment_hits,
+        threshold_total.sentinel_increment_clamps,
+        threshold_total.sentinel_sum_hits,
+    );
+    if ordering_study {
+        print_ordering_summaries("solved_win_total", &ordering_total);
+    }
+    println!(
+        "CORPUS_DONE failures={} shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={} cap_resume={} resume_wall_ms={resume_total_ms:.3} resume_reentries={resume_total_reentries}",
+        failures.len(),
+        if shared_fragments { "on" } else { "off" },
+        if lazy_frontier { "on" } else { "off" },
+        if interior_gate { "on" } else { "off" },
+        if k_reply_consume { "on" } else { "off" },
+        if cap_resume { "on" } else { "off" },
+    );
     assert!(
         failures.is_empty(),
         "corpus acceptance failures:\n{}",

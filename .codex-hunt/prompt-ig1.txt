@@ -1,0 +1,75 @@
+R-IG1 — BUILD THE PROVEN INTERIOR CENSUS GATE (WIN-arm, h_rem<=8),
+default-off, live-measured.
+
+Context: the NQ6 hunt (HUNT_REPORT_PN_INIT.md in this worktree — READ IT
+FIRST, plus the reviewed proof it cites:
+E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-dtw-bounds\PROOF_DTW_CENSUS_BOUND.md,
+Contract 8.1/8.2) measured that the PROVEN census two-gap gate, applied
+at interior claimant WIN-arm nodes with remaining horizon <=8, covers
+53.1-88.0% of all attempt expansions as trace subtrees at 0.5-1.3 us per
+evaluation, with ZERO gated positives. Those are trace counterfactuals;
+your job is the live build + live measurement. Owner directive: the
+campaign goal is a dramatically more efficient solver; this is the
+largest proven-and-unbuilt lever.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-pn-init
+(branch hunt/pn-init, tip includes the gated NQ6 telemetry — keep it
+working). You CANNOT git-commit. Engine =
+packages/hexfield_eq/rust/src/tss_solver.rs.
+
+## Binding soundness rules (from the proof + NQ6 report, non-negotiable)
+- Gate ONLY claimant/current-player WIN-arm queries at nonterminal
+  FirstStone/SecondStone nodes; NEVER universal defender arms; NEVER
+  turn a bounded no-WIN into a global LOSS verdict.
+- Census = max attacker count over defender-free windows from a
+  COMPLETE WindowStore::entries() scan (ac>0, dc==0, zero fallback);
+  exact phase-specific placement formula and ply table; the proof's
+  checked-wide conservative coordinate guard; dismiss only under strict
+  LB_plies > h_rem.
+- A gate dismissal means exactly what a no-certificate-within-horizon
+  None already means at that node — same TT/LOCAL_TT_FAILED caching
+  semantics, same staged-deepening behavior, nothing stronger cached.
+- SecondStone gets NO extra gap (the reachable ply-5 c=3 counterexample
+  is binding).
+
+## Work order
+1. INTEGRATION MEMO first (BUILD_INTERIOR_GATE.md): locate every WIN-arm
+   query point in both the wide and narrow paths; state where the gate
+   evaluates, how h_rem is derived there (exact code cites), and why
+   each placement satisfies the contract. Any location where h_rem or
+   phase cannot be derived exactly per the contract = DO NOT gate it;
+   say so.
+2. IMPLEMENT behind env flag TSS_INTERIOR_CENSUS_GATE=1, default OFF,
+   zero behavior change off. Production code paths may branch on the
+   flag; keep the hot-path cost at flag-off negligible (read the flag
+   once per solve).
+3. IDENTITY flag-off vs base behavior: the NQ6 campaign's baseline
+   numbers must be unchanged (rerun pn_init_campaign, compare
+   PNI_IDENTITY and cohort lines).
+4. SOUNDNESS CAMPAIGN flag-on (test-gated): all 19 forcing rows at
+   10k/100k + double_fork_compact + 100 human roots (NQ4/NQ6 recipe).
+   Require: identical VERDICTS flag-on vs flag-off everywhere; every
+   returned certificate verifier-accepted; any verdict flip or
+   certificate rejection = STOP and write up (it contradicts the proof
+   or your integration). Node counts flag-on should DROP — report them;
+   they will NOT match the trace counterfactual exactly (transpositions,
+   changed PN values) — report the live number honestly against the
+   53-88% trace estimate.
+5. OFFICIAL GATE flag-on: TSS_BACKWALK_TT_BYTES=2147483648 single
+   process, tss_corpus_check -- --ignored --test-threads=1, expect
+   CORPUS_DONE failures=0 (~570s; check >11 GB free RAM first).
+6. MEASURE: headline table flag-off vs flag-on per cohort — nodes,
+   expansions, TT entries, tt_hits, wall-clock; plus gate-evaluation
+   count and total gate time so the net win is explicit.
+
+## Rules
+CARGO_TARGET_DIR=.target-hunt; ONE cargo process; --test-threads=1;
+free RAM >9 GB before every cargo (powershell "Get-CimInstance
+Win32_OperatingSystem | % { $_.FreePhysicalMemory/1MB }") — THREE other
+sessions share this 31 GB host (Lean lane priority); if below, wait and
+re-check; >11 GB before the 2 GiB official gate. Single non-gate run
+<=10 min. No commits. This worktree only; siblings read-only. rustfmt
+--edition 2021 only on files you edit. Truthfulness outranks
+completeness; an honest blocker memo beats a forced integration.
+Final message: integration verdict, live vs trace savings table,
+soundness/identity evidence, gate result, files, regen commands.
