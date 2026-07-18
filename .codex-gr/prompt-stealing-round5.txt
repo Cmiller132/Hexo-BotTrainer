@@ -1,0 +1,74 @@
+R-ST5 — STEALING ROUND 5 (ultra): GAP-ZERO-LAG-WINDOW-RECODE / P5R-SERVICE under the corrected quantifiers
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+(branch hunt/gap-raw, HEAD = 67f996d1). You CANNOT git-commit. You do NOT
+have the cargo slot: NO cargo/Lean/harness/search runs — hand proofs only.
+Deliverable: STRATEGY_STEALING_ROUND5.md.
+
+## Required corpus (read first, in order, in full)
+1. STRATEGY_STEALING_HEXO.md
+2. STRATEGY_STEALING_ROUND2.md (folded errata) + STRATEGY_STEALING_REVIEW_ROUND2.md
+3. STRATEGY_STEALING_ROUND3.md (folded errata §24) + STRATEGY_STEALING_REVIEW_ROUND3.md
+4. STRATEGY_STEALING_ROUND4.md (WITH ITS FOLDED §35 ERRATA — binding,
+   especially the corrected §34.1 quantifier structure) +
+   STRATEGY_STEALING_REVIEW_ROUND4.md (its ten-item "Exact unresolved
+   obstacles after review" is the authoritative open agenda)
+
+## The state you inherit (round-4 exit, review-confirmed)
+- S23: zero-lag total-exact owner-faithful couplings fail even with
+  arbitrary pre-turn rebinding + ONE reactive escape per tested S pair
+  (proxy-support cut, applied twice). S24: winning sigma => finite
+  strategy-dependent rebinding horizon; budgets K>=2 OPEN.
+- S28: the deadline shield (delta(W)>m for every E-live window) is a sound
+  sufficient P5R invariant; C_shield nonempty as a trace class. S29: F-pair
+  service = exact transversal condition, tau_E<=2 generically; S30: legal
+  three-axis fork with tau_E=3 exists (abstract labeled state, NOT shown
+  sigma-forced). Permanent fence = exactly 6 blockers.
+- Corrected resume structure (§34.1): per real-S placement the candidate
+  picks branch (A) zero-lag repair / (B) shield-admissible lag / (C)
+  same-step physical terminal certificate, AND discharges obligations 4-6
+  (service/reconciliation, physical persistence, S18/S20/S12/S25
+  regressions). Checkpoint (28.1) is conditional on the total-exact branch.
+  Any negative gadget must be FORCED on the candidate's own
+  sigma-consistent coupled history.
+
+## Round-5 objectives (in priority order)
+1. **The sharp question, attacked from both sides.** Either:
+   (a) POSITIVE: construct a candidate mechanism for one of the three
+   branches with a proven invariant — most promising per round 4: a
+   branch-(B) lag/queue design where every real-only S cell carries the
+   shield until reconciled, coupled with a branch-4 service rule; prove it
+   maintains its invariant against a nontrivial class of S continuations
+   (name the class exactly; a conditional theorem at an honest scope is a
+   WIN); or
+   (b) NEGATIVE: extend the support-cut machinery to kill branch (A) at
+   budget K=2 (two reactive escapes in the tested pair), or kill a natural
+   formalization of branch-(B) lag (e.g. prove a sigma-forced configuration
+   where the lag queue must violate delta>m or the service transversal
+   exceeds 2 on the candidate's OWN coupled history — the reachability
+   quantifier is now mandatory; S30-style abstract states do not suffice).
+2. **Window-certificate representations** (the review's named open family:
+   non-total, nonisometric maps): give the first rigorous definition of a
+   window-faithful non-isometric representation (shadow certifies windows,
+   not stone-for-stone copies) and prove at least one nontrivial lemma
+   about it (either a P5R-style obligation transfer or a first obstruction).
+3. **Ledger maintenance**: full obligation ledger update against the
+   review's ten-item agenda; every claim labeled with which item it
+   advances.
+
+## Binding rules (campaign-standard)
+Hand proofs only; PROVEN/SKETCH/CONJECTURE/OPEN/CITED discipline; no
+machine-verified claims. Statement fidelity: inherit all definitions,
+premises, and errata boundaries (S22 premises: normal common-live
+checkpoint, total exact translation/D6 binding, nonempty parts;
+candidate-grammar vs extensional-class distinction; C_shield = complete
+traces; S29 fixed-C_S,E_S scope; no noninjective merges inside S22's
+scope). Any negative claim must carry its reachability quantifier
+explicitly. Rule citations: verify against the actual cited line ranges;
+include state.rs:149-160 and 283-288 where relevant. Continue section
+numbering from §35. Status ledger + hostile-review attack surface sections
+mandatory. Provenance: record input commit 67f996d1, note this pass
+creates no commit, list required corpus INCLUDING both review files.
+Incremental disk writes; chunk <= 2h per exec. Final message: verdict per
+objective (PROVEN-at-scope / REFUTED / PARTIAL / OPEN), and the single
+sharpest next question.
