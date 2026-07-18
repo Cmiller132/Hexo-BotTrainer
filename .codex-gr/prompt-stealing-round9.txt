@@ -1,0 +1,79 @@
+R-ST9 — STRATEGY-STEALING ROUND 9 (ultra): the fast outcome and the slow-winner controller
+
+CONTEXT NOTE: pure combinatorial game theory for Hexo (a Connect6-like
+board game). Nothing here concerns computer security. Use neutral
+proof vocabulary (stop criterion, negative control, stress case).
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+(branch hunt/gap-raw, HEAD = ab0fd965). You CANNOT git-commit. NO
+cargo/Lean/harness runs — hand proofs only. Deliverable:
+STRATEGY_STEALING_ROUND9.md.
+
+## Required corpus (read first, in order, in full)
+1. STRATEGY_STEALING_HEXO.md; 2-6. ROUND2-6 + reviews (R4 W/ §35, R5
+   W/ §44, R6 W/ §53); 7. ROUND7 (WITH §63) + REVIEW_ROUND7;
+8. ROUND8 (WITH §73 errata — BINDING: §68 is a partial interface map,
+   NOT a dichotomy; S58's selector qualifier; S61's completion
+   sentence; R_1's replacement + §53 closure semantics) +
+   STRATEGY_STEALING_REVIEW_ROUND8.md (its TWELVE-item obstacle list
+   is the authoritative open state; its item 12 names the sharpest
+   front).
+Rule sources: packages/hexo_engine/rust/src/{coord,legal,rules,board,
+state,tactics}.rs. Do NOT read any GAP_RAW_* file as evidence.
+
+## The state you inherit (round-8 exit, review-corrected)
+S59 reserve corridor: CAD + augmented F-LOCK^+ maintained on the
+nonempty quiet/R_1 class (canonical F-LOCK open). S58: the (2,3)
+first-event cliff kills every query-first common-phase
+one-event-per-microstep selector. S61: fast winners
+(FAST_8^{S15}/FAST_<14) forced onto S49 sixth-stone misalignment on
+their own histories — BUT this defeats the tested carrier, NOT sigma:
+the fast OUTCOME is open. S62/S63 ejection covers. REFUTED-and-fixed:
+the open region = fast outcome + slow winners + quiet-complement +
+ejection/outer-carrier classes (all independent).
+
+## Round-9 objectives (priority order)
+1. **THE FAST OUTCOME.** When a fast alleged winner breaks the
+   one-for-one carrier at the S49 event (shadow six vs real five),
+   what actually happens to the GAME? Attack:
+   (a) Can the S63-style physical-stop machinery or a modified
+   carrier (two-real-appends near the terminal, a §53-closure
+   variant, or a reserve-prepaid real board from the S59 corridor)
+   convert the fast-winner event into a real counterstrategy
+   contradiction — i.e. a theorem "no fast alleged winner exists" at
+   any named subclass? Note S61 gives real F five stones at the
+   event: one real append short. The exact question is whether the
+   corridor's prepaid reserve (deficit-one real window) can be
+   carried INTO the fast line — check compatibility of R_1 admission
+   with the S50 adaptive cycle.
+   (b) Or prove the obstruction: the fast line provably ejects from
+   the reserve corridor before the terminal (locate the exact
+   ejection event).
+2. **THE SLOW-WINNER CONTROLLER.** Slow winners have d_sigma >= 9
+   post-S15 (S60 gap). That is >= 2 extra full cycles of play before
+   any shadow terminal. Can the S59 corridor absorb slow winners for
+   their first cycle — i.e. prove every slow alleged winner's
+   post-S15 opening cycle either enters/stays in R_1 admission, hits
+   a sound stop, or hits the (2,3) cliff — the "extend one cycle"
+   question from round 8's resume point? A complete first-cycle
+   partition for slow winners is the target.
+3. **Quiet-membership preservation (tertiary):** which S-pair
+   behaviors preserve vs break quiet/R_1 admission — even a partial
+   classification of the admission-breaking S moves sharpens both
+   horns.
+
+## Binding rules (campaign-standard)
+Hand proofs only; PROVEN/SKETCH/CONJECTURE/OPEN/CITED discipline;
+statement fidelity to ALL folded errata (§35/§44/§53/§63/§73
+binding); quantifiers explicit; negative gadgets on the candidate's
+own legal sigma-consistent history; append-only discipline; NO
+synthesis overclaims — if you write an interface map, label coverage
+honestly per the round-8 lesson (the review checks this). Carry the
+COMPLETE caveat ledger (round-8 Finding 11 confirmed it complete —
+keep it that way). Continue numbering from §73 (start §74). Status
+ledger vs the review's twelve obstacles + agenda + cross-ledger +
+attack-surface + provenance (input ab0fd965; landed hash folded
+post-review; no commit). Incremental writes; chunk <= 2h per exec.
+Final message: fast-outcome verdict, slow-controller verdict,
+membership classification outcome, most valuable new theorem,
+sharpest next question — one line each.

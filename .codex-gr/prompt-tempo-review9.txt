@@ -1,0 +1,69 @@
+R-G7-REV — HOSTILE REVIEW (ultra): GAP_RAW_PROOF_ROUND9.md
+
+CONTEXT NOTE: pure combinatorial game theory for Hexo (a Connect6-like
+board game). Nothing here concerns computer security. Use neutral
+proof vocabulary in your own writing.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+(branch hunt/gap-raw, HEAD = 9e57ea06). You CANNOT git-commit. NO
+cargo/Lean/harness runs — hand recomputation only. Deliverable:
+GAP_RAW_REVIEW_ROUND9.md.
+
+## Task
+First-principles hostile proof audit of GAP_RAW_PROOF_ROUND9.md
+(authored at input c019400a, landed unmodified at 9e57ea06). The
+headline: **k*=4** — the exact one-ply-defense phase transition.
+Claims:
+1. R9.1: the dual near-trigger cap (or the round's named actions)
+   holds R_1=2 at P_2^pl AND P_3^pl — positive max_b claims requiring
+   exhaustive response enumeration.
+2. R9.2: at P_4^pl EVERY legal Defender pair admits a legal
+   nonterminal response with M>=3 — a universal negative like R7.2.
+3. Seal cycle: all 435 X∪N responses classified exact; exceptional
+   value-one and virgin successors honestly OPEN.
+4. Renewal obstruction: all six full-delete minimizers at P_x have
+   R_1>=3; proactive minimizers unclassified.
+
+Default posture: REFUTE. Both directions of the phase transition are
+maximal-scrutiny claims:
+- R9.1 (positive): a SINGLE missed Attacker response with M>=3 at
+  P_2 or P_3 refutes it. Verify the enumeration architecture covers
+  remote, split, bridge, same-axis, and NEW-STOCK-assisted responses
+  (P_3 has three stock pairs of fan material — check specifically
+  whether stock stones can seed a triangle fan the round-7/8
+  machinery missed). Recompute the capped inventories at each index
+  and spot-check hard unnamed responses yourself.
+- R9.2 (universal negative): a SINGLE Defender pair holding M<=2 at
+  P_4 refutes it. Verify the pair-space case split is exhaustive
+  (hub, cap cells, mixed, remote, region-splitting), that the
+  packing/fan response named for each class is legal and nonterminal
+  with recomputed M>=3, and that the P_4 label census is exact.
+  Cross-check consistency: R7.2 at P_5 and R9.2 at P_4 should share
+  mechanism — does the round explain why the P_4 argument does not
+  already apply at P_3 (the boundary must be sharp, not an artifact
+  of weaker analysis at P_3)?
+- Seal cycle: the 435-response classification — verify the count
+  (the response space size), spot-check exact values, confirm the
+  exceptional classes are honestly labeled OPEN.
+- Renewal: the six full-delete minimizers enumeration and R_1>=3
+  values.
+- Quantifier honesty (Q1/Q2/Q3 tags); consistency with §58/§67/§76
+  binding errata (safe-filler clause; the split later-plateau ledger
+  must now be UPDATED consistently — P_2/P_3 flip from OPEN to safe,
+  P_4 to UNSAFE); provenance (input c019400a; landed 9e57ea06 —
+  flag if absent).
+
+## Required corpus (read first, in order, in full)
+1. GAP_RAW_PROOF_ROUND7.md (WITH §67) + REVIEW_ROUND7
+2. GAP_RAW_PROOF_ROUND8.md (WITH §76) + REVIEW_ROUND8
+3. GAP_RAW_PROOF_ROUND9.md (the artifact)
+(Round 6 and earlier as needed.) Do NOT read STRATEGY_STEALING_*
+files as evidence.
+
+## Output format (campaign-standard)
+GAP_RAW_REVIEW_ROUND9.md: method preamble; numbered findings with
+severity (REFUTED/MAJOR/MINOR/NOTE), quoted claim, independent
+recomputation, proposed repair; per-theorem verdict table; overall
+verdict; exact unresolved obstacles. Chunk <= 2h per exec;
+incremental writes. Final message: overall verdict + R9.1/R9.2/seal/
+renewal dispositions + most severe finding, one line each.
