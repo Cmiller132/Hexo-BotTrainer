@@ -1,0 +1,73 @@
+R-ST3 — RESEARCH ROUND (ultra): GAP-PROXY-SHADOW — proxy-augmented couplings toward opener non-loss
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+(branch hunt/gap-raw, HEAD = 57fcbda8). You CANNOT git-commit. DOC-ONLY:
+NO cargo, no Lean builds, no harness runs. NOTE: another session (R-G3)
+works in this directory on GAP_RAW_PROOF_ROUND5.md — do not touch
+GAP_RAW_* files. Deliverable: STRATEGY_STEALING_ROUND3.md only (+ short
+final message).
+
+## Context (read first, in order)
+1. STRATEGY_STEALING_HEXO.md (round 1: S3/S4, rules formalization).
+2. STRATEGY_STEALING_ROUND2.md (round 2, post-errata: surplus calculus
+   S5-S7 with the frontier-gap formula Γ(A,E); the fixed-map
+   obstruction class theorem S9.1/S11 — synchronous owner-faithful
+   NO-INVENTION one-for-one shadows are dead for every coordinate map;
+   the Gale-Stewart bridge D1/D2: NL_F ⇔ S has no winning strategy).
+3. STRATEGY_STEALING_REVIEW_ROUND2.md — especially Finding 6: ONE
+   INVENTED PROXY STONE OF EACH COLOR REPAIRS THE RAW CADENCE COUNTS.
+   That repair escaped the round-2 obstruction class by design; this
+   round makes it the object of study.
+
+## The goal
+Formalize and attack proxy-augmented shadow couplings: the opener F
+simulates a role-swapped shadow game in which the shadow board may
+contain a bounded set of INVENTED (virtual) stones — bookkeeping stones
+with no real counterpart — and F's real stones are the shadow's mapped
+stones plus real surplus. Round 2's tools apply: the surplus calculus
+governs the real-side frontier; the invented stones only exist
+shadow-side.
+
+Ranked outcomes (any one rigorous result = complete round):
+(a) A PROVEN proxy coupling: exhibit an invented-stone budget, an
+    invention schedule, and a history map such that the coupling is
+    legal and win-transferring on every legal history — establishing
+    NL_F outright (via the D2 bridge it suffices that the coupling
+    turns any S winning strategy into an F winning/never-losing
+    response). Expect the hard parts: (i) shadow-side invented stones
+    enlarge the SHADOW legal frontier (the shadow game must stay a real
+    legal Hexo game for the stolen strategy to be defined — or you must
+    define the shadow game as virtual and prove the stolen strategy's
+    replies are still real-legal via Γ-control); (ii) collisions where
+    the stolen reply lands on a proxy or on F's surplus; (iii) the
+    win-detection direction: invented stones must never fabricate or
+    block a six for either side, or you must prove the fabrication is
+    harmless for the transferred verdict.
+(b) A sharpened obstruction: extend the round-2 class theorem to
+    proxy-augmented couplings with bounded invention under stated
+    regularity (e.g. static proxies fixed at coupling start, or
+    invention only at cadence-repair positions), exactly characterizing
+    the still-surviving class.
+(c) A partial: prove the two-proxy cadence repair works for the
+    OPENING PHASE (absorbing S4/GAP-OPENING-ALIGNMENT permanently —
+    a standalone theorem: the cadence mismatch is never again an
+    obstruction) even if global frontier control stays open, with the
+    exact residual obligation named.
+(d) Honest partial: precise formalization of proxy couplings, the
+    collision/frontier/win-transfer proof obligations as a ledger, and
+    the exact obstacle.
+
+## Hard constraints
+Use the rounds-1/2 rules formalization verbatim; any new rule fact
+cited to engine source file:line. Respect all standing refutations
+(S3/S4 identity-deletion, round-2 fixed-map class at its exact scope).
+Check gadget legality (radius-8 growth, 1-then-2:2 cadence, i16 safe
+region). Draws per round 2's meta-level framing; determinacy usage per
+D1/D2 only. Every claim PROVEN / SKETCH / CONJECTURE / OPEN /
+CITED(-FROM-MEMORY); no status inflation.
+
+## Output
+STRATEGY_STEALING_ROUND3.md continuing round-2 numbering (sections
+17+). Incremental disk writes; chunk <= 2h per exec; honest partial
+with a named resume point is success. Final message: ranked outcome
+achieved, PROVEN vs SKETCH list, resume point.
