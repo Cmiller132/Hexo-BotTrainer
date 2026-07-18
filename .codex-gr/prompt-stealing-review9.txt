@@ -1,0 +1,67 @@
+R-ST9-REV — HOSTILE REVIEW (ultra): STRATEGY_STEALING_ROUND9.md
+
+CONTEXT NOTE: pure combinatorial game theory for Hexo (a Connect6-like
+board game). Nothing here concerns computer security. Use neutral
+proof vocabulary in your own writing.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+(branch hunt/gap-raw, HEAD = e19e97f7). You CANNOT git-commit. NO
+cargo/Lean/harness runs — hand recomputation only. Deliverable:
+STRATEGY_STEALING_REVIEW_ROUND9.md.
+
+## Task
+First-principles hostile proof audit of STRATEGY_STEALING_ROUND9.md
+(authored at input 9e57ea06, landed unmodified at e19e97f7). The
+headline: **S70 line-seeded first-cycle controller PROVEN** at
+constructed scope. Claims:
+1. S70: on one selected first cycle, the controller forces cliff,
+   physical Shat stop, or full current R_1 entrance — a three-way
+   forced disposition. Verify the case split is exhaustive at the
+   constructed scope, every forcing step legal and cadence-correct
+   (F;S,S;F,F), and the "selected history" quantifier honestly scoped
+   (this round claims it BYPASSES S50's quantifier gap — check that
+   the bypass is real, not a relabeling of the same gap).
+2. S70.1 (immediate sound closure from the entrance): verify the
+   closure is sound and its optionality honestly stated.
+3. S70.2 (fast candidates hit the line-seeded cliff): uses S60's
+   d_sigma(h)=6 for FAST_8^{S15}. Verify the application conditions,
+   and that the round HONESTLY maintains this defeats the CARRIER,
+   not sigma (same distinction as S61 — flag any drift toward an
+   outcome claim).
+4. S69 exact scalar RES_1 membership classification — recompute
+   representative entries; verify "full R_1 preservation requires
+   every S59 admission gate" is proved, not asserted.
+5. Proved obstructions: named reserve, closure, two-append, and S63
+   conversions all FAIL for the fast outcome — verify each failure
+   proof (these are negative results; a single sound conversion
+   among them refutes the round's OPEN verdict framing).
+
+Default posture: REFUTE. Special scrutiny:
+- The round-8 synthesis (§68) was REFUTED in review for overclaiming
+  an interface map as a causal explanation. Check ROUND9 for the
+  same failure mode anywhere it explains WHY something remains open.
+- Consistency with binding errata: §44, §53, §63, §73 (the rewritten
+  §68), Def 46.1 terminal-closure semantics, S49 sixth-stone barrier,
+  S59 corridor scope (CAD + augmented F-LOCK^+ on quiet/R_1 only;
+  canonical F-LOCK open), S61 carrier-not-sigma discipline.
+- Quantifier honesty throughout (constructed scope vs arbitrary-S;
+  first cycle vs recurrence — both were declared OPEN, verify no
+  internal step silently assumes them).
+- Provenance: input 9e57ea06, landed e19e97f7 — flag if absent.
+
+## Required corpus (read first, in order, in full)
+1. STRATEGY_STEALING_ROUND5.md (WITH §44) + REVIEW_ROUND5
+2. STRATEGY_STEALING_ROUND6.md (WITH §53) + REVIEW_ROUND6
+3. STRATEGY_STEALING_ROUND7.md (WITH §63) + REVIEW_ROUND7
+4. STRATEGY_STEALING_ROUND8.md (WITH §73) + REVIEW_ROUND8
+5. STRATEGY_STEALING_ROUND9.md (the artifact)
+Do NOT read GAP_RAW_* files as evidence.
+
+## Output format (campaign-standard)
+STRATEGY_STEALING_REVIEW_ROUND9.md: method preamble; numbered
+findings with severity (REFUTED/MAJOR/MINOR/NOTE), quoted claim,
+independent recomputation, proposed repair; per-theorem verdict
+table; overall verdict; exact unresolved obstacles. Chunk <= 2h per
+exec; incremental writes. Final message: overall verdict + S70/
+S70.1/S70.2/S69/obstructions dispositions + most severe finding,
+one line each.

@@ -34,9 +34,14 @@ is made.
 
 ### 77.2 Round-9 disposition
 
-1. **Earliest loss:** `k*=4` is **PROVEN**. The cap has exact risk two at
-   `P_2^pl,P_3^pl`; every action is unsafe at `P_4^pl`, where the cap has
-   exact risk three.
+1. **Earliest loss:** ~~`k*=4` is **PROVEN**~~ **CORRECTED BY REVIEW
+   (§86): `k*=3`.** The cap has exact risk two at `P_2^pl` (after the
+   §86.3 finite incidence repair); at `P_3^pl` the review's
+   stock-assisted response `((9,-2),(10,-2))` refutes the claimed
+   exact-two value, and the review's `H_3`-region argument proves
+   **every** `P_3^pl` action unsafe (returned `M>=3`). Every action
+   is unsafe at `P_4^pl`, where the cap has exact risk three
+   (confirmed).
 2. **Double-corner seal:** **PARTIAL**. The complete finite residual-return
    first-response quotient is exact, and forty-one of forty-five row returns
    are root-robust for another all-response `M<=2` safety bound. Four exterior
@@ -228,9 +233,13 @@ On every other same-axis response use the Section-79 axial or connector
 service. For a split response, stabilize each nonvertical hard one-trigger
 family to future weight one. The unique vertical effect class has weight at
 most two by the preceding paragraph, so total future weight is at most three.
-The only cross-axis finite connector remains `h`: if empty, `D@h` truncates
-the retained high-low incidence; if response-occupied, its incident effects
-are short and easy. A `V^+` hard tail is oriented away from `h` as above.
+The only connector involving the enlarged `q=10` vertical class is `h`:
+if empty, `D@h` truncates the retained high-low incidence; if
+response-occupied, its incident effects are short and easy. Inherited
+`g=(9,-3)` remains a cross-axis connector at `P_4^pl` (it is neither
+occupied nor deleted by installing `V^+`) and is handled by the §79
+connector service, whose `g` case has only easy distance-three/four
+effects (§86.4). A `V^+` hard tail is oriented away from `h` as above.
 
 The new `r=4,r=5,s=14,s=15` count-one carriers meet no other live count-two
 union in an empty cell. Existing bridge responses use the oriented one-cell
@@ -427,8 +436,19 @@ retained consecutive tail, not merely an infinite-line direction.
 | `q=13` through `r=-3`, at `P_3` (`r`) | `[-2,0]`, `[-1,1]`, `[0,2]` | `[-2,2]` |
 | `r=-2` through `q=12`, at `P_3` (`q`) | `[13,15]`, `[14,16]`, `[15,17]` | `[13,17]` |
 
-Each displayed envelope misses every finite live transverse count-two union.
-In particular, the tempting opposite orientation at `q=6` would meet `s=7`
+Each displayed envelope misses every finite live transverse count-two union,
+with one boundary exception (§86.3): the `r=-4` retained envelope `[5,9]`
+contains `z=(5,-4)`, the empty boundary intersection with the live capped
+shield pencil `s=1` (union `q=-4..5`); `s=1 at (5,-4)` is added to the
+`r=-4` carrier incidence row. The sole retained tail reaching `z` — the
+hard response `{(8,-4),(9,-4)}` — is repaired by the full axial deletion
+`D@(7,-4), D@(11,-4)` in either legal order (the first order deletes
+starts `5,6,7` and leaves start `8` alive to support the second; every
+high label is then gone and L10.4 gives `TEMPO<=2`). If a response uses
+`z` itself, its `r=-4` family is nonconsecutive with a one-cell
+internal-gap deletion, and the second effective cell deletes the promoted
+singleton `s=1` start. No theorem value changes. In particular, the
+tempting opposite orientation at `q=6` would meet `s=7`
 at `(6,1)`, and the tempting negative orientation at `q=12` would meet
 `s=7` at `(12,-5)`; neither is used.
 
@@ -531,24 +551,39 @@ Every action at either plateau leaves at least two of the four original shield
 pencils untouched, giving the universal risk floor two exactly as in R8.1.
 Therefore `B_1(P_2^pl)=B_1(P_3^pl)=2` as well. ∎
 
-**Corollary R9.2.1 (the earliest loss index) [Q3, PROVEN].** Define `k*` as
-the least named plateau index at which no legal Defender action has
-one-successor risk at most two. Then
+**[REFUTED AT `P_3^pl` BY REVIEW — see §86.1.]** The preceding
+paragraph's `P_3^pl` half is false: the legal stock-assisted response
+`b_*=((9,-2),(10,-2))` — one of §79.4's own five purportedly completed
+nonconsecutive double-incidences — simultaneously feeds the `r=-2` W
+carrier, the `s=7` stock pair, and the `q=10` V pair, and every
+Defender reply after it hands over `TEMPO>=3` (the sole full-service
+occupancy `{(11,-2),(8,-1)}` is defeated by the hub/W response
+`((10,0),(11,-1))`). Hence `R_1(P_3^pl,a^dagger)>=3`. Only the
+`P_2^pl` equality survives (with the §86.3 incidence repair).
+
+**Corollary R9.2.1 (the earliest loss index) [Q3 — AS AUTHORED
+`k*=4`, REFUTED; CORRECTED BY REVIEW TO `k*=3`, §86.1].** Define `k*`
+as the least named plateau index at which no legal Defender action
+has one-successor risk at most two. The authored claim was
 
 `k*=4`.                                                   (120)
 
-Indeed R8.1, R8.2, and R9.2 give safe actions at indices `0,1,2,3`, while
-R9.1 proves that every action at index `4` has a response returning `M>=3`.
-The inherited `P_5^pl=P_stock` stop theorem remains true but is no longer the
-earliest known loss.
+This is refuted: R8.1, R8.2, and the surviving `P_2^pl` half of R9.2
+give safe actions at indices `0,1,2`, while the review's
+(R9-REV-4) proves every action at index `3` already has a response
+returning `M>=3`. R9.1 at index `4` remains true but is no longer
+the transition. The corrected exact value is
 
-The transition mechanism is the first three-region packing. Through `P_3`,
-the capped incidence quotient can retain at most two atomic demand regions.
-Installing `V^+` supplies a second separated vertical block: an action missing
-`H_4` permits the exact row/negative-vertical/positive-vertical witness of
-L15.1, while an action touching `H_4` necessarily leaves one triangle fan
-uncapped. This is why the loss appears at `4`, not merely because the scalar
-inventory has grown.
+`k*=3`.                                            (120-corrected)
+
+The transition mechanism paragraph below is superseded accordingly:
+the first three-region packing already exists at `P_3^pl` — the `W`
+block installed at index three supplies the third demand region
+(`r=-2`/`s=7`/`q=10` plus the intact `s=10` W pencil), one plateau
+earlier than the authored `V^+`-based account. An action missing the
+review's finite region `H_3` permits the `b_*` witness verbatim,
+while an action touching `H_3` necessarily leaves one inherited
+triangle fan uncapped (L13.3).
 
 ## 80. The double-corner sealed continuation
 
@@ -1175,11 +1210,12 @@ value, and a reached-state theorem is not promoted to a root theorem.
 | Claim / obstacle | Quantifier tag | Round-9 status | Exact basis / remaining scope |
 |---|---|---|---|
 | `GAP-RAW` | Q2 counterroute / Q3 target | **OPEN** | Neither root forcing nor an all-history Defender policy is proved |
-| Earliest stock loss index | Q3 | **PROVEN: `k*=4`** | Exact cap risks two at `P_0^pl`--`P_3^pl`; every action is unsafe at `P_4^pl` |
+| Earliest stock loss index | Q3 | **PROVEN: `k*=3` (corrected by review, §86.1)** | Exact cap risks two at `P_0^pl`--`P_2^pl`; every action is unsafe at `P_3^pl` (review's `H_3`/fan argument), `P_4^pl`, and `P_5^pl` |
 | Capped prefix inventories | Q3 diagnostic | **PROVEN EXACT** | `(8,12),(33,16),(49,26),(69,34),(95,39),(115,47)`, with no count at least three |
 | `P_0^pl,P_1^pl` cap values | Q3 | **PROVEN EXACT, inherited** | `R_1=B_1=2` by R8.1--R8.2 |
-| `P_2^pl,P_3^pl` cap values | Q3 | **PROVEN EXACT** | `R_1=B_1=2` by R9.2; all response effects enumerated |
-| `P_4^pl` phase transition | Q1/Q3 | **PROVEN UNSAFE** | Every action has a response with returned `M>=3`; for the cap, `R_1=B_1=3` exactly |
+| `P_2^pl` cap value | Q3 | **PROVEN EXACT (after §86.3 repair)** | `R_1=B_1=2` by the surviving half of R9.2; all response effects enumerated with the `(5,-4)` incidence added |
+| `P_3^pl` status | Q1/Q3 | **PROVEN UNSAFE (by review, §86.1)** | Every action has a response with returned `M>=3` via `H_3`-miss (`b_*` witness) or `H_3`-touch (untouched fan, L13.3); exact `B_1(P_3^pl)` OPEN (`>=3`) |
+| `P_4^pl` status | Q1/Q3 | **PROVEN UNSAFE** | Every action has a response with returned `M>=3`; for the cap, `R_1=B_1=3` exactly (confirmed; §86.4 wording repair on connector `g`) |
 | `P_5^pl=P_stock` | Q1/Q3 | **UNSAFE, inherited** | Binding R7.2: every action has a response with returned `M>=3` |
 | Double-corner seal, whole branch | Q2 | **PARTIAL / OPEN** | Entire finite residual-return quotient on `X ∪ N` is exact; value-one successors and virgin returns remain |
 | Axial seal continuation | Q2 | **PROVEN at exact class** | L15.3 has exact `tau=2,M=0`; after every value-zero service, R9.3 gives exact next `tau=0` and an all-response `M<=2` bound |
@@ -1205,7 +1241,7 @@ value, and a reached-state theorem is not promoted to a root theorem.
 | New machine verification | methodological | **NONE** | Every round-9 result is a hand proof |
 
 The round-8 obstacle list therefore changes as follows: obstacle 1 is closed
-with `k*=4`; obstacle 3 now has a complete finite residual-return quotient on
+with `k*=3` (corrected, §86.1); obstacle 3 now has a complete finite residual-return quotient on
 `X ∪ N` and forty-one row-return safety bounds, but remains open at the
 value-one and virgin successors; obstacle 2 gains the full-delete obstruction R9.4 but remains open;
 obstacles 4--9 retain their prior open status.
@@ -1257,8 +1293,10 @@ The following points are deliberately exposed for review.
     so their `M=0/1` dichotomy must not be collapsed.
 12. **Local off-row enumeration.** L15.9 covers exactly `200` Q-plus-arm and
     `190` two-arm occupancies. Its twenty born Q/arm bridges, forty same-arm
-    pairs, 150 split-arm pairs, and exactly eight split-arm bridges are
-    separate service classes. Named caps lie in untouched `B_j`; virgin cells
+    pairs, 150 split-arm pairs, and eight geometrically collinear split-arm
+    bridge templates — of which the two `k=1` carriers are pre-killed by the
+    seals, leaving **six alive bridges** at `k=2,3,4` (§86.5) — are separate
+    service classes. Named caps lie in untouched `B_j`; virgin cells
     are not silently included in `N`.
 13. **Seal successor scope.** R9.3/R9.5 cover every value-zero service for
     forty-one row occupancies. They do not cover every minimizing landing of
@@ -1301,8 +1339,12 @@ The following points are deliberately exposed for review.
   after this pass began. No reset or checkout was performed. Every theorem in
   this artifact remains anchored to the required `c019400a` input corpus.
 - **Artifact:** `GAP_RAW_PROOF_ROUND9.md`.
-- **Landed artifact hash:** `LANDED_ARTIFACT_HASH: <TO-BE-FOLDED-POST-REVIEW>`.
-  This is intentionally a placeholder for the post-review landed identity.
+- **Landed artifact hash:** landed unmodified at commit
+  `9e57ea060462788841d1f8f761db894981b482e9` (Git blob
+  `a54d98fd84eafac724dd563b259c4becdbf57a03`, SHA-256
+  `1ba2efd0ea48faf84d29e6da168d804650ddfae9468eaa6b7f1d394ec62635fb`),
+  identity recorded by the review's read-only check (§86.6). The
+  authoring-scoped no-commit statement below is unaffected.
 - **Commit status:** no commit was created; the user explicitly prohibited
   committing.
 - **Required corpus order:** round-6 proof through Section 58, round-6 review,
@@ -1315,3 +1357,158 @@ The following points are deliberately exposed for review.
   program, machine enumeration, solver, or test was run. File inspection and
   independent hand-audit passes supplied the proof review; all mathematical
   derivations in this artifact are paper arguments.
+
+## 86. Post-review errata and corrections (folded from GAP_RAW_REVIEW_ROUND9.md)
+
+The round-9 hostile review (ultra tier; hand recomputation only; read
+this round plus the bound rounds 7-8 corpora in full) returned overall
+**REFUTED** on the headline, with the P2 half, the P4 theorem, the
+seal quotient, and the renewal obstruction surviving. This section is
+binding and supersedes conflicting statements above. The inline
+corrections at §77.2, R9.2/R9.2.1, §78, §79, §83, §84, and §85 were
+made together with this section.
+
+### 86.1 REFUTED and corrected: the transition is `k*=3`, not `k*=4` (review Finding 1)
+
+The claimed exact-two value at `P_3^pl` (artifact R9.2's `P_3` half,
+equation (119)) is **false**. After the cap `a†=((0,-1),(1,1))`, the
+legal stock-assisted response
+
+`b_* = ((9,-2),(10,-2))`                              (R9-REV-1)
+
+— one of §79.4's own five purportedly completed nonconsecutive
+double-incidences — creates exact count-three families on the three
+axes `r=-2`, `s=7`, `q=10`, whose only carrier intersections are the
+occupied Attacker stones `(9,-2)`, `(10,-2)`, `(10,-3)`. The sole
+full-service occupancy is `d_0={(11,-2),(8,-1)}` (R9-REV-2), and it is
+defeated by the legal nonterminal hub/W response
+`e_*=((10,0),(11,-1))` (R9-REV-3), which yields disjoint residual
+grounds of combined demand exactly three (`q=10` count-four residuals
+`{-5,-1},{-1,1}` of hitting number one; intact `s=10` W-pencil
+residuals `{8,9},{9,14},{14,15}` of hitting number two). Hence every
+Defender pair after `b_*` hands over `TEMPO>=3`, so
+`M(P_3^pl+a†+b_*)>=3` and `R_1(P_3^pl,a†)>=3`.
+
+**The review strengthens the refutation to a universal stop theorem.**
+Let `H_3` be the union of the four finite segments `r=-2, q=7..14`;
+`s=7, q=5..12`; `q=10, r=-7..1`; `s=10, q=8..15`. If an initial
+`P_3^pl` action misses `H_3`, (R9-REV-1)-(R9-REV-3) apply verbatim.
+If it touches `H_3`, the touching cell lies in neither inherited
+triangle-fan union, the other cell can touch at most one fan (their
+only common cells are occupied diamond stones), and L13.3 on the
+untouched fan returns `M>=3`. Therefore
+
+`for every legal a at P_3^pl: R_1(P_3^pl, a) >= 3`.   (R9-REV-4)
+
+Combined with the inherited safe indices 0-1 (R8.1/R8.2) and the
+repaired exact-two cap at `P_2^pl` (§86.3), the corrected exact
+named-plateau transition is
+
+`k* = 3`.                                             (R9-REV-5)
+
+This remains a Q1/Q3 reached-state result: no Q2 route forcing
+arrival at `P_3^pl` from every strict-root strategy is claimed. The
+corrected transition mechanism: the first three-region packing
+already exists at index three — the `W` block supplies the third
+separated demand region — not at index four as authored.
+
+### 86.2 CONFIRMED: the `P_4^pl` universal stop and exact cap risk three (review Finding 4)
+
+Artifact R9.1 survives maximal scrutiny unchanged: the pre-cap
+`(107,47)` census, the cap's `(12,8)` deletions to `(95,39)`, the
+`H_4`-miss focal branch (`b_4=((10,0),(11,-1))`, three count-four
+`s=10` starts, three unordered services, post-service
+`e_4=((10,1),(8,0))` with exact `tau=3`), and the `H_4`-touch
+untouched-fan branch all recompute. L15.1.1's
+`R_1(P_4^pl,a†)=B_1(P_4^pl)=3` is confirmed (with §86.4's wording
+repair). One revision: R9.1 is **not** the earliest stock-phase
+obstruction — Finding 1's different `r=-2/s=7/q=10/W` obstruction
+fires already at index three. The authored `b_4/e_4` mechanism indeed
+loses one demand at `P_3^pl` (giving only demand two there); the
+refutation at `P_3` uses a different certificate.
+
+### 86.3 MINOR repair: the `(5,-4)` boundary incidence and the surviving `P_2^pl` equality (review Findings 2-3)
+
+The capped stock inventories `(8,12),(33,16),(49,26),(69,34),(95,39),
+(115,47)` are all confirmed exact — the `P_3` failure is a missed
+incidence of correctly counted labels, not an inventory error. §79's
+incidence table omitted `z=(5,-4)`, the empty boundary intersection
+of the singleton carrier `r=-4` (six-window union `q=5..15`) with the
+live capped shield pencil `s=1` (union `q=-4..5`); the blanket
+envelope-isolation sentence was literally false. The repair (folded
+inline at §79): add the incidence, qualify the sentence, and service
+the sole affected hard response `{(8,-4),(9,-4)}` by the full axial
+deletion `D@(7,-4), D@(11,-4)`. With this repair the complete
+`P_2^pl` response quotient closes with returned `M<=2` in every
+effect class, and
+
+`R_1(P_2^pl, a†) = B_1(P_2^pl) = 2`
+
+is **CONFIRMED-WITH-MINOR-REPAIR** (the surviving half of artifact
+R9.2; inherited witness `b†=((-1,1),(-1,2))` still returns exactly
+two).
+
+### 86.4 MINOR repair: the forgotten inherited connector `g` at `P_4^pl` (review Finding 5)
+
+§78's sentence "the only cross-axis finite connector remains `h`" was
+false: inherited `g=(9,-3) ∈ (s=6) ∩ (r=-3)` remains empty and
+live-incident at `P_4^pl`. Corrected (inline): the only connector
+involving the enlarged `q=10` vertical class is `h`; `g` is not new
+and is handled by the imported §79 connector service. Additionally,
+Finding 1's response class `b_*` is consistent with the `P_4^pl`
+upper target three (service `D@(11,-2)` + stabilizer `D@(10,-1)`
+leaves total future demand at most three), so the same certificate
+that refutes the `P_3` upper of two attains no contradiction at
+`P_4`.
+
+### 86.5 MINOR repair: six alive split-arm bridges, not eight (review Finding 7)
+
+L15.9's eight collinear split-arm bridge templates include the two
+`k=1` occupancies (`{(0,-1),(2,-1)}` and its `rho`-image), whose
+carriers are pre-killed by the seals `D@(1,-1)` / `D@(0,1)` sitting
+between the response cells. The exact live count is 2 orientations x
+3 depths (k=2,3,4) = 6. Monotone overcount only: in the dead cases
+no bridge cap is needed and the no-effective-cap/safe-filler branch
+applies; every affected landing retains exact `M=1`. §84 item 12
+corrected inline.
+
+### 86.6 Provenance completion and confirmed components (review Findings 6, 8-10)
+
+- **Seal quotient CONFIRMED:** `C(30,2)=45+200+190=435` unordered /
+  `870` ordered responses; the three exact axial-demand-two rows, 38
+  root-robust `M=0` classes, the four exterior root-dependent `M=0/1`
+  dichotomies, exact `M=1` for all 200 Q/arm and 190 two-arm
+  occupancies, and the `3+38=41` root-robust successor count all
+  recompute. Exceptional value-one, off-row value-one, and virgin
+  successors remain honestly OPEN — no seal-cycle or Q2 conclusion is
+  smuggled.
+- **Renewal obstruction CONFIRMED at stated scope:** exactly six
+  ordered full-delete minimizers `d_j={(-1,1),(0,j)}`, `j∈{3,4,5}`,
+  each with immediate value two; the common response
+  `e_x=((-1,2),(8,0))` creates the exact twelve-label three-axis fan
+  and returns `M>=3` for all six. Proactive minimizers remain OPEN;
+  no `B_1(P_x)>=3` or `C_cap` impossibility is inferred.
+- **Quantifier discipline CONFIRMED** (Q tags honest; §58 shield
+  contract, §67 attribution, §76 safe-filler clause all respected).
+  The authoritative later-plateau ledger is corrected to: `P_0,P_1`
+  safe (inherited exact-two), `P_2` safe (exact two, repaired),
+  `P_3` **unsafe** (every action `>=3`), `P_4` unsafe (cap exact
+  three), `P_5=P_stock` unsafe (inherited). Exact `B_1(P_3^pl)` is
+  OPEN (`>=3`).
+- **Provenance:** authoring input `c019400a...` confirmed; landed
+  identity `9e57ea06...` (blob `a54d98fd...`, SHA-256 `1ba2efd0...`)
+  folded into §85. During review finalization the shared branch
+  advanced to `e19e97f7` via excluded strategy-stealing artifacts
+  only; the reviewed blob was unchanged.
+
+### 86.7 Corrected carry-forward ledger
+
+Open after this round (supersedes §84's k*-dependent items): (1) Q2
+strategy-independent forcing to any losing plateau; (2) exact
+`B_1(P_3^pl)` magnitude; (3) seal exceptional/value-one/virgin
+successor classes; (4) proactive renewal minimizers and
+arbitrary-member `C_cap` renewal; (5) alternative repair geometries
+and forced-seal entrances; (6) general count-three initialization
+beyond L13.6; (7) R5.2 separation sharpness (radius 21
+envelope-sharp only). None of these weakens the corrected local
+transition `k*=3`.
