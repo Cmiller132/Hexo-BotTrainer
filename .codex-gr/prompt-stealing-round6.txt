@@ -1,0 +1,79 @@
+R-ST6 — STRATEGY-STEALING ROUND 6 (ultra): the P3 carrier crux
+
+CONTEXT NOTE: this is pure combinatorial game theory for Hexo (a
+Connect6-like board game) — strategy-stealing couplings, window
+certificates, service invariants. Nothing here concerns computer
+security. Use neutral proof vocabulary in your own writing (stop
+criterion, negative control, stress case, etc.).
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+(branch hunt/gap-raw, HEAD = 3000a117). You CANNOT git-commit. NO
+cargo/Lean/harness runs — hand proofs only. Deliverable:
+STRATEGY_STEALING_ROUND6.md.
+
+## Required corpus (read first, in order, in full)
+1. STRATEGY_STEALING_HEXO.md
+2. STRATEGY_STEALING_ROUND2.md + REVIEW_ROUND2
+3. STRATEGY_STEALING_ROUND3.md + REVIEW_ROUND3
+4. STRATEGY_STEALING_ROUND4.md (WITH §35 errata) + REVIEW_ROUND4
+5. STRATEGY_STEALING_ROUND5.md (WITH §44 errata — binding) +
+   STRATEGY_STEALING_REVIEW_ROUND5.md (its 12-item unresolved-obstacle
+   list is the authoritative open state)
+Rule sources: packages/hexo_engine/rust/src/{coord,legal,rules,board,
+state,tactics}.rs. Do NOT read any GAP_RAW_* file as evidence.
+
+## The state you inherit (round-5 exit, review-confirmed)
+Branch (A): lifetime K=2 total-exact REFUTED (S32); per-pair K=2 OPEN.
+Branch (B): rolling-lag guarded service invariant PROVEN on finite
+A_FS2 segments (S33/S34, exact two-stone K_E service, transient
+two-debt microstep closed); P3 composition OPEN. Branch (C)/windows:
+deficit certificates defined, S36 non-point-induced witness, S37
+maintenance algebra, S38 S26-route transfer, S39.1 shield obstruction.
+Regressions binding: S13, S14, S18, S20, S12, S25, S30, S31.
+
+## Round-6 objectives (priority order)
+1. **THE P3 CARRIER QUESTION [the named sharpest question].** For
+   every alleged-winning sigma and every rolling A_FS2 prefix: can one
+   genuine causal P3 carrier realize sigma's sequential Fhat
+   prescriptions as legal real-F actions compatible with the canonical
+   service pair K_E, while surviving S18 (reverse shadow-to-real
+   legality), transferring every S20-type Fhat terminal placement, and
+   avoiding S12 (no pre-announced F coordinate across an intervening S
+   turn)? Attack both ways:
+   (a) POSITIVE at a named scope: define an exact carrier class (e.g.
+   temporal pairing with explicit collision/unsupported-set updates),
+   prove a conditional carrier theorem on a nonempty named trace
+   class, with every legality/cadence/terminal obligation discharged
+   or explicitly delegated;
+   (b) NEGATIVE: force carrier failure on the candidate's own legal
+   sigma-consistent coupled history — a sigma whose prescriptions
+   provably cannot be causally paired with any legal service-
+   compatible real-F sequence (quantifiers explicit: which carrier
+   class dies, reachability of the gadget on the candidate's own
+   history).
+2. **Per-pair K=2 (branch A).** The budget-reset class: two reactive
+   episodes per S pair, reset each pair. Prove the analogous support-
+   cut obstruction, or show the reset genuinely escapes S32's counting
+   (partial scopes welcome with honest labels).
+3. **Coverage outside A_FS2 (secondary).** The S30 three-axis tau_E=3
+   fork: can the window-certificate route (S38) or a deeper
+   transversal argument handle it where two-stone service cannot, or
+   is there a proven obstruction extending S39.1?
+
+## Binding rules (campaign-standard)
+Hand proofs only; PROVEN/SKETCH/CONJECTURE/OPEN/CITED discipline;
+statement fidelity to ALL inherited definitions and folded errata
+(round-4 §35, round-5 §44 binding); quantifier structure explicit on
+every claim (per real-S coordinate, branches (A)/(B)/(C) are
+alternatives; service/persistence/regressions mandatory in every
+branch); negative gadgets must be selected on the candidate's own
+legal sigma-consistent history; no GAP_RAW evidence; physical
+append-only shadow discipline (no undo, fillers persist). Continue
+section numbering from §44 (start at §45). Status ledger vs the
+review's 12-item obstacle list + ten-item agenda + P0-P6/P5R
+cross-ledger + attack-surface + provenance sections mandatory (record
+input commit 3000a117; note this pass creates no commit). Incremental
+writes; chunk <= 2h per exec. Final message: P3-carrier verdict
+(POSITIVE-AT-SCOPE / NEGATIVE / PARTIAL with exact scope), per-pair
+K=2 disposition, S30 disposition, most valuable new theorem, sharpest
+next question — one line each.
