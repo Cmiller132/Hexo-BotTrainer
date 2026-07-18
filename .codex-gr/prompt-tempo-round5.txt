@@ -1,0 +1,56 @@
+R-G3 — RESEARCH ROUND 5 (ultra): sealed-pencil return classification + one-cycle Bellman closure for M<=2
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+(branch hunt/gap-raw, HEAD = 12980bc8). You CANNOT git-commit. NO cargo
+(host-wide slot is held by a wall-sensitive measurement job), no Lean
+builds, no harness runs this round. Deliverable:
+GAP_RAW_PROOF_ROUND5.md + a short final message.
+
+## Context (read in order, in full)
+GAP_RAW_PROOF_ROUND2.md, GAP_RAW_PROOF_ROUND3.md,
+GAP_RAW_REVIEW_ROUND3.md, GAP_RAW_PROOF_ROUND4.md (post-errata tip),
+GAP_RAW_REVIEW_ROUND4.md. Round 4 landed review-CONFIRMED: the exact
+TEMPO factorization (R4.1/R4.2), the invariant-class exclusions
+(R4.3/R4.4/R4.7.1 as narrowed), and the sealed-pencil one-cycle
+S_T-bound. GAP-RAW is narrowed to two exact obligations:
+- GAP-TEMPO-INITIALIZATION: M(P0) <= 2 for every strict Phi<1 root in
+  the tau=0 slice;
+- GAP-TEMPO-REPAIR: one strategy preserving M <= 2 after every legal
+  Attacker response at every reached epoch.
+
+## This round's goal (the round-4 named resume point, verbatim)
+1. Classify every return through the six surviving sealed-pencil
+   count-one extremes and every nonconsecutive axial return (round 4
+   §31 leaves these classes open).
+2. Prove that one placement cannot create more than two stabilizer
+   demands after mandatory current service, or exhibit the exact
+   violating cascade.
+3. If a violating cascade exists, determine whether it can be forced
+   from a strict Phi<1 root (GAP-CASCADE-REACHABILITY).
+4. Using 1-3, prove or refute the one-cycle Bellman closure for M<=2:
+   the sealed class is reached under S_T and closed under S_T for one
+   full Attacker-Defender cycle. Full closure would discharge
+   GAP-TEMPO-REPAIR on the sealed class; a refutation must come with
+   the exact escaping return class.
+
+Secondary (only if the primary resolves early): attack
+GAP-TEMPO-INITIALIZATION on the tau=0 strict-root slice — either a
+uniform servicing-pair construction or an exact counterexample root.
+
+## Hard constraints
+The state quantity to preserve is round 4's equation (22) — NOT
+Theta_2<1, B_3<1, dormant-stock sums, or top-two-only current scores
+(all theorem-dead; respect R4.3/R4.4/R4.7.1 scopes exactly). Do not
+resurrect: canonical J (refuted round 3), global pairing
+(docs/PROOF_TSS_DEFENDER_ZONES.md section 8), NQ2 join consumption.
+Check placement legality under the radius-8 growth rule and the 2:2
+cadence in every gadget. Every claim labeled PROVEN / SKETCH /
+CONJECTURE / OPEN; hand proofs only; no [UNRUN] inflation (you run
+nothing, so no VERIFIED claims). Status discipline per rounds 2-4.
+
+## Output
+GAP_RAW_PROOF_ROUND5.md continuing round-4 numbering (sections 37+).
+Incremental disk writes; chunk <= 2h per exec. Honest partial with a
+named resume point is success. Final message: what is PROVEN vs
+SKETCH vs OPEN, whether the Bellman closure survived, and the resume
+point.
