@@ -583,3 +583,26 @@ The shortest dependency-respecting campaign is:
 7. only after those implementations exist, prove the pinned source/artifact refinements, bind the source/toolchain/artifact hash, and land checker equality, one-way emitter refinement, B11 call-site uniqueness, and B12 trace theorems together so no intermediate revision exposes an unchecked negative mint.
 
 The single sharpest endgame risk remains **B2/B4/B5 non-vacuity**: accidentally proving the Lean checker sound for an abstract or common-mode generator while never proving that the independently rebuilt Rust frontier is exactly the frozen CP1 frontier. That failure can survive unit tests, valid-looking bytes, DAG soundness, and a fail-closed stop taxonomy while still making “complete” mean the wrong grammar.
+
+## Review erratum (R-CPRUST-1-REV, folded)
+
+**Reviewed artifact:** this document, landed unmodified at `7ca56a79`.
+**Review:** `CP_RUST_CORRESPONDENCE_MAP_REVIEW.md` (committed this fold).
+**Verdict:** UPHELD — the correspondence boundary is NOT closed.
+
+- **CP-O14 NOT DISCHARGED**, **CP-O27 BLOCKING/PROGRAM-CRITICAL** — both
+  upheld. No obligation was wrongly declared open or closed.
+- **CP-O15 NOT DISCHARGED (scope refined):** the D6/raw-order witness proves
+  ORDERED-LIST divergence only; it does not independently establish a missing
+  semantic quotient edge. The obligation stays open on other grounds.
+- **Architecture: conditionally sound, NOT implemented** — must pin exactly
+  one concrete independent `R_CP1/X_CP1`; B3 belongs in the non-vacuity
+  headline; checker-critical window arithmetic and all non-profile runtime
+  switches (incl. `ZoneSearchCaps`) must be covered by checked
+  reconstruction / profile refinement.
+- **MINOR (most severe finding):** the "74-row exhaustive inventory" claim is
+  false as written — it omits concrete consumers and test evidence; treat the
+  inventory as representative, not exhaustive.
+- Extra concrete divergence surfaced: Lean `Cell` has unbounded integer
+  fields while v1 uses checked `i16`; Rust uses unchecked `i16`, so a
+  v1-admissible-size root can panic/wrap instead of rejecting.
