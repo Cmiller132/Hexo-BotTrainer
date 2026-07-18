@@ -7,12 +7,15 @@
 **Global target:** `NL_F` remains **[OPEN]**.
 
 The result is deliberately not an outcome theorem.  It excludes two natural
-simulation families: every synchronous role-swapped shadow that maps
-all real stones one-for-one (irrespective of its coordinate map), and the
-second family that repairs the count mismatch by omitting stones but otherwise
-uses a no-invention, fixed-isometry, immediate-copy history map.  Dynamic
-recoding, virtual bookkeeping stones, and strategy-specific invariants that do
-not promise a map on every legal history survive.
+simulation families: every synchronous, owner-faithful, **no-invention**
+role-swapped shadow mapping all real stones injectively one-for-one, for
+every coordinate map, and the second family that repairs the count mismatch
+by omitting stones but otherwise uses a no-invention, fixed-isometry,
+immediate-copy history map.  (The no-invention premise is load-bearing: one
+invented proxy stone of each color repairs the raw cadence counts — review
+Finding 6.)  Dynamic recoding, virtual/proxy bookkeeping stones, and
+strategy-specific invariants that do not promise a map on every legal
+history survive.
 
 ## 9. Statement boundary and inherited rule contract
 
@@ -748,3 +751,30 @@ prefix.”
 **Machine work.** None.  No Cargo command, Lean build, harness run, or source
 edit was performed.  The only intended deliverable written by this session is
 `STRATEGY_STEALING_ROUND2.md`.
+
+## 16. Errata folded from the hostile review (R-ST2-REV)
+
+Overall review verdict (`STRATEGY_STEALING_REVIEW_ROUND2.md`):
+**CONFIRMED-WITH-ERRATA** — no FATAL or MAJOR defect; every formal
+theorem stands at its exact stated scope. The following scoped
+corrections are part of this document:
+
+1. **Headline scope (folded above):** every summary of the S9.1
+   obstruction class must carry the qualifiers "synchronous,
+   owner-faithful, no-invention ... injectively one-for-one"; one
+   invented proxy stone of each color repairs the raw cadence counts,
+   so no-invention is essential. The formal theorem already includes
+   the premise.
+2. **Citation repairs (Finding 2):** the phase-transition citation is
+   `state.rs:64-71,289-357`; D1's encoding additionally relies on
+   `legal.rs:17-18,123-145` and `board.rs:167-170`.
+3. **S7 naming (Finding 3):** S7 is *geometric frontier-neutrality* —
+   an exact geometric condition, not an unconditional "S3 trap"
+   criterion.
+4. **S9 premise (Finding 5):** the cadence law applies at a legal
+   nonterminal checkpoint at which the named actor is to move.
+5. **D1 strategy totality (Finding 11):** the macro-to-sequential
+   expansion is made total by fixing an enumeration of Z^2 and
+   prescribing the least legal coordinate at off-strategy SecondStone
+   histories (the non-dead-end argument guarantees one exists); the
+   winning-strategy correspondence is unaffected.
