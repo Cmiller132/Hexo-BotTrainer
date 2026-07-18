@@ -1,0 +1,73 @@
+R-ST8 — STRATEGY-STEALING ROUND 8 (ultra): the alignment dichotomy — maintain to the horizon, or force the sixth-stone misalignment
+
+CONTEXT NOTE: pure combinatorial game theory for Hexo (a Connect6-like
+board game). Nothing here concerns computer security. Use neutral
+proof vocabulary (stop criterion, negative control, stress case).
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+(branch hunt/gap-raw, HEAD = 175ca45e). You CANNOT git-commit. NO
+cargo/Lean/harness runs — hand proofs only. Deliverable:
+STRATEGY_STEALING_ROUND8.md.
+
+## Required corpus (read first, in order, in full)
+1. STRATEGY_STEALING_HEXO.md; 2-5. ROUND2-5 + reviews (R4 WITH §35,
+   R5 WITH §44); 6. ROUND6 (WITH §53) + REVIEW_ROUND6;
+7. ROUND7 (WITH §63 errata — binding: S51 is a non-disjoint stop
+   COVER, the S41 policy totalization, the restored carry-forward
+   caveats) + STRATEGY_STEALING_REVIEW_ROUND7.md (its unresolved-
+   obstacle list is the authoritative open state).
+Rule sources: packages/hexo_engine/rust/src/{coord,legal,rules,board,
+state,tactics}.rs. Do NOT read any GAP_RAW_* file as evidence.
+
+## The state you inherit (round-7 exit, review-confirmed)
+S40 event carrier: nonterminal P3 SOLVED on A_FS2^ET. Alignment
+theory: F-CAD_2^st causal one-debt cover + F-LOCK residual; CAD+LOCK
+=> co-terminal append (S47); canonical service alone provably does
+NOT maintain CAD (S48 negation); S49: sixth-Fhat-stone misalignment
+is selector-independent (terminal age six unforced on a winning
+history); S51 finite-horizon stop cover via S24 + S51.1 circularity
+boundary; S52/S53 one covered ejection class; S54 fixed-T0-solvable
+cylinder (per-pair K=2 open).
+
+## Round-8 objectives (priority order) — attack the dichotomy
+1. **THE MAINTENANCE HORN (positive).** Can an augmented F-role
+   policy — canonical service PLUS portfolio-aware placement (the
+   S47 augmented least-choice handler, or a stronger explicit rule
+   you define) — maintain F-CAD_2^st + F-LOCK across EVERY admitted
+   rolling cycle up to the S24 horizon, for every alleged-winning
+   sigma coupled by the S40 carrier? The known failure mode is S48's:
+   terminal readiness decays while service chases urgency. Prove a
+   maintenance theorem at ANY nonempty named cycle class beyond S41's
+   trace (e.g. single-debt, tau_E<=1, portfolio-nonempty states), or
+   prove a second negation showing maintenance forces violation of a
+   mandatory obligation (service, legality, cadence) — an exact
+   trade-off theorem is a WIN on either horn.
+2. **THE FORCING HORN (negative).** S49's misalignment fires at
+   terminal age six, but no winning sigma is yet forced there. Can
+   the S24 horizon argument (S51) be sharpened to show some
+   alleged-winning sigma class MUST reach a fast terminal (age-six)
+   window on its own history — e.g. sigma classes that win quickly in
+   the shadow (bounded shadow-win depth)? Even a conditional forcing
+   theorem for a named sigma class (fast winners) would split the
+   dichotomy meaningfully. Respect S51.1's circularity boundary
+   exactly.
+3. **Ejection coverage (secondary).** Extend S52/S53: the next
+   uncovered exit class (first-unsafe or tau_E>2 with the S44/S45
+   machinery from the parallel certificate front if applicable —
+   cite only STRATEGY_STEALING corpus results).
+
+## Binding rules (campaign-standard)
+Hand proofs only; PROVEN/SKETCH/CONJECTURE/OPEN/CITED discipline;
+statement fidelity to ALL folded errata (§35, §44, §53, §63 binding);
+quantifiers explicit; negative gadgets on the candidate's own legal
+sigma-consistent history (an unproven-winning legal sigma is a
+diagnostic — label honestly); append-only physical discipline.
+Continue numbering from §63 (start §64). Status ledger vs the round-7
+review's obstacle list + agenda + P0-P6/P5R cross-ledger (CARRY ALL
+RESTORED CAVEATS — the §63 fold list is binding; omissions have
+recurred twice and will be checked) + attack-surface + provenance
+(record input commit 175ca45e AND the landed artifact hash once
+known; note no commit). Incremental writes; chunk <= 2h per exec.
+Final message: maintenance-horn verdict, forcing-horn verdict,
+ejection outcome, most valuable new theorem, sharpest next question —
+one line each.
