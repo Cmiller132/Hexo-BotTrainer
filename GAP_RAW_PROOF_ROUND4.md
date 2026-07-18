@@ -39,9 +39,14 @@ two largest one-trigger component demands, exactly matching the Attacker's
 two-placement turn.
 
 Under the user's ranked outcomes, this round achieves mode **(c)** through
-R4.3 and R4.7.1, and a narrowly bounded mode-**(b)** partial through R4.8.
-It does **not** achieve mode (a): initialization and perpetual renewal of the
-tempo account remain open.
+R4.3 and R4.7.1, and a narrowly bounded mode-**(b)** *ingredient* through
+R4.8: after the two prescribed sealed-pencil extensions, the stabilizer
+pair witnesses `M<=2`, so `S_T`'s minimizing actual pair also hands over
+`TEMPO<=2` (a one-cycle `S_T`-bound corollary). Mode (b) itself remains
+**unachieved** — neither reachability of the sealed class under `S_T` nor
+its closure under `S_T` is proved, and §31 expressly leaves the next
+return classes open. It does **not** achieve mode (a): initialization and
+perpetual renewal of the tempo account remain open.
 
 ### 24.2 New proved results
 
@@ -775,9 +780,13 @@ component of this graph that contains a count-one label; write `N_dorm(P)`
 for their number. Distinct surviving launch sites in R4.7 lie in disjoint
 `V_j`, so each contributes at least one distinct dormant component.
 
-**Corollary R4.7.1 (positive dormant-component charge is impossible)
-[PROVEN].** Fix a threshold `B<infinity` and `epsilon>0`. No root-uniform
-nonnegative account satisfying
+**Corollary R4.7.1 (uniform positive dormant-component charge is
+impossible) [PROVEN].** Fix a threshold `B<infinity` and `epsilon>0`.
+Here **root-uniform** means `C`, `B`, and `epsilon` are fixed across
+roots, and the excluded claim is: for every normative `Phi<1` root there
+exists a pure Defender strategy under which every reached Defender epoch
+satisfies `C(P)<B` against every legal Attacker continuation. No
+root-uniform nonnegative account satisfying
 
 `C(P)>=epsilon * N_dorm(P)`                                                  (28)
 
@@ -789,17 +798,26 @@ apply R4.7 against the account's proposed strategy. Equation (28) forces
 `C>B`. ∎
 
 This covers every component-additive, translation-invariant deadline ledger
-which gives a fixed positive charge even to a remote count-one component. It
-is a genuine normative-root impossibility and is independent of R3.3's
+that charges **every** dormant component uniformly by one fixed
+`epsilon>0`. It does **not** exclude selective-type ledgers (charging
+only some residual types), root-dependent bounds `B(P_0)`, or
+history/age/rank-dependent charges tending to zero: review round-4
+Finding 12 exhibits a component-additive, translation-invariant
+`C_select` (pristine fresh-pair-type count) that R4.7's construction
+does not force to grow. (If a fixed component-additive `f(type)` is
+positive on *all* residual types inside one launch footprint, their
+positive minimum restores (28) and the corollary applies.) It is a
+genuine normative-root impossibility and is independent of R3.3's
 pointwise domination hypothesis.
 
 More generally, if
 
 `C(Q)=sum_C f(type(C))`
 
-is nonnegative and translation invariant, admitting arbitrarily many copies
-of a clonable dormant type forces `f(type)=0`; otherwise `N f(type)` exceeds
-every fixed bound. A viable account must use zero/asymptotically vanishing
+is nonnegative and translation invariant, admitting arbitrarily many
+strategy-forced copies of that **same** type forces `f(type)=0`;
+otherwise `N f(type)` exceeds every fixed bound. (Arbitrarily many
+dormant components of unspecified residual types do not suffice.) A viable account must use zero/asymptotically vanishing
 dormant charge, order statistics such as `TEMPO`, signed/path credits, or a
 proved reachability cap.
 
