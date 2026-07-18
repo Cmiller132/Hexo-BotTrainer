@@ -1,0 +1,84 @@
+R-ST8-REV — HOSTILE REVIEW (ultra): STRATEGY_STEALING_ROUND8.md
+
+CONTEXT NOTE: pure combinatorial game theory for Hexo (a Connect6-like
+board game). Nothing here concerns computer security. Use neutral
+testing/proof vocabulary in your own writing.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+(branch hunt/gap-raw, HEAD = e93d9d74). You CANNOT git-commit. NO
+cargo/Lean/harness runs — hand recomputation only. Deliverable:
+STRATEGY_STEALING_REVIEW_ROUND8.md.
+
+## Task
+First-principles hostile proof audit of STRATEGY_STEALING_ROUND8.md
+(authored at input 175ca45e, landed unmodified at e93d9d74; the
+artifact's own SHA-256 is
+7910d2917c2bfbe10a44cdff0c109ed361622a65ee9999a5a3b6929171ffcc7a).
+Claims (per its §71 dispositions):
+1. §65 maintenance horn: a positive maintenance theorem for
+   F-CAD_2^st + F-LOCK on a named nonempty quiet/R_1 cycle class,
+   plus an exact NEGATIVE at the (2,3) readiness cliff — the
+   trade-off point where maintenance forces violation of a mandatory
+   obligation.
+2. §66 forcing horn: S61 — every alleged-winning sigma in the named
+   fast classes (FAST_8^{S15} / FAST_<14) is forced onto the S49
+   sixth-stone misalignment ON ITS OWN winning history; slow winners
+   remain open.
+3. §67 ejection: mirror-clean first-unsafe class receives a physical
+   Shat stop; general common-phase and tau_E>2 cases receive exact
+   negative covers.
+4. §68 synthesis: the dichotomy's remaining open region is exactly
+   the slow-winner class vs the quiet-class boundary.
+
+Default posture: REFUTE. Recompute every census, cadence, legality,
+readiness count, horizon bound, and class-membership argument by
+hand. Attack especially:
+- §65: the quiet-class definition — is it genuinely nonempty (check
+  the witness against every clause, including the round-7 §63
+  totalized policy and terminal-closure semantics)? The maintenance
+  induction — does every S continuation inside the class keep BOTH
+  CAD (portfolio cover) and LOCK (assigned-window readiness), or
+  only CAD? The (2,3) cliff — recompute the exact counting; is the
+  negative genuinely forced (no alternative service/portfolio choice
+  escapes it) and is its scope honestly stated?
+- §66 S61: the crux. The forcing must hold on the sigma's OWN
+  winning history — check that no step of the construction requires
+  sigma to cooperate beyond what winning-in-<=N-placements implies.
+  The horizon arithmetic: verify the FAST class definitions
+  (placement counts vs cadence — off-by-one traps between placements
+  and paired turns), the age-six terminal arithmetic against S49's
+  terminal-age condition, and that the S51 stop-cover application
+  respects its NON-DISJOINT cover semantics (folded §63). Does the
+  argument respect S51.1's circularity boundary (no assumption that
+  sigma is refutable)?
+- §67: the mirror-clean class definition and its Shat stop — is the
+  stop physical (actual append completing a six) and does it respect
+  the terminal grammar (§44/§53 closure)? The negative covers for
+  common-phase and tau_E>2 — exact statement fidelity to S44/S45
+  (certificate barrier, tau_E=5)?
+- §68: does the synthesis overclaim — the open region must include
+  everything not covered (slow winners AND the quiet-class
+  complement AND unresolved ejection classes), not just slow winners.
+- Cross-round consistency: §35/§44/§53/§63 all binding (S51 = stop
+  COVER; carry-forward caveat list COMPLETE this time — round-6
+  Finding 12 and round-7 Finding 15 restored caveats must ALL appear
+  at their local ledger sites: nonisometric zero-lag recodings,
+  common-only real wins + simultaneous legality/terminal maintenance
+  incl. P5, S13 in agenda row 2, S14 in row 3 + P5R row); no NL_F
+  overclaim; provenance (input 175ca45e, landed e93d9d74 — flag if
+  the landed hash is absent from the artifact).
+
+## Required corpus (read first, in order, in full)
+1. STRATEGY_STEALING_HEXO.md; 2-6. ROUND2-6 + reviews (R4 W/ §35, R5
+   W/ §44, R6 W/ §53); 7. ROUND7 (WITH §63) + REVIEW_ROUND7;
+8. STRATEGY_STEALING_ROUND8.md (the artifact).
+Rule sources: packages/hexo_engine/rust/src/{coord,legal,rules,board,
+state,tactics}.rs cited ranges.
+
+## Output format (campaign-standard)
+STRATEGY_STEALING_REVIEW_ROUND8.md: method preamble; numbered
+findings with severity (REFUTED/MAJOR/MINOR/NOTE), quoted claim,
+independent recomputation, proposed repair; per-theorem verdict
+table; overall verdict; exact unresolved obstacles. Chunk <= 2h per
+exec; incremental writes. Final message: overall verdict + §65/§66/
+§67/§68 dispositions + most severe finding, one line each.

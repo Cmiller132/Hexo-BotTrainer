@@ -305,7 +305,9 @@ is at line distance at most three from one of them. Append `F@c`; this makes
 the real minimum at most two. S55 therefore supplies the next portfolio
 before the second query. If the urgent family has singleton transversal `s`,
 use `s` on the second real event unless `c=s`, in which case service is
-already complete and a legal padding cell is used. Dynamic quietness again
+already complete and a legal padding cell is used. If `tau_E=0` (empty
+urgent family), use the fixed least legal filler, and if it wins, close at
+the sound real-F stop (review round-8 Finding 4). Dynamic quietness again
 keeps the shadow minimum at two, while an F append cannot increase the real
 minimum. If the service or padding cell wins, close soundly; otherwise (65.6)
 holds. Every choice follows its reached prescription, and the second
@@ -342,9 +344,12 @@ Suppose the actual legal prescription `z_1` hits a shadow deficit-two window.
 For every legal one-for-one paired real placement `k_1`, both appends are
 nonterminal and the reached common `SecondStone` prefix admits no
 `F-CAD_2^st` portfolio. Consequently neither canonical service, the S47
-least-choice handler, portfolio reassignment, nor any stronger one-for-one
+least-choice handler, portfolio reassignment, nor any stronger query-first,
+common-phase, one-event-per-microstep one-for-one
 selector can maintain `F-CAD_2^st`--and hence cannot maintain
-`CAD+LOCK`--before it must query `z_2`.
+`CAD+LOCK`--before it must query `z_2` (review round-8 Finding 5: the
+theorem is not a negative about asynchronous or prepayment architectures
+that leave S40's one-event-per-microstep carrier).
 
 *Proof.* The shadow append changes the minimum from two to one and cannot yet
 complete six. Every real unblocked window begins with deficit at least three,
@@ -412,7 +417,12 @@ F-`FirstStone` nonterminal segment satisfying all of these conditions:
 5. the exit has `tau_E<=1` and is common-live.
 
 Call the class of finite concatenations (with their sound terminal closures)
-`R_1(sigma)`. Fix the continue/stop choice causally by a prefix predicate as
+`R_1(sigma)`. Two semantics are explicit (review round-8 Finding 6): the
+reserve handler REPLACES the inherited canonical F-service choice in the
+"inherited live `A_FS2`" clauses, and "sound terminal closures" means §53's
+atomic paired-final-event convention — both associated physical appends
+occur inside the one coupled closing event.
+Fix the continue/stop choice causally by a prefix predicate as
 part of the handler before play (the finite witness prefixes below are
 special-cased, followed elsewhere by the fixed least choices). If a stated
 candidate or rolling clause is absent, the analysis certificate returns
@@ -521,9 +531,13 @@ placements. If `Fhat` wins on local placement six against every legal
 intervening `Shat` pair, the least uniform depth is six. Otherwise choose a
 legal continuation on which the fourth post-S15 `Fhat` prescription is
 nonterminal. The resulting state is live at `Shat FirstStone`. A legal
-`Shat` placement exists. If such a placement won, it would itself be a legal
-counterplay refuting the alleged-winning premise; by S51.1 that event would
-be the contradiction stop and would not be continued. Hence under the
+`Shat` placement exists. If such a placement won, it — followed by any
+off-path totalization of the counterstrategy — would itself be a legal
+counterplay directly contradicting the alleged-winning premise; that direct
+shadow-game contradiction needs no coupled-node premise (review round-8
+Finding 7: S51.1 is formally stated at a genuine common-live coupled node,
+which this arbitrary shadow branch has not been shown to possess, so the
+direct argument replaces the S51.1 citation here). Hence under the
 premise choose a nonwinning first placement. The same reasoning at
 `SecondStone` supplies a nonwinning second placement. A compatible
 nonterminal branch therefore exists through local placement eight, so the
@@ -557,8 +571,16 @@ an arbitrary replacement service trace.
 
 *Proof.* S50 supplies the named causal continuation through local placement
 six for every fixed pure strategy. S60 changes `d_sigma(h)<=8` into
-`d_sigma(h)=6`; hence the reached fourth prescription must win on this
-particular legal counterplay. Paired F events change the real/shadow F-role
+`d_sigma(h)=6`. Because `d_sigma` is defined over complete/maximal
+counterplays, note that if S50's finite prefix were nonterminal after local
+placement six, it could be extended legally to a complete/maximal
+counterplay, contradicting `d_sigma(h)=6` (review round-8 Finding 8); hence
+the reached fourth prescription must win on this
+particular legal counterplay. The resulting event satisfies S51 cover
+item 3, possibly alongside another cover item (S51 is a non-disjoint
+cover). At root: `B_sigma=11` gives `d_sigma(h) <= B_sigma - 5 = 6` for
+every reached S15 continuation, validating the `FAST_<14` to `FAST_8^{S15}`
+bridge. Paired F events change the real/shadow F-role
 counts from `1/2` at S15 to `3/4` and then `5/6`. The first three post-S15
 events cannot win for real F by count, and the final paired append still
 leaves only five real-F stones. S49 now gives selector-independent terminal
@@ -745,8 +767,9 @@ The new local decision boundary is:
 | Reached condition | Round-8 disposition | Scope caveat |
 |---|---|---|
 | `mu_H>=3` | CAD portfolio is vacuous | Service and rolling admission remain separate |
-| `mu_H=2, mu_R<=2` | Reserve handler maintains CAD; a first-event aging hit is catchable | Continuing service uses `tau_E<=1`, or the reserve supplies a sound stop |
-| `mu_H=2, mu_R=3`, dynamically quiet pair | S57 prepays to the reserve class | Conditional on both actual reached prescriptions being dynamically quiet |
+| `mu_H=2, mu_R<=2` (one event) | S55/S56 one-event CAD/catch feasibility | Local feasibility only |
+| `mu_H=2, mu_R<=2` (rolling) | Reserve handler maintains CAD | Conditional on EVERY `R_1` admission clause (RES_1; inherited live `A_FS2` conditions; handler-generated nonterminal F pair; causal first-safe certificate-fresh service-admissible nonterminal S pair; both real-S cells avoid `W_*`; common-live exit with `tau_E<=1`) |
+| `mu_H=2, mu_R=3`, dynamically quiet pair | S57 prepays to the reserve class | Conditional on a common-live F `FirstStone` checkpoint with `tau_E<=1` AND both actual reached prescriptions being dynamically quiet |
 | `mu_H=2, mu_R=3`, first prescription hits a deficit-two window | S58: every one-for-one selector fails CAD before query 2 | An unmatched real append leaves the S40 carrier |
 | `mu_H=1, mu_R=1` | Augmented unique-hole rule aligns a shadow terminal, or can stop by a real win | This is augmented `F-LOCK^+`, not universal canonical `F-LOCK` |
 | `d_sigma(h)<=8` | S60 forces `d=6`; S61 forces S49 misalignment | Named alleged-winner class may be empty |
@@ -758,10 +781,17 @@ Accordingly the two horns meet at, but do not close, a sharp gap. The positive
 maintenance policy needs the real reserve no later than the event at which a
 shadow deficit-two window ages to one. The fast forcing theorem produces a
 terminal age where the global one-stone count offset makes such a reserve
-impossible under one-for-one cadence. What is still missing is a theorem that
-forces every alleged winner either into the fast class or through a recurring
-reserve-admitted controller on every one of its S turns. That missing
-quantifier is exactly why `NL_F` remains open.
+impossible under one-for-one cadence. (REWRITTEN per review round-8
+Finding 1, which REFUTED the original synthesis claim:) A universal
+fast-or-reserve theorem would connect two local interface results, but would
+not by itself prove `NL_F`. The fast S49 branch still needs an outcome-level
+argument — S61 refutes the tested one-for-one terminal-transfer carrier, it
+does not refute `sigma` or decide the game — and all outer-coverage
+obligations listed in §69 remain binding: the unresolved region contains at
+least the fast S49 outcome branch, slow winners, the complement of the
+quiet/`R_1` admission class, and the unresolved ejection and outer-carrier
+classes. This section is a PARTIAL INTERFACE MAP, not an alignment dichotomy
+or exhaustive synthesis.
 
 ### 68.1 New theorem ledger
 
@@ -792,7 +822,7 @@ the disposition column records only the incremental round-8 change.
 | 3 | **Coverage outside strict `A_FS2`.** First-unsafe, unreflected real-S terminals, wrong-role occupancy, unsupported certificates, uncertified `tau_E>2`, and Fhat-terminal events outside admitted alignment remain. | **ONE POSITIVE STOP PLUS ONE NEGATIVE COVER; OPEN otherwise.** S63 covers mirror-clean first-unsafe by a physical direct-refutation stop. S62.1 proves no other live common-phase one-append repair at that deadline. Missing/blocked/illegal images, unreflected terminals, wrong-role and unsupported certificates, phase lag, and arbitrary high-transversal exits remain. |
 | 4 | **P5R through every lag and recode.** Debt-meeting real wins need shielding/certification/F blocking/same-step Shat terminal; common-only real wins require an outer physical transfer. S14 and S25 bind. | **PARTIAL.** S63 supplies the physical same-step terminal for its mirror-clean class. S62 distinguishes P5R from the restored common-only-win duty and proves the exact failure if neither is supplied. All other lag/recode paths, S14, S25, and common-only physical transfer remain open. |
 | 5 | **Canonical and augmented F-service compatibility.** CAD state and canonical LOCK are separate; nonterminal candidates and portfolios must recur through the horizon. | **EXACT CONDITIONAL POSITIVE/NEGATIVE SPLIT.** S57--S59 prove a stronger explicit reserve handler on a nonempty `tau_E<=1` cycle class and a complete augmented terminal trace. S58 proves every one-for-one policy fails at the unprepaid `(2,3)` aging cliff. Universal canonical `F-LOCK`, arbitrary service, and universal horizon membership remain open. |
-| 6 | **Universal shadow-Fhat terminal fidelity.** Every later first/second terminal prescription needs a same-event real certificate or a strategy-own misalignment theorem. | **FAST CLASS RESOLVED; OPEN slowly.** S61 forces strategy-own sixth-stone misalignment for `FAST_8^{S15}` and `FAST_<14`. S59 aligns every terminal reached inside its reserve class. Later terminals of slow alleged winners outside that class remain open. |
+| 6 | **Universal shadow-Fhat terminal fidelity.** Every later first/second terminal prescription needs a same-event real certificate or a strategy-own misalignment theorem. | **FAST ONE-FOR-ONE TERMINAL TRANSFER FORCED TO FAIL; OUTCOME OPEN; OPEN slowly.** S61 forces strategy-own sixth-stone misalignment for `FAST_8^{S15}` and `FAST_<14` — this defeats the tested carrier, not `sigma` itself; the fast outcome branch needs a separate outcome-level argument. S59 aligns every terminal reached inside its reserve class. Later terminals of slow alleged winners outside that class remain open. |
 | 7 | **Reverse legality for spatial carriers.** Every inverse/FIFO scheme owes S18, S13, and updated unsupported/collision sets. | **OPEN, unchanged.** Temporal reserve pairing uses no inverse. S63's forward image is legal by its explicit physical window; it supplies no reverse carrier. |
 | 8 | **Strategy domain and physical persistence.** Every event must lie on one genuine legal append-only history agreeing with total `sigma`; all old stones retain every rule effect. | **PROVEN on new local traces; OPEN globally.** S57/S59 witnesses and S63's folded witness are physical and totalizable but their strategies are explicitly diagnostic, not alleged-winning. S61 uses S50 on each candidate's own actual prescriptions. Nothing is erased or relabeled physically. |
 | 9 | **Global causality.** Future backing, recoding, and repair choices may not expose a future real-F coordinate across an S turn. | **PROVEN locally; OPEN globally.** Portfolios are selected before queries, event coordinates only after reached prescriptions, and `W_*` only before the immediately following observed S pair. S50's fixed-pure-strategy computation remains within S12. Universal outer repair is absent. |
@@ -1031,3 +1061,58 @@ run. Read-only text and Git-metadata inspection were used to audit the corpus
 and baseline. File creation and incremental revision used patch operations.
 No existing proof/source file was modified, no artifact was
 deleted, and no commit was created.
+
+## 73. Errata and corrections folded from the round-8 hostile review
+
+`STRATEGY_STEALING_REVIEW_ROUND8.md` (ultra, reviewed artifact `e93d9d74`,
+SHA-256 `7910d291...ffcc7a`) returned overall **REFUTED** — but with a
+precise split: **the local mathematical core S55-S63 SURVIVES at its
+conditional scopes** (§65 CONFIRMED-WITH-QUALIFICATION, §66
+CONFIRMED-WITH-MINOR-REPAIRS, §67 CONFIRMED-AT-SCOPES); what is REFUTED is
+the §68 SYNTHESIS — its claim that one missing fast-or-reserve quantifier
+is exactly why `NL_F` remains open. Folds:
+
+1. **(Finding 1, REFUTED — folded)** §68 rewritten as a PARTIAL INTERFACE
+   MAP: a universal fast-or-reserve theorem would connect two local
+   interface results but would not prove `NL_F`; the unresolved region
+   contains at least the fast S49 OUTCOME branch (S61 defeats the tested
+   one-for-one carrier, not `sigma`), slow winners, the quiet/`R_1`
+   admission complement, and the unresolved ejection/outer-carrier
+   classes. §69's fidelity row relabeled "FAST ONE-FOR-ONE TERMINAL
+   TRANSFER FORCED TO FAIL; OUTCOME OPEN."
+2. **(Finding 2, MINOR)** The §68 decision table now carries its source
+   hypotheses: the S57 row adds the common-live `FirstStone` + `tau_E<=1`
+   conditions; the `(2,<=2)` row is split into one-event feasibility vs
+   rolling maintenance conditional on every `R_1` admission clause.
+3. **(Finding 4, MINOR)** S57's `tau_E=0` branch gains the fixed
+   least-legal-filler clause with sound-stop closure.
+4. **(Finding 5, MINOR)** S58's quantifier qualified to "any query-first,
+   common-phase, one-event-per-microstep one-for-one selector" —
+   asynchronous/prepayment architectures leaving the S40 carrier are
+   outside the theorem.
+5. **(Finding 6, MINOR)** `R_1`'s definition states the
+   reserve-replaces-canonical-service semantics and §53 atomic closure
+   explicitly. Every summary keeps "augmented `F-LOCK^+` only" — canonical
+   `F-LOCK` is NOT proved.
+6. **(Finding 7, MINOR)** S60's placement-7/8 step now uses the direct
+   alleged-winningness contradiction (winning append + off-path
+   totalization) instead of citing S51.1 beyond its common-live coupled
+   premise.
+7. **(Finding 8, MINOR)** S61 gains the complete/maximal-extension
+   sentence before applying `d_sigma`, the "item 3, possibly alongside
+   another cover item" wording, and the explicit root bound
+   `d_sigma(h) <= B_sigma - 5 = 6`.
+8. **(Finding 12, MINOR)** Landing identity `e93d9d74` recorded here (the
+   audited artifact body is not rewritten to self-embed its own hash).
+
+**Review confirmations of record.** S55/S56 censuses exact (Finding 3);
+S59's induction preserves both CAD and augmented readiness with the full
+witness verified clause-by-clause (Finding 6); S60's cadence table and
+depth gap exact (Finding 7); S61 strategy-own and count-exact (Finding 8);
+S62/S62.2 exact negative covers at named scopes (Finding 9); S63 a genuine
+physical stop obeying the terminal grammar (Finding 10); the restored
+carry-forward caveat ledgers are COMPLETE this round (Finding 11 — the
+recurring omission class is fixed). The review's twelve-item obstacle list
+supersedes §69 as the authoritative open state; its item 12 (fast-class
+nonemptiness, slow-winner controller, quiet-membership preservation,
+outcome-level argument after S49) is the sharpest front.
