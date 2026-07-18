@@ -546,7 +546,12 @@ These are design targets, not an exhaustive theorem about how a policy must
 be encoded; a hard-coded structural tie rule could distinguish the actions
 without literally storing either representation.
 
-The earliest causal warning occurs at the epoch after the second stock turn:
+(Post-review erratum, R-G4-REV Finding 11: the original sentence here
+overclaimed "the earliest causal warning" — already after the FIRST stock
+turn `U^-` exists with `h` empty and legal, and a Defender strategy with
+knowledge of the continuation could occupy `h` even earlier. The corrected
+statement:) The first epoch at which the two-axis common-hub certificate is
+present occurs after the second stock turn:
 once `U^-` and `V^-` have both been built, their unique intersection is the
 still-empty cell `h`, and `D@h` is already legal. Immediate `TEMPO` is
 nevertheless flat at two because of the shield. At `P_stock`, equation (71)
@@ -683,6 +688,8 @@ and all differently quantified gaps retain their OPEN status.
 
 ## 57. Provenance and no-run record
 
+**Reviewed/output artifact:** `110042e5` (post-review erratum, R-G4-REV
+Finding 14; errata from that review are folded in this file).
 **Input commit:** `aed0fecb` on branch `hunt/gap-raw`. This authoring pass
 creates no commit; the orchestrator commits the artifact.
 
@@ -700,3 +707,32 @@ creates no commit; the orchestrator commits the artifact.
 The test-gated harness, production rules, strict verifier, and Lean sources
 were not modified. No Cargo command, Lean build, harness, search executable,
 generated enumeration, or git commit was run.
+
+## 58. Post-review errata and strengthenings (R-G4-REV, folded from GAP_RAW_REVIEW_ROUND6.md)
+
+Hostile review of artifact `110042e5` returned **SOUND-WITH-MINOR-ERRATA**:
+R6.1 CONFIRMED (exact root, every S_T reply re-derived, shield, census,
+legality, focal handoff), R6.2 **CONFIRMED-AND-STRENGTHENED**, L12.1-L12.6
+all confirmed, no quantifier leak from Q1 to Q2/Q3/GAP-RAW. Folds:
+
+1. **Finding 11 (MINOR, folded in §53.2):** "earliest causal warning"
+   narrowed to "first epoch at which the two-axis common-hub certificate
+   is present" — U^- alone already contains empty legal h after the first
+   stock turn, and a continuation-aware Defender could pre-empt even
+   earlier; irrelevant to R6.1/R6.2, which use only actual S_T replies.
+2. **Finding 14 (MINOR, folded in §57):** reviewed/output artifact
+   `110042e5` recorded alongside the input commit.
+3. **Finding 5 (STRENGTHENING, adopted):** full post-hub optimization
+   gives EXACT values — after the hub pair and mandatory u-service,
+   M(P_1)=4 and next tau=4 (six surviving count-three labels, eight
+   servicing orders all computed) — strictly stronger than R6.2's
+   ">=3 suffices" bound. The weaker proof remains valid as written.
+4. **Finding 7-8 wording (adopted for summaries):** the four-pencil tempo
+   shield is a value PLATEAU, not a strict primary-objective penalty —
+   hub pre-emption TIES on immediate TEMPO and is rejected by S_T's
+   lexicographic tie-break. This is exactly the §53.2 decision-failure
+   mechanism (the P_stock tie).
+
+The review's closing list of exact unresolved obstacles (the barriers to
+lifting Q1 → Q2 and to any positive Q3/GAP-RAW proof) is adopted as the
+round-6 exit state; none weakens the fixed-policy refutation.

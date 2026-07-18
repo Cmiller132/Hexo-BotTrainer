@@ -1,0 +1,78 @@
+R-G4-REV — HOSTILE REVIEW (ultra): GAP_RAW_PROOF_ROUND6.md — the S_T refutation
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+(branch hunt/gap-raw, HEAD = 110042e5). You CANNOT git-commit. NO
+cargo/Lean/harness/search runs — hand recomputation only. Deliverable:
+GAP_RAW_REVIEW_ROUND6.md.
+
+## Task
+First-principles hostile audit of GAP_RAW_PROOF_ROUND6.md at commit
+110042e5. This round claims the tempo program's biggest single result:
+
+- R6.1 [Q1]: an exact strict Phi=0 root + a legal S_T-consistent Attacker
+  continuation that, past the R5.3.1 axial-cleanup handoff and through a
+  "four-pencil tempo shield", assembles the five count-two shared-hub
+  focal labels (U^-, U^+, V^-, V^+, W at hub h=(10,0)) on an
+  Attacker-FirstStone handoff with the hub empty and Defender-free —
+  with EVERY intervening S_T pair derived exactly from
+  minimize-TEMPO-then-lexicographic.
+- R6.2 [Q1]: from that handoff the L11.7-style cascade survives the extra
+  alive labels and forces the loss — S_T REFUTED as a GAP-RAW /
+  GAP-TEMPO-REPAIR witness.
+- L12.6 [Q3-init]: low-only slice — all alive labels count<=2 => tau=0
+  and M<=2; all count<=1 => M=0.
+
+Your default posture: REFUTE. This is a policy-refutation by explicit
+construction, so the proof lives or dies on move-by-move exactness.
+Attack in particular:
+1. **Every S_T reply derivation.** For EACH Defender turn in the
+   continuation, recompute the full actual-pair optimization: enumerate
+   the servicing/candidate pairs, their handoff TEMPO values, and the
+   lexicographic tiebreak. One wrong TEMPO value or one missed
+   lower-TEMPO pair anywhere breaks R6.1. Check especially whether some
+   S_T pair could legally pre-empt the hub cell (10,0) or kill a focal
+   window earlier — the "four-pencil tempo shield" (§50) exists to make
+   pre-emption strictly worse; verify its exact value comparisons at
+   every stage, not just the first.
+2. **Legality/cadence.** Radius-8 support for every placement in
+   sequence (2:2 cadence, first placement inserted before second
+   checked); no accidental Attacker six or Defender six anywhere before
+   the claimed end; nonterminality at each cited checkpoint.
+3. **The label census (§51.2 "no hidden high label").** Recompute alive
+   windows after each stock turn: no count>=3 label may appear on an
+   Attacker handoff where S_T's forced service could then differ; verify
+   the claimed counts on all three axes through every new stone.
+4. **The cascade with extra labels (§52).** The round admits the handoff
+   is NOT the isolated L11.6 profile. Verify the current imminent family
+   at the hub pair is exactly what is claimed (tau=2, the two u-residuals
+   disjoint), that the extra labels neither add current imminents nor
+   give the servicing pair a double-duty cell hitting a v/w demand, and
+   that the three surviving demands' grounds are pairwise disjoint DESPITE
+   the extra stock. Then verify the endgame: tau>=3 => Attacker win
+   within the claimed turns, with Defender's intervening pair unable to
+   cover three disjoint residuals.
+5. **Root exactness.** The Phi(P_0)=0 claim, the R4.7-anchor
+   normalization (§49.1), and consistency of the derived axial-cleanup
+   handoff with R5.3.1's already-reviewed statement.
+6. **Quantifier honesty.** No leak from Q1 to Q2/GAP-RAW anywhere
+   (executive section, ledger §55, and prose); L12.6's scope; the §53.2
+   "P_stock tie" decision-failure analysis and the sharpest-next-question
+   framing.
+
+## Required corpus (read first, in order, in full)
+1. GAP_RAW_PROOF_ROUND4.md (with folded errata) + GAP_RAW_REVIEW_ROUND4.md
+   (S_T's definition round)
+2. GAP_RAW_PROOF_ROUND5.md (WITH §47 errata — L11.6/L11.7 hub geometry,
+   R5.3/R5.3.1) + GAP_RAW_REVIEW_ROUND5.md
+3. GAP_RAW_PROOF_ROUND6.md (the artifact)
+(Rounds 2-3 as needed for inherited definitions.) Do NOT read any
+STRATEGY_STEALING_* file as evidence.
+
+## Output format (campaign-standard)
+GAP_RAW_REVIEW_ROUND6.md: method preamble (reviewed artifact 110042e5 +
+named input); numbered findings with severity (REFUTED/MAJOR/MINOR/NOTE),
+quoted claim, independent recomputation, proposed repair; per-theorem
+verdict table (R6.1, R6.2, L12.6, the shield lemmas, ledger rows);
+overall verdict; exact unresolved obstacles. Chunk <= 2h per exec;
+incremental writes. Final message: overall verdict + R6.1/R6.2 dispositions
++ most severe finding, one line each.
