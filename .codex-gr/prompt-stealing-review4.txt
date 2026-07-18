@@ -1,0 +1,67 @@
+R-ST4-REV — HOSTILE REVIEW (ultra): STRATEGY_STEALING_ROUND4.md
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+(branch hunt/gap-raw, HEAD = 8fb68864). You CANNOT git-commit. You do NOT
+have the cargo slot: NO cargo/Lean/harness/search runs — hand recomputation
+only. Deliverable: STRATEGY_STEALING_REVIEW_ROUND4.md.
+
+## Task
+First-principles hostile proof audit of STRATEGY_STEALING_ROUND4.md at
+commit 8fb68864. The round claims TWO PROVEN theorems:
+1. Ranked (b) for the dynamic class C_react^<=1: within the zero-lag
+   total-exact owner-faithful family, arbitrary pre-turn rebinding plus at
+   most one coordinate-reactive escape in the tested S turn is insufficient
+   (proxy-support cut: every committed exact binding exposes a proxy edge;
+   double application at the round-3 checkpoint).
+2. Ranked (c) for the P5R module: a phase-sensitive shielding invariant
+   (window empty-count > remaining S placements before F acts) defines a
+   nontrivial P5R-safe conditional dynamic class C_shield, with exact
+   service cost results (transversal <=2 unless three-axis fork; permanent
+   fence hitting number = 6).
+
+Your default posture: REFUTE. Recompute every coordinate family, window
+census, transversal, hitting number, legality chain, and cadence claim by
+hand. Attack especially:
+- the support-connectivity argument (27.1) and whether the partition-edge
+  cut (27.2) really survives ALL allowed pre-turn rebindings (retirement,
+  movement, merge) — is the "real preimage empty and legal" step airtight
+  under every rebinding the class definition permits?
+- the double-cut argument in 28.1: does "either fails sooner or uses two
+  reactive escapes" exhaust all cases? Is the checkpoint forced on every
+  member of C_react^<=1, or only on candidates that follow round 3's
+  transferred pair?
+- the class definition C_react^<=1 itself: is it well-defined, nonempty,
+  and does it genuinely relax C_static^2 (i.e., is this a NEW theorem, not
+  a corollary of round 3's impossibility)?
+- the P5R shield: the debt/shield definitions (30.1), the S-turn
+  preservation lemma (30.2), the F-turn restoration condition, the
+  three-axis fork counterexample (31.2) legality on the 2:2 cadence, and
+  the hitting-number-six claim (31.3) — recompute the 18-window census
+  through one surplus stone and its minimal blocker set.
+- scope honesty: no claim may leak toward NL_F or "unbounded total
+  rebinding"; check the design-space map (32) and both ledgers (33) for
+  overstatement; check the resume point (34.1) states quantifiers
+  correctly.
+
+## Required corpus (read first, in order, in full)
+1. STRATEGY_STEALING_HEXO.md (round 1)
+2. STRATEGY_STEALING_ROUND2.md (with folded errata §16)
+3. STRATEGY_STEALING_REVIEW_ROUND2.md
+4. STRATEGY_STEALING_ROUND3.md (with folded errata §24)
+5. STRATEGY_STEALING_REVIEW_ROUND3.md
+6. STRATEGY_STEALING_ROUND4.md (the artifact under review)
+Rule sources: the cited ranges in
+packages/hexo_engine/rust/src/{coord,legal,rules,board,state,tactics}.rs —
+verify each citation actually supports the stated rule use.
+Do NOT read or modify any GAP_RAW_* file as evidence.
+
+## Output format (campaign-standard)
+STRATEGY_STEALING_REVIEW_ROUND4.md with: method preamble (state the
+reviewed artifact commit 8fb68864 AND the input commit it names);
+numbered findings each with severity (REFUTED / MAJOR / MINOR / NOTE),
+quoted claim, independent counter-derivation or confirmation, and proposed
+repair; a per-theorem verdict table (CONFIRMED / CONFIRMED-WITH-ERRATA /
+DOWNGRADE / REFUTED); an overall verdict (SOUND / SOUND-WITH-ERRATA /
+UNSOUND); and the exact list of unresolved obstacles. Chunk <= 2h per
+exec; incremental writes. Final message: overall verdict + most severe
+finding, one line each.

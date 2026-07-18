@@ -142,8 +142,12 @@ The following boundaries are binding.
 For the final point, a forward legal placement inserts into the owner map and
 pushes the occupied list (`packages/hexo_engine/rust/src/board.rs:88-95`) and
 appends the placement history (`packages/hexo_engine/rust/src/state.rs:265-273,
-304-307`). The engine has a search-only undo facility at `state.rs:360-369`;
-it is not a legal game action and is not used by a representation update.
+304-307`). The engine exposes an undo API at `state.rs:360-369`; per
+post-review erratum (Finding 12) this is an analysis facility used from the
+MCTS/search context (`state.rs:283-288`), outside legal forward `Placement`
+transitions — not an access-enforced "search-only" operation — and it is not
+used by any representation update here. New states start with `Player0` in
+`Opening` per `state.rs:149-160` (completing the `289-337` citation).
 
 ## 26. Dynamic representation semantics
 
@@ -229,6 +233,18 @@ truncation is not permitted. Relative to `C_static^2` at the shared S15
 checkpoint, it relaxes the fixed-map/fixed-proxy restrictions: proxy
 designations and the global isometry may change, and one collision-dependent
 repair is allowed.
+
+(Post-review erratum, R-ST4-REV Finding 4 — syntax/semantics distinction.
+Two different collections must not be conflated: the *candidate grammar* —
+deterministic update algorithms with legal partial executions — is nonempty,
+as witnessed by an explicit hand example in which one backing/filler repair
+legally executes; the *extensional class* of members fulfilling all five
+promises globally is what S23 proves EMPTY. S23 is a theorem about candidate
+rules, stated as: every such candidate fails one of its promises. Also, the
+comparison to round 3 is exactly at the shared S15 checkpoint with `q_1` as
+proxy — Definition 20.1 allowed either member of the first `Fhat` pair as
+proxy, so round 4 is not literally a strict superclass of every round-3
+synchronization.)
 
 ## 27. The proxy-support cut
 
@@ -328,9 +344,13 @@ proxy of each shadow role, so S22 supplies a legal collision coordinate
 `c_1`. Real S owns only two stones before placing it; `S@c_1` is necessarily
 nonwinning. Its committed shadow target is occupied, so restoring Definition
 26.4's invariant requires a first coordinate-reactive escape. If no such
-escape restores the invariant, totality already fails. Otherwise phase alignment
-allows exactly one actual `Shat` placement in that repair. Afterwards the
-counts are
+escape restores the invariant, totality already fails. Otherwise a successful
+escape can append exactly one `Shat` stone: any additional four-placement
+shadow cycle contains a prescribed `Fhat` pair that cannot be transferred
+while the real game remains at S `SecondStone`, and is therefore an earlier
+failure of Definition 26.4 items 2 or 4 (post-review erratum, R-ST4-REV
+Finding 3 — the one-append fact follows from the immediate-transfer and
+real-turn premises, not phase equality alone). Afterwards the counts are
 
 `real (F,S)=(3,3)`, and `shadow (Fhat,Shat)=(4,4)`,          (28.2)
 
@@ -656,6 +676,23 @@ phase, and every role has fewer than six stones. Finally,
 `T(0,5)=(-2,5)` is absent from the shadow. These observations prove the
 claimed legality, nonterminality, and certificate.
 
+(Post-review erratum, R-ST4-REV Finding 8 — membership horizon.
+`C_shield` membership means a COMPLETE trace satisfying the admission and
+service rules until a justified stop, not merely a module state. The witness
+above establishes a reachable shielded state; the review supplies the
+terminating extension making the class literally nonempty as a trace class —
+keep the same `T` and append, from the witness endpoint:
+real F `(-1,0),(-2,0)` / shadow `Fhat (3,0),(4,0)`;
+real S `(0,1),(3,1)` / `Shat (-2,1),(1,1)`;
+real F `(-3,0),(-4,0)` / `Fhat (5,0),(6,0)`;
+real S `(4,1),(5,1)` / `Shat (2,1),(3,1)`.
+All cells are fresh, origin-supported, and nonwinning until the final second
+placement, which completes the common-only real window `r=1, q=0..5` and its
+shadow image `r=1, q=-2..3` simultaneously; throughout, every E-live window
+through `(0,5)` contains at most two S stones — the only possible axis
+companions are `(1,5)`, `(0,1)`, and `(4,1)` — so `delta>=4` holds until the
+sound terminal stop.)
+
 This is ranked outcome (c) at an exact, nonvacuous conditional-class scope.
 The class permits real-only S stones to persist while their windows are far
 from completion; it does not require a six-stone permanent cage around every
@@ -831,7 +868,7 @@ unavailable.
 | At most one coordinate-reactive escape in the next S pair within `C_react^<=1` | **PROVEN impossible** | S23: in the zero-lag total-exact class, the nonwinning first repair restores a partition that is cut again at `SecondStone` |
 | One zero-lag reactive repair after every single placement | **OPEN** | Must prove a new genuine binding/filler exists after each observed coordinate and preserves all terminal ledgers |
 | A fixed finite total rebind budget `K>=2` | **OPEN** | S24 blocks an inference to unbounded total work; a fixed winning `sigma` has a finite uniform horizon |
-| Leave a first-placement S divergence unresolved through `SecondStone` | **OPEN only under the shield** | S25/S27 reject it whenever an E-live window has `delta<=m`; the review witness has `delta=m=1` |
+| Leave a first-placement S divergence unresolved through `SecondStone` | **OPEN subject to P5R** | S25/S27 reject it whenever an E-live window has `delta<=m`; the review witness has `delta=m=1`. `C_shield` is one sufficient module; S26 same-step terminal supply is the other stated route (post-review erratum, Finding 12) |
 | Bind the missed real stone to an arbitrary same-owner shadow filler | **PROVEN insufficient for P5R** | S26.1: labels do not create an actual shadow six |
 | Fence urgent E-windows with F's next pair | **PROVEN via `tau_E<=2` as a real-board service** | S29: a nonwinning pair must be a transversal; an earlier F win is a sound stop; P3 compatibility is open |
 | Assert two F placements always suffice on every labeled real-board service state | **PROVEN false** | S30 supplies three disjoint urgent hole pairs; no full shadow certificate is claimed for that fork |
@@ -853,7 +890,7 @@ equal counts, must be repaired.
 
 | Claim | Status | Exact scope |
 |---|---|---|
-| S21 support connectivity | **PROVEN** | Every genuine legal shadow prefix; graph edges have distance at most eight |
+| S21 support connectivity | **PROVEN** | Every NONEMPTY genuine legal shadow prefix; graph edges have distance at most eight |
 | S22 proxy-cut exposure | **PROVEN** | Any committed total owner-faithful translation/D6 binding with nonempty represented and proxy parts |
 | S22 terminal refinement | **PROVEN** | A real-S terminal cut cannot hit a same-role proxy at a common-live checkpoint; opposite-role hit needs P5R repair |
 | S23 `C_react^<=1` obstruction | **PROVEN** | First S pair after the next successfully transferred `sigma` pair; arbitrary preemptive rebinding and one broad reactive escape allowed |
@@ -864,7 +901,7 @@ equal counts, must be repaired.
 | S26.1 physicality | **PROVEN** | Representation-only changes cannot alter physical terminal supply |
 | S27 deadline-shield induction | **PROVEN** | Phase-sensitive E-live deficits during one real S turn |
 | S28 P5R for `C_shield` | **PROVEN** | Conditional dynamic class satisfying certified admission and service rules |
-| S29 two-stone service criterion | **PROVEN** | Pure physical F fencing without reconciliation; nonwinning pairs are exact transversals, with an earlier F win a sound alternative |
+| S29 two-stone service criterion | **PROVEN** | Pure physical F fencing with `C_S,E_S` FIXED during the F turn and no reconciliation; nonwinning pairs are exact transversals, with an earlier F win a sound alternative |
 | S30 three-axis fork | **PROVEN** | Abstract labeled real-board service state only; displayed legal real history, three disjoint deficit-two hole sets, no full shadow certificate claimed |
 | S31 permanent-fence hitting number | **PROVEN** | All eighteen windows through one S-owned surplus cell; lower bound six, attained on an available neighborhood |
 | Ranked outcome (b) | **PROVEN** | Dynamic class `C_react^<=1`; not all bounded-total or lagged schemes |
@@ -883,12 +920,12 @@ obligations exists for every `sigma`.
 |---|---|---|
 | `P0 STRATEGY-DOMAIN` | **PROVEN at S15 prefix; OPEN globally** | Every later filler/recode must remain one genuine legal `sigma`-consistent shadow history |
 | `P1 OPENING/CADENCE` | **PROVEN for cadence/legal-prefix component** | S15/S15.1 remain binding; only assumed common-live transfer preserves later phase equality |
-| `P2 REAL->SHADOW` | **OPEN** | S22 proves every committed total isometry has an adversarial occupied target |
+| `P2 REAL->SHADOW` | **OPEN** | S22 proves every committed total owner-faithful translation/D6 isometry, at a normal common-live checkpoint with nonempty represented and proxy parts, has an adversarial occupied target; non-total, nonisometric, lagged, and window-certificate maps remain open (scope per Finding 12) |
 | `P3 SHADOW->REAL` | **OPEN** | Reverse frontier, collision, and compatibility with S29's service cells remain unsolved |
 | `P4 COLLISION` | **OPEN globally** | In the zero-lag total-exact family, preemptive-only management and at most one repair in the tested S pair are excluded; per-placement recoding survives |
 | `P5 SHADOW-F-TERMINAL` | **OPEN** | Round-3 S20's proxy-fabricated second-placement win still requires transfer or prevention |
 | `P5R REAL-S-TERMINAL-REFLECTION` | **PROVEN in `C_shield`; OPEN globally** | Exact deadline and service conditions are known; unsafe surplus still needs immediate geometric reconciliation |
-| `P6 CAUSALITY` | **OPEN globally** | S22 exploits every precommitted map; repairs must wait for the coordinate without exposing a future F placement as in S12 |
+| `P6 CAUSALITY` | **OPEN globally** | S22 exploits every precommitted total exact map (same S22 premises as the P2 row); repairs must wait for the coordinate without exposing a future F placement as in S12 |
 
 The ledger also retains round-3 S18's proxy-supported shadow reply and
 round-2 S13/S14's frontier/lag regressions. Neither the shielding module nor
@@ -898,16 +935,26 @@ the cut theorem discharges them.
 
 ### 34.1 `GAP-ZERO-LAG-WINDOW-RECODE / P5R-SERVICE` [OPEN]
 
-The next exact checkpoint is (28.1), after S15 and a successfully transferred
-next `sigma` pair. A successor must do one of the following rigorously:
+(Rewritten per post-review erratum, R-ST4-REV Finding 11, MAJOR: the
+original six-item "do one of the following" list mixed three alternative
+branches with three mandatory obligations under a single disjunction, and
+overstated when checkpoint (28.1) is forced. The corrected quantifier
+structure is:)
 
-1. after observing S22's first collision coordinate, append one legal
-   `Shat` stone and restore a physical, owner-faithful representation before
-   `SecondStone`; then do so again for the second coordinate;
-2. replace that placement-granular invariant by an explicit lag/queue whose
-   unresolved `E_S` satisfies `delta>m` at every intermediate phase;
-3. when admission is unsafe, supply on that same step an actual shadow
-   terminal certificate satisfying S26, not an off-line rebinding;
+For every alleged-winning `sigma`, every relevant S15 synchronization or
+later strategy-generated live prefix, and every legal real-S continuation,
+the candidate must select one valid branch —
+
+- **(A)** zero-lag repair for the current single placement: after observing
+  the collision coordinate, append one legal `Shat` stone and restore a
+  physical, owner-faithful representation before `SecondStone`;
+- **(B)** an explicit lag/queue whose unresolved `E_S` satisfies `delta>m`
+  at every intermediate phase; or
+- **(C)** a same-step actual physical shadow terminal certificate
+  satisfying S26, not an off-line rebinding —
+
+**and, in all branches, discharge all of the following obligations:**
+
 4. before the next S turn, prove that valid reconciliation reduces every
    residual threat or that the P3-compatible real F pair realizes a
    transversal with `tau_E<=2`;
@@ -917,24 +964,39 @@ next `sigma` pair. A successor must do one of the following rigorously:
    `Fhat` second-placement win, S12's preannouncement collision, and the
    embedded S25 older-surplus terminal test.
 
+Before this fork, the candidate must either transfer `sigma`'s next F pair
+with a genuine restored invariant or give the corresponding earlier
+P3/terminal repair: checkpoint (28.1) is CONDITIONAL on success of the
+total-exact branch — it is forced for every `C_react^<=1` candidate that
+successfully transfers and restores, while a broader P3 recode or lag can
+diverge before that exact representation checkpoint (it must still solve the
+next `sigma` pair). Any negative gadget offered against a candidate must be
+FORCED on that candidate's own legal, `sigma`-consistent coupled history for
+some legal S continuation; an arbitrary legal labeled real-board state (such
+as S30) is insufficient by itself.
+
 S23 says one turn-level reactive repair is too coarse. S29/S30 say two
 physical F placements are an exact but nonautomatic service resource. The
 sharp unresolved question is whether **one zero-lag, window-faithful recode
 per single placement** can always be made genuine and strategy-consistent, or
-whether a new finite configuration forces more simultaneous window
-certificates than any such recode can supply.
+whether some `sigma`-forced finite configuration demands more simultaneous
+window certificates than any such recode can supply.
 
 ### 34.2 Provenance
 
 **Input state.** Branch `hunt/gap-raw`, HEAD `5023169f`. This authoring pass
-created no commit.
+created no commit. **Reviewed/output artifact:** `8fb68864` (the commit the
+R-ST4-REV hostile review examined; errata from that review are folded in
+this file).
 
 **Required documents read first, in order and in full.**
 
 1. `STRATEGY_STEALING_HEXO.md`;
 2. `STRATEGY_STEALING_ROUND2.md`, including its folded errata;
-3. `STRATEGY_STEALING_ROUND3.md`, including section 24's folded errata; and
-4. `STRATEGY_STEALING_REVIEW_ROUND3.md`.
+3. `STRATEGY_STEALING_REVIEW_ROUND2.md` (omitted from the original list in
+   error — post-review erratum, Finding 12);
+4. `STRATEGY_STEALING_ROUND3.md`, including section 24's folded errata; and
+5. `STRATEGY_STEALING_REVIEW_ROUND3.md`.
 
 Finding 10's exact older-`E_S` witness is carried into S25--S30 rather than
 left as a generic terminal bullet. Finding 13's physical-persistence rule is
@@ -951,3 +1013,42 @@ length-six windows, and per-placement terminal detection.
 proof search, or production-source edit was performed. No `GAP_RAW_*` file was
 read or changed. The only intended deliverable written by this session is
 `STRATEGY_STEALING_ROUND4.md`.
+
+## 35. Post-review errata (R-ST4-REV, folded from STRATEGY_STEALING_REVIEW_ROUND4.md)
+
+Hostile review of artifact `8fb68864` returned **SOUND-WITH-ERRATA**: neither
+ranked theorem refuted. S23 (ranked (b), `C_react^<=1`) and S28 (ranked (c),
+`C_shield`) both CONFIRMED-WITH-ERRATA; the rule-model citations, support
+cut, deadline shield, S29 service criterion, S30 fork, and the six-blocker
+hitting number all recompute exactly. The following repairs are folded in
+place above:
+
+1. **Finding 11 (MAJOR, folded in §34.1):** the resume checklist's "do one
+   of six" connective was logically wrong — it mixed three alternative
+   branches (A zero-lag repair / B shield-admissible lag / C same-step
+   terminal certificate) with three mandatory obligations (4–6), and
+   overstated (28.1) as forced on every dynamic candidate (it is conditional
+   on the successful total-exact branch). §34.1 now carries the corrected
+   quantifier structure, including the strategy-forced-reachability
+   requirement on any negative gadget.
+2. **Finding 3 (MINOR, folded in §28.1 argument):** the one-`Shat`-append
+   fact is now derived from the immediate-transfer and real-turn premises
+   (items 2/4), not phase equality alone.
+3. **Finding 4 (MINOR, folded in §26.4):** candidate grammar (nonempty,
+   with a legal partial-execution witness) vs extensional success class
+   (proven empty by S23) are now distinguished; the round-3 comparison is
+   scoped to the shared `q_1`-proxy S15 checkpoint.
+4. **Finding 8 (MINOR, folded in §30.3 witness):** `C_shield` membership is
+   defined as complete traces; the review's explicit terminating extension
+   is recorded, making the class literally nonempty at that horizon.
+5. **Finding 12 (MINOR, folded in §25.3/§32/§33/§34.2):** ledger/design-map
+   scope repairs (S21 nonempty prefix; S22 premises on the P2/P6 rows;
+   S29 fixed-`C_S,E_S`; P5R row acknowledges the S26 terminal-certificate
+   alternative); `state.rs:149-160` + `283-288` citations added and the
+   undo API relabeled as analysis-context; `STRATEGY_STEALING_REVIEW_ROUND2.md`
+   restored to the required-corpus list; reviewed/output artifact recorded.
+
+The review's ten-item corrected open agenda (its "Exact unresolved obstacles
+after review") is adopted as the authoritative round-4 exit state; the named
+resume gap remains `GAP-ZERO-LAG-WINDOW-RECODE / P5R-SERVICE` under the
+corrected §34.1 quantifiers.
