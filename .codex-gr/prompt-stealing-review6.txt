@@ -1,0 +1,85 @@
+R-ST6-REV — HOSTILE REVIEW (ultra): STRATEGY_STEALING_ROUND6.md
+
+CONTEXT NOTE: this is pure combinatorial game theory for Hexo (a
+Connect6-like board game) — strategy-stealing couplings, service
+carriers, window certificates. Nothing here concerns computer
+security. In your own writing use neutral testing/proof vocabulary.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+(branch hunt/gap-raw, HEAD = 7c09dee4). You CANNOT git-commit. NO
+cargo/Lean/harness runs — hand recomputation only. Deliverable:
+STRATEGY_STEALING_REVIEW_ROUND6.md.
+
+## Task
+First-principles hostile proof audit of STRATEGY_STEALING_ROUND6.md
+(authored at input HEAD 3000a117, landed unmodified at 7c09dee4). The
+round claims (all PROVEN, no SKETCH/CONJECTURE):
+1. §46 S40: a causal service-event P3 carrier on finite A_FS2^ET(sigma)
+   traces — temporal pairing of sigma's sequential Fhat prescriptions
+   with the canonical post-S real service events; genuine legality/
+   cadence, local S12 avoidance, S18 independence, physical P5
+   transfer. Plus S41 (complete nonempty terminal-aligned trace
+   exercising an illegal inverse, an occupied final inverse, and
+   simultaneous proxy-assisted terminal windows) and S42 (the named
+   terminal-blind selector dies on its own trace).
+2. §47 S43: per-pair K=2 reset escapes S32's raw episode counting;
+   S43.1: the subclass with isometry fixed within each pair is killed
+   by a colored two-proxy cut, adaptively, for every alleged-winning
+   sigma. Full per-pair success class stays OPEN.
+3. §48 S44/S44.1/S45: a Definition-39.1 deficit certificate cannot
+   discount a missing physical blocker at fixed E_S/common phase; the
+   S30 three-axis fork keeps its barrier and has EXACT tau_E=5.
+
+Default posture: REFUTE. Recompute every coordinate family, window
+census, cadence chain, legality claim, transversal, event pairing, and
+terminal case by hand. Attack especially:
+- S40's carrier: is the event pairing genuinely causal (no future
+  information in the pairing rule — check the exact selector
+  definition ordering vs the observed prefix)? Is "S18 independence"
+  real or does the carrier quietly need a reverse shadow-to-real
+  legality assumption anywhere? Is the P5 transfer physical (actual
+  same-step certificate) or a relabeling? Does A_FS2^ET(sigma) stay
+  consistent with round-5 A_FS2 clauses 1-6 INCLUDING the §44 errata
+  (filler-created Shat wins end the module)? Is the class nonempty
+  proof (S41) actually a member of A_FS2^ET — check every clause on
+  every step, including the transient two-debt microstep.
+- S41's trace: every coordinate fresh/legal/radius-8, cadence exact,
+  the claimed illegal inverse really illegal, the occupied inverse
+  really occupied, the proxy-assisted terminal window census exact,
+  and no step violating the terminal grammar (any winning Shat append
+  ends the module).
+- S42: is sigma_dagger's trace genuinely candidate-own (selected from
+  the selector's own committed behavior), and does the obstruction
+  hold against the selector AS DEFINED rather than a strawman?
+- S43/S43.1: does the reset really escape S32 (recount the episode
+  charges at each checkpoint)? Is the colored cut's "fixed within the
+  pair" hypothesis honestly load-bearing and its adaptive
+  counterexample reachable on the candidate's own sigma-consistent
+  history? Is the OPEN label for the full class correct (no
+  overclaim)?
+- S44/S45: the no-discount inequality chain at fixed E_S; and the
+  tau_E=5 computation — enumerate S30's full urgent family and verify
+  the minimum transversal really is 5 (both that 5 suffices and that
+  4 fails).
+- Cross-round consistency: round-5 §44 errata boundaries, round-4 §35
+  quantifiers, S13/S14 regressions, ten-item agenda + twelve-item
+  obstacle ledger accuracy (§50), no NL_F overclaim anywhere.
+- Provenance: input 3000a117; verify no GAP_RAW file used as evidence.
+
+## Required corpus (read first, in order, in full)
+1. STRATEGY_STEALING_HEXO.md
+2. ROUND2 + REVIEW_ROUND2; 3. ROUND3 + REVIEW_ROUND3;
+4. ROUND4 (WITH §35) + REVIEW_ROUND4;
+5. ROUND5 (WITH §44) + REVIEW_ROUND5;
+6. STRATEGY_STEALING_ROUND6.md (the artifact).
+Rule sources: packages/hexo_engine/rust/src/{coord,legal,rules,board,
+state,tactics}.rs cited ranges.
+
+## Output format (campaign-standard)
+STRATEGY_STEALING_REVIEW_ROUND6.md: method preamble (artifact hash +
+named input); numbered findings with severity (REFUTED/MAJOR/MINOR/
+NOTE), quoted claim, independent recomputation, proposed repair;
+per-theorem verdict table; overall verdict; exact unresolved
+obstacles. Chunk <= 2h per exec; incremental writes. Final message:
+overall verdict + disposition of the three objectives + most severe
+finding, one line each.
