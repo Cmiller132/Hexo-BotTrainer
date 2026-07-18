@@ -1,0 +1,71 @@
+R-ST4 — RESEARCH ROUND (ultra): GAP-PROXY-RETIRE-OR-RECODE + P5R — dynamic proxy management toward NL_F
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+(branch hunt/gap-raw, HEAD = 5023169f). You CANNOT git-commit. DOC-ONLY:
+NO cargo, no Lean builds, no harness runs. NOTE: another session (R-G3)
+works in this directory on GAP_RAW_PROOF_ROUND5.md — do not touch
+GAP_RAW_* files. Deliverable: STRATEGY_STEALING_ROUND4.md only (+ short
+final message).
+
+## Context (read first, in order)
+1. STRATEGY_STEALING_HEXO.md (round 1: S3/S4, rules formalization).
+2. STRATEGY_STEALING_ROUND2.md post-errata (surplus calculus S5-S7,
+   frontier-gap formula Γ(A,E), fixed-map obstruction class,
+   Gale-Stewart D1/D2 bridge).
+3. STRATEGY_STEALING_ROUND3.md post-errata INCLUDING §24 errata
+   (two-proxy synchronization theorem — S4 permanently absorbed,
+   transfer-conditional; C_static² impossibility via proxy-preimage
+   collision; the frontier/collision/fabrication obligation ledger; and
+   the review-added obligation P5R REAL-S-TERMINAL-REFLECTION with its
+   exact witness — an older E_S stone completing a real six invisible
+   to the shadow).
+4. STRATEGY_STEALING_REVIEW_ROUND3.md (all findings — the repairs are
+   binding: retirement/movement are representation-level re-binding
+   operations, the real board is append-only; the synchronization
+   dichotomy is per-synchronization).
+
+## The goal
+Design and prove correct (or refute) a DYNAMIC proxy-management
+invariant: after round 3's synchronization, maintain a representation
+invariant that survives every legal continuation — retiring, moving, or
+recoding proxies as representation-level operations — discharging the
+full obligation ledger INCLUDING P5R.
+
+Ranked outcomes (any one rigorous result = complete round):
+(a) A PROVEN dynamic coupling: an invariant class + update rules such
+    that from the synchronized checkpoint, for every legal real
+    continuation, the coupling maintains legality, strategy-consistency,
+    and win-reflection (both directions: shadow-F̂ wins transfer to real
+    F; real-S sixes — including through E_S per P5R — reflect to
+    shadow-Ŝ wins no later). Via the D2 bridge this establishes NL_F.
+    Expected hard core: the E_S bookkeeping — every real-only surplus
+    stone must be either represented (rebound to a shadow stone),
+    fenced away from all live six-windows, or serviced before a window
+    through it can complete.
+(b) A PROVEN impossibility for a well-defined dynamic class: e.g. every
+    representation-level scheme whose rebinding map has bounded lag or
+    bounded total rebind count, exactly characterizing what any
+    survivor must do (unbounded/adaptive rebinding, etc.).
+(c) A PROVEN partial: discharge P5R alone on a nontrivial invariant
+    class (e.g. prove a fencing lemma — the opener can always service
+    E_S-threatening windows within the surplus tempo it owns — even if
+    other ledger items stay open), with exact residuals named.
+(d) Honest partial: the invariant design space mapped, each candidate
+    killed or left open with the exact obstacle, and a sharpened
+    successor obligation.
+
+## Hard constraints
+Rounds 1-3 formalization verbatim; new rule facts cited to engine
+source file:line; all standing refutations respected (S3/S4 at their
+scopes, round-2 fixed-map class, round-3 C_static²). Gadget legality
+checked (radius-8 growth, 1-then-2:2 cadence, mid-turn wins, i16 safe
+region). The real board is append-only; proxies/rebinding exist only in
+the representation invariant. Draws per the meta-level framing;
+determinacy only via D1/D2. Every claim PROVEN / SKETCH / CONJECTURE /
+OPEN / CITED(-FROM-MEMORY); no status inflation.
+
+## Output
+STRATEGY_STEALING_ROUND4.md continuing numbering (sections 25+).
+Incremental disk writes; chunk <= 2h per exec; honest partial with a
+named resume point is success. Final message: ranked outcome achieved,
+PROVEN vs SKETCH list, resume point.
