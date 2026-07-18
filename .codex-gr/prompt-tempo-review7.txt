@@ -1,0 +1,85 @@
+R-G5-REV — HOSTILE REVIEW (ultra): GAP_RAW_PROOF_ROUND7.md
+
+CONTEXT NOTE: this is pure combinatorial game theory for Hexo (a
+Connect6-like board game) — tempo invariants, window families, defense
+policies. Nothing here concerns computer security. Use neutral proof
+vocabulary in your own writing.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+(branch hunt/gap-raw, HEAD = fbae2f7b). You CANNOT git-commit. NO
+cargo/Lean/harness runs — hand recomputation only. Deliverable:
+GAP_RAW_REVIEW_ROUND7.md.
+
+## Task
+First-principles hostile proof audit of GAP_RAW_PROOF_ROUND7.md
+(authored at input HEAD 8ac6caae, landed unmodified at fbae2f7b). The
+round claims (all PROVEN):
+1. R7.1: at EVERY one of the six round-6 plateau epochs P_i^pl, every
+   legal servicing pair containing the hub h=(10,0) admits a legal
+   nonterminal Attacker triangle-fan response with M>=3 (eq 72), with
+   the expanded chronology (b_sigma, then every d has an e returning
+   tau>=3, then completion).
+2. R7.2: at final P_stock, EVERY legal Defender pair a has a response
+   b with M>=3 (eq 73), i.e. min_a R_1 >= 3 (eq 74) — a universal
+   local stop state excluding every tie refinement including one-ply
+   Bellman. P_stock verdict NOT-REPAIRABLE.
+3. R7.2.1: the first plateau ray reply (-24,8),(-32,8) already admits
+   the section-60 triangle response — a shorter fixed-S_T refutation.
+4. L13.6: tau=0 epoch whose alive count-three residual family has
+   hitting number <=2 implies M<=2 (extends L12.6 through two
+   count-three labels; explicitly NOT a renewal theorem).
+
+Default posture: REFUTE. Recompute every label census, count,
+transversal, window family, legality chain, and M/tau evaluation by
+hand. Attack especially:
+- §60 triangle fans: the consecutive-triple demand lemma (60.1) — is
+  the demand census exhaustive over all three axis families and D6
+  images? The exact south/north responses (60.2): legality
+  (radius-8, emptiness), nonterminality, and the claimed M>=3 —
+  enumerate the Defender's ALL candidate service pairs, not a subset;
+  verify no single pair hits all demanded windows. The forced rebuild
+  (60.3): does an untouched fan really regenerate after the exchange —
+  check the exact stone additions do not accidentally block a fan
+  window or create a Defender count that changes the census.
+- §61 P_stock stop state: the three pairwise action-disjoint threat
+  regions — verify pairwise disjointness of their SERVICE sets (a pair
+  has only two stones; disjointness of three demands is the crux);
+  the adaptive fork (61.2) — is the case split over Defender pairs
+  exhaustive (pairs splitting across regions, pairs outside all
+  regions, pairs inside one)?
+- Quantifier honesty: R7.1 is per-plateau-epoch with the hub in a —
+  does any claim quietly extend to non-hub pairs at plateaus i<5 (it
+  must NOT, only R7.2 covers all pairs and only at final P_stock)?
+  Q2/Q3 OPEN statements accurate; "universal local stop" scope (61.3)
+  honest — from the reached state only, no root-forcing claim.
+- R7.2.1: recheck that the FIRST plateau (post-diamond, pre-stock)
+  really contains the triangle-fan preconditions — the stock labels
+  added later must not be load-bearing for the section-60 census at
+  i=0.
+- L13.6: the residual-transversal condition — verify the proof
+  handles the interaction between a count-three label's completion
+  and the count-<=2 stock (does servicing the count-three family
+  break the lower-stock invariant?); strict nonvacuity example (63.2)
+  coordinates and census; the explicit non-renewal boundary (63.3).
+- Consistency with the binding corpus: round-6 §58 errata (plateau
+  wording, exact M=4/tau=4), L12.2/L12.4 usage, the round-5 Finding-4
+  quantifier contract (Q1/Q2/Q3 tags), continue-from-§58 numbering.
+- Provenance: input 8ac6caae named; no GAP_RAW-external evidence; no
+  STRATEGY_STEALING file used as evidence.
+
+## Required corpus (read first, in order, in full)
+1. GAP_RAW_PROOF_ROUND4.md + REVIEW_ROUND4
+2. GAP_RAW_PROOF_ROUND5.md (WITH §47) + REVIEW_ROUND5
+3. GAP_RAW_PROOF_ROUND6.md (WITH §58 — binding) + REVIEW_ROUND6
+4. GAP_RAW_PROOF_ROUND7.md (the artifact)
+(Rounds 2-3 as needed for inherited definitions.) Do NOT read any
+STRATEGY_STEALING_* file as evidence.
+
+## Output format (campaign-standard)
+GAP_RAW_REVIEW_ROUND7.md: method preamble (artifact hash + named
+input); numbered findings with severity (REFUTED/MAJOR/MINOR/NOTE),
+quoted claim, independent recomputation, proposed repair; per-theorem
+verdict table; overall verdict; exact unresolved obstacles. Chunk
+<= 2h per exec; incremental writes. Final message: overall verdict +
+R7.1/R7.2/R7.2.1/L13.6 dispositions + most severe finding, one line
+each.

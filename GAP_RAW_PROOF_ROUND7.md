@@ -47,8 +47,11 @@ response pair `b` such that
 `M(P_i^pl+D@a_1+D@a_2+A@b_1+A@b_2)>=3`.                 (72)
 
 Consequently no hub-pre-empting pair at any named plateau epoch satisfies
-`max_b M(P_{a,b})<=2`. The requested `P_stock` answer is therefore
-**NOT-REPAIRABLE**, not merely unresolved.
+`max_b M(P_{a,b})<=2`: `P_stock` is **not repairable by hub pre-emption**.
+The full universal **NOT-REPAIRABLE** verdict — over EVERY legal Defender
+pair, hub-containing or not — follows from R7.2 below, whose adaptive
+all-pair fork independently supplies the missing non-hub cases (review
+round-7 Finding 9).
 
 Expanded through the forced completion, the negative-gadget chronology is
 
@@ -607,7 +610,7 @@ displayed state class only; it supplies no all-response renewal theorem.
 |---|---|---|---|
 | GAP-RAW | Q2 counterroute / Q3 target | **OPEN** | `P_stock` is locally lost, but it is not forced from a strict root against every Defender strategy; no universal Defender policy is proved |
 | R7.1 hub-pre-emption at all six plateau epochs | Q1/Q3 | **PROVEN** | For every hub-containing pair, one of `G_-`,`G_+` is untouched and L13.3 returns `M>=3` |
-| Named `P_stock` decision | Q1/Q3 | **PROVEN: NOT-REPAIRABLE** | No hub-pre-empting pair has one-ply worst-response value at most two |
+| Named `P_stock` decision | Q1/Q3 | **PROVEN: NOT-REPAIRABLE** | R7.2's adaptive all-pair fork: EVERY legal Defender pair at final `P_stock` has one-ply worst-response value at least three (R7.1 supplies the hub-containing cases at all six plateaus) |
 | R7.2 universal local `P_stock` stop theorem | Q1/Q3 | **PROVEN** | Adaptive fork among `H,G_-,G_+`; every Defender pair returns `M>=3` under one legal response; Q2 root reachability remains open |
 | `min_a R_1(P_stock,a)>=3` | Q3 diagnostic | **PROVEN** | Equation (74); all legal pairs are immediate-`TEMPO` minimizers on the plateau |
 | Strategy-independent reachability of `P_stock` | Q2 | **OPEN** | Round 6 reaches it only against fixed `S_T` |
@@ -723,7 +726,12 @@ the minimum separation for the R5.2 value theorem remains open.
 ### 66.2 Provenance and no-run record
 
 **Input commit:** `8ac6caaec8668e77e7c4097c12336e0154c73841` on branch
-`hunt/gap-raw`. This authoring pass creates no commit.
+`hunt/gap-raw`. This authoring pass creates no commit (sentence scoped to
+the authoring session). **Reviewed/output artifact:**
+`fbae2f7ba13fcf8446e134d3d8cdfb7063688510` (blob
+`12e91ef709dd7d27037ac87f6cd3641fa7b2f067`, SHA-256
+`1758de37f0988b0dd332a692e73dadeb74e0e881842672c03c605a98a03601bb`),
+added post-review per round-7 Finding 14.
 
 During authoring, an unrelated concurrent job advanced the observed shared
 branch HEAD to `7c09dee43842bdb73cd3fdfc9e144d51b3b9b62f`. A final read-only
@@ -749,3 +757,37 @@ in rounds 2--3. No `STRATEGY_STEALING_*` file was read as evidence.
 The test-gated harness, production rules, strict verifier, and Lean sources
 were not modified. No Cargo command, Lean build, harness, game/search
 executable, generated enumeration, or git commit was run.
+
+## 67. Errata and strengthenings folded from the round-7 hostile review
+
+`GAP_RAW_REVIEW_ROUND7.md` (ultra, reviewed artifact `fbae2f7b`) returned
+**SOUND-WITH-MINOR-ERRATA**: no REFUTED or MAJOR finding; R7.1, R7.2,
+R7.2.1, and L13.6 all CONFIRMED at their stated scopes. Folds and
+confirmations of record:
+
+1. **(Finding 9, MINOR — folded)** The universal `P_stock`
+   NOT-REPAIRABLE verdict is now attributed to R7.2's adaptive
+   all-pair fork rather than to R7.1's hub-only consequence; R7.1's
+   closing sentence is qualified to "not repairable by hub
+   pre-emption," and the §64 ledger row cites the all-pair basis.
+   The verdict itself was always mathematically correct.
+2. **(Finding 14, MINOR — folded)** §66.2 now records the landed
+   reviewed/output artifact `fbae2f7b` (blob + SHA-256), alongside
+   the authoring-scoped no-commit sentence.
+3. **(Review completion of record)** The final `P_stock` label census
+   was independently completed: exact `(n_1,n_2)=(127,55)`, no count
+   at least three — the plateau premises hold with an explicit census
+   rather than an inherited one.
+4. **(Confirmations of record)** L13.1's demand census is axis- and
+   D6-complete; the south/north fan responses are legal, nonterminal,
+   and census-exact; L13.3 exhausts every legal next Defender pair
+   and the completion chronology; L13.4's three action regions are
+   pairwise disjoint in the required physical sense; R7.2's adaptive
+   fork covers cross-region and outside pairs; R7.2.1 is independent
+   of all five later stock turns; L13.6 handles arbitrary lower stock
+   at initialization-only scope; Q1/Q2/Q3 quantifier discipline and
+   the local-stop scope statement are honest.
+
+The review's closing unresolved-obstacle list (Q2 root forcing,
+pre-`P_stock` Q3 intervention, renewal, amortized invariants,
+separation sharpness) is the authoritative open state for round 8.
