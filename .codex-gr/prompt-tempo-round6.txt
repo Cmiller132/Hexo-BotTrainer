@@ -1,0 +1,71 @@
+R-G4 — TEMPO ROUND 6 (ultra): GAP-HUB-FANOUT-REACHABILITY, quantifier-correct
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+(branch hunt/gap-raw, HEAD = aed0fecb). You CANNOT git-commit. You do NOT
+have the host cargo slot: NO cargo/Lean/harness runs this round — this is a
+pure hand-proof authoring round. Deliverable: GAP_RAW_PROOF_ROUND6.md.
+
+## Required corpus (read first, in order, in full)
+1. GAP_RAW_PROOF_ROUND2.md
+2. GAP_RAW_PROOF_ROUND3.md + GAP_RAW_REVIEW_ROUND3.md
+3. GAP_RAW_PROOF_ROUND4.md (with folded errata) + GAP_RAW_REVIEW_ROUND4.md
+4. GAP_RAW_PROOF_ROUND5.md (WITH ITS FOLDED SECTION-47 ERRATA — binding) +
+   GAP_RAW_REVIEW_ROUND5.md
+
+## The state you inherit (round-5 exit, review-confirmed)
+- Complete sealed-pencil first-return classification (L11.1-L11.4);
+  one-cycle M<=2 value theorems R5.1 (isolated) and R5.2 (radius-21
+  separated).
+- S_T provably rejects the transverse-seal entrance (R5.3/R5.3.1, strict
+  0<2); the first concrete S_T state is the axial-cleanup handoff produced
+  by pair (33), with 24 surviving off-axis count-one labels.
+- The strict shared hub (L11.6, Phi_H<1, n_2=5/n_1=4) cascades
+  M: 2 -> >=3 under forced service (L11.7); embedding it behind two remote
+  count-five gadgets refutes unrestricted statewise equation-(22) closure
+  (R5.4). The intact hub is defusable by D@0 (L11.8).
+- MAJOR erratum (Section 46, binding): hub reachability decomposes into
+  THREE differently quantified problems. Every claim you make MUST be
+  labeled with which one it addresses:
+  (Q1) fixed-S_T hub reachability — refutes S_T only;
+  (Q2) strategy-independent hub forcing (∃P_0 ∀S ∃α) — the GAP-RAW
+       counterroute;
+  (Q3) positive universal initialization/repair (∀P_0 ∃S ∀α) — must also
+       exclude ALL other escape classes (other M>2 fanouts, cross-hull
+       interactions, nested-derivative next turns, all responses from the
+       axial-cleanup handoff).
+
+## Round-6 objectives (in priority order)
+1. **Q1 decision push**: from the R5.3.1 axial-cleanup handoff, either
+   (a) construct an explicit S_T-consistent Attacker continuation that
+   assembles the five count-two shared-hub stock of L11.6 on an Attacker
+   handoff before Defender occupies the hub cell — every position exact,
+   every S_T reply derived from its actual definition (minimize TEMPO,
+   then lexicographic), every placement radius-8 legal on the 2:2 cadence —
+   or (b) prove a causal pre-emption invariant showing S_T's actual replies
+   kill every hub-assembly attempt from that handoff class. Partial
+   progress with exact intermediate positions is valuable; label anything
+   unfinished OPEN honestly.
+2. **Q3 structural progress**: if Q1 resolves either way, extract what it
+   says about a repaired policy — if S_T fails, name the exact decision
+   point and what a Bellman-aware objective must see; if S_T survives,
+   state the invariant precisely and identify which OTHER escape classes
+   (cross-hull, nested-derivative, other fanouts) it does or does not
+   cover.
+3. **Initialization slice (secondary)**: any strict-root tau=0 class beyond
+   the two round-5 instances where M<=2 initialization is provable.
+
+## Binding rules (campaign-standard)
+Hand proofs only; PROVEN vs OPEN vs REFUTED discipline; no machine-verified
+claims (no VERIFIED/[UNRUN] labels); statement fidelity — do not weaken
+inherited definitions (I(P), tau, TEMPO eq. 20, M eq. 21, eq. 22 as state
+condition); respect ALL prior review boundaries (no canonical J, no
+pointwise Theta_2<1 renewal, no B_3<1, no overbroad dormant charges, no
+global pairing, R4.7.1 only in narrowed form). Continue definitions and
+equation numbering from round 5 including Section 47. Provenance: record
+input commit AND note this pass creates no commit; the orchestrator commits.
+Status ledger section mandatory (every named gap gets a row, including
+GAP-HUB-FANOUT-REACHABILITY as the Q1/Q2 subproblem and the broader
+GAP-CASCADE/INITIALIZATION/REPAIR gaps). Hostile-review attack surface
+section mandatory. Incremental disk writes; chunk <= 2h per exec. Final
+message: one-paragraph verdict per objective (RESOLVED/PARTIAL/OPEN) and
+the single sharpest next question.
