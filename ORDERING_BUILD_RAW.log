@@ -1,0 +1,10 @@
+2026-07-18T00:19:16.2531089-04:00 purpose=ordering_unit_final available_gib=15.343 free_physical_gib=15.332 cargo_processes=0
+    Finished `release` profile [optimized] target(s) in 0.06s
+     Running unittests rust\src\lib.rs (.target-codex\x86_64-pc-windows-msvc\release\deps\hexfield_eq-de26e3778420c4c2.exe)
+
+running 1 test
+test tss_solver::tests::ordering_study_offline_pass_reranks_without_mutating_children ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 141 filtered out; finished in 0.00s
+
+EXIT_CODE=0

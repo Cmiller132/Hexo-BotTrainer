@@ -41,6 +41,50 @@ use crate::tss_verify::{
     MAX_CERT_ROOT_STONES, MAX_CERT_WITNESSES,
 };
 
+#[cfg(test)]
+pub(crate) const ORDERING_STUDY_ORDERS: [&str; 7] = [
+    "baseline",
+    "zone_bound",
+    "census_distance",
+    "gate_adjacency",
+    "d_stone",
+    "census_zone_composite",
+    "zone_gate_composite",
+];
+
+/// One compact, post-solve observation. Per-child features live only on the
+/// cfg(test) child records; this is the offline result retained by the corpus
+/// harness instead of emitting a potentially enormous child trace.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OrderingStudyRecord {
+    pub(crate) depth: u32,
+    pub(crate) generated_children: u32,
+    pub(crate) pair_node: bool,
+    pub(crate) ranks: [u32; ORDERING_STUDY_ORDERS.len()],
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct OrderingStudyReport {
+    pub(crate) records: Vec<OrderingStudyRecord>,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static ORDERING_STUDY_REPORT: RefCell<OrderingStudyReport> = RefCell::new(OrderingStudyReport::default());
+}
+
+#[cfg(test)]
+pub(crate) fn begin_ordering_study_report() {
+    ORDERING_STUDY_REPORT.with(|slot| slot.borrow_mut().records.clear());
+}
+
+#[cfg(test)]
+pub(crate) fn take_ordering_study_report() -> OrderingStudyReport {
+    ORDERING_STUDY_REPORT.with(|slot| std::mem::take(&mut *slot.borrow_mut()))
+}
+
 // Test-only NQ6 census/PN telemetry. The production solver has no field,
 // branch, or callable entry point for this collector.
 #[cfg(test)]
@@ -1090,6 +1134,8 @@ impl TssSolver {
         let root = search.insert_root(state);
         search.run(state, root);
         #[cfg(test)]
+        search.finalize_ordering_study();
+        #[cfg(test)]
         {
             self.last_wide_root_numbers = Some((search.entries[root].pn, search.entries[root].dn));
         }
@@ -2134,6 +2180,107 @@ enum WidePnStepOutcome {
     Stalled,
 }
 
+/// Cheap generation-time observations used only by the offline ordering
+/// study. Smaller values are better except `gate_adjacency`, where larger is
+/// better. `zone_bound` is the maximum claimant-support distance needed to
+/// cover every placement in the child; `d_stone` is the corresponding minimum.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct OrderingChildFeatures {
+    zone_bound: u16,
+    census_distance: u16,
+    gate_adjacency: u16,
+    d_stone: u16,
+}
+
+#[cfg(test)]
+struct OrderingFeatureContext {
+    claimant_stones: Vec<HexCoord>,
+    claimant_windows: Vec<(u8, Vec<HexCoord>)>,
+    defender_gate_cells: Vec<HexCoord>,
+}
+
+#[cfg(test)]
+impl OrderingFeatureContext {
+    fn from_state(state: &RustHexoState, claimant: Player) -> Self {
+        let claimant_stones = state
+            .board()
+            .occupied_cells()
+            .iter()
+            .copied()
+            .filter(|&coord| state.board().get(coord) == Some(claimant))
+            .collect();
+        let mut claimant_windows = Vec::new();
+        let mut defender_gate_cells = Vec::new();
+        for entry in state.board().windows().entries() {
+            let Some(owner) = entry.active_player() else {
+                continue;
+            };
+            let count = entry.count(owner);
+            if owner == claimant && count > 0 {
+                claimant_windows.push((count, entry.empty_cells()));
+            } else if owner == claimant.other() && count >= 4 {
+                defender_gate_cells.extend(entry.empty_cells());
+            }
+        }
+        defender_gate_cells.sort_unstable_by_key(|coord| raw_coord_key(*coord));
+        defender_gate_cells.dedup();
+        Self {
+            claimant_stones,
+            claimant_windows,
+            defender_gate_cells,
+        }
+    }
+
+    fn features(&self, placements: &[HexCoord]) -> OrderingChildFeatures {
+        let distances = placements
+            .iter()
+            .map(|&placed| {
+                self.claimant_stones
+                    .iter()
+                    .map(|&stone| hex_distance(placed, stone))
+                    .min()
+                    .and_then(|distance| u16::try_from(distance).ok())
+                    .unwrap_or(u16::MAX)
+            })
+            .collect::<Vec<_>>();
+        let d_stone = distances.iter().copied().min().unwrap_or(u16::MAX);
+        let zone_bound = distances.iter().copied().max().unwrap_or(u16::MAX);
+        let post_census = self
+            .claimant_windows
+            .iter()
+            .map(|(count, empties)| {
+                count.saturating_add(
+                    placements
+                        .iter()
+                        .filter(|placed| empties.contains(placed))
+                        .count()
+                        .try_into()
+                        .unwrap_or(u8::MAX),
+                )
+            })
+            .max()
+            .unwrap_or(0)
+            .min(6);
+        let gate_adjacency = placements
+            .iter()
+            .filter(|&&placed| {
+                self.defender_gate_cells
+                    .iter()
+                    .any(|&gate| hex_distance(placed, gate) <= 1)
+            })
+            .count()
+            .try_into()
+            .unwrap_or(u16::MAX);
+        OrderingChildFeatures {
+            zone_bound,
+            census_distance: u16::from(6u8.saturating_sub(post_census)),
+            gate_adjacency,
+            d_stone,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct WidePnChild {
     mv: WidePnMove,
@@ -2152,6 +2299,8 @@ struct WidePnChild {
     /// also the neutral value for one-placement and defender children, so the
     /// root-only tier prior cannot perturb their established ordering.
     first_width_tier: u8,
+    #[cfg(test)]
+    ordering: OrderingChildFeatures,
 }
 
 #[derive(Clone, Debug)]
@@ -3302,6 +3451,8 @@ struct WidePnSearch<'store> {
     #[cfg(test)]
     closure_counters: bool,
     #[cfg(test)]
+    ordering_study: bool,
+    #[cfg(test)]
     closure_stats: RefCell<ClosureDebtStats>,
     #[cfg(test)]
     closure_pair_nodes: HashMap<usize, ClosurePairNodeProfile>,
@@ -3556,6 +3707,8 @@ impl<'store> WidePnSearch<'store> {
             live_ge3_seed_nanos: std::cell::Cell::new(0),
             #[cfg(test)]
             closure_counters: std::env::var("TSS_CLOSURE_COUNTERS").ok().as_deref() == Some("1"),
+            #[cfg(test)]
+            ordering_study: std::env::var("TSS_ORDERING_STUDY").ok().as_deref() == Some("1"),
             #[cfg(test)]
             closure_stats: RefCell::new(ClosureDebtStats::default()),
             #[cfg(test)]
@@ -5174,6 +5327,71 @@ impl<'store> WidePnSearch<'store> {
         );
     }
 
+    #[cfg(test)]
+    fn finalize_ordering_study(&self) {
+        if !self.ordering_study {
+            return;
+        }
+        let mut records = Vec::new();
+        for entry in &self.entries {
+            let WidePnNode::Branch {
+                kind: WidePnKind::Choice,
+                children,
+            } = &entry.node
+            else {
+                continue;
+            };
+            if entry.pn != 0 || children.is_empty() {
+                continue;
+            }
+            let Some(winning_index) = children
+                .iter()
+                .position(|child| self.child_numbers(child).0 == 0)
+            else {
+                continue;
+            };
+            let key = |order: usize, index: usize, feature: OrderingChildFeatures| {
+                let baseline = u32::try_from(index).unwrap_or(u32::MAX);
+                let zone = u32::from(feature.zone_bound);
+                let census = u32::from(feature.census_distance);
+                let gate = u32::from(u16::MAX.saturating_sub(feature.gate_adjacency));
+                let stone = u32::from(feature.d_stone);
+                match order {
+                    0 => [baseline, 0, 0, 0, 0],
+                    1 => [zone, baseline, 0, 0, 0],
+                    2 => [census, baseline, 0, 0, 0],
+                    3 => [gate, baseline, 0, 0, 0],
+                    4 => [stone, baseline, 0, 0, 0],
+                    5 => [census, zone, stone, gate, baseline],
+                    6 => [zone, gate, census, stone, baseline],
+                    _ => unreachable!("ordering study key index"),
+                }
+            };
+            let winning_feature = children[winning_index].ordering;
+            let ranks = std::array::from_fn(|order| {
+                let winning_key = key(order, winning_index, winning_feature);
+                1u32.saturating_add(
+                    children
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, child)| key(order, *index, child.ordering) < winning_key)
+                        .count()
+                        .try_into()
+                        .unwrap_or(u32::MAX),
+                )
+            });
+            records.push(OrderingStudyRecord {
+                depth: u32::try_from(entry.depth).unwrap_or(u32::MAX),
+                generated_children: u32::try_from(children.len()).unwrap_or(u32::MAX),
+                pair_node: children
+                    .iter()
+                    .all(|child| matches!(child.mv, WidePnMove::Pair(_, _))),
+                ranks,
+            });
+        }
+        ORDERING_STUDY_REPORT.with(|slot| slot.borrow_mut().records.extend(records));
+    }
+
     fn refresh(&mut self, id: usize) {
         self.recompute(id);
     }
@@ -5426,6 +5644,10 @@ impl<'store> WidePnSearch<'store> {
         let gate_started = self.closure_counters.then(Instant::now);
         let gate = WideTurnGate::build(state, self.claimant);
         #[cfg(test)]
+        let ordering_context = self
+            .ordering_study
+            .then(|| OrderingFeatureContext::from_state(state, self.claimant));
+        #[cfg(test)]
         let gate_build_nanos = gate_started
             .map(|started| u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX))
             .unwrap_or(0);
@@ -5545,6 +5767,11 @@ impl<'store> WidePnSearch<'store> {
                         prior,
                         urgent_block: wide_move_contains_defender_block(mv, &defender_blocks),
                         first_width_tier,
+                        #[cfg(test)]
+                        ordering: ordering_context
+                            .as_ref()
+                            .map(|context| context.features(&[first, second]))
+                            .unwrap_or_default(),
                     });
                 }
             }
@@ -5587,8 +5814,17 @@ impl<'store> WidePnSearch<'store> {
             self.claimant,
             WidthOptions::vcf_pair_complete(),
         );
+        #[cfg(test)]
+        let ordering_context = self
+            .ordering_study
+            .then(|| OrderingFeatureContext::from_state(state, self.claimant));
         let mut children = Vec::new();
         for candidate in candidates {
+            #[cfg(test)]
+            let ordering = ordering_context
+                .as_ref()
+                .map(|context| context.features(&[candidate.coord]))
+                .unwrap_or_default();
             let Ok((result, delta)) = state.apply_with_delta(Placement {
                 coord: candidate.coord,
             }) else {
@@ -5651,6 +5887,8 @@ impl<'store> WidePnSearch<'store> {
                     prior,
                     urgent_block: candidate.defender_block,
                     first_width_tier: 0,
+                    #[cfg(test)]
+                    ordering,
                 });
             }
         }
@@ -5707,6 +5945,8 @@ impl<'store> WidePnSearch<'store> {
                 prior,
                 urgent_block: false,
                 first_width_tier: 0,
+                #[cfg(test)]
+                ordering: OrderingChildFeatures::default(),
             });
         }
         children
@@ -5777,6 +6017,8 @@ impl<'store> WidePnSearch<'store> {
                         prior: final_prior,
                         urgent_block: false,
                         first_width_tier: 0,
+                        #[cfg(test)]
+                        ordering: OrderingChildFeatures::default(),
                     }
                 })
                 .collect(),
@@ -10066,6 +10308,7 @@ mod tests {
             prior: WidePnPrior::UNIFORM,
             urgent_block: wide_move_contains_defender_block(mv, &defender_blocks),
             first_width_tier: 0,
+            ordering: OrderingChildFeatures::default(),
         };
         let mut children = vec![
             child(WidePnMove::One(ordinary)),
@@ -10127,6 +10370,7 @@ mod tests {
             },
             urgent_block: false,
             first_width_tier: 0,
+            ordering: OrderingChildFeatures::default(),
         };
         let tied = [child(5, 3), child(-5, 3)];
         assert_eq!(
@@ -10177,6 +10421,72 @@ mod tests {
     }
 
     #[test]
+    fn ordering_study_offline_pass_reranks_without_mutating_children() {
+        begin_ordering_study_report();
+        let state = RustHexoState::new();
+        let mut search = WidePnSearch::new(Player::Player0, 0, 10, 0, 100, 10);
+        search.ordering_study = true;
+        let root = search.insert_root(&state);
+        let child = |q, result, ordering| WidePnChild {
+            mv: WidePnMove::Pair(HexCoord::new(q, 0), HexCoord::new(q + 1, 0)),
+            result,
+            entry: None,
+            future_key: None,
+            prior: WidePnPrior::UNIFORM,
+            urgent_block: false,
+            first_width_tier: 0,
+            ordering,
+        };
+        let original = vec![
+            child(
+                0,
+                WidePnChildResult::Pending,
+                OrderingChildFeatures {
+                    zone_bound: 2,
+                    census_distance: 3,
+                    gate_adjacency: 0,
+                    d_stone: 5,
+                },
+            ),
+            child(
+                3,
+                WidePnChildResult::Pending,
+                OrderingChildFeatures {
+                    zone_bound: 1,
+                    census_distance: 2,
+                    gate_adjacency: 1,
+                    d_stone: 4,
+                },
+            ),
+            child(
+                6,
+                WidePnChildResult::ClaimantTactical,
+                OrderingChildFeatures {
+                    zone_bound: 0,
+                    census_distance: 1,
+                    gate_adjacency: 2,
+                    d_stone: 3,
+                },
+            ),
+        ];
+        search.entries[root].node = WidePnNode::Branch {
+            kind: WidePnKind::Choice,
+            children: original.clone(),
+        };
+        search.recompute(root);
+        search.finalize_ordering_study();
+        let report = take_ordering_study_report();
+        assert_eq!(report.records.len(), 1);
+        assert_eq!(report.records[0].ranks, [3, 1, 1, 1, 1, 1, 1]);
+        let WidePnNode::Branch { children, .. } = &search.entries[root].node else {
+            panic!("synthetic ordering root must remain a branch")
+        };
+        assert_eq!(children[0].mv, original[0].mv);
+        assert_eq!(children[1].mv, original[1].mv);
+        assert_eq!(children[2].mv, original[2].mv);
+    }
+
+    #[test]
     fn wide_pn_sequential_root_honors_width_tier_after_urgency() {
         let search = WidePnSearch::new(Player::Player0, 0, 10, 0, 100, 10);
         assert!(search.prefer_width_tier_at_depth(0));
@@ -10193,6 +10503,7 @@ mod tests {
             },
             urgent_block: false,
             first_width_tier,
+            ordering: OrderingChildFeatures::default(),
         };
         let tier_zero = child(0, 20, 0);
         let tier_one = child(3, 3, 1);
@@ -10268,6 +10579,7 @@ mod tests {
             prior: WidePnPrior::UNIFORM,
             urgent_block: false,
             first_width_tier,
+            ordering: OrderingChildFeatures::default(),
         };
         let children = [
             pair_child(0, tier_zero_entry, 0),
@@ -10349,6 +10661,7 @@ mod tests {
             },
             urgent_block: false,
             first_width_tier: 0,
+            ordering: OrderingChildFeatures::default(),
         };
         let children = [child(0, Some(refuted)), child(1, None), child(2, None)];
 
@@ -10385,6 +10698,7 @@ mod tests {
             },
             urgent_block: false,
             first_width_tier: 0,
+            ordering: OrderingChildFeatures::default(),
         };
         let children = [child(0, Some(proven)), child(1, None), child(2, None)];
 
@@ -10437,6 +10751,7 @@ mod tests {
             prior: WidePnPrior::UNIFORM,
             urgent_block: false,
             first_width_tier: 0,
+            ordering: OrderingChildFeatures::default(),
         };
         search.entries[root].node = WidePnNode::Branch {
             kind: WidePnKind::Universal {
@@ -10521,6 +10836,7 @@ mod tests {
             prior: WidePnPrior::UNIFORM,
             urgent_block: false,
             first_width_tier: 0,
+            ordering: OrderingChildFeatures::default(),
         };
         search.entries[root].node = WidePnNode::Branch {
             kind: WidePnKind::Universal {
@@ -10587,6 +10903,7 @@ mod tests {
                 prior: WidePnPrior::UNIFORM,
                 urgent_block: false,
                 first_width_tier: 0,
+                ordering: OrderingChildFeatures::default(),
             })
             .collect();
         search.entries[root].node = WidePnNode::Branch {
@@ -10633,6 +10950,7 @@ mod tests {
             prior: WidePnPrior::UNIFORM,
             urgent_block: false,
             first_width_tier: 0,
+            ordering: OrderingChildFeatures::default(),
         };
 
         let refuted = vec![
@@ -10729,6 +11047,7 @@ mod tests {
                     prior: WidePnPrior { pn: 1, dn: 1 },
                     urgent_block: false,
                     first_width_tier: 0,
+                    ordering: OrderingChildFeatures::default(),
                 },
                 WidePnChild {
                     mv: WidePnMove::One(HexCoord::new(6, 0)),
@@ -10738,6 +11057,7 @@ mod tests {
                     prior: WidePnPrior { pn: 2, dn: 1 },
                     urgent_block: false,
                     first_width_tier: 0,
+                    ordering: OrderingChildFeatures::default(),
                 },
             ],
         };
@@ -10815,6 +11135,7 @@ mod tests {
                     prior,
                     urgent_block: false,
                     first_width_tier: 0,
+                    ordering: OrderingChildFeatures::default(),
                 }],
             };
         }
@@ -10875,6 +11196,7 @@ mod tests {
             prior,
             urgent_block: false,
             first_width_tier: 0,
+            ordering: OrderingChildFeatures::default(),
         };
         assert_eq!(search.child_numbers(&lazy), (prior.pn, prior.dn));
     }
@@ -10920,6 +11242,7 @@ mod tests {
             prior: edge_prior,
             urgent_block: false,
             first_width_tier: 0,
+            ordering: OrderingChildFeatures::default(),
         };
         let virtual_child = child(WideFutureKey::Virtual(key.clone()));
         let attacker_child = child(WideFutureKey::OnSelection(key.clone()));
@@ -10953,6 +11276,7 @@ mod tests {
             prior,
             urgent_block: true,
             first_width_tier: 0,
+            ordering: OrderingChildFeatures::default(),
         };
 
         assert_eq!(
@@ -10988,6 +11312,7 @@ mod tests {
                 prior,
                 urgent_block: false,
                 first_width_tier: 0,
+                ordering: OrderingChildFeatures::default(),
             }],
         };
         search.recompute(root);
@@ -11068,6 +11393,7 @@ mod tests {
                 prior,
                 urgent_block: false,
                 first_width_tier: 0,
+                ordering: OrderingChildFeatures::default(),
             }],
         };
         search.recompute(root);

@@ -24,7 +24,9 @@ use crate::tss_core::{
     CertVerify, ClosureDebtStats, DeepSolve, ProofStatus, SolveCaps, SolveGoal, ThresholdScaleStats,
 };
 use crate::tss_solver::{
-    round3_shadow_certificate, CapResumeError, CapResumeSession, TssSolver, WidthOptions,
+    begin_ordering_study_report, round3_shadow_certificate, take_ordering_study_report,
+    CapResumeError, CapResumeSession, OrderingStudyReport, TssSolver, WidthOptions,
+    ORDERING_STUDY_ORDERS,
 };
 use crate::tss_verify::TssVerifier;
 
@@ -48,6 +50,87 @@ fn status_name(status: ProofStatus) -> &'static str {
         ProofStatus::Win => "WIN",
         ProofStatus::Loss => "LOSS",
         ProofStatus::Unknown => "UNKNOWN",
+    }
+}
+
+fn ordering_rank_bin(rank: u32) -> usize {
+    match rank {
+        1 => 0,
+        2 => 1,
+        3 => 2,
+        4 => 3,
+        5..=8 => 4,
+        9..=16 => 5,
+        17..=32 => 6,
+        _ => 7,
+    }
+}
+
+fn print_ordering_summaries(label: &str, report: &OrderingStudyReport) {
+    let scopes = [
+        ("all_choice", None, None),
+        ("pair", Some(true), None),
+        ("pair", Some(true), Some((0u32, 7u32))),
+        ("pair", Some(true), Some((8u32, 15u32))),
+        ("pair", Some(true), Some((16u32, u32::MAX))),
+    ];
+    for (scope, pair_only, depth_band) in scopes {
+        let selected = report
+            .records
+            .iter()
+            .filter(|record| pair_only.is_none_or(|pair| record.pair_node == pair))
+            .filter(|record| {
+                depth_band.is_none_or(|(low, high)| (low..=high).contains(&record.depth))
+            })
+            .collect::<Vec<_>>();
+        if selected.is_empty() {
+            continue;
+        }
+        let band = depth_band
+            .map(|(low, high)| {
+                if high == u32::MAX {
+                    format!("{low}plus")
+                } else {
+                    format!("{low}-{high}")
+                }
+            })
+            .unwrap_or_else(|| "all".to_owned());
+        let mut child_counts = selected
+            .iter()
+            .map(|record| record.generated_children)
+            .collect::<Vec<_>>();
+        child_counts.sort_unstable();
+        let child_sum = child_counts
+            .iter()
+            .map(|&value| u64::from(value))
+            .sum::<u64>();
+        let child_median = child_counts[(child_counts.len() - 1) / 2];
+        for (order, order_name) in ORDERING_STUDY_ORDERS.iter().enumerate() {
+            let mut ranks = selected
+                .iter()
+                .map(|record| record.ranks[order])
+                .collect::<Vec<_>>();
+            ranks.sort_unstable();
+            let mut hist = [0u64; 8];
+            for &rank in &ranks {
+                hist[ordering_rank_bin(rank)] = hist[ordering_rank_bin(rank)].saturating_add(1);
+            }
+            let count = u64::try_from(ranks.len()).unwrap_or(u64::MAX);
+            let rank_sum = ranks.iter().map(|&rank| u64::from(rank)).sum::<u64>();
+            let cdf = |limit: u32| ranks.iter().filter(|&&rank| rank <= limit).count();
+            let rank_median = ranks[(ranks.len() - 1) / 2];
+            println!(
+                "ORDERING_SUMMARY label={label} scope={scope} band={band} order={order_name} nodes={count} rank1={} median={rank_median} mean={:.6} cdf1={} cdf2={} cdf4={} cdf8={} cdf16={} hist={hist:?} children_median={child_median} children_mean={:.6}",
+                cdf(1),
+                rank_sum as f64 / count as f64,
+                cdf(1),
+                cdf(2),
+                cdf(4),
+                cdf(8),
+                cdf(16),
+                child_sum as f64 / count as f64,
+            );
+        }
     }
 }
 
@@ -191,6 +274,7 @@ fn tss_corpus_check() {
     let cap_resume = std::env::var("TSS_CAP_RESUME").ok().as_deref() == Some("1");
     let live_ge3_seed = std::env::var("TSS_LIVE_GE3_SEED").ok().as_deref() == Some("1");
     let closure_counters = std::env::var("TSS_CLOSURE_COUNTERS").ok().as_deref() == Some("1");
+    let ordering_study = std::env::var("TSS_ORDERING_STUDY").ok().as_deref() == Some("1");
     let threshold_counters = std::env::var("TSS_THRESHOLD_COUNTERS").ok().as_deref() == Some("1");
     let threshold_delta = std::env::var("TSS_THRESHOLD_DELTA").unwrap_or_else(|_| "off".to_owned());
     if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_SHARED_FRAGMENTS") {
@@ -249,6 +333,13 @@ fn tss_corpus_check() {
             "TSS_THRESHOLD_COUNTERS does not match gate expectation",
         );
     }
+    if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_ORDERING_STUDY") {
+        assert_eq!(
+            expected,
+            if ordering_study { "1" } else { "0" },
+            "TSS_ORDERING_STUDY does not match gate expectation",
+        );
+    }
     if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_THRESHOLD_DELTA") {
         assert_eq!(
             expected, threshold_delta,
@@ -256,7 +347,7 @@ fn tss_corpus_check() {
         );
     }
     println!(
-        "CORPUS_MODE shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={} cap_resume={} live_ge3_seed={} closure_counters={} threshold_counters={} threshold_delta={} tt_bytes_cap={tt_bytes_cap}",
+        "CORPUS_MODE shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={} cap_resume={} live_ge3_seed={} closure_counters={} ordering_study={} threshold_counters={} threshold_delta={} tt_bytes_cap={tt_bytes_cap}",
         if shared_fragments { "on" } else { "off" },
         if lazy_frontier { "on" } else { "off" },
         if interior_gate { "on" } else { "off" },
@@ -264,6 +355,7 @@ fn tss_corpus_check() {
         if cap_resume { "on" } else { "off" },
         if live_ge3_seed { "on" } else { "off" },
         if closure_counters { "on" } else { "off" },
+        if ordering_study { "on" } else { "off" },
         if threshold_counters { "on" } else { "off" },
         threshold_delta,
     );
@@ -307,6 +399,7 @@ fn tss_corpus_check() {
     let mut resume_total_reentries = 0u64;
     let mut closure_total = ClosureDebtStats::default();
     let mut threshold_total = ThresholdScaleStats::default();
+    let mut ordering_total = OrderingStudyReport::default();
     let mut stage_refresh_total = 0u64;
     let mut live_ge3_seed_scans = 0u64;
     let mut live_ge3_seed_nanos = 0u64;
@@ -337,6 +430,7 @@ fn tss_corpus_check() {
                 tt_bytes_cap,
                 semantic_horizon: u32::MAX,
             };
+            begin_ordering_study_report();
             let t0 = Instant::now();
             let (result, resume_meta) = if let Some(solver) = resume_solver.as_ref() {
                 if resume_session.is_none() && !resume_unsupported {
@@ -379,6 +473,7 @@ fn tss_corpus_check() {
                 (solver.solve(&pos.state, &caps), None)
             };
             let ms = t0.elapsed().as_secs_f64() * 1e3;
+            let ordering_report = take_ordering_study_report();
             if cap_resume {
                 resume_root_ms += ms;
                 resume_total_ms += ms;
@@ -422,6 +517,12 @@ fn tss_corpus_check() {
                 result.stats.live_ge3_seed_scans,
                 result.stats.live_ge3_seed_nanos as f64 / 1_000_000.0,
             );
+            if ordering_study {
+                print_ordering_summaries(&format!("{}@{cap}", pos.id), &ordering_report);
+                if result.status == ProofStatus::Win {
+                    ordering_total.records.extend(ordering_report.records);
+                }
+            }
             stage_refresh_total = stage_refresh_total.saturating_add(result.stats.stage_refreshes);
             live_ge3_seed_scans =
                 live_ge3_seed_scans.saturating_add(result.stats.live_ge3_seed_scans);
@@ -590,6 +691,9 @@ fn tss_corpus_check() {
         threshold_total.sentinel_increment_clamps,
         threshold_total.sentinel_sum_hits,
     );
+    if ordering_study {
+        print_ordering_summaries("solved_win_total", &ordering_total);
+    }
     println!(
         "CORPUS_DONE failures={} shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={} cap_resume={} resume_wall_ms={resume_total_ms:.3} resume_reentries={resume_total_reentries}",
         failures.len(),
