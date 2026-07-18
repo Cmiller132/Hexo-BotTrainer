@@ -56,7 +56,8 @@ and its limitations.
 **CITED (local measurement).** The retained +1 counter run took 499.85 s,
 versus an uncontaminated 495.94 s baseline.  Exclusive descent/state traversal
 outside expansion was 13.93% of baseline wall.  Proportional attribution by
-the visit/revisit ratio assigned 34.79 s, or 7.01% of wall, to revisits.  This
+the visit/revisit ratio assigned 34.80 s, or 7.02% of wall, to revisits
+(conventional rounding; the source report's 34.79 s / 7.01% is truncation).  This
 was an attribution, not a separately timed revisit bucket
 (`HUNT_REPORT_THRESHOLD_SCALE.md:23-34`).  The raw totals were 9,080,708
 recursive visits, 4,574,016 revisits, 8,464,552 threshold-cross returns,
@@ -134,8 +135,20 @@ saturating subtraction.  The implementation and its own summary are at
 `tss_solver.rs:4008-4019` and `:4139-4203`.  A call returns when either live
 number reaches its supplied threshold (`:4069-4085`).
 
-**CITED (code).** The selected delta value enters the scheduling equations only
-through the competitive second-best term.  The test-arm plumbing separately
+**CITED (code); ERRATUM (review Finding 6).** The selected delta value
+enters the scheduling equations only through the competitive second-best
+term — but the official off-versus-2 A/B is exact only below the
+sentinel: any `Some(delta)`, unlike `None`, also clamps inherited PN/DN
+thresholds, second-best additions, and the unit progress floors to
+`PN_INFINITY`.  Retained `THRESHOLD_FULL_D1_RAW.log` shows `Some(1)`
+reproduced the off run's integer structural totals exactly (9,080,708 /
+4,574,016 / 8,464,552 / 8,056,474 / 6,188,156), making the clamp
+observationally inert in the +1 counters; the retained delta-2 aggregate
+has no sentinel-hit counter, so attributing every delta-2 schedule
+difference solely to second-best widening requires an identically clamped
+control or a sentinel-hit assertion.  This does not change the empirical
+fact that shipped +1 beat the tested delta-2 implementation.  The
+test-arm plumbing separately
 clamps inherited-threshold and increment arithmetic to `PN_INFINITY`
 (`tss_solver.rs:3999-4005`, `:4033-4042`).  All test arms retain a unit
 child-progress floor, $\min(\text{current}+1,\texttt{PN_INFINITY})$, equal to
@@ -204,7 +217,16 @@ precise assumptions under which it is valid.
 
 ## 4. Formal model
 
-### 4.1 Engine-faithful numerical core
+### 4.1 Idealized numerical core below saturation
+
+**ERRATUM (review Finding 1).** Model M uses a formal $\infty$; the engine
+clamps at `PN_INFINITY = 10^9` (`tss_solver.rs:1977`, `:3999-4005`,
+`:4033-4042`, `:4959-4969`), so at the sentinel the progress floor is not
+strict.  Saturation is therefore an explicit engine exclusion of this
+model, alongside the policy exclusions listed below.  Finite-sentinel
+realization ranges: T2 transfers to the engine for $2\le q<I$ and
+$1\le M<I-1$ (a literal current-engine prior also has $q\le37$); C2 is a
+valid formal asymptotic, not an unbounded fixed-sentinel engine trace.
 
 **DEFINITION (model M).** Fix integers $H\ge1$ and $\delta\ge1$.  A search
 arena is a finite rooted acyclic AND/OR
@@ -312,8 +334,8 @@ selected-cutoff deepening.  Unary node types may alternate; min and sum agree
 on one child.
 
 **PROVEN (F1 exact count).** The $d+1$ stages have caps $0,1,\ldots,d$.
-At cap $k<d$, the run activates $v_0,\ldots,v_{k+1}$, expands the reopened
-frontier through $v_k$, and marks $v_{k+1}$ as the selected cutoff: $k+2$
+At cap $k<d$, the run activates $v_0,\ldots,v_{k+1}$, expands the current
+frontier $v_k$ (reopened when $k>0$), and marks $v_{k+1}$ as the selected cutoff: $k+2$
 activations and two expansion events.  At cap $d$, it activates
 $v_0,\ldots,v_d$ and expands the terminal: $d+1$ activations and one event.
 Therefore
@@ -875,3 +897,38 @@ class—frontier accuracy can be worth much more than the re-traversal it causes
 the aggregate log does not identify a literal worst-case gadget.  Frontier-band
 mass, not prior scale alone, is the right next predictor.  R-T1.1 is the named
 point at which to test it.
+
+## 13. Errata folded from the hostile review (R-T1-REV)
+
+The review (`docs/DFPN_RETRAVERSAL_REVIEW.md`) confirmed all ten formal
+results (no refutation, no downgrade to SKETCH) with the following
+scoped corrections, which are hereby part of this document:
+
+1. **Model scope (MAJOR, folded in §4.1):** the numerical core is
+   idealized below saturation; `PN_INFINITY` clamping is an explicit
+   engine exclusion.  T2's engine realization range is $2\le q<I$,
+   $1\le M<I-1$.
+2. **Official A/B scope (MAJOR, folded in §2.2):** the off-versus-2
+   comparison also toggles sentinel clamping; exactness holds below the
+   sentinel, with the `Some(1)` structural-equality control cited and
+   the missing delta-2 sentinel-hit counter noted.
+3. **T3 hypotheses (MINOR):** the family $S_M$ additionally assumes all
+   DN priors are 1 and root thresholds are infinite (the run analysis
+   uses both).  The overestimate parameter is the winner-prior
+   overestimate ratio **in model M**, not a claim for every global
+   heuristic-ratio definition.
+4. **T5 engine transfer (MINOR):** inequality (10) is a formal-model
+   call ceiling; for direct engine use it requires numerical minimum
+   selection and $s\le I-\delta$.  The transferable weighted form
+   charges each return by its actual margin
+   (`effective_threshold - entry_score`); the sum of those margins is
+   at most $PV$.  (10) is not a counter ceiling for every production
+   threshold-cross return.
+5. **D1 statement (MINOR):** the duplication family quantifies positive
+   integers $k,M$, and the counted quantity is direct z-entry
+   expansions (one terminal-on-expansion entry per z).  The D1-to-T2
+   production composition remains SKETCH.
+6. **F1 prose (MINOR, folded in §5):** at cap 0 the frontier vertex is
+   fresh, not reopened.
+7. **Attribution rounding (MINOR, folded in §2.1):** 34.80 s / 7.02%
+   under conventional rounding.
