@@ -328,7 +328,15 @@ cell from L14.2: delete an easy or singleton family, and stabilize an adjacent
 diagonal family into its nested outer tail.  Every promoted old count-one
 bridge outside a diagonal extreme is one of L14.1's two singleton row labels,
 so one residual cell deletes it outright.  Fill an unused placement only
-after the effective cells.
+after the effective cells, with the SAFE-FILLER restriction (review round-8
+Finding 5): choose the standard max-`q` filler outside every surviving
+derivative support (or, for an easy second-axis deletion, a residual cell
+away from the at-most-one low-only outer cell of a retained derivative);
+if a filler nevertheless kills a derivative's high label, remove that
+derivative from the named list. Arbitrary deletion is monotone for the
+scalar `TEMPO` bound but does not preserve the exact nested-pair clause of
+`C_cap`; the restriction repairs exact class membership without changing
+R8.1, R8.2, or the `TEMPO<=2` conclusion.
 L14.4 then gives `TEMPO<=2` for the actual serviced handoff.  Thus
 
 `M(P_{a^dagger,b})<=2` for every `b`.                       (92)
@@ -655,8 +663,13 @@ and every legal next Defender pair has exact handoff `TEMPO=2`.
 - If only `p'` is occupied, play `p` and whichever of `y_-1,y_1` is not the
   other Defender cell.
 
-The first placement is adjacent to old Attacker stock and the second is
-adjacent to the first.  The five central lines are exactly
+Legality splits by template (review round-8 Finding 3): in each one-corner
+template the first placement is adjacent to old Attacker stock and the wing
+cell is adjacent to the first response; in the no-corner template
+`(p,p')=((0,1),(1,-1))` the two cells are at distance two, and each is
+INDEPENDENTLY adjacent to unchanged old stock (`p` to `c=(0,0)`; `p'` to
+`c` and `d=(1,0)`), so the ordered pair is legal either way. The five
+central lines are exactly
 
 | completion | five adjacent-pair central lines | occupied corner's line |
 |---|---|---|
@@ -807,7 +820,8 @@ the amortized-credit route remain **OPEN**.
 | Diamond shield alone is a one-ply local stop | Q3 negative alternative | **REFUTED** | R8.1 exhibits a safe action |
 | R8.2 one-stock test | Q3 | **PROVEN at exact `P_1^pl`** | Exact census `(33,16)`, stock stabilizer, extended bridge/tail audit |
 | `R_1(P_1^pl,a^dagger)=B_1(P_1^pl)=2` | Q3 diagnostic | **PROVEN EXACT** | Same exact witness and shield risk floor |
-| Dual near-trigger cap at later plateaux | Q3 | **OPEN** | No `V^-`, `W`, `V^+`, or `U^+` incidence audit is claimed |
+| Dual near-trigger cap at `P_2^pl,P_3^pl,P_4^pl` | Q3 | **OPEN** | No `V^-`, `W`, or `V^+` incidence audit is claimed |
+| Dual near-trigger cap at `P_5^pl=P_stock` | Q1/Q3 | **UNSAFE, `R_1>=3`** | By binding R7.2 (§67): every legal Defender action at final `P_stock` has a response with `M>=3`; the cap action is one such `a`. The earliest loss index in `{2,3,4,5}` remains unknown |
 | R8.3 complete earliest Q2 branch | Q2 | **PROVEN at one-level scope** | Enlarged untouched launch plus exhaustive raw action dichotomy |
 | Arbitrary initial root reply | Q2 | **ABSORBED / PROVEN** | One of three disjoint enlarged launch footprints is untouched |
 | Raw action quotient | Q2 | **PROVEN EXACT** | Survivor-block table; exact `tau=0,M=0`; twenty ordered minimizers |
@@ -903,7 +917,10 @@ artifact:** `GAP_RAW_PROOF_ROUND8.md` is the working-tree deliverable; no
 landed output commit exists during this no-commit pass, so no commit identity
 is fabricated.  Once the artifact is landed and reviewed, its landed identity
 must be added in the round-8 review/folded errata, following Sections 47, 58,
-and 67.
+and 67. **Landed/reviewed artifact (added post-review per Finding 11):**
+`c57da44286f75feb236e6da6c55cdd53e5ec2e68` (blob
+`6c460713444ff94758b5416debdfa5b27fa878ef`), byte-identical to the reviewed
+working-tree copy.
 
 The required corpus was read first, in this order and in full:
 
@@ -924,3 +941,39 @@ This pass did not modify the test-gated harness, production rules, strict
 verifier, Lean sources, or any unrelated working-tree file.  No Cargo command,
 Lean build, harness, game/search executable, generated enumeration, or git
 commit was run.
+
+## 76. Errata and strengthenings folded from the round-8 hostile review
+
+`GAP_RAW_REVIEW_ROUND8.md` (ultra, reviewed artifact `c57da442`) returned
+**SOUND-WITH-MINOR-ERRATA**: no REFUTED or MAJOR finding. R8.1 CONFIRMED
+with the crux held — the review independently verified the response
+enumeration is EXHAUSTIVE (remote, split, bridge, and separated same-axis
+pairs all covered; no missed response with `M>=3`; the cap's exact
+`(n_1,n_2)=(8,12)` inventory recomputed). §70 CONFIRMED (exact `P_1^pl`
+risk two, stock-assisted classes included). §71 CONFIRMED with one wording
+repair. R8.4 CONFIRMED with one bookkeeping repair. Folds:
+
+1. **(Finding 3, MINOR)** L14.9's legality sentence split by template:
+   the no-corner pair `(p,p')` is at distance two with each cell
+   independently adjacent to unchanged old stock; the one-corner
+   templates keep the adjacent-wing phrasing. No value changes.
+2. **(Finding 5, MINOR)** R8.4 gains the safe-filler clause: fillers are
+   chosen outside surviving derivative supports (max-`q` standard, or
+   away from the low-only outer cell for easy second-axis deletions),
+   else the killed derivative leaves the named list. Repairs exact
+   `C_cap` membership; R8.1/R8.2/`TEMPO<=2` unchanged.
+3. **(Finding 10, MINOR)** The later-plateau ledger row split:
+   `P_2..P_4^pl` OPEN; `P_5^pl=P_stock` UNSAFE with `R_1>=3` by binding
+   R7.2 — the earliest loss index in `{2,3,4,5}` is the open datum.
+4. **(Finding 11, MINOR)** §75 records the landed/reviewed artifact
+   identity `c57da442` (blob `6c460713`).
+
+**Review confirmations of record.** The cap is legal, servicing, and
+non-hub (Finding 1); §71 absorbs the root reply over the complete raw
+action quotient (Finding 2); every non-seal lozenge endpoint has exact
+`tau=0,M=2` and the double-corner seal is honestly unresolved (Finding 4);
+tail isolation, the exact witness, and the universal risk floor recompute
+(Finding 8); the `U^-` stock census preserves exact risk two (Finding 9);
+Q1/Q2/Q3 boundaries and the meaning of REPAIRABLE-AT-P0 are honest
+(Finding 12). The review's nine-item unresolved-obstacle list is the
+authoritative open state for round 9.

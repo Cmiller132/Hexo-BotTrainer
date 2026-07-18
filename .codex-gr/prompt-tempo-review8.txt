@@ -1,0 +1,74 @@
+R-G6-REV — HOSTILE REVIEW (ultra): GAP_RAW_PROOF_ROUND8.md
+
+CONTEXT NOTE: pure combinatorial game theory for Hexo (a Connect6-like
+board game). Nothing here concerns computer security. Use neutral
+proof vocabulary in your own writing.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+(branch hunt/gap-raw, HEAD = c57da442). You CANNOT git-commit. NO
+cargo/Lean/harness runs — hand recomputation only. Deliverable:
+GAP_RAW_REVIEW_ROUND8.md.
+
+## Task
+First-principles hostile proof audit of GAP_RAW_PROOF_ROUND8.md
+(authored at input a8a0b92d, landed unmodified at c57da442). Claims:
+1. §69 R8.1 (dual near-trigger cap): at P_0^pl the non-hub pair
+   a* = ((0,-1),(1,1)) satisfies max_b M(P_{a*,b}) <= 2 over EVERY
+   legal Attacker response — REPAIRABLE-AT-P0, and the repair is not
+   the hub. Includes the separated same-axis rank cover.
+2. §70: the same pair holds R_1 = 2 after one stock turn (P_1^pl).
+3. §71 Q2 deviation tree: the initial reply is absorbed; every
+   non-seal branch reaches an exact tau=0/M=2 lozenge; the
+   double-corner seal branch is honestly UNRESOLVED.
+4. §72 R8.4: a one-cycle C_cap renewal landing from exact P0/P1
+   (arbitrary-member renewal open).
+
+Default posture: REFUTE. This round's central claim is a POSITIVE
+max_b bound — the hardest kind to verify because it requires
+EXHAUSTIVE response enumeration. Attack especially:
+- R8.1's exhaustiveness: the claim quantifies over EVERY legal
+  nonterminal Attacker pair b. Verify the enumeration strategy
+  (window classes, near-trigger structure, the same-axis rank cover)
+  actually covers all pairs — including pairs far from the diamond
+  (do remote pairs trivially keep M<=2? the argument must say why),
+  pairs splitting across axes, and pairs that interact with the
+  shield pencils. Recompute M for the hardest named cases and
+  spot-check several unnamed ones yourself. A single missed b with
+  M>=3 REFUTES the round's headline.
+- The blocking geometry: a*=((0,-1),(1,1)) are exactly the two
+  triangle-fan trigger cells from round 7's b_-/b_+ (eq 76). Verify
+  occupying them really neutralizes BOTH fans (no third fan exists —
+  check all D6 images and other axes), and that the pair is legal and
+  in Serv(P_0^pl) (or that playing outside Serv is properly handled
+  by the plateau value analysis).
+- §70: after the U^- stock turn, the label census changes — verify
+  the R_1=2 computation accounts for the new stock labels'
+  interactions with a*, and that the Attacker cannot use the stock
+  stones as fan material.
+- §71: the deviation-tree case split — is "absorbed" exact
+  (recompute the initial-reply analysis); are the lozenge endpoints
+  really tau=0/M=2 (recompute); is the double-corner seal's
+  UNRESOLVED label honest (no soft claim leaks)?
+- §72 R8.4: the C_cap landing — statement fidelity to L13.6/L12.6
+  initialization classes; verify the one-cycle bookkeeping.
+- Quantifier honesty throughout (Q1/Q2/Q3 tags); consistency with
+  §58/§67 binding errata (esp. R7.2's universal stop at P_stock —
+  REPAIRABLE-AT-P0 must not contradict it: check the round explains
+  where between P1 and P_stock repairability is lost or leaves it
+  honestly open); provenance (input a8a0b92d + landed c57da442
+  recorded — flag if the landed hash is absent).
+
+## Required corpus (read first, in order, in full)
+1. GAP_RAW_PROOF_ROUND6.md (WITH §58) + REVIEW_ROUND6
+2. GAP_RAW_PROOF_ROUND7.md (WITH §67) + GAP_RAW_REVIEW_ROUND7
+3. GAP_RAW_PROOF_ROUND8.md (the artifact)
+(Rounds 2-5 as needed.) Do NOT read any STRATEGY_STEALING_* file as
+evidence.
+
+## Output format (campaign-standard)
+GAP_RAW_REVIEW_ROUND8.md: method preamble; numbered findings with
+severity (REFUTED/MAJOR/MINOR/NOTE), quoted claim, independent
+recomputation, proposed repair; per-theorem verdict table; overall
+verdict; exact unresolved obstacles. Chunk <= 2h per exec;
+incremental writes. Final message: overall verdict + R8.1/§70/§71/
+R8.4 dispositions + most severe finding, one line each.
