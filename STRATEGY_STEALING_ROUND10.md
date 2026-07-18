@@ -1105,3 +1105,24 @@ terminal prescription is appended?
 The secondary recurrence question is whether the protected-spare-line and
 quiet-prescription premises of `Q70^2` can be forced or repaired after every
 S70 entrance, rather than selected for one further cycle.
+
+## Review erratum (R-ST10-REV, folded)
+
+**Reviewed artifact:** this document, landed unmodified at `1bdaf02a`.
+**Review:** `STRATEGY_STEALING_REVIEW_ROUND10.md` (committed `f0cedc7f`).
+**Verdict:** REFUTED-AS-STATED (localized to S77.1).
+
+- S71 **CONFIRMED, PARTIAL** — genuine bounded asynchronous crossing of the
+  S58 cliff on the delimited class.
+- S73 **CONFIRMED** — exhaustive immediate-sleeve obstruction at the fixed
+  S70 bridge.
+- S75 **CONFIRMED conditionally** — one genuine second `R_1` cycle on nonempty
+  `Q70^2` (indefinite recurrence still OPEN).
+- S76 **CONFIRMED**.
+- **S77.1 REFUTED AS STATED.** Its seven gates admit `u=(0,3), v=(0,4)` with
+  `τ_E=1`, contradicting the claimed exact S70 endpoint. **Repair (per
+  review):** restrict S77.1 to `τ_E=0`; the ordered-pair classification then
+  holds. Treat the unrestricted S77.1 statement as withdrawn pending the
+  repaired re-derivation.
+- Fast OUTCOME and `NL_F` **CONFIRMED OPEN** — carrier results do not decide
+  `σ`.

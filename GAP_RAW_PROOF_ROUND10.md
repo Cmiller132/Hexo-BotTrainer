@@ -853,3 +853,18 @@ This is the required carry-forward of Section 86.7, in the same order.
   game/search executable, solver, generated enumeration, or test was run.
   Read-only file and Git inspection were used only for corpus and provenance;
   all mathematical case classifications above are hand proofs.
+
+## Review erratum (R-G8-REV, folded)
+
+**Reviewed artifact:** this document, landed unmodified at `8424e9a4`
+(supplies the §94 `LANDED_ARTIFACT_HASH` placeholder). **Review:**
+`GAP_RAW_REVIEW_ROUND10.md` (committed `5787961a`). **Verdict:**
+SOUND-WITH-MINOR-ERRATA.
+
+- Target 1 — `B_1(P_3^pl)=3` **CONFIRMED EXACT** under hostile recomputation:
+  no legal nonterminal response to the cap `a†` reaches `M>=4`.
+- Target 2 — **CONFIRMED at stated partial scope**; the named seal classes
+  (Q/arm successors, born-bridge refinements) remain honestly OPEN.
+- Target 3 — **CONFIRMED at stated partial scope**; immediate `P_x`
+  minimizers and the exact `48/96` renewal residual verified.
+- Only finding = the MINOR provenance omission above, now recorded.
