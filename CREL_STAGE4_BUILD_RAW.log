@@ -1,0 +1,8 @@
+﻿BUILD_META final_tree_after_format_cleanup=true started=2026-07-18T09:16:24.0916157-04:00
+RESOURCE_GATE timestamp=2026-07-18T09:16:25.5316296-04:00 available_bytes=13349076992 free_physical_kib=13022484 foreign_cargo=0
+   Compiling hexo_engine v0.1.0 (E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-cert-support\packages\hexo_engine)
+   Compiling hexo_utils v0.1.0 (E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-cert-support\packages\hexo_utils)
+   Compiling hexfield_eq v0.1.0 (E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-cert-support\packages\hexfield_eq)
+    Finished `release` profile [optimized] target(s) in 12.00s
+  Executable unittests rust\src\lib.rs (.target-hunt\x86_64-pc-windows-msvc\release\deps\hexfield_eq-de26e3778420c4c2.exe)
+BUILD_EXIT code=0

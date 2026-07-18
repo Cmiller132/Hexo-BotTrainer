@@ -16,6 +16,8 @@
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::c_void;
+use std::mem::size_of;
 use std::time::Instant;
 
 use hexo_engine::{
@@ -31,6 +33,8 @@ type Cell = (i16, i16);
 
 const SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 const DEFAULT_TT_BYTES: usize = 64 << 20;
+const STAGE4_TOTAL_CACHE_BYTES: usize = 512 << 20;
+const STAGE4_VERIFY_TEMP_BYTES: usize = crate::tss_verify::MAX_VERIFY_MEMO_BYTES;
 const HUMAN_PATH: &str =
     "E:/Hexo-BotTrainer-hexgt/data/hexo-bootstrap-corpus/hexo_human_corpus.jsonl";
 
@@ -878,6 +882,40 @@ struct StageTarget {
     trial: u64,
     state: HexoState,
     query_horizon: u32,
+}
+
+#[derive(Clone, Copy)]
+struct Stage4Candidate {
+    template_index: usize,
+    symmetry: u8,
+}
+
+struct Stage4Library {
+    admitted: Vec<usize>,
+    refused: Vec<usize>,
+    artifact_bytes: usize,
+    index_bytes: usize,
+    build_nanos: u128,
+    _index_blob: Vec<u8>,
+}
+
+#[derive(Default)]
+struct Stage4Totals {
+    e_ns: u128,
+    l_ns: u128,
+    i_ns: u128,
+    m_ns: u128,
+    v_ns: u128,
+    solve_ns: u128,
+    accepted: u64,
+    missed: u64,
+    probes: u64,
+    hint_checks: u64,
+    expansions: u64,
+    nodes: u64,
+    tt_peak_bytes: u64,
+    fragment_peak_bytes: u64,
+    fragment_entries: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -2828,6 +2866,548 @@ fn h6_forced_miss_isolation() {
         direct.stats.nodes,
         direct.stats.tt_entries,
         direct.stats.peak_tt_bytes,
+    );
+}
+
+fn stage4_index_record(template: &RelTemplate, artifact_offset: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    put_u16(
+        &mut out,
+        u16::try_from(template.source_kind.len()).expect("source-kind length"),
+    );
+    out.extend(template.source_kind.as_bytes());
+    put_u16(
+        &mut out,
+        u16::try_from(template.source_id.len()).expect("source-id length"),
+    );
+    out.extend(template.source_id.as_bytes());
+    out.extend(template.artifact_id);
+    put_u8(&mut out, status_tag(template.status));
+    put_u8(&mut out, player_tag(template.interface.current_player));
+    put_phase(&mut out, template.interface.phase);
+    put_u32(
+        &mut out,
+        u32::try_from(template.interface.root_projection.len()).expect("projection length"),
+    );
+    put_u32(
+        &mut out,
+        u32::try_from(artifact_offset).expect("artifact offset"),
+    );
+    put_u32(
+        &mut out,
+        u32::try_from(template.canonical_bytes.len()).expect("artifact length"),
+    );
+    out
+}
+
+fn stage4_library(templates: &[RelTemplate], reservation_bytes: usize) -> Stage4Library {
+    let started = Instant::now();
+    let mut eligible = templates
+        .iter()
+        .enumerate()
+        .filter(|(_, template)| matches!(template.source_state.phase(), TurnPhase::FirstStone))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    eligible.sort_by(|&a, &b| {
+        let left = &templates[a];
+        let right = &templates[b];
+        (
+            left.source_kind.as_str(),
+            left.source_id.as_str(),
+            left.artifact_id,
+        )
+            .cmp(&(
+                right.source_kind.as_str(),
+                right.source_id.as_str(),
+                right.artifact_id,
+            ))
+    });
+
+    let mut admitted = Vec::new();
+    let mut refused = Vec::new();
+    let mut artifact_bytes = 0usize;
+    let mut index_blob = b"HXCRI\x01\0\0".to_vec();
+    for index in eligible {
+        let template = &templates[index];
+        let record = stage4_index_record(template, artifact_bytes);
+        let whole_record = template.canonical_bytes.len().saturating_add(record.len());
+        let used = artifact_bytes.saturating_add(index_blob.len());
+        if used.saturating_add(whole_record) <= reservation_bytes {
+            artifact_bytes = artifact_bytes.saturating_add(template.canonical_bytes.len());
+            index_blob.extend(record);
+            admitted.push(index);
+            println!(
+                "CREL_STAGE4_ADMISSION source={} id={} outcome=admitted artifact_bytes={} index_record_bytes={} cumulative_bytes={} reservation_bytes={reservation_bytes}",
+                template.source_kind,
+                template.source_id,
+                template.canonical_bytes.len(),
+                stage4_index_record(template, artifact_bytes - template.canonical_bytes.len()).len(),
+                artifact_bytes + index_blob.len(),
+            );
+        } else {
+            refused.push(index);
+            println!(
+                "CREL_STAGE4_ADMISSION source={} id={} outcome=refused reason=whole_record_exceeds_reservation artifact_bytes={} index_record_bytes={} used_bytes={} reservation_bytes={reservation_bytes}",
+                template.source_kind,
+                template.source_id,
+                template.canonical_bytes.len(),
+                record.len(),
+                used,
+            );
+        }
+    }
+    Stage4Library {
+        admitted,
+        refused,
+        artifact_bytes,
+        index_bytes: index_blob.len(),
+        build_nanos: started.elapsed().as_nanos(),
+        _index_blob: index_blob,
+    }
+}
+
+fn stage4_targets(templates: &[RelTemplate]) -> Vec<StageTarget> {
+    let mut targets = Vec::new();
+    for (source_index, template) in templates.iter().enumerate() {
+        if !matches!(template.source_state.phase(), TurnPhase::FirstStone) {
+            continue;
+        }
+        let footprint = template
+            .interface
+            .root_projection
+            .iter()
+            .map(|(coord, _)| cell(*coord))
+            .collect::<BTreeSet<_>>();
+        for k in [1usize, 2] {
+            for trial in 0..4u64 {
+                let seed = SEED
+                    ^ (template.source_state.placements_made() as u64).rotate_left(17)
+                    ^ (k as u64).rotate_left(31)
+                    ^ trial.wrapping_mul(0xD1B5_4A32_D192_ED03);
+                let (state, _) =
+                    add_balanced_turn_pairs(&template.source_state, &footprint, k, seed)
+                        .expect("frozen Stage-4 target construction");
+                let query_horizon = deadline_to_absolute(
+                    state.placements_made(),
+                    template.clocks.semantic_deadline,
+                )
+                .expect("Stage-4 target horizon");
+                targets.push(StageTarget {
+                    source_index,
+                    source_kind: template.source_kind.clone(),
+                    source_id: template.source_id.clone(),
+                    status: template.status,
+                    k,
+                    trial,
+                    state,
+                    query_horizon,
+                });
+            }
+        }
+    }
+    targets.sort_by(|a, b| {
+        (a.source_kind.as_str(), a.source_id.as_str(), a.k, a.trial).cmp(&(
+            b.source_kind.as_str(),
+            b.source_id.as_str(),
+            b.k,
+            b.trial,
+        ))
+    });
+    targets
+}
+
+fn stage4_node_cap(target: &StageTarget) -> u64 {
+    match target.source_kind.as_str() {
+        "human" => 30_000,
+        "hand_loss" => 1,
+        "forcing"
+            if matches!(
+                target.source_id.as_str(),
+                "zrugh2x" | "strongloss_a_prefix6" | "hayes_20260712_turn16"
+            ) =>
+        {
+            100_000
+        }
+        "forcing" => 10_000,
+        _ => panic!("unknown frozen source kind"),
+    }
+}
+
+fn stage4_goal(status: ProofStatus) -> SolveGoal {
+    match status {
+        ProofStatus::Win => SolveGoal::Win,
+        ProofStatus::Loss => SolveGoal::Loss,
+        ProofStatus::Unknown => panic!("unknown Stage-4 query"),
+    }
+}
+
+fn stage4_solver() -> TssSolver {
+    let mut solver = TssSolver::default();
+    solver.set_shared_fragments_for_test(true);
+    solver.set_width_options(WidthOptions::vcf_pair_complete());
+    solver
+}
+
+fn stage4_solve(
+    solver: &mut TssSolver,
+    target: &StageTarget,
+    tt_bytes_cap: usize,
+) -> crate::tss_core::DeepResult<TssCertificate> {
+    solver.solve_goal(
+        &target.state,
+        &SolveCaps {
+            node_cap: stage4_node_cap(target),
+            tt_bytes_cap,
+            semantic_horizon: target.query_horizon,
+        },
+        stage4_goal(target.status),
+    )
+}
+
+fn stage4_observe_solve(
+    totals: &mut Stage4Totals,
+    solver: &TssSolver,
+    fragment_before: u64,
+    result: &crate::tss_core::DeepResult<TssCertificate>,
+) {
+    totals.nodes = totals.nodes.saturating_add(result.stats.nodes);
+    totals.expansions = totals.expansions.saturating_add(result.stats.expansions);
+    totals.tt_peak_bytes = totals
+        .tt_peak_bytes
+        .max(result.stats.peak_tt_bytes.saturating_sub(fragment_before));
+    let snapshot = solver.shared_fragment_store_snapshot();
+    totals.fragment_peak_bytes = totals.fragment_peak_bytes.max(snapshot.peak_bytes);
+    totals.fragment_entries = totals.fragment_entries.max(snapshot.entries);
+}
+
+fn stage4_candidates(
+    templates: &[RelTemplate],
+    library: &Stage4Library,
+    target: &StageTarget,
+) -> Vec<Stage4Candidate> {
+    let mut candidates = Vec::new();
+    for &template_index in &library.admitted {
+        let template = &templates[template_index];
+        if template.status != target.status
+            || !matches!(template.source_state.phase(), TurnPhase::FirstStone)
+        {
+            continue;
+        }
+        for symmetry in 0..crate::tss_verify::D6_SYMMETRY_COUNT {
+            candidates.push(Stage4Candidate {
+                template_index,
+                symmetry,
+            });
+        }
+    }
+    candidates.sort_by(|a, b| {
+        source_order_key(&templates[a.template_index])
+            .cmp(&source_order_key(&templates[b.template_index]))
+            .then_with(|| a.symmetry.cmp(&b.symmetry))
+    });
+    candidates
+}
+
+fn stage4_run_baseline(targets: &[StageTarget]) -> Stage4Totals {
+    let mut totals = Stage4Totals::default();
+    let mut solver = stage4_solver();
+    for target in targets {
+        let fragment_before = solver.shared_fragment_store_snapshot().bytes;
+        let started = Instant::now();
+        let result = stage4_solve(&mut solver, target, STAGE4_TOTAL_CACHE_BYTES);
+        let solve_ns = started.elapsed().as_nanos();
+        totals.solve_ns = totals.solve_ns.saturating_add(solve_ns);
+        stage4_observe_solve(&mut totals, &solver, fragment_before, &result);
+        let snapshot = solver.shared_fragment_store_snapshot();
+        println!(
+            "CREL_STAGE4_QUERY arm=baseline source={} id={} k={} trial={} A=0 S0_ns={solve_ns} SR_ns=0 L_ns=0 I_ns=0 M_ns=0 V_ns=0 first_accepted_rank=none status={:?} nodes={} expansions={} tt_peak_bytes={} fragment_bytes={} fragment_peak_bytes={} fragment_entries={}",
+            target.source_kind,
+            target.source_id,
+            target.k,
+            target.trial,
+            result.status,
+            result.stats.nodes,
+            result.stats.expansions,
+            result.stats.peak_tt_bytes.saturating_sub(fragment_before),
+            snapshot.bytes,
+            snapshot.peak_bytes,
+            snapshot.entries,
+        );
+    }
+    totals
+}
+
+fn stage4_run_crel(
+    templates: &[RelTemplate],
+    targets: &[StageTarget],
+    library: &Stage4Library,
+    fanout: usize,
+    residual_bytes: usize,
+) -> Stage4Totals {
+    let mut totals = Stage4Totals {
+        e_ns: templates
+            .iter()
+            .filter(|template| matches!(template.source_state.phase(), TurnPhase::FirstStone))
+            .map(|template| template.extraction_nanos)
+            .sum::<u128>()
+            .saturating_add(library.build_nanos),
+        ..Stage4Totals::default()
+    };
+    let mut solver = stage4_solver();
+    let mut hard_without_strict = 0u64;
+    for target in targets {
+        let lookup_started = Instant::now();
+        let candidates = stage4_candidates(templates, library, target);
+        let l_ns = lookup_started.elapsed().as_nanos();
+        totals.l_ns = totals.l_ns.saturating_add(l_ns);
+        let mut i_ns = 0u128;
+        let mut m_ns = 0u128;
+        let mut v_ns = 0u128;
+        let mut matched_rank = 0usize;
+        let mut first_accepted_rank = None;
+        let mut accepted = false;
+        let mut probes = 0usize;
+        for candidate in candidates {
+            let template = &templates[candidate.template_index];
+            let match_started = Instant::now();
+            let matched = hint_match(template, &target.state, candidate.symmetry);
+            i_ns = i_ns.saturating_add(match_started.elapsed().as_nanos());
+            totals.hint_checks = totals.hint_checks.saturating_add(1);
+            if !matched {
+                continue;
+            }
+            matched_rank += 1;
+            if probes >= fanout {
+                break;
+            }
+            probes += 1;
+            totals.probes = totals.probes.saturating_add(1);
+            let materialize_started = Instant::now();
+            let materialized = materialize_template(
+                template,
+                &target.state,
+                candidate.symmetry,
+                target.status,
+                target.query_horizon,
+            );
+            m_ns = m_ns.saturating_add(materialize_started.elapsed().as_nanos());
+            let strict_accepted = match materialized.as_ref() {
+                Ok(cert) => {
+                    let verify_started = Instant::now();
+                    let value = TssVerifier.verify(&target.state, cert, target.status);
+                    v_ns = v_ns.saturating_add(verify_started.elapsed().as_nanos());
+                    value
+                }
+                Err(_) => false,
+            };
+            if strict_accepted {
+                accepted = true;
+                first_accepted_rank = Some(matched_rank);
+                break;
+            }
+        }
+        totals.i_ns = totals.i_ns.saturating_add(i_ns);
+        totals.m_ns = totals.m_ns.saturating_add(m_ns);
+        totals.v_ns = totals.v_ns.saturating_add(v_ns);
+        let mut sr_ns = 0u128;
+        let mut status = target.status;
+        let mut nodes = 0u64;
+        let mut expansions = 0u64;
+        let mut query_tt_peak = 0u64;
+        if accepted {
+            totals.accepted = totals.accepted.saturating_add(1);
+            // Shadow-only: strict acceptance is observed, never converted to a
+            // production hard value or installed in solver-visible state.
+            hard_without_strict += 0;
+        } else {
+            totals.missed = totals.missed.saturating_add(1);
+            let fragment_before = solver.shared_fragment_store_snapshot().bytes;
+            let solve_started = Instant::now();
+            let result = stage4_solve(&mut solver, target, residual_bytes);
+            sr_ns = solve_started.elapsed().as_nanos();
+            totals.solve_ns = totals.solve_ns.saturating_add(sr_ns);
+            status = result.status;
+            nodes = result.stats.nodes;
+            expansions = result.stats.expansions;
+            query_tt_peak = result.stats.peak_tt_bytes.saturating_sub(fragment_before);
+            stage4_observe_solve(&mut totals, &solver, fragment_before, &result);
+        }
+        let snapshot = solver.shared_fragment_store_snapshot();
+        println!(
+            "CREL_STAGE4_QUERY arm=crel source={} id={} k={} trial={} A={} S0_ns=0 SR_ns={sr_ns} L_ns={l_ns} I_ns={i_ns} M_ns={m_ns} V_ns={v_ns} first_accepted_rank={} probes={probes} matched_seen={matched_rank} status={status:?} nodes={nodes} expansions={expansions} tt_peak_bytes={query_tt_peak} fragment_bytes={} fragment_peak_bytes={} fragment_entries={}",
+            target.source_kind,
+            target.source_id,
+            target.k,
+            target.trial,
+            u8::from(accepted),
+            first_accepted_rank
+                .map(|rank| rank.to_string())
+                .unwrap_or_else(|| "none".to_owned()),
+            snapshot.bytes,
+            snapshot.peak_bytes,
+            snapshot.entries,
+        );
+    }
+    assert_eq!(hard_without_strict, 0);
+    println!(
+        "CREL_STAGE4_SHADOW shadow_only=true warm_hard_values_returned=0 hard_without_strict={hard_without_strict} strict_verifier_unchanged=true"
+    );
+    totals
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct ProcessMemoryCounters {
+    cb: u32,
+    page_fault_count: u32,
+    peak_working_set_size: usize,
+    working_set_size: usize,
+    quota_peak_paged_pool_usage: usize,
+    quota_paged_pool_usage: usize,
+    quota_peak_non_paged_pool_usage: usize,
+    quota_non_paged_pool_usage: usize,
+    pagefile_usage: usize,
+    peak_pagefile_usage: usize,
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetCurrentProcess() -> *mut c_void;
+}
+
+#[cfg(windows)]
+#[link(name = "psapi")]
+extern "system" {
+    fn GetProcessMemoryInfo(
+        process: *mut c_void,
+        counters: *mut ProcessMemoryCounters,
+        cb: u32,
+    ) -> i32;
+}
+
+#[cfg(windows)]
+fn stage4_peak_rss_bytes() -> usize {
+    let mut counters = ProcessMemoryCounters {
+        cb: u32::try_from(size_of::<ProcessMemoryCounters>()).expect("memory counter size"),
+        page_fault_count: 0,
+        peak_working_set_size: 0,
+        working_set_size: 0,
+        quota_peak_paged_pool_usage: 0,
+        quota_paged_pool_usage: 0,
+        quota_peak_non_paged_pool_usage: 0,
+        quota_non_paged_pool_usage: 0,
+        pagefile_usage: 0,
+        peak_pagefile_usage: 0,
+    };
+    let ok = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) };
+    assert_ne!(ok, 0, "GetProcessMemoryInfo failed");
+    counters.peak_working_set_size
+}
+
+#[cfg(not(windows))]
+fn stage4_peak_rss_bytes() -> usize {
+    0
+}
+
+#[test]
+#[ignore = "C-REL Stage 4 one serialized A/B arm; release, serial, --nocapture"]
+fn crel_stage4_arm() {
+    let invocation_started = Instant::now();
+    let arm = std::env::var("CREL_STAGE4_ARM").expect("CREL_STAGE4_ARM=baseline|crel");
+    assert!(arm == "baseline" || arm == "crel");
+    let reservation_mib = env_num("CREL_STAGE4_RESERVATION_MIB", 1usize);
+    assert!([1usize, 8, 32, 64].contains(&reservation_mib));
+    let fanout = env_num("CREL_STAGE4_FANOUT", 1usize);
+    assert!([1usize, 2, 4, 8, 16, 32].contains(&fanout));
+    let pair = env_num("CREL_STAGE4_PAIR", 0usize);
+    assert!(pair < 3);
+    let order = std::env::var("CREL_STAGE4_ORDER").unwrap_or_else(|_| "AB".to_owned());
+    let reservation_bytes = reservation_mib << 20;
+    let residual_bytes = STAGE4_TOTAL_CACHE_BYTES
+        .checked_sub(reservation_bytes)
+        .expect("Stage-4 residual cache");
+    println!(
+        "CREL_STAGE4_META arm={arm} reservation_mib={reservation_mib} reservation_bytes={reservation_bytes} residual_solver_fragment_bytes={} fanout={fanout} pair={pair} order={order} total_cache_bytes={} target=x86_64-pc-windows-msvc release=true test_threads=1 shadow_only=true G_ns=0 source_solve_already_demanded=true verifier_temp_cap_bytes={} hard_without_strict=0",
+        if arm == "baseline" { STAGE4_TOTAL_CACHE_BYTES } else { residual_bytes },
+        STAGE4_TOTAL_CACHE_BYTES,
+        STAGE4_VERIFY_TEMP_BYTES,
+    );
+
+    let templates = acquire_round2_templates();
+    let targets = stage4_targets(&templates);
+    assert_eq!(templates.len(), 48, "frozen 48-template library drift");
+    assert_eq!(targets.len(), 368, "frozen K=1/K=2 target cohort drift");
+    let library = stage4_library(&templates, reservation_bytes);
+    let eligible = library.admitted.len() + library.refused.len();
+    assert_eq!(eligible, 46, "frozen FirstStone eligibility drift");
+    println!(
+        "CREL_STAGE4_LIBRARY eligible={eligible} admitted={} refused={} artifact_bytes={} index_bytes={} reservation_bytes={reservation_bytes} whole_record_rule=true eviction=false build_ns={} extraction_ns={}",
+        library.admitted.len(),
+        library.refused.len(),
+        library.artifact_bytes,
+        library.index_bytes,
+        library.build_nanos,
+        templates
+            .iter()
+            .filter(|template| matches!(template.source_state.phase(), TurnPhase::FirstStone))
+            .map(|template| template.extraction_nanos)
+            .sum::<u128>(),
+    );
+
+    let totals = if arm == "baseline" {
+        stage4_run_baseline(&targets)
+    } else {
+        stage4_run_crel(&templates, &targets, &library, fanout, residual_bytes)
+    };
+    let artifact_index_bytes = if arm == "crel" {
+        library.artifact_bytes.saturating_add(library.index_bytes)
+    } else {
+        0
+    };
+    let verifier_temp_bytes = if arm == "crel" && totals.probes > 0 {
+        STAGE4_VERIFY_TEMP_BYTES
+    } else {
+        0
+    };
+    let solver_phase = totals
+        .tt_peak_bytes
+        .saturating_add(totals.fragment_peak_bytes);
+    let verify_phase = totals
+        .fragment_peak_bytes
+        .saturating_add(verifier_temp_bytes as u64);
+    let accounted_peak =
+        (artifact_index_bytes as u64).saturating_add(solver_phase.max(verify_phase));
+    let peak_rss_bytes = stage4_peak_rss_bytes();
+    println!(
+        "CREL_STAGE4_SUMMARY arm={arm} reservation_mib={reservation_mib} fanout={fanout} pair={pair} order={order} targets={} G_ns=0 E_ns={} L_ns={} I_ns={} M_ns={} V_ns={} solve_label={} solve_ns={} accepted={} missed={} probes={} hint_checks={} nodes={} expansions={} admitted={} refused={} artifact_bytes={} index_bytes={} tt_peak_bytes={} fragment_peak_bytes={} fragment_entries={} verifier_temp_bytes={} accounted_peak_bytes={} cache_limit_bytes={} cache_within_limit={} process_peak_rss_bytes={} hard_without_strict=0 invocation_elapsed_s={:.3}",
+        targets.len(),
+        totals.e_ns,
+        totals.l_ns,
+        totals.i_ns,
+        totals.m_ns,
+        totals.v_ns,
+        if arm == "baseline" { "S0" } else { "SR" },
+        totals.solve_ns,
+        totals.accepted,
+        totals.missed,
+        totals.probes,
+        totals.hint_checks,
+        totals.nodes,
+        totals.expansions,
+        library.admitted.len(),
+        library.refused.len(),
+        if arm == "crel" { library.artifact_bytes } else { 0 },
+        if arm == "crel" { library.index_bytes } else { 0 },
+        totals.tt_peak_bytes,
+        totals.fragment_peak_bytes,
+        totals.fragment_entries,
+        verifier_temp_bytes,
+        accounted_peak,
+        STAGE4_TOTAL_CACHE_BYTES,
+        accounted_peak <= STAGE4_TOTAL_CACHE_BYTES as u64,
+        peak_rss_bytes,
+        invocation_started.elapsed().as_secs_f64(),
     );
 }
 

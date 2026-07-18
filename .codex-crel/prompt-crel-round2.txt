@@ -1,0 +1,55 @@
+C-REL ROUND 2 (high): shadow-only Stages 1-3 of the strict-discharge warm-template-cache design
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-cert-support
+(branch hunt/cert-support, HEAD = the fresh merge of claude/tss-vcf-width
+0e4a34e9 — the consolidated engine with lazy frontier, census gate, and all
+landed levers). You CANNOT git-commit. You HAVE the host cargo slot (one
+cargo at a time host-wide; --target x86_64-pc-windows-msvc;
+CARGO_TARGET_DIR=.target-hunt). RAM gate before every cargo run: >=10 GB
+available and >=5 GB free physical, abort-and-note if failed. Deliverable:
+HUNT_REPORT_CREL_ROUND2.md + raw logs + cfg(test)-only code.
+
+## Mandate
+DESIGN_C_REL.md (round 1, commit 408dc5b6 — read IN FULL first, including
+§7.2's fixed hostile manifest and the Stage table with kill criteria) is
+BINDING. Round 1's verdict: the support-only verifier died at O4; the
+salvage is C_rel as a strict-discharge warm TEMPLATE cache (rootless
+bodies routed to targets where the existing STRICT proof still replays —
+every hard verdict still minted by the unchanged strict verifier).
+HUNT_REPORT_CERT_SUPPORT.md (3cd224fe) holds the retained shadow data
+(77.78-96.11% conditional rebind acceptance) and fixture identities.
+
+## Execute EXACTLY Stages 1-3 (shadow-only; no production hard values)
+- Stage 1 — consolidated shadow reproduction: cfg(test) relative-clock
+  converter/materializer vs the consolidated engine; frozen acquisition
+  manifest + four deterministic balanced outside-footprint mutations per
+  K + strict-accepted hand Loss fixtures; unchanged-strict transfer as
+  negative control; every rebound candidate through the UNCHANGED strict
+  verifier; freeze acquisition/rejection reasons + M/V timers; compare
+  conditional rates with the retained 77.78-96.11% range. KILL per the
+  table: any hard result without strict acceptance = halt; no cross-root
+  strict acceptance beyond exact root equality = kill full-certificate
+  path.
+- Stage 2 — interface recorder + confusion matrix: extract the exact v1
+  projection/zone/WF declaration, evaluate but BYPASS it in a parallel
+  shadow arm; measure true/false probe classes, serialized bytes,
+  candidate counts, per-phase timers. Kill per the O12 equation
+  condition in the table.
+- Stage 3 — hostile suite: run ONLY H1-H6 as specified in §7.2 (exact
+  fixtures named there; H2 uses the retained 0hz3hty far-five fixture,
+  NOT a new coordinate set). Fatal contract kill conditions per the
+  table — check each explicitly and report each case's outcome by name.
+
+Stages 4-6 are OUT OF SCOPE this round (economics + gate candidate come
+only after these close green).
+
+## Rules
+cfg(test) only; tss_verify.rs UNTOUCHED; no production-path changes; RAM/
+runtime classes per the table (Stage 1 M-class 64 MiB TT serial; Stages
+2-3 S/M fixture replays; each invocation < 10 min); ONE cargo at a time;
+chunk <= 2h per exec; incremental writes; raw logs UTF-8. Honest kills
+are wins — if a kill criterion fires, say exactly which and stop the
+affected path. Final message: per-stage verdict (PASS/KILL with the
+specific criterion), the conditional acceptance rate vs the retained
+range, H1-H6 outcomes one line each, and whether Stage 4 economics is
+justified.

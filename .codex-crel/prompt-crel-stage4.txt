@@ -1,0 +1,73 @@
+R-CREL-4 — C_rel STAGE 4: scoped library/routing economics (the decisive gate)
+
+CONTEXT NOTE: this is performance measurement for a board-game (Hexo,
+Connect6-like) proof-search engine's warm-template cache. Nothing here
+concerns computer security. Use neutral vocabulary in your own writing
+(stop criterion, negative-control, stress case).
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-cert-support
+(branch hunt/cert-support, HEAD = 3e4808c6). You CANNOT git-commit.
+Deliverable: HUNT_REPORT_CREL_STAGE4.md + hashed raw logs.
+
+## Binding sources (read first)
+- DESIGN_C_REL.md @ 408dc5b6: §6.2 cost model (S0/SR/L/I/M/V/A/E/G, the
+  fixed-total-cache envelope, break-even + 5% gate) and the Stage-4 row
+  of §"per-stage plan" (kill criteria verbatim binding).
+- HUNT_REPORT_CREL_ROUND2.md @ 3e4808c6: the frozen 48-template
+  library, 46 eligible FirstStone bodies, Stage-2 O13 matrix facts.
+- Comparator: HUNT_REPORT_SHARED_FRAGMENTS.md @ b45b9bf0 L242-259 (the
+  139-root exact-fragment baseline C_rel must beat incrementally).
+
+## Task (Stage 4 ONLY — no Stage 5/6, no production gate candidate)
+Measure whether C_rel pays under a fair fixed-total-cache envelope:
+
+1. Arms per target query: (a) strongest no-C_rel baseline (current
+   exact fragments) at total accounted cache budget 512 MiB → S0_j;
+   (b) C_rel + exact fragments + MANDATORY cold fallback, where the
+   C_rel reservation is SUBTRACTED from the residual solver/fragment
+   bytes in that arm → SR_j on miss.
+2. Sweep C_rel reservation {1,8,32,64} MiB x fanout {1,2,4,8,16,32}.
+3. Account and report per cell: G/E/L/I/M/V/S0/SR walls, admitted vs
+   refused bodies under the deterministic admission/refusal rule,
+   artifact+index bytes, accounted peak (TT + exact-fragment + C_rel
+   artifact/index + verifier temporaries, separately), process peak
+   RSS, first-accepted rank. Wall time is the decision metric;
+   expansions are diagnosis only. G=0 where the source solve was
+   already a demanded query (say which).
+4. Statistics: each cell = six serialized invocations; compute the
+   source-clustered 95% lower bound of net gain per cell (cluster by
+   source root, not by target mutation — mutations of one root are
+   correlated).
+5. Shadow-only: the warm path returns NO production hard values; every
+   accepted body's evidence is conceptually the unchanged strict
+   verifier's; hard_without_strict counter must stay zero.
+
+## KILL CRITERIA (design-verbatim, binding; report which fired)
+- KILL if the source-clustered 95% lower bound of net gain is <= 5%
+  over the strongest exact baseline in EVERY budget/fanout cell.
+- KILL if no bounded fanout pays.
+- KILL if accounted cache exceeds 512 MiB in any cell.
+- KILL if max observed paired process-RSS regression exceeds 5%
+  (RSS is never compared directly with 512 MiB).
+An honest KILL verdict is a full-value exit — do not soften it.
+
+## Resource laws (binding)
+ONE cargo invocation at a time host-wide; before EVERY cargo command
+check Memory\Available Bytes >= 10 GiB AND FreePhysicalMemory >= 5 GiB
+(wait and re-check if low); if a foreign cargo.exe is running, wait.
+CARGO_TARGET_DIR=.target-hunt, --target x86_64-pc-windows-msvc,
+--release, --test-threads=1. Each serialized invocation < 10 min —
+split the campaign across invocations by cell. All raw logs UTF-8;
+SHA-256 every authoritative raw in the report. tss_verify.rs remains
+untouched; all code stays in the cfg(test) hunt module.
+
+## Report (HUNT_REPORT_CREL_STAGE4.md)
+Verdict PASS/KILL with the exact criterion; per-cell table (reservation
+x fanout: net gain, 95% clustered LB, accounted peak, RSS delta);
+best cell highlighted; cost-model decomposition for the best cell;
+comparator statement vs the 139-root exact-fragment baseline; honest
+caveats (e.g. zone-hint path still structurally-only). Provenance:
+input commit 3e4808c6; no commit created. Incremental writes; chunk
+<= 2h per exec. Final message: PASS/KILL + which criterion, best-cell
+net gain + LB, RSS verdict, one-line deploy recommendation
+(Phase-3 leaf relevance), sharpest residual question.

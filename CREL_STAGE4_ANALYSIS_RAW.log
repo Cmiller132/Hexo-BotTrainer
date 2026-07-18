@@ -1,0 +1,112 @@
+﻿CELL reservation_mib=1 fanout=1 net_gain_pct=88.575572 lb95_pct=80.524629 ub95_pct=95.636607 baseline_mean_s=149.527779 net_mean_s=132.445086 max_paired_rss_regression_pct=0.272691 accounted_peak_bytes=86080035 accepted=350 missed=18 first_rank_min=1 first_rank_max=1
+PAIR reservation_mib=1 fanout=1 pair=0 baseline_s=159.439302 warm_complete_s=18.759995 net_gain_pct=88.233770 rss_regression_pct=0.272691
+PAIR reservation_mib=1 fanout=1 pair=1 baseline_s=137.113849 warm_complete_s=16.029781 net_gain_pct=88.309145 rss_regression_pct=0.167542
+PAIR reservation_mib=1 fanout=1 pair=2 baseline_s=152.030184 warm_complete_s=16.458302 net_gain_pct=89.174319 rss_regression_pct=0.149716
+CELL reservation_mib=1 fanout=2 net_gain_pct=89.848978 lb95_pct=82.150822 ub95_pct=96.047471 baseline_mean_s=168.496306 net_mean_s=151.392209 max_paired_rss_regression_pct=-0.089832 accounted_peak_bytes=86080035 accepted=350 missed=18 first_rank_min=1 first_rank_max=1
+PAIR reservation_mib=1 fanout=2 pair=0 baseline_s=169.000641 warm_complete_s=19.116878 net_gain_pct=88.688281 rss_regression_pct=-0.196747
+PAIR reservation_mib=1 fanout=2 pair=1 baseline_s=167.397835 warm_complete_s=16.785097 net_gain_pct=89.972931 rss_regression_pct=-0.089832
+PAIR reservation_mib=1 fanout=2 pair=2 baseline_s=169.090441 warm_complete_s=15.410315 net_gain_pct=90.886348 rss_regression_pct=-0.399600
+CELL reservation_mib=1 fanout=4 net_gain_pct=89.417553 lb95_pct=82.548544 ub95_pct=96.009028 baseline_mean_s=149.535813 net_mean_s=133.711265 max_paired_rss_regression_pct=-0.062453 accounted_peak_bytes=86080035 accepted=350 missed=18 first_rank_min=1 first_rank_max=1
+PAIR reservation_mib=1 fanout=4 pair=0 baseline_s=157.385581 warm_complete_s=15.610655 net_gain_pct=90.081268 rss_regression_pct=-0.209638
+PAIR reservation_mib=1 fanout=4 pair=1 baseline_s=138.717423 warm_complete_s=15.821016 net_gain_pct=88.594788 rss_regression_pct=-0.062453
+PAIR reservation_mib=1 fanout=4 pair=2 baseline_s=152.504435 warm_complete_s=16.041973 net_gain_pct=89.480979 rss_regression_pct=-0.119952
+CELL reservation_mib=1 fanout=8 net_gain_pct=89.483895 lb95_pct=81.126942 ub95_pct=96.127597 baseline_mean_s=156.560700 net_mean_s=140.096613 max_paired_rss_regression_pct=0.277826 accounted_peak_bytes=86080035 accepted=350 missed=18 first_rank_min=1 first_rank_max=1
+PAIR reservation_mib=1 fanout=8 pair=0 baseline_s=150.650345 warm_complete_s=16.104948 net_gain_pct=89.309717 rss_regression_pct=-0.082531
+PAIR reservation_mib=1 fanout=8 pair=1 baseline_s=160.752134 warm_complete_s=16.596069 net_gain_pct=89.675988 rss_regression_pct=-0.047410
+PAIR reservation_mib=1 fanout=8 pair=2 baseline_s=158.279621 warm_complete_s=16.691244 net_gain_pct=89.454584 rss_regression_pct=0.277826
+CELL reservation_mib=1 fanout=16 net_gain_pct=88.107905 lb95_pct=77.610512 ub95_pct=95.300411 baseline_mean_s=141.054838 net_mean_s=124.280463 max_paired_rss_regression_pct=0.445245 accounted_peak_bytes=86080035 accepted=350 missed=18 first_rank_min=1 first_rank_max=1
+PAIR reservation_mib=1 fanout=16 pair=0 baseline_s=149.037858 warm_complete_s=16.785604 net_gain_pct=88.737355 rss_regression_pct=0.445245
+PAIR reservation_mib=1 fanout=16 pair=1 baseline_s=129.531087 warm_complete_s=16.838671 net_gain_pct=87.000286 rss_regression_pct=-0.164889
+PAIR reservation_mib=1 fanout=16 pair=2 baseline_s=144.595570 warm_complete_s=16.698849 net_gain_pct=88.451341 rss_regression_pct=0.274959
+CELL reservation_mib=1 fanout=32 net_gain_pct=89.611153 lb95_pct=81.102317 ub95_pct=95.602670 baseline_mean_s=146.020418 net_mean_s=130.850579 max_paired_rss_regression_pct=0.511009 accounted_peak_bytes=86080035 accepted=350 missed=18 first_rank_min=1 first_rank_max=1
+PAIR reservation_mib=1 fanout=32 pair=0 baseline_s=152.103499 warm_complete_s=12.661761 net_gain_pct=91.675562 rss_regression_pct=0.340622
+PAIR reservation_mib=1 fanout=32 pair=1 baseline_s=144.060861 warm_complete_s=16.735735 net_gain_pct=88.382872 rss_regression_pct=0.049983
+PAIR reservation_mib=1 fanout=32 pair=2 baseline_s=141.896893 warm_complete_s=16.112019 net_gain_pct=88.645263 rss_regression_pct=0.511009
+CELL reservation_mib=8 fanout=1 net_gain_pct=90.159357 lb95_pct=83.242673 ub95_pct=96.339031 baseline_mean_s=156.306861 net_mean_s=140.925261 max_paired_rss_regression_pct=0.017449 accounted_peak_bytes=86080035 accepted=350 missed=18 first_rank_min=1 first_rank_max=1
+PAIR reservation_mib=8 fanout=1 pair=0 baseline_s=151.479765 warm_complete_s=15.979846 net_gain_pct=89.450838 rss_regression_pct=0.017449
+PAIR reservation_mib=8 fanout=1 pair=1 baseline_s=166.373412 warm_complete_s=14.328157 net_gain_pct=91.387953 rss_regression_pct=-0.122546
+PAIR reservation_mib=8 fanout=1 pair=2 baseline_s=151.067406 warm_complete_s=15.836797 net_gain_pct=89.516735 rss_regression_pct=-0.244499
+CELL reservation_mib=8 fanout=2 net_gain_pct=88.943189 lb95_pct=80.721294 ub95_pct=96.005293 baseline_mean_s=145.735884 net_mean_s=129.622142 max_paired_rss_regression_pct=0.117571 accounted_peak_bytes=86080035 accepted=350 missed=18 first_rank_min=1 first_rank_max=1
+PAIR reservation_mib=8 fanout=2 pair=0 baseline_s=143.414405 warm_complete_s=15.920724 net_gain_pct=88.898797 rss_regression_pct=0.117571
+PAIR reservation_mib=8 fanout=2 pair=1 baseline_s=151.603551 warm_complete_s=15.794510 net_gain_pct=89.581701 rss_regression_pct=0.067488
+PAIR reservation_mib=8 fanout=2 pair=2 baseline_s=142.189695 warm_complete_s=16.625990 net_gain_pct=88.307176 rss_regression_pct=-0.012501
+CELL reservation_mib=8 fanout=4 net_gain_pct=89.484439 lb95_pct=80.632570 ub95_pct=95.874967 baseline_mean_s=152.145100 net_mean_s=136.146189 max_paired_rss_regression_pct=0.357858 accounted_peak_bytes=86080035 accepted=350 missed=18 first_rank_min=1 first_rank_max=1
+PAIR reservation_mib=8 fanout=4 pair=0 baseline_s=152.900525 warm_complete_s=16.879987 net_gain_pct=88.960151 rss_regression_pct=-0.231712
+PAIR reservation_mib=8 fanout=4 pair=1 baseline_s=152.001478 warm_complete_s=16.820152 net_gain_pct=88.934218 rss_regression_pct=0.357858
+PAIR reservation_mib=8 fanout=4 pair=2 baseline_s=151.533297 warm_complete_s=14.296596 net_gain_pct=90.565377 rss_regression_pct=-0.751337
+CELL reservation_mib=8 fanout=8 net_gain_pct=87.496903 lb95_pct=77.247967 ub95_pct=95.281539 baseline_mean_s=144.708867 net_mean_s=126.615777 max_paired_rss_regression_pct=0.169902 accounted_peak_bytes=86080035 accepted=350 missed=18 first_rank_min=1 first_rank_max=1
+PAIR reservation_mib=8 fanout=8 pair=0 baseline_s=151.475752 warm_complete_s=18.949478 net_gain_pct=87.490091 rss_regression_pct=0.169902
+PAIR reservation_mib=8 fanout=8 pair=1 baseline_s=155.245546 warm_complete_s=18.393102 net_gain_pct=88.152251 rss_regression_pct=-0.251782
+PAIR reservation_mib=8 fanout=8 pair=2 baseline_s=127.405303 warm_complete_s=16.936690 net_gain_pct=86.706448 rss_regression_pct=-0.428564
+CELL reservation_mib=8 fanout=16 net_gain_pct=89.960135 lb95_pct=80.125521 ub95_pct=95.937721 baseline_mean_s=151.172175 net_mean_s=135.994693 max_paired_rss_regression_pct=0.187369 accounted_peak_bytes=86080035 accepted=350 missed=18 first_rank_min=1 first_rank_max=1
+PAIR reservation_mib=8 fanout=16 pair=0 baseline_s=151.996297 warm_complete_s=15.892336 net_gain_pct=89.544261 rss_regression_pct=-0.282056
+PAIR reservation_mib=8 fanout=16 pair=1 baseline_s=150.651532 warm_complete_s=14.682858 net_gain_pct=90.253762 rss_regression_pct=0.187369
+PAIR reservation_mib=8 fanout=16 pair=2 baseline_s=150.868697 warm_complete_s=14.957254 net_gain_pct=90.085913 rss_regression_pct=0.140028
+CELL reservation_mib=8 fanout=32 net_gain_pct=88.133424 lb95_pct=79.340886 ub95_pct=95.745176 baseline_mean_s=127.569094 net_mean_s=112.431010 max_paired_rss_regression_pct=0.367417 accounted_peak_bytes=86080035 accepted=350 missed=18 first_rank_min=1 first_rank_max=1
+PAIR reservation_mib=8 fanout=32 pair=0 baseline_s=129.918947 warm_complete_s=14.021590 net_gain_pct=89.207432 rss_regression_pct=0.300541
+PAIR reservation_mib=8 fanout=32 pair=1 baseline_s=126.043265 warm_complete_s=14.121471 net_gain_pct=88.796331 rss_regression_pct=-0.159844
+PAIR reservation_mib=8 fanout=32 pair=2 baseline_s=126.745071 warm_complete_s=17.271192 net_gain_pct=86.373283 rss_regression_pct=0.367417
+CELL reservation_mib=32 fanout=1 net_gain_pct=89.884152 lb95_pct=81.798369 ub95_pct=96.284088 baseline_mean_s=144.003062 net_mean_s=129.435932 max_paired_rss_regression_pct=0.282408 accounted_peak_bytes=86080035 accepted=350 missed=18 first_rank_min=1 first_rank_max=1
+PAIR reservation_mib=32 fanout=1 pair=0 baseline_s=147.832731 warm_complete_s=12.504492 net_gain_pct=91.541459 rss_regression_pct=-0.209576
+PAIR reservation_mib=32 fanout=1 pair=1 baseline_s=142.475010 warm_complete_s=15.407062 net_gain_pct=89.186131 rss_regression_pct=-0.194286
+PAIR reservation_mib=32 fanout=1 pair=2 baseline_s=141.701445 warm_complete_s=15.789838 net_gain_pct=88.856968 rss_regression_pct=0.282408
+CELL reservation_mib=32 fanout=2 net_gain_pct=89.511037 lb95_pct=81.043404 ub95_pct=95.979707 baseline_mean_s=134.439241 net_mean_s=120.337959 max_paired_rss_regression_pct=0.084938 accounted_peak_bytes=86080035 accepted=350 missed=18 first_rank_min=1 first_rank_max=1
+PAIR reservation_mib=32 fanout=2 pair=0 baseline_s=152.521133 warm_complete_s=17.037759 net_gain_pct=88.829247 rss_regression_pct=-0.221984
+PAIR reservation_mib=32 fanout=2 pair=1 baseline_s=117.192161 warm_complete_s=12.616176 net_gain_pct=89.234624 rss_regression_pct=0.084938
+PAIR reservation_mib=32 fanout=2 pair=2 baseline_s=133.604429 warm_complete_s=12.649909 net_gain_pct=90.531819 rss_regression_pct=-0.189820
+CELL reservation_mib=32 fanout=4 net_gain_pct=88.240103 lb95_pct=77.698861 ub95_pct=95.457764 baseline_mean_s=130.250068 net_mean_s=114.932794 max_paired_rss_regression_pct=0.408092 accounted_peak_bytes=86080035 accepted=350 missed=18 first_rank_min=1 first_rank_max=1
+PAIR reservation_mib=32 fanout=4 pair=0 baseline_s=127.276404 warm_complete_s=17.013760 net_gain_pct=86.632432 rss_regression_pct=-0.124828
+PAIR reservation_mib=32 fanout=4 pair=1 baseline_s=131.368905 warm_complete_s=16.239318 net_gain_pct=87.638385 rss_regression_pct=0.237833
+PAIR reservation_mib=32 fanout=4 pair=2 baseline_s=132.104896 warm_complete_s=12.698744 net_gain_pct=90.387378 rss_regression_pct=0.408092
+CELL reservation_mib=32 fanout=8 net_gain_pct=89.624792 lb95_pct=81.197945 ub95_pct=95.992253 baseline_mean_s=129.834598 net_mean_s=116.363988 max_paired_rss_regression_pct=0.415728 accounted_peak_bytes=86080035 accepted=350 missed=18 first_rank_min=1 first_rank_max=1
+PAIR reservation_mib=32 fanout=8 pair=0 baseline_s=127.803079 warm_complete_s=12.515492 net_gain_pct=90.207206 rss_regression_pct=-0.542396
+PAIR reservation_mib=32 fanout=8 pair=1 baseline_s=119.981319 warm_complete_s=12.636248 net_gain_pct=89.468154 rss_regression_pct=-0.226820
+PAIR reservation_mib=32 fanout=8 pair=2 baseline_s=141.719395 warm_complete_s=15.260091 net_gain_pct=89.232179 rss_regression_pct=0.415728
+CELL reservation_mib=32 fanout=16 net_gain_pct=88.861964 lb95_pct=77.589511 ub95_pct=95.418444 baseline_mean_s=126.276124 net_mean_s=112.211443 max_paired_rss_regression_pct=0.119668 accounted_peak_bytes=86080035 accepted=350 missed=18 first_rank_min=1 first_rank_max=1
+PAIR reservation_mib=32 fanout=16 pair=0 baseline_s=126.568126 warm_complete_s=13.423576 net_gain_pct=89.394189 rss_regression_pct=0.022479
+PAIR reservation_mib=32 fanout=16 pair=1 baseline_s=126.178092 warm_complete_s=14.056048 net_gain_pct=88.860151 rss_regression_pct=-0.094808
+PAIR reservation_mib=32 fanout=16 pair=2 baseline_s=126.082153 warm_complete_s=14.714416 net_gain_pct=88.329502 rss_regression_pct=0.119668
+CELL reservation_mib=32 fanout=32 net_gain_pct=89.226818 lb95_pct=82.588140 ub95_pct=96.086827 baseline_mean_s=128.282738 net_mean_s=114.462605 max_paired_rss_regression_pct=0.004999 accounted_peak_bytes=86080035 accepted=350 missed=18 first_rank_min=1 first_rank_max=1
+PAIR reservation_mib=32 fanout=32 pair=0 baseline_s=126.528665 warm_complete_s=12.607572 net_gain_pct=90.035797 rss_regression_pct=0.004999
+PAIR reservation_mib=32 fanout=32 pair=1 baseline_s=132.410764 warm_complete_s=15.999761 net_gain_pct=87.916571 rss_regression_pct=-0.149630
+PAIR reservation_mib=32 fanout=32 pair=2 baseline_s=125.908785 warm_complete_s=12.853065 net_gain_pct=89.791765 rss_regression_pct=-0.301603
+CELL reservation_mib=64 fanout=1 net_gain_pct=89.804134 lb95_pct=82.093825 ub95_pct=96.081425 baseline_mean_s=136.895876 net_mean_s=122.938157 max_paired_rss_regression_pct=0.054793 accounted_peak_bytes=86080035 accepted=350 missed=18 first_rank_min=1 first_rank_max=1
+PAIR reservation_mib=64 fanout=1 pair=0 baseline_s=127.281598 warm_complete_s=12.716409 net_gain_pct=90.009232 rss_regression_pct=0.054793
+PAIR reservation_mib=64 fanout=1 pair=1 baseline_s=146.291842 warm_complete_s=12.736049 net_gain_pct=91.294082 rss_regression_pct=-0.182473
+PAIR reservation_mib=64 fanout=1 pair=2 baseline_s=137.114189 warm_complete_s=16.420701 net_gain_pct=88.024069 rss_regression_pct=-0.371404
+CELL reservation_mib=64 fanout=2 net_gain_pct=90.438601 lb95_pct=82.191259 ub95_pct=96.297600 baseline_mean_s=149.166253 net_mean_s=134.903873 max_paired_rss_regression_pct=0.320649 accounted_peak_bytes=86080035 accepted=350 missed=18 first_rank_min=1 first_rank_max=1
+PAIR reservation_mib=64 fanout=2 pair=0 baseline_s=150.720741 warm_complete_s=13.576297 net_gain_pct=90.992417 rss_regression_pct=-0.089865
+PAIR reservation_mib=64 fanout=2 pair=1 baseline_s=145.593715 warm_complete_s=12.647764 net_gain_pct=91.312974 rss_regression_pct=0.320649
+PAIR reservation_mib=64 fanout=2 pair=2 baseline_s=151.184303 warm_complete_s=16.563079 net_gain_pct=89.044445 rss_regression_pct=0.220176
+CELL reservation_mib=64 fanout=4 net_gain_pct=88.335726 lb95_pct=79.719265 ub95_pct=95.642460 baseline_mean_s=140.410334 net_mean_s=124.032488 max_paired_rss_regression_pct=0.463032 accounted_peak_bytes=86080035 accepted=350 missed=18 first_rank_min=1 first_rank_max=1
+PAIR reservation_mib=64 fanout=4 pair=0 baseline_s=152.125354 warm_complete_s=16.684132 net_gain_pct=89.032642 rss_regression_pct=0.463032
+PAIR reservation_mib=64 fanout=4 pair=1 baseline_s=117.259805 warm_complete_s=15.517127 net_gain_pct=86.766883 rss_regression_pct=0.230294
+PAIR reservation_mib=64 fanout=4 pair=2 baseline_s=151.845844 warm_complete_s=16.932281 net_gain_pct=88.849032 rss_regression_pct=-0.214149
+CELL reservation_mib=64 fanout=8 net_gain_pct=89.603188 lb95_pct=81.052488 ub95_pct=96.106442 baseline_mean_s=154.195592 net_mean_s=138.164166 max_paired_rss_regression_pct=0.429893 accounted_peak_bytes=86080035 accepted=350 missed=18 first_rank_min=1 first_rank_max=1
+PAIR reservation_mib=64 fanout=8 pair=0 baseline_s=152.248097 warm_complete_s=12.735634 net_gain_pct=91.634947 rss_regression_pct=-0.343284
+PAIR reservation_mib=64 fanout=8 pair=1 baseline_s=166.050518 warm_complete_s=18.802072 net_gain_pct=88.676897 rss_regression_pct=0.035026
+PAIR reservation_mib=64 fanout=8 pair=2 baseline_s=144.288160 warm_complete_s=16.556572 net_gain_pct=88.525342 rss_regression_pct=0.429893
+CELL reservation_mib=64 fanout=16 net_gain_pct=89.749027 lb95_pct=80.574166 ub95_pct=95.931257 baseline_mean_s=155.269738 net_mean_s=139.353079 max_paired_rss_regression_pct=-0.054897 accounted_peak_bytes=86080035 accepted=350 missed=18 first_rank_min=1 first_rank_max=1
+PAIR reservation_mib=64 fanout=16 pair=0 baseline_s=152.396820 warm_complete_s=16.936649 net_gain_pct=88.886481 rss_regression_pct=-0.057445
+PAIR reservation_mib=64 fanout=16 pair=1 baseline_s=139.404071 warm_complete_s=13.883993 net_gain_pct=90.040468 rss_regression_pct=-0.054897
+PAIR reservation_mib=64 fanout=16 pair=2 baseline_s=174.008322 warm_complete_s=16.929336 net_gain_pct=90.270962 rss_regression_pct=-0.141946
+CELL reservation_mib=64 fanout=32 net_gain_pct=89.213935 lb95_pct=79.125641 ub95_pct=95.647724 baseline_mean_s=131.548946 net_mean_s=117.359990 max_paired_rss_regression_pct=0.122472 accounted_peak_bytes=86080035 accepted=350 missed=18 first_rank_min=1 first_rank_max=1
+PAIR reservation_mib=64 fanout=32 pair=0 baseline_s=144.164861 warm_complete_s=17.372484 net_gain_pct=87.949571 rss_regression_pct=0.122472
+PAIR reservation_mib=64 fanout=32 pair=1 baseline_s=126.006200 warm_complete_s=12.682458 net_gain_pct=89.935052 rss_regression_pct=-0.132272
+PAIR reservation_mib=64 fanout=32 pair=2 baseline_s=124.475775 warm_complete_s=12.511923 net_gain_pct=89.948307 rss_regression_pct=-0.187378
+BEST reservation_mib=8 fanout=1 net_gain_pct=90.159357 lb95_pct=83.242673 ub95_pct=96.339031 baseline_mean_s=156.306861 net_mean_s=140.925261
+BEST_COMPONENT name=E_ns mean_ns=147024533.333
+BEST_COMPONENT name=I_ns mean_ns=3886066.667
+BEST_COMPONENT name=L_ns mean_ns=9624533.333
+BEST_COMPONENT name=M_ns mean_ns=7778433.333
+BEST_COMPONENT name=S0_ns mean_ns=156306860966.667
+BEST_COMPONENT name=V_ns mean_ns=1001068266.667
+BEST_COMPONENT name=accounted_baseline mean_ns=86080035.000
+BEST_COMPONENT name=accounted_crel mean_ns=70041730.000
+BEST_COMPONENT name=rss_baseline mean_ns=164089856.000
+BEST_COMPONENT name=rss_crel mean_ns=163898709.333
+BEST_COMPONENT name=solve_ns mean_ns=14212218100.000
+GLOBAL max_paired_rss_regression_pct=0.511009 rss_cell_res=1 rss_cell_fanout=32 rss_pair=2 rss_baseline_bytes=163516416 rss_crel_bytes=164352000 max_accounted_peak_bytes=86080035 min_available_bytes=8009220096 min_free_physical_bytes=8021725184 max_process_elapsed_s=259.893 resource_gate_records=158
+CRITERIA every_cell_lb_le_5pct=false no_bounded_fanout_pays=false accounted_cache_exceeds_512mib=false max_paired_rss_regression_exceeds_5pct=false
+VERDICT PASS
+GATE_AUDIT resource_records=158 wait_rechecks=14 launches=144 min_launch_available_bytes=10760761344 min_launch_free_physical_bytes=10754404352 max_launch_foreign_cargo=0
