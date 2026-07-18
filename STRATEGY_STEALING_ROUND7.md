@@ -374,7 +374,14 @@ Off-line `Fhat` stones form runs of length at most two, and q-windows
 containing `(0,0)` are `Shat`-blocked, completing the near-window census. The
 final event `z=(6,0), k=(5,0)` fills `V/W` and satisfies `F-LOCK`. These
 prefix-indexed assignments define one causal `Pi` on the displayed finite
-trace; no assignment uses the as-yet unqueried prescription.
+trace; no assignment uses the as-yet unqueried prescription. To totalize
+this into the fixed pre-trace policy Definition 55.2 requests (review
+round-7 Finding 9): special-case the finitely many displayed S41 prefixes,
+and on every other physical prefix return the least admissible portfolio
+under the already fixed coordinate/window orders, formalized with codomain
+`Option Portfolio` so that `None` — no admissible portfolio — is the strict
+class exit rather than a portfolio value. This rule is fixed independently
+of the branch later followed and reproduces every displayed S41 choice.
 
 *Proof: S42.* Immediately before the second post-S15 service pair, its shadow
 q-window has deficit two while the displayed real q-window has deficit three.
@@ -505,7 +512,10 @@ stones, hence is nonwinning. Execute the already fixed physical certificate
 
 Any urgent window for this final debt must contain at least four real-S
 stones. There are exactly four total, so all four lie in that window and are
-collinear on one axis. Four distinct indices in a six-cell interval have span
+collinear on one axis. Since every urgent window contains the same four
+distinct stones, all urgent windows use their unique common axis line (two
+distinct axis lines cannot both contain the same four distinct cells).
+Four distinct indices in a six-cell interval have span
 three, four, or five. For span five there is one urgent interval; for span
 four there are at most two; for span three the four cells are consecutive and
 the three possible hole pairs have a two-cell transversal, exactly the
@@ -567,7 +577,13 @@ blocks, the next `Shat` win refutes the alleged-winning premise.
 
 ### 56.3 Finite-horizon reduction and the exact circularity boundary
 
-**Theorem S51 (finite-horizon stop trichotomy) [PROVEN].** Fix an
+**Theorem S51 (finite-horizon stop cover) [PROVEN].** (Renamed from
+"trichotomy" per review round-7 Finding 6: the three headings form an
+exhaustive but not necessarily mutually exclusive cover — an unrelated
+obligation can fail at the same event as a terminal result, and a
+voluntarily truncated live construction falls under item 1's mandatory
+coverage/continuation obligation without any extra maximality premise.)
+Fix an
 alleged-winning `sigma` and a genuine live coupled checkpoint `h` whose shadow
 component is legal, reachable, nonterminal, and `sigma`-consistent. Let
 `N_sigma(h)` be S24's finite upper bound on the length of a nonterminal shadow
@@ -901,7 +917,7 @@ candidate or a separation from fixed `T_0`.
 | 7 | Reverse legality for spatial carriers | **UNCHANGED OPEN for spatial carriers.** The event and deficit constructions never invert `z`; S18/S13 and sequential unsupported/collision sets remain binding on inverse/FIFO proposals. |
 | 8 | Strategy domain and physical persistence | **PROVEN on new finite scopes; OPEN globally.** S47 uses reached legal prescriptions, S50's counterplay is a function of fixed pure `sigma`, S53 uses an actual correct-role stone, and S54 keeps every filler/proxy. No physical stone is removed or recolored. |
 | 9 | Global causality | **PARTIAL.** `svc_{E+CAD}` fixes its portfolio before the query and chooses its event cell after the reached prescription; S50 uses deterministic pure-strategy look-ahead through its own fixed next shadow append. Other branches and future backing plans still owe S12. |
-| 10 | Universal window-certificate maintenance | **NEW F-ROLE MODULE; OPEN globally.** S46 gives the exact debt update. S47 transfers terminal meaning only with state maintenance plus canonical lock, or with the admitted augmented rule; it does not prove recurring maintenance. Arbitrary S turns and simultaneous P2/P3/P5R remain open. |
+| 10 | Universal window-certificate maintenance | **NEW F-ROLE MODULE; OPEN globally.** S46 gives the exact debt update. S47 transfers terminal meaning only with state maintenance plus canonical lock, or with the admitted augmented rule; it does not prove recurring maintenance. Arbitrary S turns, common-only real wins, simultaneous legality and terminal maintenance (P5 as well as P5R), and simultaneous P2/P3/P5R remain open. |
 | 11 | High-transversal service and permanent fencing | **ONE CERTIFIED EXCEPTION; OPEN generally.** S53.1 reconciles a singleton high-transversal debt only when its correct-role physical shadow certificate already exists. S30's exact `tau_E=5`, S31's six-blocker cost, availability, interrupted installation, and P3 compatibility remain binding. |
 | 12 | Strategy-specific reachability and outcome | **PARTIAL.** S50 is adaptive on every fixed `sigma` and reaches its fourth prescription, but does not force it to win. S49 is negative if it does. S51 reduces the general route to membership plus real-stop avoidance. No arbitrary alleged-winning strategy is refuted; `NL_F` remains open. |
 
@@ -910,7 +926,7 @@ candidate or a separation from fixed `T_0`.
 | Agenda item | Round-7 status | Exact advance and remaining duty |
 |---:|---|---|
 | 1. Pre-checkpoint P3 transfer | **PROVEN AT S40 SCOPE; PARTIAL beyond it** | S50 crosses one more actual `sigma` cycle with canonical service. Universal recurrence and terminal fidelity remain open. |
-| 2. P2/P4 at each real-S coordinate | **PARTIAL** | S53 covers one occupied-certificate ejection. S54 executes two displayed zero-lag coordinate responses with changing `T`, but the same cylinder is fixed-`T_0` solvable and is not a cut adaptation. First-unsafe, wrong-role, unsupported, and general adaptive coordinates remain open. |
+| 2. P2/P4 at each real-S coordinate | **PARTIAL** | S53 covers one occupied-certificate ejection. S54 executes two displayed zero-lag coordinate responses with changing `T`, but the same cylinder is fixed-`T_0` solvable and is not a cut adaptation. First-unsafe, wrong-role, unsupported, and general adaptive coordinates remain open. S13 (fixed-isometry one-stone FIFO frontier failure) remains a binding regression here; guarded traces fall outside it via persistent genuine fillers/proxies and physical reconciliation. |
 | 3. P5R during every lag/recode | **PROVEN in inherited guarded/certified classes and S53's admitted one-step continuations; OPEN globally** | The new debt is admitted by the exact phase guard. S14 remains binding on unguarded literal lag; real-terminal exits still need physical branch C or another P5R mechanism. |
 | 4. F-service compatibility | **CONDITIONAL AT CERTIFIED SCOPE; OPEN globally** | `F-CAD_2^st` is a sufficient readiness certificate; canonical service separately owes `F-LOCK`, while augmented exact service chooses the ready hole. S50 proves only `tau_E<=2` in the first adaptive cycle. S49 excludes a sixth-stone terminal. |
 | 5. Permanent-fence installation | **OPEN** | S31 is unchanged. S53.1 uses a pre-existing shadow certificate, not a newly installed six-blocker fence. |
@@ -1069,7 +1085,13 @@ event hit the S49 barrier or another physically misaligned terminal window?
 
 **Requested input state.** Branch `hunt/gap-raw`, input commit
 `09e27a93` (the round-6 hostile review and binding section 53). This authoring
-pass creates no commit and does not amend, reset, or move a branch reference.
+pass creates no commit and does not amend, reset, or move a branch reference
+(sentence scoped to the authoring session). **First landed artifact:**
+`798bfb75cee282960640fd8b4abcbfea47c11404` (blob
+`2241724248da0bb66b01d7d1764496b1562f0fb5`, SHA-256
+`12e228fe0d8aba68fe58ff090960d522627116ac194644ce3af58df4e8796140`),
+recorded post-review per round-7 Finding 16; `a8a0b92d` was the observed
+intermediate parent.
 
 During the session a read-only check observed the branch reference at
 `a8a0b92d`, an external descendant of `09e27a93`. A name-only comparison
@@ -1120,3 +1142,46 @@ No Cargo command, Lean build, harness, executable search, or proof-search
 program was run. No production source, prior proof artifact, or unrelated
 workspace entry was edited. All coordinate, count, cadence, deficit, window,
 and transversal arguments are hand proofs.
+
+## 63. Errata and clarifications folded from the round-7 hostile review
+
+`STRATEGY_STEALING_REVIEW_ROUND7.md` (ultra, reviewed artifact `798bfb75`,
+authored at input `09e27a93`) returned **SOUND-WITH-MINOR-ERRATA**: no
+REFUTED or MAJOR finding; all four sections CONFIRMED (§55 conditional
+alignment + exact audits + the proven canonical-maintenance negation; §56
+partial negative route with terminal-age-six honestly unforced; §57
+partition + correct-role reconciliation; §58 finite cylinder only). Folds:
+
+1. **(Finding 4, MINOR)** S50's proof now states the unique-common-axis
+   inference explicitly before the span census.
+2. **(Finding 6, MINOR)** S51 renamed "finite-horizon stop cover" — the
+   three headings are an exhaustive but non-disjoint cover, with the
+   voluntary-truncation case falling under item 1's mandatory
+   coverage/continuation obligation.
+3. **(Finding 9, MINOR)** S41's pathwise portfolio assignments are now
+   explicitly totalized into the fixed pre-trace policy Definition 55.2
+   requests (least-admissible off-path rule; codomain `Option Portfolio`
+   with `None` = strict-class exit).
+4. **(Finding 15, MINOR)** Carry-forward completeness restored: §59.2 row
+   10 regains common-only real wins + simultaneous legality/terminal
+   maintenance (P5 as well as P5R); §59.3 row 2 regains the explicit S13
+   sentence. (Second recurrence of this omission class — the caveat
+   list is now a standing prompt requirement for future rounds.)
+5. **(Finding 16, MINOR)** §62.1 records the first landed artifact
+   identity (commit/blob/SHA-256), distinguishing named input, observed
+   intermediate parent, and landing.
+
+**Review confirmations of record.** S48's audits recompute exactly (S41
+debt-one repayment; S42 red line — the PROVEN negation that canonical
+service alone does not maintain `F-CAD_2^st` stands); S49 is
+selector-independent at exactly its stated scope with terminal age six
+remaining unforced on a winning history; S50.1's five-stone census is
+exhaustive; S46's debt law is exact with non-preserving cases visible;
+`F-CAD_2^st` is a genuine many-window-to-one cover (no hidden point map);
+CAD+LOCK yields an actual co-terminal append; S51.1's circularity boundary
+is drawn correctly; S52's partition is complete at checkpoint-local scope;
+S53/S53.1 reconcile exactly the correct-role occupied class; S54's cylinder
+is legal but fixed-`T_0`-solvable (proving neither rebinding necessity nor
+escape from S43.1's subclass — full per-pair `K=2` stays OPEN). The
+review's unresolved-obstacle list supersedes §59 as the authoritative open
+state.

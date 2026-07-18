@@ -1,0 +1,89 @@
+R-ST7-REV — HOSTILE REVIEW (ultra): STRATEGY_STEALING_ROUND7.md
+
+CONTEXT NOTE: pure combinatorial game theory for Hexo (a Connect6-like
+board game). Nothing here concerns computer security. Use neutral
+testing/proof vocabulary in your own writing.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\hunt-gap-raw
+(branch hunt/gap-raw, HEAD = 798bfb75). You CANNOT git-commit. NO
+cargo/Lean/harness runs — hand recomputation only. Deliverable:
+STRATEGY_STEALING_REVIEW_ROUND7.md.
+
+## Task
+First-principles hostile proof audit of STRATEGY_STEALING_ROUND7.md
+(authored at input 09e27a93, landed unmodified at 798bfb75). Claims:
+1. §55: S46 alignment-debt update law; Definitions 55.2 F-CAD_2^st
+   (causal one-debt F-window deficit cover, many-window-to-one, no
+   point map) and 55.3 F-LOCK (residual canonical-terminal-hits-
+   assigned-window obligation); S47 conditional alignment (CAD+LOCK
+   => inherited event-terminal alignment; augmented least-choice
+   handler conditional on recurring admission); S48 exact audits (S41
+   repays debt one; S42 fails terminal readiness — i.e. canonical
+   service alone does NOT maintain the invariant: a PROVEN negation).
+2. §56: S49 selector-independent sixth-Fhat-stone alignment barrier
+   (every one-for-one post-S15 F-event selector incl. every two-cell
+   service augmentation, conditional on terminal age six); S50
+   adaptive earliest-cycle dichotomy (every pure sigma + S15 sync);
+   S50.1 five-Shat-stones negative control (at most two immediate
+   winning cells); S51 finite-horizon stop trichotomy via S24; S51.1
+   branch-(C) boundary (physical Shat win = counterstrategy
+   contradiction); the exact circularity boundary statement.
+3. §57: S52 rolling exit partition; S53/S53.1 correct-role occupied
+   reconciliation (newly covered ejection class); honest uncovered
+   remainder.
+4. §58: S54 intra-pair alternating-translation cylinder (finite legal
+   two-episode execution; per-pair class stays OPEN).
+
+Default posture: REFUTE. Recompute every window census, deficit
+count, cadence chain, legality claim, debt-portfolio update, terminal
+age, and transversal by hand. Attack especially:
+- S46/55.2: the debt-update law's case analysis — does every legal
+  paired F event really update the portfolio as claimed (windows
+  gained/lost, opponent-blocking events, the selected-pair freedom)?
+  Is the one-debt bound genuinely maintained or does a case leak two
+  debts? Is "no point map" honest (any hidden injectivity)?
+- S47: the implication direction — does CAD+LOCK really imply
+  inherited event-terminal alignment, or only the readiness
+  precondition? Is the augmented least-choice handler's conditional
+  admission honestly scoped (what happens when the unique hole is
+  occupied/illegal)? Is the OPEN label on the complete augmented
+  terminal trace correct?
+- S48: recompute both audits exactly (S41's debt-one repayment
+  arithmetic; S42's terminal-readiness failure — verify this really
+  proves the NEGATION claim about canonical service on all A_FS2).
+- S49: "selector-independent" — is the quantifier over selectors
+  genuinely exhaustive (one-for-one post-S15 + two-cell
+  augmentations), and does the terminal-age-six condition make the
+  barrier vacuous or substantive? Check the age computation against
+  the cadence.
+- S50/S50.1: the earliest-cycle dichotomy's case split; the
+  five-stone two-winning-cells census (enumerate the windows).
+- S51: the trichotomy's use of S24 — statement fidelity to S24's
+  actual scope; the circularity boundary — is the claimed exclusion
+  of the tested P5/(46.4) duty honest?
+- S52/S53: partition completeness (no missing exit case); S53's
+  branch dispatch legality; S53.1's empty-urgent-family claim.
+- S54: every coordinate/cadence/legality of the cylinder; honest
+  no-global-claim labels.
+- Cross-round: §53 errata binding (terminal closure semantics used
+  consistently); round-6 review's obstacle list carried accurately in
+  §59.2-59.4 (check the four restored round-6 caveats survive); S13/
+  S14/S18/S20/S25/S30/S31 regressions respected; no NL_F overclaim;
+  provenance (input 09e27a93; verify no GAP_RAW evidence; landed
+  artifact 798bfb75 should be recorded — flag if absent).
+
+## Required corpus (read first, in order, in full)
+1. STRATEGY_STEALING_HEXO.md; 2-5. ROUND2-5 + their reviews (ROUND4
+   WITH §35, ROUND5 WITH §44); 6. ROUND6 (WITH §53) + REVIEW_ROUND6;
+7. STRATEGY_STEALING_ROUND7.md (the artifact).
+Rule sources: packages/hexo_engine/rust/src/{coord,legal,rules,board,
+state,tactics}.rs cited ranges.
+
+## Output format (campaign-standard)
+STRATEGY_STEALING_REVIEW_ROUND7.md: method preamble (artifact hash +
+named input); numbered findings with severity (REFUTED/MAJOR/MINOR/
+NOTE), quoted claim, independent recomputation, proposed repair;
+per-theorem verdict table; overall verdict; exact unresolved
+obstacles. Chunk <= 2h per exec; incremental writes. Final message:
+overall verdict + disposition of the four sections + most severe
+finding, one line each.
