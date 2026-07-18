@@ -275,6 +275,7 @@ fn tss_corpus_check() {
     let live_ge3_seed = std::env::var("TSS_LIVE_GE3_SEED").ok().as_deref() == Some("1");
     let closure_counters = std::env::var("TSS_CLOSURE_COUNTERS").ok().as_deref() == Some("1");
     let ordering_study = std::env::var("TSS_ORDERING_STUDY").ok().as_deref() == Some("1");
+    let (zone_order, zone_order_band) = crate::tss_solver::zone_order_config();
     let threshold_counters = std::env::var("TSS_THRESHOLD_COUNTERS").ok().as_deref() == Some("1");
     let threshold_delta = std::env::var("TSS_THRESHOLD_DELTA").unwrap_or_else(|_| "off".to_owned());
     if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_SHARED_FRAGMENTS") {
@@ -347,7 +348,7 @@ fn tss_corpus_check() {
         );
     }
     println!(
-        "CORPUS_MODE shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={} cap_resume={} live_ge3_seed={} closure_counters={} ordering_study={} threshold_counters={} threshold_delta={} tt_bytes_cap={tt_bytes_cap}",
+        "CORPUS_MODE shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={} cap_resume={} live_ge3_seed={} closure_counters={} ordering_study={} zone_order={} zone_order_band={} threshold_counters={} threshold_delta={} tt_bytes_cap={tt_bytes_cap}",
         if shared_fragments { "on" } else { "off" },
         if lazy_frontier { "on" } else { "off" },
         if interior_gate { "on" } else { "off" },
@@ -356,6 +357,8 @@ fn tss_corpus_check() {
         if live_ge3_seed { "on" } else { "off" },
         if closure_counters { "on" } else { "off" },
         if ordering_study { "on" } else { "off" },
+        zone_order,
+        zone_order_band,
         if threshold_counters { "on" } else { "off" },
         threshold_delta,
     );
@@ -604,8 +607,12 @@ fn tss_corpus_check() {
             );
             let (pair_ms, defender_ms, regen_ms, expand_ms, refresh_ms, insert_ms) =
                 crate::tss_solver::wide_gen_profile();
+            let (zone_contexts, zone_keys, zone_context_ns, zone_key_ns) =
+                crate::tss_solver::zone_order_profile();
             println!(
-                "GEN_PROFILE pair_ms={pair_ms} defender_ms={defender_ms} regen_ms={regen_ms} expand_ms={expand_ms} refresh_ms={refresh_ms} insert_ms={insert_ms}"
+                "GEN_PROFILE pair_ms={pair_ms} defender_ms={defender_ms} regen_ms={regen_ms} expand_ms={expand_ms} refresh_ms={refresh_ms} insert_ms={insert_ms} zone_contexts={zone_contexts} zone_keys={zone_keys} zone_context_ms={:.3} zone_key_ms={:.3}",
+                zone_context_ns as f64 / 1_000_000.0,
+                zone_key_ns as f64 / 1_000_000.0,
             );
             final_status = result.status;
             if result.status != ProofStatus::Unknown || i == ladder.len() - 1 {
