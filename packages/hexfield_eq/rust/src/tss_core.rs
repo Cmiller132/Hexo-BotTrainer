@@ -159,6 +159,21 @@ pub(crate) struct ClosureDebtStats {
     pub(crate) avoidable_second_candidate_nanos: u64,
     pub(crate) avoidable_pair_evaluation_nanos: u64,
     pub(crate) avoidable_dedup_nanos: u64,
+    /// R-OS3 paired reveal-prefix counterfactual. Order 0 is historical;
+    /// order 1 is `(zone_bound, historical_ordinal)`.
+    pub(crate) reveal_proven_pair_nodes: u64,
+    pub(crate) reveal_rank_bins: [[u64; 8]; 2],
+    pub(crate) reveal_evaluation_rank_bins: [[u64; 8]; 2],
+    pub(crate) reveal_total_evaluated: [u64; 2],
+    pub(crate) reveal_prefix_evaluated: [u64; 2],
+    pub(crate) reveal_total_expanded: [u64; 2],
+    pub(crate) reveal_avoidable_expanded: [u64; 2],
+    pub(crate) reveal_avoidable_second_candidate_nanos: [u64; 2],
+    pub(crate) reveal_avoidable_pair_evaluation_nanos: [u64; 2],
+    pub(crate) reveal_avoidable_dedup_nanos: [u64; 2],
+    /// Test-only time spent deriving and bucketing the offline key. This is
+    /// reported separately and is never counted as avoidable classifier work.
+    pub(crate) reveal_analysis_nanos: u64,
 }
 
 /// Test-only accounting for the prior-scale threshold hunt. These values are
@@ -341,6 +356,37 @@ impl ClosureDebtStats {
         self.avoidable_dedup_nanos = self
             .avoidable_dedup_nanos
             .saturating_add(other.avoidable_dedup_nanos);
+        self.reveal_proven_pair_nodes = self
+            .reveal_proven_pair_nodes
+            .saturating_add(other.reveal_proven_pair_nodes);
+        for order in 0..2 {
+            for bin in 0..8 {
+                self.reveal_rank_bins[order][bin] = self.reveal_rank_bins[order][bin]
+                    .saturating_add(other.reveal_rank_bins[order][bin]);
+                self.reveal_evaluation_rank_bins[order][bin] = self.reveal_evaluation_rank_bins
+                    [order][bin]
+                    .saturating_add(other.reveal_evaluation_rank_bins[order][bin]);
+            }
+            self.reveal_total_evaluated[order] = self.reveal_total_evaluated[order]
+                .saturating_add(other.reveal_total_evaluated[order]);
+            self.reveal_prefix_evaluated[order] = self.reveal_prefix_evaluated[order]
+                .saturating_add(other.reveal_prefix_evaluated[order]);
+            self.reveal_total_expanded[order] = self.reveal_total_expanded[order]
+                .saturating_add(other.reveal_total_expanded[order]);
+            self.reveal_avoidable_expanded[order] = self.reveal_avoidable_expanded[order]
+                .saturating_add(other.reveal_avoidable_expanded[order]);
+            self.reveal_avoidable_second_candidate_nanos[order] = self
+                .reveal_avoidable_second_candidate_nanos[order]
+                .saturating_add(other.reveal_avoidable_second_candidate_nanos[order]);
+            self.reveal_avoidable_pair_evaluation_nanos[order] = self
+                .reveal_avoidable_pair_evaluation_nanos[order]
+                .saturating_add(other.reveal_avoidable_pair_evaluation_nanos[order]);
+            self.reveal_avoidable_dedup_nanos[order] = self.reveal_avoidable_dedup_nanos[order]
+                .saturating_add(other.reveal_avoidable_dedup_nanos[order]);
+        }
+        self.reveal_analysis_nanos = self
+            .reveal_analysis_nanos
+            .saturating_add(other.reveal_analysis_nanos);
     }
 }
 

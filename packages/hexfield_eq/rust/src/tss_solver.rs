@@ -2318,22 +2318,37 @@ impl OrderingFeatureContext {
         }
     }
 
+    fn nearest_claimant_distance(&self, placed: HexCoord) -> u16 {
+        self.claimant_stones
+            .iter()
+            .map(|&stone| hex_distance(placed, stone))
+            .min()
+            .and_then(|distance| u16::try_from(distance).ok())
+            .unwrap_or(u16::MAX)
+    }
+
     fn pair_key(&self, first: HexCoord, second: HexCoord, mode: ZoneOrderMode) -> u16 {
-        let nearest = |placed| {
-            self.claimant_stones
-                .iter()
-                .map(|&stone| hex_distance(placed, stone))
-                .min()
-                .and_then(|distance| u16::try_from(distance).ok())
-                .unwrap_or(u16::MAX)
-        };
-        let first = nearest(first);
-        let second = nearest(second);
+        let first = self.nearest_claimant_distance(first);
+        let second = self.nearest_claimant_distance(second);
         match mode {
             ZoneOrderMode::Off => 0,
             ZoneOrderMode::ZoneBound => first.max(second),
             ZoneOrderMode::DStone => first.min(second),
         }
+    }
+
+    #[cfg(test)]
+    fn cached_nearest_claimant_distance(
+        &self,
+        placed: HexCoord,
+        cache: &mut HashMap<HexCoord, u16>,
+    ) -> u16 {
+        if let Some(&distance) = cache.get(&placed) {
+            return distance;
+        }
+        let distance = self.nearest_claimant_distance(placed);
+        cache.insert(placed, distance);
+        distance
     }
 
     #[cfg(test)]
@@ -2466,11 +2481,45 @@ struct ClosurePairNodeProfile {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default)]
+struct RevealZoneWork {
+    evaluated: u64,
+    second_candidate_nanos: u64,
+    pair_evaluation_nanos: u64,
+    dedup_nanos: u64,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+struct RevealPairNodeProfile {
+    /// Indexed by the byte-exact `u16` zone-bound value. Empty intervening
+    /// buckets are retained so prefix sums have no comparison ambiguity.
+    zone: Vec<RevealZoneWork>,
+}
+
+#[cfg(test)]
+impl RevealPairNodeProfile {
+    fn work_mut(&mut self, zone_bound: u16) -> &mut RevealZoneWork {
+        let index = usize::from(zone_bound);
+        if self.zone.len() <= index {
+            self.zone
+                .resize(index.saturating_add(1), RevealZoneWork::default());
+        }
+        &mut self.zone[index]
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
 struct ClosurePairChildProfile {
     evaluation_ordinal: u64,
     second_candidate_nanos: u64,
     pair_evaluation_nanos: u64,
     dedup_nanos: u64,
+    zone_bound: u16,
+    zone_evaluation_prefix: u64,
+    zone_second_candidate_nanos: u64,
+    zone_pair_evaluation_nanos: u64,
+    zone_dedup_nanos: u64,
     selected: bool,
     linked: bool,
     expanded: bool,
@@ -3564,6 +3613,8 @@ struct WidePnSearch<'store> {
     #[cfg(test)]
     closure_counters: bool,
     #[cfg(test)]
+    reveal_prefix_study: bool,
+    #[cfg(test)]
     ordering_study: bool,
     #[cfg(test)]
     closure_stats: RefCell<ClosureDebtStats>,
@@ -3575,6 +3626,10 @@ struct WidePnSearch<'store> {
     closure_last_pair_node: std::cell::Cell<ClosurePairNodeProfile>,
     #[cfg(test)]
     closure_last_pair_children: RefCell<Vec<ClosurePairChildProfile>>,
+    #[cfg(test)]
+    reveal_pair_nodes: HashMap<usize, RevealPairNodeProfile>,
+    #[cfg(test)]
+    reveal_last_pair_node: RefCell<RevealPairNodeProfile>,
     #[cfg(test)]
     threshold_counters: bool,
     #[cfg(test)]
@@ -3825,6 +3880,9 @@ impl<'store> WidePnSearch<'store> {
             #[cfg(test)]
             closure_counters: std::env::var("TSS_CLOSURE_COUNTERS").ok().as_deref() == Some("1"),
             #[cfg(test)]
+            reveal_prefix_study: std::env::var("TSS_REVEAL_PREFIX_STUDY").ok().as_deref()
+                == Some("1"),
+            #[cfg(test)]
             ordering_study: std::env::var("TSS_ORDERING_STUDY").ok().as_deref() == Some("1"),
             #[cfg(test)]
             closure_stats: RefCell::new(ClosureDebtStats::default()),
@@ -3836,6 +3894,10 @@ impl<'store> WidePnSearch<'store> {
             closure_last_pair_node: std::cell::Cell::new(ClosurePairNodeProfile::default()),
             #[cfg(test)]
             closure_last_pair_children: RefCell::new(Vec::new()),
+            #[cfg(test)]
+            reveal_pair_nodes: HashMap::new(),
+            #[cfg(test)]
+            reveal_last_pair_node: RefCell::new(RevealPairNodeProfile::default()),
             #[cfg(test)]
             threshold_counters: std::env::var("TSS_THRESHOLD_COUNTERS").ok().as_deref()
                 == Some("1"),
@@ -5528,6 +5590,161 @@ impl<'store> WidePnSearch<'store> {
                 .dedup_nanos
                 .saturating_sub(child_profile.dedup_nanos),
         );
+        if !self.reveal_prefix_study {
+            return;
+        }
+        let Some(reveal_node) = self.reveal_pair_nodes.get(&id) else {
+            return;
+        };
+        let WidePnNode::Branch { children, .. } = &self.entries[id].node else {
+            return;
+        };
+        let rank_bin = |value: u64| match value {
+            1 => 0,
+            2 => 1,
+            3 => 2,
+            4 => 3,
+            5..=8 => 4,
+            9..=16 => 5,
+            17..=32 => 6,
+            _ => 7,
+        };
+        let winner_zone = child_profile.zone_bound;
+        let zone_rank = 1u64.saturating_add(
+            children
+                .iter()
+                .enumerate()
+                .filter(|(index, child)| {
+                    (child.ordering.zone_bound, *index) < (winner_zone, winning_index)
+                })
+                .count()
+                .try_into()
+                .unwrap_or(u64::MAX),
+        );
+        let historical_rank = u64::try_from(rank).unwrap_or(u64::MAX);
+        let total_zone_work =
+            reveal_node
+                .zone
+                .iter()
+                .copied()
+                .fold(RevealZoneWork::default(), |mut total, work| {
+                    total.evaluated = total.evaluated.saturating_add(work.evaluated);
+                    total.second_candidate_nanos = total
+                        .second_candidate_nanos
+                        .saturating_add(work.second_candidate_nanos);
+                    total.pair_evaluation_nanos = total
+                        .pair_evaluation_nanos
+                        .saturating_add(work.pair_evaluation_nanos);
+                    total.dedup_nanos = total.dedup_nanos.saturating_add(work.dedup_nanos);
+                    total
+                });
+        let lower_zone_work = reveal_node
+            .zone
+            .iter()
+            .take(usize::from(winner_zone))
+            .copied()
+            .fold(RevealZoneWork::default(), |mut total, work| {
+                total.evaluated = total.evaluated.saturating_add(work.evaluated);
+                total.second_candidate_nanos = total
+                    .second_candidate_nanos
+                    .saturating_add(work.second_candidate_nanos);
+                total.pair_evaluation_nanos = total
+                    .pair_evaluation_nanos
+                    .saturating_add(work.pair_evaluation_nanos);
+                total.dedup_nanos = total.dedup_nanos.saturating_add(work.dedup_nanos);
+                total
+            });
+        let zone_evaluation_prefix = lower_zone_work
+            .evaluated
+            .saturating_add(child_profile.zone_evaluation_prefix);
+        let zone_second_prefix = lower_zone_work
+            .second_candidate_nanos
+            .saturating_add(child_profile.zone_second_candidate_nanos);
+        let zone_evaluation_nanos_prefix = lower_zone_work
+            .pair_evaluation_nanos
+            .saturating_add(child_profile.zone_pair_evaluation_nanos);
+        let zone_dedup_prefix = lower_zone_work
+            .dedup_nanos
+            .saturating_add(child_profile.zone_dedup_nanos);
+        let mut expanded_total = 0u64;
+        let mut historical_expanded_tail = 0u64;
+        let mut zone_expanded_tail = 0u64;
+        for (index, child) in children.iter().enumerate() {
+            let Some(profile) = self.closure_pair_children.get(&(id, index)) else {
+                continue;
+            };
+            if !profile.expanded {
+                continue;
+            }
+            expanded_total = expanded_total.saturating_add(1);
+            if index > winning_index {
+                historical_expanded_tail = historical_expanded_tail.saturating_add(1);
+            }
+            if (child.ordering.zone_bound, index) > (winner_zone, winning_index) {
+                zone_expanded_tail = zone_expanded_tail.saturating_add(1);
+            }
+        }
+        stats.reveal_proven_pair_nodes = stats.reveal_proven_pair_nodes.saturating_add(1);
+        stats.reveal_rank_bins[0][rank_bin(historical_rank)] =
+            stats.reveal_rank_bins[0][rank_bin(historical_rank)].saturating_add(1);
+        stats.reveal_rank_bins[1][rank_bin(zone_rank)] =
+            stats.reveal_rank_bins[1][rank_bin(zone_rank)].saturating_add(1);
+        stats.reveal_evaluation_rank_bins[0][rank_bin(child_profile.evaluation_ordinal)] = stats
+            .reveal_evaluation_rank_bins[0][rank_bin(child_profile.evaluation_ordinal)]
+        .saturating_add(1);
+        stats.reveal_evaluation_rank_bins[1][rank_bin(zone_evaluation_prefix)] = stats
+            .reveal_evaluation_rank_bins[1][rank_bin(zone_evaluation_prefix)]
+        .saturating_add(1);
+        for order in 0..2 {
+            stats.reveal_total_evaluated[order] =
+                stats.reveal_total_evaluated[order].saturating_add(node_profile.evaluated);
+            stats.reveal_total_expanded[order] =
+                stats.reveal_total_expanded[order].saturating_add(expanded_total);
+        }
+        stats.reveal_prefix_evaluated[0] =
+            stats.reveal_prefix_evaluated[0].saturating_add(child_profile.evaluation_ordinal);
+        stats.reveal_prefix_evaluated[1] =
+            stats.reveal_prefix_evaluated[1].saturating_add(zone_evaluation_prefix);
+        stats.reveal_avoidable_expanded[0] =
+            stats.reveal_avoidable_expanded[0].saturating_add(historical_expanded_tail);
+        stats.reveal_avoidable_expanded[1] =
+            stats.reveal_avoidable_expanded[1].saturating_add(zone_expanded_tail);
+        stats.reveal_avoidable_second_candidate_nanos[0] =
+            stats.reveal_avoidable_second_candidate_nanos[0].saturating_add(
+                node_profile
+                    .second_candidate_nanos
+                    .saturating_sub(child_profile.second_candidate_nanos),
+            );
+        stats.reveal_avoidable_pair_evaluation_nanos[0] =
+            stats.reveal_avoidable_pair_evaluation_nanos[0].saturating_add(
+                node_profile
+                    .pair_evaluation_nanos
+                    .saturating_sub(child_profile.pair_evaluation_nanos),
+            );
+        stats.reveal_avoidable_dedup_nanos[0] = stats.reveal_avoidable_dedup_nanos[0]
+            .saturating_add(
+                node_profile
+                    .dedup_nanos
+                    .saturating_sub(child_profile.dedup_nanos),
+            );
+        stats.reveal_avoidable_second_candidate_nanos[1] =
+            stats.reveal_avoidable_second_candidate_nanos[1].saturating_add(
+                total_zone_work
+                    .second_candidate_nanos
+                    .saturating_sub(zone_second_prefix),
+            );
+        stats.reveal_avoidable_pair_evaluation_nanos[1] =
+            stats.reveal_avoidable_pair_evaluation_nanos[1].saturating_add(
+                total_zone_work
+                    .pair_evaluation_nanos
+                    .saturating_sub(zone_evaluation_nanos_prefix),
+            );
+        stats.reveal_avoidable_dedup_nanos[1] = stats.reveal_avoidable_dedup_nanos[1]
+            .saturating_add(
+                total_zone_work
+                    .dedup_nanos
+                    .saturating_sub(zone_dedup_prefix),
+            );
     }
 
     #[cfg(test)]
@@ -5779,6 +5996,17 @@ impl<'store> WidePnSearch<'store> {
         } else {
             None
         };
+        #[cfg(test)]
+        let reveal_pair_profile = if self.reveal_prefix_study
+            && kind == WidePnKind::Choice
+            && matches!(state.phase(), TurnPhase::FirstStone)
+        {
+            Some(std::mem::take(
+                &mut *self.reveal_last_pair_node.borrow_mut(),
+            ))
+        } else {
+            None
+        };
         children.shrink_to_fit();
         self.entries[id].node = if children.is_empty() {
             WidePnNode::Refuted
@@ -5792,6 +6020,10 @@ impl<'store> WidePnSearch<'store> {
                 self.closure_pair_children
                     .insert((id, child_index), profile);
             }
+        }
+        #[cfg(test)]
+        if let Some(profile) = reveal_pair_profile {
+            self.reveal_pair_nodes.insert(id, profile);
         }
         self.refresh(id);
         WidePnStepOutcome::Progress
@@ -5848,9 +6080,18 @@ impl<'store> WidePnSearch<'store> {
         let gate = WideTurnGate::build(state, self.claimant);
         #[cfg(test)]
         let observe_ordering_study = self.ordering_study;
+        #[cfg(test)]
+        let observe_reveal_prefix = self.reveal_prefix_study;
         #[cfg(not(test))]
         let observe_ordering_study = false;
-        let ordering_context = if self.zone_order_mode.enabled() || observe_ordering_study {
+        #[cfg(not(test))]
+        let observe_reveal_prefix = false;
+        #[cfg(test)]
+        let reveal_context_started = observe_reveal_prefix.then(Instant::now);
+        let ordering_context = if self.zone_order_mode.enabled()
+            || observe_ordering_study
+            || observe_reveal_prefix
+        {
             #[cfg(test)]
             let context_started = self.zone_order_mode.enabled().then(Instant::now);
             let context =
@@ -5868,6 +6109,10 @@ impl<'store> WidePnSearch<'store> {
             None
         };
         #[cfg(test)]
+        let mut reveal_analysis_nanos = reveal_context_started
+            .map(|started| u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX))
+            .unwrap_or(0);
+        #[cfg(test)]
         let gate_build_nanos = gate_started
             .map(|started| u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX))
             .unwrap_or(0);
@@ -5875,6 +6120,12 @@ impl<'store> WidePnSearch<'store> {
         let mut pair_profile = ClosurePairNodeProfile::default();
         #[cfg(test)]
         let mut pair_child_profiles = Vec::new();
+        #[cfg(test)]
+        let mut reveal_pair_profile = RevealPairNodeProfile::default();
+        #[cfg(test)]
+        let mut reveal_distance_cache = HashMap::<HexCoord, u16>::new();
+        #[cfg(test)]
+        let mut reveal_zone_keys = Vec::<u16>::new();
         #[cfg(test)]
         let mut accepted = 0u64;
         #[cfg(test)]
@@ -5898,6 +6149,8 @@ impl<'store> WidePnSearch<'store> {
         for first_candidate in &first_candidates {
             let first_width_tier = wide_candidate_width_tier(first_candidate);
             let first = first_candidate.coord;
+            #[cfg(test)]
+            let mut reveal_second_elapsed = 0u64;
             {
                 #[cfg(test)]
                 let _regen_timer = WideGenTimer::start(&WIDE_GEN_PRIOR_NANOS);
@@ -5911,13 +6164,47 @@ impl<'store> WidePnSearch<'store> {
                 );
                 #[cfg(test)]
                 if let Some(started) = second_started {
+                    let elapsed = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                    reveal_second_elapsed = elapsed;
                     pair_profile.second_candidate_nanos =
-                        pair_profile.second_candidate_nanos.saturating_add(
-                            u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
-                        );
+                        pair_profile.second_candidate_nanos.saturating_add(elapsed);
                 }
             }
-            for &second in &second_coords {
+            #[cfg(test)]
+            if observe_reveal_prefix {
+                let analysis_started = Instant::now();
+                reveal_zone_keys.clear();
+                let context = ordering_context
+                    .as_ref()
+                    .expect("reveal-prefix study builds a turn-start context");
+                let first_distance =
+                    context.cached_nearest_claimant_distance(first, &mut reveal_distance_cache);
+                reveal_zone_keys.extend(second_coords.iter().map(|&second| {
+                    first_distance.max(
+                        context
+                            .cached_nearest_claimant_distance(second, &mut reveal_distance_cache),
+                    )
+                }));
+                let minimum_zone = reveal_zone_keys
+                    .iter()
+                    .copied()
+                    .min()
+                    .unwrap_or(first_distance);
+                let work = reveal_pair_profile.work_mut(minimum_zone);
+                work.second_candidate_nanos = work
+                    .second_candidate_nanos
+                    .saturating_add(reveal_second_elapsed);
+                reveal_analysis_nanos = reveal_analysis_nanos.saturating_add(
+                    u64::try_from(analysis_started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                );
+            }
+            for (_second_index, &second) in second_coords.iter().enumerate() {
+                #[cfg(test)]
+                let reveal_zone_bound = if observe_reveal_prefix {
+                    reveal_zone_keys[_second_index]
+                } else {
+                    0
+                };
                 // Stateless classification from the turn-start window
                 // snapshot: no engine applies in the pair double loop.
                 #[cfg(test)]
@@ -5925,11 +6212,16 @@ impl<'store> WidePnSearch<'store> {
                 let evaluated = self.evaluate_wide_pair_at_gate(&gate, first, second);
                 #[cfg(test)]
                 if let Some(started) = evaluation_started {
+                    let elapsed = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
                     pair_profile.evaluated = pair_profile.evaluated.saturating_add(1);
                     pair_profile.pair_evaluation_nanos =
-                        pair_profile.pair_evaluation_nanos.saturating_add(
-                            u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
-                        );
+                        pair_profile.pair_evaluation_nanos.saturating_add(elapsed);
+                    if observe_reveal_prefix {
+                        let work = reveal_pair_profile.work_mut(reveal_zone_bound);
+                        work.evaluated = work.evaluated.saturating_add(1);
+                        work.pair_evaluation_nanos =
+                            work.pair_evaluation_nanos.saturating_add(elapsed);
+                    }
                 }
                 if let Some((result, prior)) = evaluated {
                     #[cfg(test)]
@@ -5955,9 +6247,13 @@ impl<'store> WidePnSearch<'store> {
                     };
                     #[cfg(test)]
                     if let Some(started) = dedup_started {
-                        pair_profile.dedup_nanos = pair_profile.dedup_nanos.saturating_add(
-                            u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
-                        );
+                        let elapsed =
+                            u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                        pair_profile.dedup_nanos = pair_profile.dedup_nanos.saturating_add(elapsed);
+                        if observe_reveal_prefix {
+                            let work = reveal_pair_profile.work_mut(reveal_zone_bound);
+                            work.dedup_nanos = work.dedup_nanos.saturating_add(elapsed);
+                        }
                     }
                     if !inserted {
                         continue;
@@ -5970,6 +6266,23 @@ impl<'store> WidePnSearch<'store> {
                             second_candidate_nanos: pair_profile.second_candidate_nanos,
                             pair_evaluation_nanos: pair_profile.pair_evaluation_nanos,
                             dedup_nanos: pair_profile.dedup_nanos,
+                            zone_bound: reveal_zone_bound,
+                            zone_evaluation_prefix: reveal_pair_profile
+                                .zone
+                                .get(usize::from(reveal_zone_bound))
+                                .map_or(0, |work| work.evaluated),
+                            zone_second_candidate_nanos: reveal_pair_profile
+                                .zone
+                                .get(usize::from(reveal_zone_bound))
+                                .map_or(0, |work| work.second_candidate_nanos),
+                            zone_pair_evaluation_nanos: reveal_pair_profile
+                                .zone
+                                .get(usize::from(reveal_zone_bound))
+                                .map_or(0, |work| work.pair_evaluation_nanos),
+                            zone_dedup_nanos: reveal_pair_profile
+                                .zone
+                                .get(usize::from(reveal_zone_bound))
+                                .map_or(0, |work| work.dedup_nanos),
                             ..ClosurePairChildProfile::default()
                         });
                     }
@@ -6010,7 +6323,16 @@ impl<'store> WidePnSearch<'store> {
                         #[cfg(test)]
                         ordering: ordering_context
                             .as_ref()
-                            .map(|context| context.features(&[first, second]))
+                            .map(|context| {
+                                if observe_ordering_study {
+                                    context.features(&[first, second])
+                                } else {
+                                    OrderingChildFeatures {
+                                        zone_bound: reveal_zone_bound,
+                                        ..OrderingChildFeatures::default()
+                                    }
+                                }
+                            })
                             .unwrap_or_default(),
                     });
                 }
@@ -6039,6 +6361,14 @@ impl<'store> WidePnSearch<'store> {
             drop(stats);
             self.closure_last_pair_node.set(pair_profile);
             *self.closure_last_pair_children.borrow_mut() = pair_child_profiles;
+            if observe_reveal_prefix {
+                let mut stats = self.closure_stats.borrow_mut();
+                stats.reveal_analysis_nanos = stats
+                    .reveal_analysis_nanos
+                    .saturating_add(reveal_analysis_nanos);
+                drop(stats);
+                *self.reveal_last_pair_node.borrow_mut() = reveal_pair_profile;
+            }
         }
         children
     }

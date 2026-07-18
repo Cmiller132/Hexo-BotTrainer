@@ -274,8 +274,17 @@ fn tss_corpus_check() {
     let cap_resume = std::env::var("TSS_CAP_RESUME").ok().as_deref() == Some("1");
     let live_ge3_seed = std::env::var("TSS_LIVE_GE3_SEED").ok().as_deref() == Some("1");
     let closure_counters = std::env::var("TSS_CLOSURE_COUNTERS").ok().as_deref() == Some("1");
+    let reveal_prefix_study = std::env::var("TSS_REVEAL_PREFIX_STUDY").ok().as_deref() == Some("1");
     let ordering_study = std::env::var("TSS_ORDERING_STUDY").ok().as_deref() == Some("1");
     let (zone_order, zone_order_band) = crate::tss_solver::zone_order_config();
+    assert!(
+        !reveal_prefix_study || closure_counters,
+        "TSS_REVEAL_PREFIX_STUDY requires TSS_CLOSURE_COUNTERS=1"
+    );
+    assert!(
+        !reveal_prefix_study || zone_order == "off",
+        "reveal-prefix measurement must not enable or couple to TSS_ZONE_ORDER"
+    );
     let threshold_counters = std::env::var("TSS_THRESHOLD_COUNTERS").ok().as_deref() == Some("1");
     let threshold_delta = std::env::var("TSS_THRESHOLD_DELTA").unwrap_or_else(|_| "off".to_owned());
     if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_SHARED_FRAGMENTS") {
@@ -327,6 +336,13 @@ fn tss_corpus_check() {
             "TSS_CLOSURE_COUNTERS does not match gate expectation",
         );
     }
+    if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_REVEAL_PREFIX_STUDY") {
+        assert_eq!(
+            expected,
+            if reveal_prefix_study { "1" } else { "0" },
+            "TSS_REVEAL_PREFIX_STUDY does not match gate expectation",
+        );
+    }
     if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_THRESHOLD_COUNTERS") {
         assert_eq!(
             expected,
@@ -348,7 +364,7 @@ fn tss_corpus_check() {
         );
     }
     println!(
-        "CORPUS_MODE shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={} cap_resume={} live_ge3_seed={} closure_counters={} ordering_study={} zone_order={} zone_order_band={} threshold_counters={} threshold_delta={} tt_bytes_cap={tt_bytes_cap}",
+        "CORPUS_MODE shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={} cap_resume={} live_ge3_seed={} closure_counters={} reveal_prefix_study={} ordering_study={} zone_order={} zone_order_band={} threshold_counters={} threshold_delta={} tt_bytes_cap={tt_bytes_cap}",
         if shared_fragments { "on" } else { "off" },
         if lazy_frontier { "on" } else { "off" },
         if interior_gate { "on" } else { "off" },
@@ -356,6 +372,7 @@ fn tss_corpus_check() {
         if cap_resume { "on" } else { "off" },
         if live_ge3_seed { "on" } else { "off" },
         if closure_counters { "on" } else { "off" },
+        if reveal_prefix_study { "on" } else { "off" },
         if ordering_study { "on" } else { "off" },
         zone_order,
         zone_order_band,
@@ -556,6 +573,33 @@ fn tss_corpus_check() {
                 closure.avoidable_pair_evaluation_nanos as f64 / 1e6,
                 closure.avoidable_dedup_nanos as f64 / 1e6,
             );
+            for (order, order_name) in ["historical", "zone_bound"].iter().enumerate() {
+                let avoid_total_nanos = closure.reveal_avoidable_second_candidate_nanos[order]
+                    .saturating_add(closure.reveal_avoidable_pair_evaluation_nanos[order])
+                    .saturating_add(closure.reveal_avoidable_dedup_nanos[order]);
+                println!(
+                    "REVEAL_ROW id={} cap={cap} order={order_name} proven_pair_choices={} rank_bins={:?} evaluation_rank_bins={:?} total_evaluated={} prefix_evaluated={} avoid_evaluated={} total_expanded={} avoid_expanded={} second_ms={:.3} eval_ms={:.3} dedup_ms={:.3} avoid_second_ms={:.3} avoid_eval_ms={:.3} avoid_dedup_ms={:.3} avoid_total_ms={:.3} pair_ms={:.3} analysis_ms={:.3}",
+                    pos.id,
+                    closure.reveal_proven_pair_nodes,
+                    closure.reveal_rank_bins[order],
+                    closure.reveal_evaluation_rank_bins[order],
+                    closure.reveal_total_evaluated[order],
+                    closure.reveal_prefix_evaluated[order],
+                    closure.reveal_total_evaluated[order]
+                        .saturating_sub(closure.reveal_prefix_evaluated[order]),
+                    closure.reveal_total_expanded[order],
+                    closure.reveal_avoidable_expanded[order],
+                    closure.second_candidate_nanos as f64 / 1e6,
+                    closure.pair_evaluation_nanos as f64 / 1e6,
+                    closure.dedup_nanos as f64 / 1e6,
+                    closure.reveal_avoidable_second_candidate_nanos[order] as f64 / 1e6,
+                    closure.reveal_avoidable_pair_evaluation_nanos[order] as f64 / 1e6,
+                    closure.reveal_avoidable_dedup_nanos[order] as f64 / 1e6,
+                    avoid_total_nanos as f64 / 1e6,
+                    closure.pair_generation_nanos as f64 / 1e6,
+                    closure.reveal_analysis_nanos as f64 / 1e6,
+                );
+            }
             let threshold = result.stats.threshold_scale;
             println!(
                 "THRESHOLD_ROW id={} cap={cap} visits={} revisits={} threshold_crosses={} reselections={} sibling_switches={} residencies={} residency_expansions={} expansion_bins={:?} descent_ms={:.3} state_ms={:.3}",
@@ -670,6 +714,32 @@ fn tss_corpus_check() {
         live_ge3_seed_scans,
         live_ge3_seed_nanos as f64 / 1e6,
     );
+    for (order, order_name) in ["historical", "zone_bound"].iter().enumerate() {
+        let avoid_total_nanos = closure_total.reveal_avoidable_second_candidate_nanos[order]
+            .saturating_add(closure_total.reveal_avoidable_pair_evaluation_nanos[order])
+            .saturating_add(closure_total.reveal_avoidable_dedup_nanos[order]);
+        println!(
+            "REVEAL_DONE order={order_name} proven_pair_choices={} rank_bins={:?} evaluation_rank_bins={:?} total_evaluated={} prefix_evaluated={} avoid_evaluated={} total_expanded={} avoid_expanded={} second_ms={:.3} eval_ms={:.3} dedup_ms={:.3} avoid_second_ms={:.3} avoid_eval_ms={:.3} avoid_dedup_ms={:.3} avoid_total_ms={:.3} pair_ms={:.3} analysis_ms={:.3}",
+            closure_total.reveal_proven_pair_nodes,
+            closure_total.reveal_rank_bins[order],
+            closure_total.reveal_evaluation_rank_bins[order],
+            closure_total.reveal_total_evaluated[order],
+            closure_total.reveal_prefix_evaluated[order],
+            closure_total.reveal_total_evaluated[order]
+                .saturating_sub(closure_total.reveal_prefix_evaluated[order]),
+            closure_total.reveal_total_expanded[order],
+            closure_total.reveal_avoidable_expanded[order],
+            closure_total.second_candidate_nanos as f64 / 1e6,
+            closure_total.pair_evaluation_nanos as f64 / 1e6,
+            closure_total.dedup_nanos as f64 / 1e6,
+            closure_total.reveal_avoidable_second_candidate_nanos[order] as f64 / 1e6,
+            closure_total.reveal_avoidable_pair_evaluation_nanos[order] as f64 / 1e6,
+            closure_total.reveal_avoidable_dedup_nanos[order] as f64 / 1e6,
+            avoid_total_nanos as f64 / 1e6,
+            closure_total.pair_generation_nanos as f64 / 1e6,
+            closure_total.reveal_analysis_nanos as f64 / 1e6,
+        );
+    }
     println!(
         "THRESHOLD_DONE visits={} revisits={} threshold_crosses={} reselections={} sibling_switches={} residencies={} residency_expansions={} expansion_bins={:?} descent_ms={:.3} state_ms={:.3}",
         threshold_total.recursive_node_visits,

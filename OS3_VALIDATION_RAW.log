@@ -1,0 +1,17 @@
+﻿RUSTFMT_CHECK=PASS
+GIT_DIFF_CHECK=PASS
+STRICT_VERIFIER=UNTOUCHED
+LOG_EXIT_ZERO=OS3_SMOKE_RAW.log
+LOG_EXIT_ZERO=OS3_OFFICIAL_0L_RAW.log
+LOG_EXIT_ZERO=OS3_OFFICIAL_94_RAW.log
+LOG_EXIT_ZERO=OS3_OFFICIAL_REST_RAW.log
+LOG_EXIT_ZERO=OS3_PRODUCTION_BUILD_FINAL_RAW.log
+LOG_EXIT_ZERO=OS3_UNIT_FINAL_RAW.log
+CORPUS_FAILURES_ZERO=OS3_SMOKE_RAW.log
+CORPUS_FAILURES_ZERO=OS3_OFFICIAL_0L_RAW.log
+CORPUS_FAILURES_ZERO=OS3_OFFICIAL_94_RAW.log
+CORPUS_FAILURES_ZERO=OS3_OFFICIAL_REST_RAW.log
+IDENTITY_DONE baseline_rungs=34 measured_rungs=34 failures=0 verifier_diff_chars=0
+OS3_SUMMARY scope=smoke_aggregate rows=2 rungs=2 proven_pair_choices=401 historical_rank_bins=[52, 32, 36, 32, 213, 31, 0, 5] zone_rank_bins=[60, 65, 52, 34, 25, 2, 16, 147] historical_eval_rank_bins=[18, 0, 49, 0, 233, 0, 6, 95] zone_eval_rank_bins=[35, 48, 34, 8, 0, 1, 73, 202] historical_avoid_ms=85.928 zone_avoid_ms=62.980 zone_over_historical=0.732939 pair_ms=1184.039 analysis_ms=104.006 adjusted_pair_ms=1080.033 classifier_component_ms=641.711 historical_pair_ceiling_pct=7.956 zone_pair_ceiling_pct=5.831 historical_classifier_ceiling_pct=13.390 zone_classifier_ceiling_pct=9.814 historical_33plus_pct=1.247 zone_33plus_pct=36.658 historical_avoid_evaluated=697978 zone_avoid_evaluated=556491 historical_avoid_expanded=1368 zone_avoid_expanded=1500 negative_dominated_rows=mvp2lvc
+OS3_SUMMARY scope=official_aggregate rows=19 rungs=34 proven_pair_choices=77678 historical_rank_bins=[10784, 5686, 11250, 5666, 21508, 14981, 5343, 2460] zone_rank_bins=[15886, 14919, 10511, 6888, 10793, 6868, 4652, 7161] historical_eval_rank_bins=[2029, 6033, 3025, 1950, 22322, 398, 370, 41551] zone_eval_rank_bins=[5417, 9433, 7078, 5670, 1243, 939, 6575, 41323] historical_avoid_ms=28607.982 zone_avoid_ms=26596.504 zone_over_historical=0.929688 pair_ms=407166.804 analysis_ms=38145.000 adjusted_pair_ms=369021.804 classifier_component_ms=226683.629 historical_pair_ceiling_pct=7.752 zone_pair_ceiling_pct=7.207 historical_classifier_ceiling_pct=12.620 zone_classifier_ceiling_pct=11.733 historical_33plus_pct=3.167 zone_33plus_pct=9.219 historical_avoid_evaluated=204140526 zone_avoid_evaluated=192559756 historical_avoid_expanded=176109 zone_avoid_expanded=201200 negative_dominated_rows=hu01jk4,mvp2lvc
+VALIDATION_DONE=2026-07-18T10:02:34.2034779-04:00

@@ -1,0 +1,94 @@
+R-OS3 — REVEAL-PREFIX CEILING REMEASUREMENT (default-off, measurement ONLY — the last queued ordering-family residue)
+
+CONTEXT NOTE: this is solver-performance research for a board game
+(Hexo, Connect6-like). Nothing here concerns computer security. Use
+neutral vocabulary.
+
+You are working in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width
+(branch claude/tss-vcf-width, HEAD = 0e4a34e9). You CANNOT git-commit.
+Deliverables: HUNT_REPORT_REVEAL_PREFIX.md + raw logs (OS3_*_RAW.log)
++ SHA256 manifest (OS3_HASHES_RAW.log). Windows host; Cargo target
+x86_64-pc-windows-msvc; CARGO_TARGET_DIR=.target-codex; release;
+serial tests only.
+
+## Standing verdicts you must not contradict (read these reports first)
+1. HUNT_REPORT_ORDERING_STUDY.md (R-OS1): offline rank study —
+   zone_bound as a rank key lifts winner-in-prefix coverage at width
+   2-4 from 20-37% to 34-59%, but WORSENS mean rank (8.699 -> 10.505)
+   and fattens the 33+ tail (3.86% -> 10.19%). d_stone is the safer
+   secondary signal.
+2. HUNT_REPORT_ORDERING_WIRE.md (R-OS2): live df-pn wiring of
+   zone_bound = NULL; d_stone control = REGRESSION. The scheduling
+   lever family is CLOSED. Its report authorizes exactly ONE residue:
+   "A reveal-prefix follow-on remains narrowly justified as a
+   default-off measurement, not as a production promotion... must
+   retain its own expansion/tail gates and remeasure the R-CD1
+   reveal ceiling; it must not infer a search win from R-OS1 ranks
+   or be coupled to this flag."
+3. HUNT_REPORT_CLOSURE_DEBTS.md (R-CD1): the sound reveal
+   counterfactual — at proven Choice nodes the reveal prefix ends
+   only after the eventual winning child is classified; refuted and
+   unresolved Choice nodes get ZERO prospective saving (they exhaust
+   the generator). Under HISTORICAL ordering the winning child sits
+   deep (rank bins [10785, 5686, 11250, 5666, 21508, 14981, 5343,
+   2460]), so the ceiling was small and "no cursor build is
+   justified" was the disposition.
+
+## Task — one question, measured honestly
+Does zone_bound-keyed reordering raise the SOUND reveal ceiling
+enough to justify an incremental-reveal cursor build — or does the
+R-CD1 null stand?
+
+1. Reconstruct the R-CD1 sound-reveal counterfactual instrumentation
+   (counters only, zero behavior change; reuse its harness pieces if
+   present in-tree). For each proven pair Choice node record the
+   avoidable tail (second-candidate + evaluation + dedup work after
+   the winning child), under TWO candidate orders computed offline
+   per node: (a) historical order (reproduce/confirm the R-CD1
+   ceiling on the same cohort); (b) zone_bound-keyed order exactly as
+   R-OS1 defined the key (with its tie handling; document byte-exact
+   key derivation). Same-cohort paired comparison.
+2. Cohort: the R-CD1 10k smoke cohort (mvp2lvc + xsnfyll) MUST be
+   reproduced first as the anchor (baseline search counts must match
+   R-CD1's exactly — if they do not, STOP and report the drift; do
+   not proceed on a drifted anchor). Then the official counter
+   profile run (1 GiB, TSS_LAZY_FRONTIER=1 — the profile ruling)
+   over the standard corpus rows R-CD1 named as the unrun decision
+   gate, bounded to what fits your time budget; report exactly which
+   rows ran and which did not (no silent truncation).
+3. Report per-row and aggregate: proven-Choice count, winning-child
+   rank distribution under both orders, avoidable-tail time and
+   expansions under both orders, and the ceiling as % of total
+   classification cost. The 33+ tail risk from R-OS1 must be
+   remeasured in THIS counterfactual (does the fattened tail eat the
+   prefix gain at exactly the nodes that matter?).
+4. Verdict, pre-registered bars (design-verbatim, binding):
+   - JUSTIFIED only if the zone_bound-order sound ceiling >= 2x the
+     historical-order ceiling AND >= 5% of total classification cost
+     on the official-profile rows that ran, AND the per-row ceiling
+     is not negative-dominated (no row where the reordered ceiling
+     is materially WORSE than historical by > 20% relative).
+   - Otherwise NULL: the ordering family stays fully closed with no
+     residue.
+   No promotion either way — measurement only; verdict decides
+   whether a cursor-build hunt is ever POSED, nothing else.
+
+## Hard constraints
+- ZERO search-behavior change: counters and offline reordering
+  analysis only; verdict/expansion identity with baseline must be
+  asserted per row (identical verdicts + identical live search
+  counts; the counterfactual is bookkeeping, not a schedule change).
+- Strict verifier untouched (tss_verify.rs any-diff = abort).
+- No coupling to TSS_ZONE_ORDER; do not enable it in any arm.
+- RAM gates before every cargo invocation: >= 10 GiB available AND
+  >= 5 GiB free; no foreign cargo.exe (ONE cargo host-wide — wait,
+  recheck, only then launch). Invocations < 10 min each; chunk <= 2h
+  per exec.
+- Raws for every run + SHA256 manifest; report numbers must be
+  copy-paste traceable to raws.
+- Truthful partial reporting: if time runs out, report what ran; do
+  not extrapolate unrun rows.
+
+Final message: verdict (JUSTIFIED / NULL) + historical vs zone_bound
+ceiling numbers (smoke anchor and official rows) + tail-risk finding
++ exact rows run/unrun, one line each.

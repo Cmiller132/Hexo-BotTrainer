@@ -1,0 +1,37 @@
+﻿IDENTITY_BASELINE=CLOSURE_COUNTER_FULL_OFF_RAW.log
+IDENTITY_MEASURED=OS3_OFFICIAL_0L_RAW.log,OS3_OFFICIAL_94_RAW.log,OS3_OFFICIAL_REST_RAW.log
+IDENTITY key=0hz3hty@10000 result=MATCH status=WIN nodes=2412 expansions=2411 tt_entries=2402 tt_hits=3 peak_tt_bytes=284940
+IDENTITY key=0l4291i_live@10000 result=MATCH status=UNKNOWN nodes=10000 expansions=9999 tt_entries=9986 tt_hits=262 peak_tt_bytes=2178996
+IDENTITY key=0l4291i_live@100000 result=MATCH status=UNKNOWN nodes=100000 expansions=99999 tt_entries=99964 tt_hits=1911 peak_tt_bytes=26405485
+IDENTITY key=0l4291i_live@1000000 result=MATCH status=UNKNOWN nodes=1000000 expansions=999999 tt_entries=999962 tt_hits=18549 peak_tt_bytes=288513572
+IDENTITY key=0l4291i_live@20000000 result=MATCH status=WIN nodes=1879612 expansions=1879611 tt_entries=1879574 tt_hits=37076 peak_tt_bytes=549161606
+IDENTITY key=8is963b@10000 result=MATCH status=LOSS nodes=1 expansions=0 tt_entries=0 tt_hits=0 peak_tt_bytes=0
+IDENTITY key=94gnnol@10000 result=MATCH status=UNKNOWN nodes=10000 expansions=9999 tt_entries=9982 tt_hits=118 peak_tt_bytes=2209688
+IDENTITY key=94gnnol@100000 result=MATCH status=UNKNOWN nodes=100000 expansions=99999 tt_entries=99967 tt_hits=2124 peak_tt_bytes=25872046
+IDENTITY key=94gnnol@1000000 result=MATCH status=UNKNOWN nodes=1000000 expansions=999999 tt_entries=999959 tt_hits=25682 peak_tt_bytes=293096179
+IDENTITY key=acly7kb@10000 result=MATCH status=WIN nodes=75 expansions=74 tt_entries=70 tt_hits=0 peak_tt_bytes=18072
+IDENTITY key=dy3dg99@10000 result=MATCH status=LOSS nodes=1 expansions=0 tt_entries=0 tt_hits=0 peak_tt_bytes=0
+IDENTITY key=g2xx6wl@10000 result=MATCH status=WIN nodes=4107 expansions=4106 tt_entries=4098 tt_hits=0 peak_tt_bytes=1488570
+IDENTITY key=hayes_20260712_placement31@10000 result=MATCH status=UNKNOWN nodes=10000 expansions=9999 tt_entries=9983 tt_hits=300 peak_tt_bytes=1572158
+IDENTITY key=hayes_20260712_placement31@100000 result=MATCH status=WIN nodes=11664 expansions=11663 tt_entries=11647 tt_hits=323 peak_tt_bytes=1840074
+IDENTITY key=hayes_20260712_turn16@10000 result=MATCH status=UNKNOWN nodes=10000 expansions=9999 tt_entries=9983 tt_hits=300 peak_tt_bytes=1572154
+IDENTITY key=hayes_20260712_turn16@100000 result=MATCH status=WIN nodes=11664 expansions=11663 tt_entries=11647 tt_hits=323 peak_tt_bytes=1840070
+IDENTITY key=hu01jk4@10000 result=MATCH status=WIN nodes=380 expansions=379 tt_entries=371 tt_hits=0 peak_tt_bytes=143141
+IDENTITY key=jh7yo7y@10000 result=MATCH status=WIN nodes=2119 expansions=2118 tt_entries=2108 tt_hits=13 peak_tt_bytes=333256
+IDENTITY key=jnzzmcm@10000 result=MATCH status=WIN nodes=9798 expansions=9797 tt_entries=9786 tt_hits=12 peak_tt_bytes=2224728
+IDENTITY key=l9mxn59@10000 result=MATCH status=UNKNOWN nodes=226 expansions=225 tt_entries=207 tt_hits=1 peak_tt_bytes=27206
+IDENTITY key=l9mxn59@100000 result=MATCH status=UNKNOWN nodes=226 expansions=225 tt_entries=207 tt_hits=1 peak_tt_bytes=27206
+IDENTITY key=l9mxn59@1000000 result=MATCH status=UNKNOWN nodes=226 expansions=225 tt_entries=207 tt_hits=1 peak_tt_bytes=27206
+IDENTITY key=lz60mfb@10000 result=MATCH status=UNKNOWN nodes=10000 expansions=9999 tt_entries=9970 tt_hits=251 peak_tt_bytes=2181248
+IDENTITY key=lz60mfb@100000 result=MATCH status=UNKNOWN nodes=100000 expansions=99999 tt_entries=99970 tt_hits=1015 peak_tt_bytes=22797268
+IDENTITY key=lz60mfb@1000000 result=MATCH status=WIN nodes=109896 expansions=109895 tt_entries=109866 tt_hits=1022 peak_tt_bytes=25072700
+IDENTITY key=mvp2lvc@10000 result=MATCH status=UNKNOWN nodes=10000 expansions=9999 tt_entries=9972 tt_hits=93 peak_tt_bytes=1948056
+IDENTITY key=mvp2lvc@100000 result=MATCH status=UNKNOWN nodes=17957 expansions=17956 tt_entries=17922 tt_hits=175 peak_tt_bytes=3928520
+IDENTITY key=mvp2lvc@1000000 result=MATCH status=UNKNOWN nodes=17957 expansions=17956 tt_entries=17922 tt_hits=175 peak_tt_bytes=3928520
+IDENTITY key=strongloss_a_prefix6@10000 result=MATCH status=UNKNOWN nodes=10000 expansions=9999 tt_entries=9991 tt_hits=4193 peak_tt_bytes=963126
+IDENTITY key=strongloss_a_prefix6@100000 result=MATCH status=WIN nodes=16126 expansions=16125 tt_entries=16115 tt_hits=5515 peak_tt_bytes=1580150
+IDENTITY key=strongloss_b_prefix8@10000 result=MATCH status=WIN nodes=1099 expansions=1098 tt_entries=1092 tt_hits=279 peak_tt_bytes=104364
+IDENTITY key=xsnfyll@10000 result=MATCH status=WIN nodes=82 expansions=81 tt_entries=74 tt_hits=1 peak_tt_bytes=7156
+IDENTITY key=zrugh2x@10000 result=MATCH status=UNKNOWN nodes=10000 expansions=9999 tt_entries=9977 tt_hits=599 peak_tt_bytes=1883186
+IDENTITY key=zrugh2x@100000 result=MATCH status=WIN nodes=41734 expansions=41733 tt_entries=41711 tt_hits=1950 peak_tt_bytes=8062494
+IDENTITY_DONE baseline_rungs=34 measured_rungs=34 failures=0 verifier_diff_chars=0

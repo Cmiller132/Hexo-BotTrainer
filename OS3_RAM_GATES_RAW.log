@@ -1,0 +1,11 @@
+﻿2026-07-18T09:34:12.0399577-04:00 purpose=os3_build available_gib=13.334 free_physical_gib=13.409 cargo_processes=0
+2026-07-18T09:34:39.7144454-04:00 purpose=os3_build_retry available_gib=10.886 free_physical_gib=11.687 cargo_processes=0
+2026-07-18T09:35:17.5547622-04:00 purpose=os3_smoke_anchor available_gib=13.289 free_physical_gib=13.292 cargo_processes=0
+2026-07-18T09:35:57.2596955-04:00 purpose=os3_official_0l4291i_live available_gib=13.27 free_physical_gib=13.267 cargo_processes=0
+2026-07-18T09:44:43.7797995-04:00 purpose=os3_official_94gnnol available_gib=13.436 free_physical_gib=13.428 cargo_processes=0
+2026-07-18T09:48:40.8400375-04:00 purpose=os3_official_remaining_17 available_gib=13.79 free_physical_gib=13.799 cargo_processes=0
+2026-07-18T09:54:06.1380890-04:00 purpose=os3_production_release_build available_gib=13.28 free_physical_gib=13.345 cargo_processes=0
+2026-07-18T09:54:43.0617206-04:00 purpose=os3_production_release_build_final available_gib=6.942 free_physical_gib=6.968 cargo_processes=0
+2026-07-18T09:55:38.3519144-04:00 purpose=os3_production_release_build_final_retry available_gib=9.492 free_physical_gib=9.495 cargo_processes=0
+2026-07-18T09:56:13.2994081-04:00 purpose=os3_production_release_build_final_retry2 available_gib=10.199 free_physical_gib=10.197 cargo_processes=0
+2026-07-18T09:57:59.5153827-04:00 purpose=os3_unit_final available_gib=13.297 free_physical_gib=13.349 cargo_processes=0
