@@ -5,6 +5,7 @@
 //! at the canonical root and all 12 D6-remapped roots.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::time::Instant;
 
 use hexo_engine::{apply_placement, HexCoord, HexoState, Placement, Player};
@@ -22,6 +23,7 @@ const DEFAULT_RELATIVE_HORIZON: u32 = 12;
 const DEFAULT_GAME_COUNT: usize = 8;
 const DEFAULT_BACKTRACK: usize = 12;
 const DEFAULT_WALL_SECONDS: u64 = 1_200;
+const DEFAULT_FIRST_N: usize = 7;
 
 #[derive(Clone, Debug)]
 struct HumanGame {
@@ -50,6 +52,22 @@ where
                 .unwrap_or_else(|error| panic!("{name}: {error:?}"))
         })
         .unwrap_or(default)
+}
+
+fn env_ladder(name: &str, default: &[u64]) -> Vec<u64> {
+    match std::env::var(name) {
+        Ok(value) => {
+            let ladder = value
+                .split(',')
+                .map(|token| token.trim())
+                .filter(|token| !token.is_empty())
+                .map(|token| token.parse::<u64>().unwrap_or_else(|error| panic!("{name}: {error:?}")))
+                .collect::<Vec<_>>();
+            assert!(!ladder.is_empty(), "{name} must list at least one node cap");
+            ladder
+        }
+        Err(_) => default.to_vec(),
+    }
 }
 
 fn parse_ints(slice: &str) -> Vec<i16> {
@@ -292,6 +310,49 @@ fn load_human_candidates(path: &str, game_count: usize, backtrack: usize) -> Vec
     candidates
 }
 
+type PositionKey = (u8, (u8, i16, i16), Vec<(i16, i16, u8)>);
+
+/// Enumerate every distinct D6-canonical position that occurs within the first
+/// `first_n` plies of ANY corpus game. Positions are collapsed by
+/// `root_position_key` (symmetric/transposed duplicates fold together) and
+/// returned in a deterministic order: shallow depths first, then by canonical
+/// position key. Illegal or terminal prefixes are skipped defensively.
+fn load_corpus_first_n(path: &str, first_n: usize) -> Vec<Candidate> {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("read OPENING_ATLAS_CORPUS={path}: {error}"));
+    let mut reps: BTreeMap<(usize, PositionKey), Vec<HexCoord>> = BTreeMap::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let game = match parse_game(line) {
+            Some(game) => game,
+            None => continue,
+        };
+        let mut state = HexoState::new();
+        for (ply, &coord) in game.moves.iter().take(first_n).enumerate() {
+            if apply_placement(&mut state, Placement { coord }).is_err() {
+                break;
+            }
+            if state.is_terminal() {
+                break;
+            }
+            let prefix = ply + 1;
+            let canonical_moves = canonical_sequence(&game.moves[..prefix]);
+            let key = root_position_key(&canonical_moves);
+            reps.entry((prefix, key)).or_insert(canonical_moves);
+        }
+    }
+    reps.into_iter()
+        .map(|((prefix, _key), canonical_moves)| Candidate {
+            source: format!("corpus7:depth{prefix}"),
+            source_prefix: prefix,
+            orbit_size: orbit_size(&canonical_moves),
+            canonical_moves,
+        })
+        .collect()
+}
+
 fn replay_unchecked(moves: &[HexCoord]) -> HexoState {
     let mut state = HexoState::new();
     for (ply, &coord) in moves.iter().enumerate() {
@@ -407,18 +468,31 @@ fn verify_all_d6(
     (verified, accepted_mask)
 }
 
-fn solve_candidate(candidate: &Candidate, tt_bytes: usize, relative_horizon: u32) {
+fn solve_candidate(
+    candidate: &Candidate,
+    tt_bytes: usize,
+    relative_horizon: u32,
+    node_ladder: &[u64],
+    unbounded_horizon: bool,
+) {
     let state = replay(&candidate.canonical_moves);
-    let semantic_horizon = state
-        .placements_made()
-        .checked_add(relative_horizon)
-        .expect("semantic horizon overflow");
+    // Deep profile: an unbounded ply deadline lets the search go as deep as the
+    // node budget allows (depth bounded by the node cap, not an artificial ply
+    // limit). Default keeps the +relative_horizon deadline (pass1 behavior).
+    let semantic_horizon = if unbounded_horizon {
+        u32::MAX
+    } else {
+        state
+            .placements_made()
+            .checked_add(relative_horizon)
+            .expect("semantic horizon overflow")
+    };
     let position_fingerprint =
         fnv1a64(format!("{:?}", root_position_key(&candidate.canonical_moves)).as_bytes());
     let start = Instant::now();
     let mut final_result = None;
     let mut used_cap = 0u64;
-    for node_cap in DEFAULT_NODE_LADDER {
+    for &node_cap in node_ladder {
         let mut solver = TssSolver::default();
         solver.set_width_options(WidthOptions::vcf_pair_complete());
         let result = solver.solve(
@@ -490,47 +564,94 @@ fn solve_candidate(candidate: &Candidate, tt_bytes: usize, relative_horizon: u32
 #[test]
 #[ignore = "default-off certified opening-atlas pass; run explicitly"]
 fn opening_atlas_pass1() {
+    let mode = std::env::var("OPENING_ATLAS_MODE").unwrap_or_default();
     let corpus_path = std::env::var("OPENING_ATLAS_CORPUS").ok();
     let game_count = env_num("OPENING_ATLAS_GAME_COUNT", DEFAULT_GAME_COUNT);
     let backtrack = env_num("OPENING_ATLAS_BACKTRACK", DEFAULT_BACKTRACK);
+    let first_n = env_num("OPENING_ATLAS_FIRST_N", DEFAULT_FIRST_N);
     let tt_bytes = env_num("OPENING_ATLAS_TT_BYTES", DEFAULT_TT_BYTES);
     let relative_horizon = env_num("OPENING_ATLAS_RELATIVE_HORIZON", DEFAULT_RELATIVE_HORIZON);
     let wall_seconds = env_num("OPENING_ATLAS_WALL_SECONDS", DEFAULT_WALL_SECONDS);
+    let node_ladder = env_ladder("OPENING_ATLAS_NODE_LADDER", &DEFAULT_NODE_LADDER);
+    let unbounded_horizon = env_num::<u8>("OPENING_ATLAS_UNBOUNDED", 0) != 0;
+    // Cross-position parallelism: shard the candidate list so N independent
+    // worker processes (built once, launched N times) each solve a disjoint
+    // stride of positions with their own TT. Round-robin by index balances the
+    // depth mix (and thus the expensive positions) across workers.
+    let shard_count = env_num::<usize>("SHARD_COUNT", 1).max(1);
+    let shard_index = env_num::<usize>("SHARD_INDEX", 0);
+    assert!(shard_index < shard_count, "SHARD_INDEX must be < SHARD_COUNT");
 
-    let mut candidates = shallow_candidates();
-    let shallow_count = candidates.len();
-    if let Some(path) = corpus_path.as_deref() {
-        candidates.extend(load_human_candidates(path, game_count, backtrack));
-    }
+    // Two candidate modes share the same solve+strict-verify emit loop:
+    //  - default: shallow D6 census (+ optional deep human backtrack)
+    //  - corpus_first_n: EVERY distinct D6-canonical position within the first
+    //    `first_n` plies of ALL corpus games.
+    let corpus_first_n = mode == "corpus_first_n";
+    let (candidates, shallow_count) = if corpus_first_n {
+        let path = corpus_path
+            .as_deref()
+            .expect("corpus_first_n mode requires OPENING_ATLAS_CORPUS");
+        (load_corpus_first_n(path, first_n), 0usize)
+    } else {
+        let mut candidates = shallow_candidates();
+        let shallow_count = candidates.len();
+        if let Some(path) = corpus_path.as_deref() {
+            candidates.extend(load_human_candidates(path, game_count, backtrack));
+        }
+        (candidates, shallow_count)
+    };
     let total = candidates.len();
+    // Positions assigned to THIS shard (round-robin stride).
+    let shard_indices = (0..total)
+        .filter(|index| index % shard_count == shard_index)
+        .collect::<Vec<_>>();
+    let shard_total = shard_indices.len();
     println!(
-        "ATLAS_SETUP schema=1 corpus={} games={} backtrack={} shallow={} candidates={} node_ladder={:?} tt_bytes={} relative_horizon={} wall_seconds={}",
+        "ATLAS_SETUP schema=1 mode={} corpus={} games={} backtrack={} first_n={} shallow={} candidates={} shard_index={} shard_count={} shard_total={} node_ladder={:?} tt_bytes={} relative_horizon={} unbounded_horizon={} wall_seconds={}",
+        if mode.is_empty() { "pass1" } else { &mode },
         corpus_path.as_deref().unwrap_or("NONE"),
         game_count,
         backtrack,
+        first_n,
         shallow_count,
         total,
-        DEFAULT_NODE_LADDER,
+        shard_index,
+        shard_count,
+        shard_total,
+        node_ladder,
         tt_bytes,
         relative_horizon,
+        unbounded_horizon,
         wall_seconds,
     );
+    std::io::stdout().flush().ok();
 
     let batch_start = Instant::now();
     let mut attempted = 0usize;
-    for candidate in &candidates {
+    for &index in &shard_indices {
         if attempted > 0 && batch_start.elapsed().as_secs() >= wall_seconds {
             break;
         }
-        solve_candidate(candidate, tt_bytes, relative_horizon);
+        solve_candidate(
+            &candidates[index],
+            tt_bytes,
+            relative_horizon,
+            &node_ladder,
+            unbounded_horizon,
+        );
         attempted += 1;
+        // Flush every row so a wall-time stop or crash preserves partial output.
+        std::io::stdout().flush().ok();
     }
     println!(
-        "ATLAS_DONE attempted={} residual={} wall_ms={:.3}",
+        "ATLAS_DONE shard_index={} shard_count={} attempted={} residual={} wall_ms={:.3}",
+        shard_index,
+        shard_count,
         attempted,
-        total - attempted,
+        shard_total - attempted,
         batch_start.elapsed().as_secs_f64() * 1e3,
     );
+    std::io::stdout().flush().ok();
     assert!(
         attempted >= shallow_count,
         "wall cap must cover the shallow census"

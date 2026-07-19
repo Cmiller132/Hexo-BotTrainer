@@ -1,9 +1,15 @@
-import json, os, sys
+import json, os
 
 BASE = r"E:/Hexo-BotTrainer-hexgt/.claude/worktrees/opening-atlas"
-RAW = os.path.join(BASE, "OPENING_ATLAS_PASS1_RAW.txt")
+RAW_PASS1 = os.path.join(BASE, "OPENING_ATLAS_PASS1_RAW.txt")
+# Deep 16-core corpus first-7-ply layer (unbounded horizon, 2M node cap,
+# 640 MiB TT/worker). Falls back to the earlier shallow corpus7 raw if absent.
+RAW_CORPUS7 = os.path.join(BASE, "OPENING_ATLAS_CORPUS7_DEEP_RAW.txt")
+if not os.path.exists(RAW_CORPUS7):
+    RAW_CORPUS7 = os.path.join(BASE, "OPENING_ATLAS_CORPUS7_RAW.txt")
 OUT_DIR = os.path.join(BASE, "atlas-web", "data")
 OUT = os.path.join(OUT_DIR, "atlas.json")
+OUT_JSONP = os.path.join(OUT_DIR, "atlas.jsonp.js")
 COMMIT = "db96d1b136021212ef32e1f1fdf747bc2262e1c7"
 
 INT_FIELDS = {"source_prefix","placements","orbit","cap","horizon","nodes",
@@ -24,17 +30,29 @@ def parse_moves(val):
         out.append([int(q), int(r)])
     return out
 
-rows = []
-with open(RAW, encoding="utf-16") as f:
-    for line in f:
-        line = line.rstrip("\n").rstrip("\r")
+def read_text(path):
+    """Raw logs are UTF-16 (PowerShell '>' redirect); fall back to UTF-8-sig."""
+    with open(path, "rb") as fh:
+        data = fh.read()
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return data.decode("utf-16")
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return data.decode("utf-16")
+
+def parse_raw(path):
+    if not os.path.exists(path):
+        return []
+    rows = []
+    for line in read_text(path).splitlines():
+        line = line.rstrip("\r")
         if not line.startswith("ATLAS_ROW "):
             continue
         body = line[len("ATLAS_ROW "):]
         # moves is last; may be empty. Split on spaces (no value contains a space).
-        toks = body.split(" ")
         rec = {}
-        for tok in toks:
+        for tok in body.split(" "):
             if "=" not in tok:
                 continue
             k, v = tok.split("=", 1)
@@ -58,6 +76,28 @@ with open(RAW, encoding="utf-16") as f:
         if "moves" not in row:
             row["moves"] = []
         rows.append(row)
+    return rows
+
+# ---- Load + merge (pass1 rows first; corpus7 rows only for NEW ids) ----
+pass1_rows = parse_raw(RAW_PASS1)
+corpus7_rows = parse_raw(RAW_CORPUS7)
+
+seen = set()
+rows = []
+for r in pass1_rows:
+    if r["id"] in seen:
+        continue
+    seen.add(r["id"])
+    rows.append(r)
+corpus7_new = 0
+corpus7_dupe = 0
+for r in corpus7_rows:
+    if r["id"] in seen:
+        corpus7_dupe += 1
+        continue
+    seen.add(r["id"])
+    rows.append(r)
+    corpus7_new += 1
 
 # ---- Verification ----
 total = len(rows)
@@ -71,10 +111,16 @@ assert win + loss + unknown == total, "counts do not add up"
 for r in rows:
     if r["certified"] == 1:
         assert r["status"] in ("WIN","LOSS"), f"certified non-decisive: {r['id']}"
-# moves parse sanity: all ints
 for r in rows:
     for m in r["moves"]:
         assert len(m) == 2 and all(isinstance(x,int) for x in m), f"bad move in {r['id']}"
+
+# Per-source-kind and per-depth breakdown for the corpus7 layer.
+corpus7_by_depth = {}
+for r in rows:
+    if r["source"].startswith("corpus7:"):
+        d = r["source_prefix"]
+        corpus7_by_depth[d] = corpus7_by_depth.get(d, 0) + 1
 
 census = {"ply2_raw": 216, "ply2_d6": 24, "ply3_raw": 42768, "ply3_d6": 3684}
 
@@ -121,6 +167,11 @@ doc = {
     "census": census,
     "summary": {"total": total, "win": win, "loss": loss,
                 "unknown": unknown, "certified": certified},
+    "corpus7": {
+        "new_rows": corpus7_new,
+        "duplicate_of_pass1": corpus7_dupe,
+        "by_depth": {str(k): corpus7_by_depth[k] for k in sorted(corpus7_by_depth)},
+    },
     "sharp_examples": sharp_examples,
     "rows": rows,
 }
@@ -128,11 +179,20 @@ doc = {
 os.makedirs(OUT_DIR, exist_ok=True)
 with open(OUT, "w", encoding="utf-8") as f:
     json.dump(doc, f, ensure_ascii=False, indent=2)
+with open(OUT_JSONP, "w", encoding="utf-8") as f:
+    f.write("window.__ATLAS__ = ")
+    json.dump(doc, f, ensure_ascii=False, indent=2)
+    f.write(";\n")
 
 print(json.dumps({
+    "pass1_rows": len(pass1_rows),
+    "corpus7_rows_parsed": len(corpus7_rows),
+    "corpus7_new": corpus7_new,
+    "corpus7_dupe_of_pass1": corpus7_dupe,
     "total": total, "win": win, "loss": loss, "unknown": unknown,
     "certified": certified,
     "certified_win": sum(1 for r in rows if r["certified"]==1 and r["status"]=="WIN"),
     "certified_loss": sum(1 for r in rows if r["certified"]==1 and r["status"]=="LOSS"),
-    "out": OUT,
+    "corpus7_by_depth": {str(k): corpus7_by_depth[k] for k in sorted(corpus7_by_depth)},
+    "out": OUT, "out_jsonp": OUT_JSONP,
 }, indent=2))
