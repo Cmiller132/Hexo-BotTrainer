@@ -222,6 +222,12 @@ function verdictClass(row) {
   if (row.status === "LOSS") return "loss";
   return "unknown";
 }
+// A certified DECISIVE row (WIN or LOSS) carries the claimant's forced-win line:
+// for a WIN the side-to-move is the claimant; for a LOSS the claimant is the
+// side-to-move's OPPONENT, and the same win_line is the full solution by which
+// that opponent forces the win against the (losing) side-to-move. Both render
+// their solution identically through the scrubber; UNKNOWN has none.
+function isDecisive(row) { return row.status === "WIN" || row.status === "LOSS"; }
 function sourceLabel(row) {
   // "human:<hash>:winner=-1" -> "human <hash>"; "shallow:empty" -> "shallow empty"
   const parts = row.source.split(":");
@@ -407,16 +413,17 @@ function currentThreatGaps() {
   return findThreats(toStones(fullMoves), claimantIdx);
 }
 
-/* Presentation state of a certified WIN, keyed off fields already in the data
- * (win_line_terminal + presence of win_line) plus a live threat scan — so it is
- * regeneration-proof and never asserts a six the board doesn't show:
+/* Presentation state of a certified DECISIVE row (WIN or LOSS) — the claimant's
+ * forced-win line — keyed off fields already in the data (win_line_terminal +
+ * presence of win_line) plus a live threat scan, so it is regeneration-proof and
+ * never asserts a six the board doesn't show:
  *   "terminal"  win_line replays to a real six (win_line_terminal === 1)
  *   "threat"    win_line stops before the six at a proven-won, four-holding node
  *   "recorded-absent" no line recorded, but a board-level four is visible
  *   "proof-only"      no line recorded AND no board four — a deep proof cert
  *   "loading"   details still in flight                                       */
 function winState(row) {
-  if (row.status !== "WIN") return null;
+  if (!isDecisive(row)) return null;
   if (row.win_line_terminal === 1) return "terminal";
   if (winLineArr.length) return "threat";
   if (!row._merged) return "loading";
@@ -444,20 +451,24 @@ function renderReadout(row) {
   $("roK").textContent = verdict;
 
   let sub = `<b>${sourceLabel(row)}</b> · ${row.placements} stones · ${row.side} to move · ${row.phase}`;
-  if (row.status === "WIN") {
+  if (isDecisive(row)) {
     const c = row.claimant;
+    // WIN and LOSS share the SAME solution readout (the claimant's forced win);
+    // a LOSS just leads with the losing side's framing. `lost` is "" for a WIN,
+    // so every existing WIN string is byte-for-byte unchanged.
+    const lost = row.status === "LOSS" ? `${row.side} is lost; ` : "";
     switch (winState(row)) {
       case "terminal":
-        sub += ` · <span class="ro-win">${c} forces the win — the line replays all the way to six-in-a-row &rarr;</span>`;
+        sub += ` · <span class="ro-win">${lost}${c} forces the win — the line replays all the way to six-in-a-row &rarr;</span>`;
         break;
       case "threat":
-        sub += ` · <span class="ro-win">${c}'s win is certified. The recorded line runs ${winLineArr.length} placements to the proven-won position shown — it stops before the sixth stone, so ${c}'s leading six-in-a-row window is outlined with its completion cells as ghosts; the certificate proves the win continues from here &rarr;</span>`;
+        sub += ` · <span class="ro-win">${lost}${c}'s win is certified. The recorded line runs ${winLineArr.length} placements to the proven-won position shown — it stops before the sixth stone, so ${c}'s leading six-in-a-row window is outlined with its completion cells as ghosts; the certificate proves the win continues from here &rarr;</span>`;
         break;
       case "recorded-absent":
-        sub += ` · <span class="ro-win">forced win certified for ${c}${certShapeNote(row)} · the exact line was not recorded, but ${c} already holds a leading six-window on the board (outlined, completion cells ghosted) — the win is proven by the certificate, not by the shown window alone</span>`;
+        sub += ` · <span class="ro-win">${lost}forced win certified for ${c}${certShapeNote(row)} · the exact line was not recorded, but ${c} already holds a leading six-window on the board (outlined, completion cells ghosted) — the win is proven by the certificate, not by the shown window alone</span>`;
         break;
       case "proof-only":
-        sub += ` · <span class="ro-proof">forced win certified for ${c} by proof structure${certShapeNote(row)} · the forced six is deep — no line was recorded and no board-level four is visible, so only the certificate proves it (not board-obvious)</span>`;
+        sub += ` · <span class="ro-proof">${lost}forced win certified for ${c} by proof structure${certShapeNote(row)} · the forced six is deep — no line was recorded and no board-level four is visible, so only the certificate proves it (not board-obvious)</span>`;
         break;
       default: // loading
         sub += ` · <span class="ro-pending">forced win certified for ${c}; loading the winning line&hellip;</span>`;
@@ -594,7 +605,7 @@ function sanitizeWinLine(row, wl) {
 function setupScrub(row) {
   stopPlay();
   scrubRow = row;
-  winLineArr = (row.status === "WIN" && Array.isArray(row.win_line))
+  winLineArr = (isDecisive(row) && Array.isArray(row.win_line))
     ? sanitizeWinLine(row, row.win_line) : [];
   openingN = row.moves.length;
   fullMoves = row.moves.concat(winLineArr);
@@ -634,8 +645,10 @@ function renderScrub(k) {
   const subset = fullMoves.slice(0, k);
   const stones = toStones(subset);
   const atTerminal = k === N;
-  // draw the winning six only at the true terminal of a real forced line
-  const winCells = (row.status === "WIN" && atTerminal && winLineArr.length)
+  // draw the winning six only at the true terminal of a real forced line (the
+  // claimant's line — identical for a WIN and for a LOSS, whose line is the
+  // opponent's full solution against the losing side-to-move)
+  const winCells = (isDecisive(row) && atTerminal && winLineArr.length)
     ? findWin(stones) : null;
   board.setStones(stones, winCells, openingN, claimantIdx);
   // At the terminal of a certified win that DOESN'T show a six (non-terminal
@@ -643,7 +656,7 @@ function renderScrub(k) {
   // as a whole with ghost completion cells, so the board shows the FULL six
   // window forming rather than a placed six. Never drawn mid-scrub or when a real
   // six already exists. Null when no board-level four exists (a deep proof).
-  const projWin = (row.status === "WIN" && atTerminal && !winCells && claimantIdx !== null)
+  const projWin = (isDecisive(row) && atTerminal && !winCells && claimantIdx !== null)
     ? bestClaimantWindow(stones, claimantIdx) : null;
   board.setProjectedWin(projWin, claimantIdx);
   if (!atTerminal && k >= 1) {
@@ -654,8 +667,11 @@ function renderScrub(k) {
   }
   const rng = $("msRange");
   if (rng.value !== String(k)) rng.value = String(k);
+  // The scrub tag names the claimant's forced win during the solution portion
+  // (same for WIN and LOSS — a LOSS shows the opponent's forced win); the opening
+  // portion falls back to the row's own verdict ("atlas · loss" / "atlas · win").
   let tag;
-  if (row.status === "WIN" && atTerminal)
+  if (isDecisive(row) && atTerminal)
     tag = winCells ? "atlas · forced win · six-in-a-row"
       : projWin ? "atlas · forced win · projected six (proven-won)"
       : "atlas · forced win · proof-certified";

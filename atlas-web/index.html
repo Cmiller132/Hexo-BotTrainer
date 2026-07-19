@@ -6,7 +6,7 @@
 <title>Hexo — Opening Atlas Explorer</title>
 <!-- inline hex-motif favicon: keeps the showcase LAN page free of a spurious /favicon.ico 404, no external request -->
 <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D'http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg'%20viewBox%3D'0%200%2032%2032'%3E%3Cpolygon%20points%3D'28.1%2C9%2028.1%2C23%2016%2C30%203.9%2C23%203.9%2C9%2016%2C2'%20fill%3D'%23141a20'%20stroke%3D'%234f93ff'%20stroke-width%3D'2'%2F%3E%3Ccircle%20cx%3D'16'%20cy%3D'16'%20r%3D'2.6'%20fill%3D'%234f93ff'%2F%3E%3C%2Fsvg%3E">
-<link rel="stylesheet" href="style.css?v=96915067974b663ab4ee12ef92282a74f85169c8">
+<link rel="stylesheet" href="style.css?v=2215dca09b7c3bd51418bc52c74f4e0ffc691031">
 </head>
 <body>
 
@@ -41,8 +41,9 @@
       (most-played first), so the top of the list is what people actually play — and those most-played
       openings are still <b>UNKNOWN by design</b>; certified verdicts live deeper in the tree.
       <b>P0</b> is the first player (opens at the origin, blue); <b>P1</b> is second (red).
-      Browse the representatives, replay a certified win through its forced line, or build your own
-      opening and look up its canonical D6 verdict.</p>
+      Browse the representatives, replay a certified win <em>or loss</em> through its forced solution
+      (a loss shows the winner's full forcing line), or build your own opening and look up its
+      canonical D6 verdict.</p>
   </div>
 
   <!-- summary counts — each tile filters the list to that verdict -->
@@ -157,8 +158,8 @@
         <span><i class="lg-dot p0"></i> P0 (first, blue)</span>
         <span><i class="lg-dot p1"></i> P1 (second, red)</span>
         <span><i class="lg-mark"></i> last placed pair</span>
-        <span><i class="lg-out"></i> six-in-a-row (terminal wins)</span>
-        <span><i class="lg-threat"></i> claimant's leading four (proven-won board)</span>
+        <span><i class="lg-out"></i> six-in-a-row (terminal line)</span>
+        <span><i class="lg-proj"></i> projected six-window · ghost completions (proven-won, six not on board)</span>
         <span><i class="lg-ring"></i> current scrub move</span>
       </div>
 
@@ -210,6 +211,6 @@
 
 <div class="toast-wrap" id="toastWrap" aria-live="polite"></div>
 
-<script type="module" src="atlas.js?v=96915067974b663ab4ee12ef92282a74f85169c8"></script>
+<script type="module" src="atlas.js?v=2215dca09b7c3bd51418bc52c74f4e0ffc691031"></script>
 </body>
 </html>

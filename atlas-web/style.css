@@ -369,8 +369,10 @@ select{cursor:pointer}
 .board-legend .lg-dot.p1{background:var(--p1)}
 .board-legend .lg-mark{width:7px;height:7px;border-radius:50%;background:var(--accent)}
 .board-legend .lg-out{width:11px;height:8px;border:1.6px solid var(--accent);border-radius:2px}
-.board-legend .lg-threat{width:10px;height:10px;border-radius:2px;
-  border:1.8px dashed var(--p0-soft);background:transparent}
+/* projected six-window: dashed accent outline mirrors .winoutline.projected
+   (the solid .lg-out above is the terminal six; this dashed one is projected). */
+.board-legend .lg-proj{width:11px;height:8px;border-radius:2px;
+  border:1.6px dashed var(--accent);background:transparent}
 .board-legend .lg-ring{width:9px;height:9px;border-radius:50%;
   border:1.8px solid var(--p0);background:transparent}
 
