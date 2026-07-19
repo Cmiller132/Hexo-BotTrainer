@@ -174,46 +174,16 @@ function fillSummary() {
   $("cGen").textContent = (ATLAS.generated_from || "").slice(0, 12);
 
   // Vocabulary-note figures — derived from the same data the tiles use, so they
-  // can never drift from the totals above (was hardcoded "7-ply / 226 / 269").
+  // can never drift from the totals above. Every row on the site is now a parsed
+  // corpus opening, so all wins are corpus wins.
   const wins = ATLAS.rows.filter(r => r.status === "WIN");
-  const humanWins = wins.filter(r => r.source.split(":")[0] === "human").length;
-  const corpusWins = wins.length - humanWins;
   const byDepth = (ATLAS.corpus7 && ATLAS.corpus7.by_depth) || {};
   const depths = Object.keys(byDepth).map(Number).filter(n => !isNaN(n)).sort((a, b) => a - b);
   const set = (id, v) => { const el = $(id); if (el) el.textContent = v; };
   set("vnDepthRange", depths.length ? `${depths[0]}–${depths[depths.length - 1]}` : "—");
-  set("vnCorpusWins", corpusWins.toLocaleString());
-  set("vnHumanWins", humanWins.toLocaleString());
+  set("vnCorpusWins", wins.length.toLocaleString());
   set("vnLoss", s.loss.toLocaleString());
   set("vnCertTotal", s.certified.toLocaleString());
-}
-
-/* ---- sharp example card ---- */
-function fillSharp() {
-  const flip = (ATLAS.sharp_examples || []).find(e => e.kind === "verdict_flip");
-  if (!flip) { $("sharpCard").style.display = "none"; return; }
-  // colour the verdict pill by the player the text names, straight from data,
-  // so a future flip direction keeps colour matched to text.
-  const vClass = v => "sc-v " + (/\bP1\b/.test(v) ? "win-p1" : "win-p0");
-  $("scGame").textContent = flip.game;
-  $("scBefore").textContent = flip.before.verdict;
-  $("scBefore").className = vClass(flip.before.verdict);
-  $("scBeforeSub").textContent = `prefix ${flip.before.prefix} · ${flip.before.side} · ${flip.before.phase}`;
-  $("scAfter").textContent = flip.after.verdict;
-  $("scAfter").className = vClass(flip.after.verdict);
-  $("scAfterSub").textContent = `prefix ${flip.after.prefix} · ${flip.after.side} · ${flip.after.phase}`;
-  $("scMove").textContent = `plays (${flip.flip_move[0]},${flip.flip_move[1]})`;
-  $("scDesc").textContent = flip.description;
-
-  // Locate the "before" row (same game, prefix = source_ply) to load on click.
-  const beforeRow = ATLAS.rows.find(r =>
-    r.source.includes(flip.game) && r.placements === flip.before.prefix);
-  const load = () => {
-    if (beforeRow) { setMode("view"); selectRow(beforeRow.id, true); toast("loaded verdict-flip · before"); }
-    else toast("before-position row not found", true);
-  };
-  $("sharpCard").addEventListener("click", load);
-  $("sharpCard").addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); load(); } });
 }
 
 /* ---- list rendering ---- */
@@ -228,30 +198,16 @@ function verdictClass(row) {
 // that opponent forces the win against the (losing) side-to-move. Both render
 // their solution identically through the scrubber; UNKNOWN has none.
 function isDecisive(row) { return row.status === "WIN" || row.status === "LOSS"; }
+// The site lists only the parsed-game corpus openings, so a row's headline is
+// its depth (the sort key) — not the internal corpus9/corpus11 solve-pass tag.
 function sourceLabel(row) {
-  // "human:<hash>:winner=-1" -> "human <hash>"; "shallow:empty" -> "shallow empty"
-  const parts = row.source.split(":");
-  if (parts[0] === "human") return `human ${(parts[1] || "").slice(0, 8)}`;
-  if (parts[0] === "shallow") return `shallow ${parts[1] || ""}`;
-  return row.source.slice(0, 22);
-}
-
-function buildSourceFilter() {
-  const kinds = new Set();
-  for (const r of ATLAS.rows) kinds.add(r.source.split(":")[0]);
-  const sel = $("fSource");
-  for (const k of [...kinds].sort()) {
-    const o = document.createElement("option");
-    o.value = k; o.textContent = k + " sources";
-    sel.appendChild(o);
-  }
+  return `${row.placements}-ply opening`;
 }
 
 function currentFilter() {
   return {
     q: $("fSearch").value.trim().toLowerCase(),
     verdict: $("fVerdict").value,
-    source: $("fSource").value,
   };
 }
 
@@ -265,25 +221,27 @@ function rowMatches(row, f) {
   if (f.verdict === "loss" && row.status !== "LOSS") return false;
   if (f.verdict === "unknown" && row.status !== "UNKNOWN") return false;
   if (f.verdict === "certified" && row.certified !== 1) return false;
-  if (f.source && row.source.split(":")[0] !== f.source) return false;
   if (f.q && !row._hay.includes(f.q)) return false;   // _hay precomputed once at boot
   return true;
 }
 
 // Sort orders for the browse list. Default "freq" ranks by human-game usage
-// (most-played openings first); ties break to the deeper/canonical row so the
-// depth-1 origin (6902) precedes the empty root (6902), matching the census.
+// (most-played openings first); "plyAsc"/"plyDesc" sort by opening depth (the
+// primary browse axis now that sources are consolidated). Ties break by usage
+// then verdict then a stable canonical id.
 const _freq = r => (r[FREQ_FIELD] || 0);
 function sortRows(rows, mode) {
   mode = mode || "freq";
   const rank = r => r.status === "WIN" ? 0 : r.status === "LOSS" ? 1 : 2;
+  const stable = (a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
   const cmp = {
-    freq: (a, b) => (_freq(b) - _freq(a)) || (b.placements - a.placements) ||
-      (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+    freq: (a, b) => (_freq(b) - _freq(a)) || (b.placements - a.placements) || stable(a, b),
     verdict: (a, b) => (rank(a) - rank(b)) || (b.placements - a.placements) ||
-      (_freq(b) - _freq(a)),
-    depth: (a, b) => (b.placements - a.placements) || (_freq(b) - _freq(a)) ||
-      (rank(a) - rank(b)),
+      (_freq(b) - _freq(a)) || stable(a, b),
+    plyAsc: (a, b) => (a.placements - b.placements) || (_freq(b) - _freq(a)) ||
+      (rank(a) - rank(b)) || stable(a, b),
+    plyDesc: (a, b) => (b.placements - a.placements) || (_freq(b) - _freq(a)) ||
+      (rank(a) - rank(b)) || stable(a, b),
   }[mode] || cmp_freq_fallback;
   return rows.slice().sort(cmp);
 }
@@ -342,7 +300,7 @@ function fillRowNode(b, row, top) {
   b.dataset.id = row.id;
   b.classList.toggle("sel", row.id === selectedId);
   b._label.textContent = sourceLabel(row);
-  b._sub.textContent = `${row.placements}st · ×${row.orbit}`;
+  b._sub.textContent = `×${row.orbit} variant${row.orbit === 1 ? "" : "s"}`;
   // colour the WIN badge by the CLAIMANT (p0 blue / p1 red) so a "P1 WIN" badge
   // isn't tinted blue while P1's stones are red; LOSS/UNKNOWN keep their class.
   b._badge.className = "a-badge " + verdictClass(row) +
@@ -450,7 +408,7 @@ function renderReadout(row) {
     verdict = `CERTIFIED LOSS — ${row.side} is lost; ${row.claimant} forces the win`;
   $("roK").textContent = verdict;
 
-  let sub = `<b>${sourceLabel(row)}</b> · ${row.placements} stones · ${row.side} to move · ${row.phase}`;
+  let sub = `<b>${sourceLabel(row)}</b> · ${row.side} to move · ${row.phase}`;
   if (isDecisive(row)) {
     const c = row.claimant;
     // WIN and LOSS share the SAME solution readout (the claimant's forced win);
@@ -976,8 +934,6 @@ async function boot() {
   initBoard();
   wireScrub();
   fillSummary();
-  fillSharp();
-  buildSourceFilter();
   // land the browse list on the proven openings, not a wall of UNKNOWN
   $("fVerdict").value = "certified";
   renderList();
@@ -990,7 +946,6 @@ async function boot() {
     searchTimer = setTimeout(renderList, 150);
   });
   $("fVerdict").addEventListener("change", renderList);
-  $("fSource").addEventListener("change", renderList);
   $("fSort").addEventListener("change", renderList);
   $("atlasList").addEventListener("click", e => {
     const row = e.target.closest(".arow");

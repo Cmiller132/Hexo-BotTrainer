@@ -546,17 +546,32 @@ def _index_row(r):
             continue
         d[k] = r[k]
     return d
-index_rows = [_index_row(r) for r in rows]
+# The served browse docs show ONLY the parsed-game corpus openings (plies 3-11).
+# The shallow enumeration seed (empty root + the ply 1-2 D6 classes) and the deep
+# single-game 'human' dives are dropped from the site: they are not "parsed games
+# at <=11 plies" and the mix of source kinds was confusing. atlas.json (OUT above)
+# keeps the FULL set for selfcheck + the frozen-base machinery + provenance — the
+# browser only ever loads atlas-index / atlas-details, so this filter is purely a
+# view choice and disturbs no verdict, no certificate, and none of the frozen asserts.
+SITE_SOURCES = ("corpus9", "corpus11")
+site_rows = [r for r in rows if r["source"].split(":", 1)[0] in SITE_SOURCES]
+site_summary = {
+    "total": len(site_rows),
+    "win": sum(1 for r in site_rows if r["status"] == "WIN"),
+    "loss": sum(1 for r in site_rows if r["status"] == "LOSS"),
+    "unknown": sum(1 for r in site_rows if r["status"] == "UNKNOWN"),
+    "certified": sum(1 for r in site_rows if r["certified"] == 1),
+}
+index_rows = [_index_row(r) for r in site_rows]
 index_doc = {
     "schema": doc["schema"],
     "generated_from": doc["generated_from"],
     "census": doc["census"],
-    "summary": doc["summary"],
+    "summary": site_summary,
     "corpus7": doc["corpus7"],
-    "sharp_examples": doc["sharp_examples"],
     "rows": index_rows,
 }
-details = {r["id"]: {k: r[k] for k in DETAIL_FIELDS if k in r} for r in rows}
+details = {r["id"]: {k: r[k] for k in DETAIL_FIELDS if k in r} for r in site_rows}
 
 def _compact(obj):
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))

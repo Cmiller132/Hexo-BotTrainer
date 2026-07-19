@@ -6,7 +6,7 @@
 <title>Hexo — Opening Atlas Explorer</title>
 <!-- inline hex-motif favicon: keeps the showcase LAN page free of a spurious /favicon.ico 404, no external request -->
 <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D'http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg'%20viewBox%3D'0%200%2032%2032'%3E%3Cpolygon%20points%3D'28.1%2C9%2028.1%2C23%2016%2C30%203.9%2C23%203.9%2C9%2016%2C2'%20fill%3D'%23141a20'%20stroke%3D'%234f93ff'%20stroke-width%3D'2'%2F%3E%3Ccircle%20cx%3D'16'%20cy%3D'16'%20r%3D'2.6'%20fill%3D'%234f93ff'%2F%3E%3C%2Fsvg%3E">
-<link rel="stylesheet" href="style.css?v=2215dca09b7c3bd51418bc52c74f4e0ffc691031">
+<link rel="stylesheet" href="style.css?v=536ccd7b9181a88d0c7edeb97ba839603cec93c8">
 </head>
 <body>
 
@@ -70,30 +70,10 @@
     representative — a proof, not an estimate.
     <span class="tag-unk">UNKNOWN</span> means no certificate finished inside this pass's bounds.
     <b>UNKNOWN is not a draw, a balanced position, or a loss</b> — Hexo has no draw outcome, and CERTIFIED&nbsp;DRAW
-    is reserved in the schema but is never emitted. Shallow openings (the empty root, all 24 first-reply classes,
-    and the entire 3,684-class two-stone layer) are UNKNOWN by design. The certified slice is a deep solver-proven
-    corpus (depths <b id="vnDepthRange">—</b>, <b id="vnCorpusWins">—</b> certified wins) plus deep human-game
-    endings (<b id="vnHumanWins">—</b> wins and <b id="vnLoss">—</b> losses drawn from played games) —
-    <b id="vnCertTotal">—</b> proven verdicts in all.
-  </div>
-
-  <!-- sharp example -->
-  <div class="sharp-card" id="sharpCard" role="button" tabindex="0" aria-label="Load verdict-flip example onto the board">
-    <div class="sc-k">Sharp example · verdict flip · game <span id="scGame">—</span></div>
-    <div class="sc-flip">
-      <div class="sc-state">
-        <span class="sc-v win-p0" id="scBefore">CERTIFIED P0 WIN</span>
-        <span class="sc-sub" id="scBeforeSub">prefix 44 · P0 · SecondStone</span>
-      </div>
-      <span class="sc-move" id="scMove">plays (14,-3)</span>
-      <span class="sc-arrow">&rarr;</span>
-      <div class="sc-state">
-        <span class="sc-v win-p1" id="scAfter">CERTIFIED P1 WIN</span>
-        <span class="sc-sub" id="scAfterSub">prefix 45 · P1 · FirstStone</span>
-      </div>
-    </div>
-    <div class="sc-desc" id="scDesc">A single placement flips the proven winner. The move is a certificate-backed losing blunder.</div>
-    <div class="sc-cta">click to load the "before" position onto the board &rarr;</div>
+    is reserved in the schema but is never emitted. Every position here is a D6-canonical opening that occurs in the
+    8,698-game human corpus, through the first 11 plies. The certified slice is a deep solver-proven set (depths
+    <b id="vnDepthRange">—</b>, <b id="vnCorpusWins">—</b> certified wins and <b id="vnLoss">—</b> certified losses)
+    — <b id="vnCertTotal">—</b> proven verdicts in all; the rest are openings not yet resolved within the pass bounds.
   </div>
 
   <!-- 3-region grid -->
@@ -104,7 +84,7 @@
       <div class="sec">
         <h2 class="k">Positions</h2>
         <div class="hist-filters">
-          <input type="text" id="fSearch" placeholder="search id / source / moves" spellcheck="false" autocomplete="off" aria-label="Search positions">
+          <input type="text" id="fSearch" placeholder="search id / moves" spellcheck="false" autocomplete="off" aria-label="Search positions">
           <select id="fVerdict" aria-label="Filter by verdict">
             <option value="">all verdicts</option>
             <option value="certified">certified (win or loss)</option>
@@ -112,13 +92,11 @@
             <option value="loss">certified loss</option>
             <option value="unknown">unknown</option>
           </select>
-          <select id="fSource" aria-label="Filter by source">
-            <option value="">all sources</option>
-          </select>
           <select id="fSort" aria-label="Sort order">
             <option value="freq">sort · most used</option>
+            <option value="plyAsc">sort · ply (shallow → deep)</option>
+            <option value="plyDesc">sort · ply (deep → shallow)</option>
             <option value="verdict">sort · verdict</option>
-            <option value="depth">sort · depth</option>
           </select>
         </div>
         <div class="filter-count" id="filterCount">—</div>
@@ -211,6 +189,6 @@
 
 <div class="toast-wrap" id="toastWrap" aria-live="polite"></div>
 
-<script type="module" src="atlas.js?v=2215dca09b7c3bd51418bc52c74f4e0ffc691031"></script>
+<script type="module" src="atlas.js?v=536ccd7b9181a88d0c7edeb97ba839603cec93c8"></script>
 </body>
 </html>
