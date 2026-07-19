@@ -345,12 +345,44 @@ fn load_corpus_first_n(path: &str, first_n: usize) -> Vec<Candidate> {
     }
     reps.into_iter()
         .map(|((prefix, _key), canonical_moves)| Candidate {
-            source: format!("corpus7:depth{prefix}"),
+            source: format!("corpus{first_n}:depth{prefix}"),
             source_prefix: prefix,
             orbit_size: orbit_size(&canonical_moves),
             canonical_moves,
         })
         .collect()
+}
+
+/// Probe helper: load explicit canonical move sequences (one per line,
+/// "q,r;q,r;...") as candidates, bypassing corpus enumeration. Used to
+/// calibrate node caps against known-verdict positions.
+fn load_moves_file(path: &str) -> Vec<Candidate> {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("read OPENING_ATLAS_MOVES_FILE={path}: {error}"));
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let moves = line
+            .split(';')
+            .filter(|token| !token.trim().is_empty())
+            .map(|token| {
+                let ints = parse_ints(token);
+                assert_eq!(ints.len(), 2, "move token must be q,r");
+                HexCoord::new(ints[0], ints[1])
+            })
+            .collect::<Vec<_>>();
+        let canonical_moves = canonical_sequence(&moves);
+        out.push(Candidate {
+            source: "probe:moves".to_owned(),
+            source_prefix: canonical_moves.len(),
+            orbit_size: orbit_size(&canonical_moves),
+            canonical_moves,
+        });
+    }
+    out
 }
 
 fn replay_unchecked(moves: &[HexCoord]) -> HexoState {
@@ -437,6 +469,197 @@ fn cert_metrics(cert: &TssCertificate) -> (u32, usize, usize, usize) {
     (derived_horizon, edges, commutations, zones)
 }
 
+/// Extract the PRINCIPAL forced-win line from a certificate, as the ordered
+/// list of placements AFTER the root opening. At each claimant node take the
+/// winning move; at each defender (Universal) node take one principal reply;
+/// at a lambda-1 Win leaf complete the witness window with the claimant's
+/// remaining placements so the line reaches a literal six-in-a-row. Returns the
+/// move list and whether replay reached a terminal win for the claimant.
+fn extract_win_line(cert: &TssCertificate, root_state: &HexoState) -> (Vec<HexCoord>, bool) {
+    let (line, terminal, _path) = extract_win_line_traced(cert, root_state);
+    (line, terminal)
+}
+
+fn extract_win_line_traced(
+    cert: &TssCertificate,
+    root_state: &HexoState,
+) -> (Vec<HexCoord>, bool, String) {
+    let claimant = cert.claimant;
+    let mut state = root_state.clone();
+    let mut line = Vec::new();
+    let mut path = String::new();
+    let mut id = cert.root_node;
+    let mut terminal_win = false;
+
+    let mut play = |state: &mut HexoState, mv: HexCoord, line: &mut Vec<HexCoord>| -> bool {
+        if apply_placement(state, Placement { coord: mv }).is_err() {
+            return false;
+        }
+        line.push(mv);
+        true
+    };
+
+    // The arena is acyclic; bound the walk defensively.
+    for _ in 0..(cert.nodes.len() + 8) {
+        let Some(node) = cert.nodes.get(id as usize) else {
+            break;
+        };
+        let mover_claimant = state.current_player() == claimant;
+        match node {
+            CertNode::Choice { mv, child } => {
+                path.push(if mover_claimant { 'C' } else { 'c' });
+                if !play(&mut state, *mv, &mut line) {
+                    path.push('!');
+                    break;
+                }
+                if let Some(outcome) = state.terminal() {
+                    terminal_win = outcome.winner == claimant;
+                    break;
+                }
+                id = *child;
+            }
+            CertNode::OrCompletion { mv, .. } => {
+                path.push(if mover_claimant { 'O' } else { 'o' });
+                if play(&mut state, *mv, &mut line) {
+                    terminal_win = state.terminal().is_some_and(|o| o.winner == claimant);
+                } else {
+                    path.push('!');
+                }
+                break;
+            }
+            CertNode::Universal { edges, .. } => {
+                // One principal defender reply is enough for a single line; the
+                // certificate proves every reply loses.
+                path.push(if mover_claimant { 'u' } else { 'U' });
+                let Some(edge) = edges.first() else {
+                    path.push('0');
+                    break;
+                };
+                if !play(&mut state, edge.mv, &mut line) {
+                    path.push('!');
+                    break;
+                }
+                if let Some(outcome) = state.terminal() {
+                    terminal_win = outcome.winner == claimant;
+                    break;
+                }
+                id = edge.child;
+            }
+            CertNode::Win { witness, count, .. } => {
+                // Claimant to move with a lambda-1 win: fill the empty witness
+                // cells with claimant placements to reach the six-in-a-row.
+                path.push(if mover_claimant { 'W' } else { 'w' });
+                path.push_str(&count.to_string());
+                for cell in witness.cells() {
+                    if state.board().get(cell).is_some() {
+                        continue;
+                    }
+                    if !play(&mut state, cell, &mut line) {
+                        path.push('!');
+                        break;
+                    }
+                    if let Some(outcome) = state.terminal() {
+                        terminal_win = outcome.winner == claimant;
+                        break;
+                    }
+                }
+                break;
+            }
+            CertNode::Loss { .. } => {
+                path.push(if mover_claimant { 'l' } else { 'L' });
+                break;
+            }
+        }
+    }
+    // The arena principal line ends at a proven-winning contract (Loss / implicit
+    // Universal / lambda-1 Win) that does not spell out the finishing stones. A
+    // bounded, threat-restricted search recovers the actual six-in-a-row line.
+    if !terminal_win && state.terminal().is_none() {
+        if let Some(finish) = find_finish(&state, claimant, 12) {
+            let before = line.len();
+            line.extend(finish);
+            terminal_win = true;
+            path.push('+');
+            path.push_str(&(line.len() - before).to_string());
+        }
+    }
+    (line, terminal_win, path)
+}
+
+/// Empty cells that matter for a lambda-1 finish: the open cells of any window
+/// where `claimant` already holds >= 4 and the opponent holds none. The mover
+/// completes/extends such a window (claimant) or blocks it (defender), so both
+/// sides' relevant replies live in this tiny set.
+fn threat_cells(state: &HexoState, claimant: Player, min_count: u8) -> Vec<HexCoord> {
+    let mut cells = Vec::new();
+    for entry in state.board().windows().entries() {
+        if entry.count(claimant) >= min_count && entry.count(claimant.other()) == 0 {
+            cells.extend(entry.empty_cells());
+        }
+    }
+    cells.sort_by_key(|coord| (coord.q, coord.r));
+    cells.dedup();
+    cells
+}
+
+/// Depth-bounded forced-win finder over threat-relevant moves only. Returns a
+/// concrete line to a `claimant` six-in-a-row: at claimant nodes any move that
+/// forces the win; at defender nodes EVERY reply must still lose. Restricting to
+/// threat cells keeps branching tiny, which is sound for the lambda-1 finish the
+/// certificate already proved exists.
+fn find_finish(state: &HexoState, claimant: Player, depth: usize) -> Option<Vec<HexCoord>> {
+    if let Some(outcome) = state.terminal() {
+        return (outcome.winner == claimant).then(Vec::new);
+    }
+    if depth == 0 {
+        return None;
+    }
+    let claimant_to_move = state.current_player() == claimant;
+    // Restrict both sides to imminent (>=4) threat cells: the claimant completes
+    // or extends, the defender blocks. This keeps the lambda-1 finish fast and
+    // the displayed line a legal, terminating six-in-a-row.
+    let moves = threat_cells(state, claimant, 4);
+    if moves.is_empty() {
+        return None;
+    }
+    let mut principal: Option<Vec<HexCoord>> = None;
+    for mv in moves {
+        let mut child = state.clone();
+        if apply_placement(&mut child, Placement { coord: mv }).is_err() {
+            continue;
+        }
+        match find_finish(&child, claimant, depth - 1) {
+            Some(mut tail) => {
+                if claimant_to_move {
+                    // One forcing move suffices for the claimant.
+                    let mut line = Vec::with_capacity(tail.len() + 1);
+                    line.push(mv);
+                    line.append(&mut tail);
+                    return Some(line);
+                }
+                // Defender: remember a witness line but keep checking all replies.
+                if principal.is_none() {
+                    let mut line = Vec::with_capacity(tail.len() + 1);
+                    line.push(mv);
+                    line.append(&mut tail);
+                    principal = Some(line);
+                }
+            }
+            None => {
+                if !claimant_to_move {
+                    // A defender reply escapes within this depth: not forced here.
+                    return None;
+                }
+            }
+        }
+    }
+    if claimant_to_move {
+        None
+    } else {
+        principal
+    }
+}
+
 fn verify_all_d6(
     canonical_moves: &[HexCoord],
     cert: &TssCertificate,
@@ -474,6 +697,7 @@ fn solve_candidate(
     relative_horizon: u32,
     node_ladder: &[u64],
     unbounded_horizon: bool,
+    wide: bool,
 ) {
     let state = replay(&candidate.canonical_moves);
     // Deep profile: an unbounded ply deadline lets the search go as deep as the
@@ -494,7 +718,15 @@ fn solve_candidate(
     let mut used_cap = 0u64;
     for &node_cap in node_ladder {
         let mut solver = TssSolver::default();
-        solver.set_width_options(WidthOptions::vcf_pair_complete());
+        // Wider search (round3_consume) is vcf_pair_complete PLUS consuming
+        // quiet-turn attacker moves and sound ranked-zone defender pruning. The
+        // strict TssVerifier below stays normative: any certified WIN it rejects
+        // panics the shard rather than emitting unsound data.
+        solver.set_width_options(if wide {
+            WidthOptions::round3_consume()
+        } else {
+            WidthOptions::vcf_pair_complete()
+        });
         let result = solver.solve(
             &state,
             &SolveCaps {
@@ -541,8 +773,9 @@ fn solve_candidate(
         let (derived_horizon, edges, commutations, zones) = cert_metrics(cert);
         let certificate_debug = format!("{cert:?}");
         let cert_fingerprint = fnv1a64(certificate_debug.as_bytes());
+        let (win_line, win_line_terminal) = extract_win_line(cert, &state);
         println!(
-            "ATLAS_ROW {base} certified=1 claimant={} cert_nodes={} cert_edges={} cert_commutations={} cert_zones={} derived_horizon={} cert_fnv1a64_debug_v1={cert_fingerprint:016x} d6_verified={} d6_mask=0x{d6_mask:03x} moves={}",
+            "ATLAS_ROW {base} certified=1 claimant={} cert_nodes={} cert_edges={} cert_commutations={} cert_zones={} derived_horizon={} cert_fnv1a64_debug_v1={cert_fingerprint:016x} d6_verified={} d6_mask=0x{d6_mask:03x} win_line_len={} win_line_terminal={} win_line={} moves={}",
             player_name(cert.claimant),
             cert.nodes.len(),
             edges,
@@ -550,12 +783,15 @@ fn solve_candidate(
             zones,
             derived_horizon,
             d6_verified,
+            win_line.len(),
+            u8::from(win_line_terminal),
+            moves_text(&win_line),
             moves_text(&candidate.canonical_moves),
         );
     } else {
         assert_eq!(result.status, ProofStatus::Unknown);
         println!(
-            "ATLAS_ROW {base} certified=0 claimant=NA cert_nodes=0 cert_edges=0 cert_commutations=0 cert_zones=0 derived_horizon=NA cert_fnv1a64_debug_v1=NA d6_verified=0 d6_mask=0x000 moves={}",
+            "ATLAS_ROW {base} certified=0 claimant=NA cert_nodes=0 cert_edges=0 cert_commutations=0 cert_zones=0 derived_horizon=NA cert_fnv1a64_debug_v1=NA d6_verified=0 d6_mask=0x000 win_line_len=0 win_line_terminal=NA win_line=NA moves={}",
             moves_text(&candidate.canonical_moves),
         );
     }
@@ -574,6 +810,9 @@ fn opening_atlas_pass1() {
     let wall_seconds = env_num("OPENING_ATLAS_WALL_SECONDS", DEFAULT_WALL_SECONDS);
     let node_ladder = env_ladder("OPENING_ATLAS_NODE_LADDER", &DEFAULT_NODE_LADDER);
     let unbounded_horizon = env_num::<u8>("OPENING_ATLAS_UNBOUNDED", 0) != 0;
+    // Search width: "round3_consume" = wider (quiet-turn + ranked-zone consume);
+    // anything else = vcf_pair_complete (pass1/deep behavior).
+    let wide = std::env::var("OPENING_ATLAS_WIDTH").unwrap_or_default() == "round3_consume";
     // Cross-position parallelism: shard the candidate list so N independent
     // worker processes (built once, launched N times) each solve a disjoint
     // stride of positions with their own TT. Round-robin by index balances the
@@ -587,7 +826,10 @@ fn opening_atlas_pass1() {
     //  - corpus_first_n: EVERY distinct D6-canonical position within the first
     //    `first_n` plies of ALL corpus games.
     let corpus_first_n = mode == "corpus_first_n";
-    let (candidates, shallow_count) = if corpus_first_n {
+    let (candidates, shallow_count) = if let Ok(moves_path) = std::env::var("OPENING_ATLAS_MOVES_FILE")
+    {
+        (load_moves_file(&moves_path), 0usize)
+    } else if corpus_first_n {
         let path = corpus_path
             .as_deref()
             .expect("corpus_first_n mode requires OPENING_ATLAS_CORPUS");
@@ -600,6 +842,21 @@ fn opening_atlas_pass1() {
         }
         (candidates, shallow_count)
     };
+    // Optional depth window (source_prefix in [min,max]). Lets a run focus the
+    // budget on the highest-yield depths (deeper positions are closest to a
+    // forcing win) instead of spreading thin across all depths.
+    let min_depth = env_num::<usize>("OPENING_ATLAS_MIN_DEPTH", 0);
+    let max_depth = env_num::<usize>("OPENING_ATLAS_MAX_DEPTH", usize::MAX);
+    let mut candidates = candidates
+        .into_iter()
+        .filter(|candidate| candidate.source_prefix >= min_depth && candidate.source_prefix <= max_depth)
+        .collect::<Vec<_>>();
+    // Optional ordering: "desc" puts the deepest (highest win-yield) positions
+    // first so a wall-ceiling truncation leaves only low-value shallow residual.
+    if std::env::var("OPENING_ATLAS_ORDER").unwrap_or_default() == "desc" {
+        candidates.reverse();
+    }
+
     let total = candidates.len();
     // Positions assigned to THIS shard (round-robin stride).
     let shard_indices = (0..total)
@@ -607,7 +864,7 @@ fn opening_atlas_pass1() {
         .collect::<Vec<_>>();
     let shard_total = shard_indices.len();
     println!(
-        "ATLAS_SETUP schema=1 mode={} corpus={} games={} backtrack={} first_n={} shallow={} candidates={} shard_index={} shard_count={} shard_total={} node_ladder={:?} tt_bytes={} relative_horizon={} unbounded_horizon={} wall_seconds={}",
+        "ATLAS_SETUP schema=1 mode={} corpus={} games={} backtrack={} first_n={} shallow={} candidates={} shard_index={} shard_count={} shard_total={} width={} node_ladder={:?} tt_bytes={} relative_horizon={} unbounded_horizon={} wall_seconds={}",
         if mode.is_empty() { "pass1" } else { &mode },
         corpus_path.as_deref().unwrap_or("NONE"),
         game_count,
@@ -618,6 +875,7 @@ fn opening_atlas_pass1() {
         shard_index,
         shard_count,
         shard_total,
+        if wide { "round3_consume" } else { "vcf_pair_complete" },
         node_ladder,
         tt_bytes,
         relative_horizon,
@@ -638,6 +896,7 @@ fn opening_atlas_pass1() {
             relative_horizon,
             &node_ladder,
             unbounded_horizon,
+            wide,
         );
         attempted += 1;
         // Flush every row so a wall-time stop or crash preserves partial output.

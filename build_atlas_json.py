@@ -2,11 +2,18 @@ import json, os
 
 BASE = r"E:/Hexo-BotTrainer-hexgt/.claude/worktrees/opening-atlas"
 RAW_PASS1 = os.path.join(BASE, "OPENING_ATLAS_PASS1_RAW.txt")
-# Deep 16-core corpus first-7-ply layer (unbounded horizon, 2M node cap,
-# 640 MiB TT/worker). Falls back to the earlier shallow corpus7 raw if absent.
-RAW_CORPUS7 = os.path.join(BASE, "OPENING_ATLAS_CORPUS7_DEEP_RAW.txt")
-if not os.path.exists(RAW_CORPUS7):
-    RAW_CORPUS7 = os.path.join(BASE, "OPENING_ATLAS_CORPUS7_RAW.txt")
+# Corpus first-7-ply layers, applied in order. pass1 is authoritative for its
+# ids; corpus layers stack with a NEVER-DOWNGRADE rule (a certified WIN/LOSS is
+# never replaced by an UNKNOWN), so the deep vcf layer backfills any position
+# the wider round3 layer left UNKNOWN or never reached, and round3 upgrades any
+# newly-proven win.
+# The 9-ply deep run (vcf + unbounded horizon, 8M cap) supersedes the 7-ply
+# deep set and carries the win_line PV on every certified win. The 7-ply raw is
+# kept only as a fallback if the 9-ply raw is absent.
+RAW_DEEP9 = os.path.join(BASE, "OPENING_ATLAS_CORPUS9_DEEP_RAW.txt")
+RAW_DEEP7 = os.path.join(BASE, "OPENING_ATLAS_CORPUS7_DEEP_RAW.txt")
+CORPUS_LAYERS = [p for p in (RAW_DEEP9,) if os.path.exists(p)] or \
+                [p for p in (RAW_DEEP7,) if os.path.exists(p)]
 OUT_DIR = os.path.join(BASE, "atlas-web", "data")
 OUT = os.path.join(OUT_DIR, "atlas.json")
 OUT_JSONP = os.path.join(OUT_DIR, "atlas.jsonp.js")
@@ -14,7 +21,7 @@ COMMIT = "db96d1b136021212ef32e1f1fdf747bc2262e1c7"
 
 INT_FIELDS = {"source_prefix","placements","orbit","cap","horizon","nodes",
               "expansions","tt_bytes","peak_tt_bytes","certified","cert_nodes",
-              "cert_edges","cert_commutations","cert_zones","d6_verified"}
+              "cert_edges","cert_commutations","cert_zones","d6_verified","win_line_len"}
 FLOAT_FIELDS = {"ms"}
 # derived_horizon is int-or-NA; handled specially
 
@@ -61,6 +68,10 @@ def parse_raw(path):
         for k, v in rec.items():
             if k == "moves":
                 row["moves"] = parse_moves(v)
+            elif k == "win_line":
+                row["win_line"] = [] if v == "NA" else parse_moves(v)
+            elif k == "win_line_terminal":
+                row[k] = None if v == "NA" else int(v)
             elif k == "derived_horizon":
                 row[k] = None if v == "NA" else int(v)
             elif k == "cert_fnv1a64_debug_v1":
@@ -75,29 +86,42 @@ def parse_raw(path):
                 row[k] = v  # id, source, side, phase, status, d6_mask
         if "moves" not in row:
             row["moves"] = []
+        # win_line schema (absent in the legacy pass1 raw).
+        row.setdefault("win_line", [])
+        row.setdefault("win_line_len", len(row["win_line"]))
+        row.setdefault("win_line_terminal", None)
         rows.append(row)
     return rows
 
-# ---- Load + merge (pass1 rows first; corpus7 rows only for NEW ids) ----
+# ---- Load + layered merge ----
+# pass1 ids are authoritative and never overwritten. Corpus layers stack in
+# order; within corpus ids, an incoming row replaces the current one iff it is
+# certified OR the current one is not certified (never downgrade a verdict).
 pass1_rows = parse_raw(RAW_PASS1)
-corpus7_rows = parse_raw(RAW_CORPUS7)
+pass1_ids = {r["id"] for r in pass1_rows}
+corpus = {}                       # id -> row (best corpus verdict so far)
+corpus_order = []                 # preserve first-seen order for stable output
+layer_new = {}                    # layer path -> new wins contributed
+for path in CORPUS_LAYERS:
+    new_wins = 0
+    for r in parse_raw(path):
+        rid = r["id"]
+        if rid in pass1_ids:
+            continue
+        cur = corpus.get(rid)
+        if cur is None:
+            corpus[rid] = r
+            corpus_order.append(rid)
+        elif r["certified"] == 1 or cur["certified"] == 0:
+            if r["certified"] == 1 and cur["certified"] == 0:
+                new_wins += 1
+            corpus[rid] = r
+    layer_new[os.path.basename(path)] = new_wins
 
-seen = set()
-rows = []
-for r in pass1_rows:
-    if r["id"] in seen:
-        continue
-    seen.add(r["id"])
-    rows.append(r)
-corpus7_new = 0
-corpus7_dupe = 0
-for r in corpus7_rows:
-    if r["id"] in seen:
-        corpus7_dupe += 1
-        continue
-    seen.add(r["id"])
-    rows.append(r)
-    corpus7_new += 1
+rows = list(pass1_rows) + [corpus[rid] for rid in corpus_order]
+corpus7_new = len(corpus_order)
+corpus7_dupe = sum(1 for r in (parse_raw(CORPUS_LAYERS[-1]) if CORPUS_LAYERS else [])
+                   if r["id"] in pass1_ids)
 
 # ---- Verification ----
 total = len(rows)
@@ -115,10 +139,20 @@ for r in rows:
     for m in r["moves"]:
         assert len(m) == 2 and all(isinstance(x,int) for x in m), f"bad move in {r['id']}"
 
-# Per-source-kind and per-depth breakdown for the corpus7 layer.
+# win_line: emitted for every certified WIN sourced from a win_line-aware raw
+# (the corpus first-N layer). Legacy pass1 certified rows predate the field.
+win_line_wins = [r for r in rows if r["certified"] == 1 and r["status"] == "WIN"
+                 and r["source"].startswith("corpus")]
+for r in win_line_wins:
+    assert len(r["win_line"]) > 0, f"certified corpus win without win_line: {r['id']}"
+    for m in r["win_line"]:
+        assert len(m) == 2 and all(isinstance(x,int) for x in m), f"bad win_line move in {r['id']}"
+win_line_terminal = sum(1 for r in win_line_wins if r.get("win_line_terminal") == 1)
+
+# Per-depth breakdown for the corpus first-N layer.
 corpus7_by_depth = {}
 for r in rows:
-    if r["source"].startswith("corpus7:"):
+    if r["source"].startswith("corpus"):
         d = r["source_prefix"]
         corpus7_by_depth[d] = corpus7_by_depth.get(d, 0) + 1
 
@@ -171,6 +205,10 @@ doc = {
         "new_rows": corpus7_new,
         "duplicate_of_pass1": corpus7_dupe,
         "by_depth": {str(k): corpus7_by_depth[k] for k in sorted(corpus7_by_depth)},
+        "layers": [os.path.basename(p) for p in CORPUS_LAYERS],
+        "new_wins_by_layer": layer_new,
+        "win_line_wins": len(win_line_wins),
+        "win_line_terminal": win_line_terminal,
     },
     "sharp_examples": sharp_examples,
     "rows": rows,
@@ -186,13 +224,16 @@ with open(OUT_JSONP, "w", encoding="utf-8") as f:
 
 print(json.dumps({
     "pass1_rows": len(pass1_rows),
-    "corpus7_rows_parsed": len(corpus7_rows),
+    "corpus_layers": [os.path.basename(p) for p in CORPUS_LAYERS],
+    "new_wins_by_layer": layer_new,
     "corpus7_new": corpus7_new,
     "corpus7_dupe_of_pass1": corpus7_dupe,
     "total": total, "win": win, "loss": loss, "unknown": unknown,
     "certified": certified,
     "certified_win": sum(1 for r in rows if r["certified"]==1 and r["status"]=="WIN"),
     "certified_loss": sum(1 for r in rows if r["certified"]==1 and r["status"]=="LOSS"),
+    "win_line_wins": len(win_line_wins),
+    "win_line_terminal": win_line_terminal,
     "corpus7_by_depth": {str(k): corpus7_by_depth[k] for k in sorted(corpus7_by_depth)},
     "out": OUT, "out_jsonp": OUT_JSONP,
 }, indent=2))
