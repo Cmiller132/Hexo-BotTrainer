@@ -1,0 +1,426 @@
+diff --git a/packages/hexfield_eq/rust/src/tss_crel_leaf_hunt.rs b/packages/hexfield_eq/rust/src/tss_crel_leaf_hunt.rs
+index 430641cb..98406385 100644
+--- a/packages/hexfield_eq/rust/src/tss_crel_leaf_hunt.rs
++++ b/packages/hexfield_eq/rust/src/tss_crel_leaf_hunt.rs
+@@ -10,11 +10,11 @@ use std::ffi::OsString;
+ 
+ use hexo_engine::{apply_placement, HexCoord, HexoState, Placement, TurnPhase};
+ 
+-use crate::tss_core::{CertVerify, ProofStatus, SolveCaps, SolveGoal, ZoneSearchCaps};
++use crate::tss_core::{CertVerify, ProofStatus, SolveCaps, SolveGoal, SolveStats, ZoneSearchCaps};
+ use crate::tss_solver::{
+     begin_pn_init_leaf_state_telemetry, take_pn_init_telemetry_report, TssSolver, WidthOptions,
+ };
+-use crate::tss_verify::{CertNode, RootBinding, TssCertificate, TssVerifier};
++use crate::tss_verify::{CertNode, RootBinding, TssCertificate, TssVerifier, ZoneInfo};
+ 
+ const SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+ const GAME_COUNT: usize = 50;
+@@ -23,11 +23,12 @@ const MIN_START_PLY: usize = 8;
+ const NODE_CAP: u64 = 500;
+ const TT_BYTES: usize = 256 * 1024;
+ const HORIZONS: [u32; 2] = [8, 16];
+-const FLAGS: [&str; 4] = [
++const FLAGS: [&str; 5] = [
+     "TSS_LAZY_FRONTIER",
+     "TSS_INTERIOR_CENSUS_GATE",
+     "TSS_SHARED_FRAGMENTS",
+     "TSS_K_REPLY_CONSUME",
++    "TSS_LEAF_ZONED_EMIT",
+ ];
+ 
+ #[derive(Clone, Debug)]
+@@ -280,6 +281,236 @@ fn zoned_nodes(cert: &TssCertificate) -> usize {
+         .count()
+ }
+ 
++fn universal_shapes(cert: &TssCertificate) -> (usize, usize, usize) {
++    let mut total = 0usize;
++    let mut implicit = 0usize;
++    let mut explicit = 0usize;
++    for node in &cert.nodes {
++        if let CertNode::Universal {
++            implicit_dispatch, ..
++        } = node
++        {
++            total += 1;
++            if *implicit_dispatch {
++                implicit += 1;
++            } else {
++                explicit += 1;
++            }
++        }
++    }
++    (total, implicit, explicit)
++}
++
++fn without_zones(cert: &TssCertificate) -> TssCertificate {
++    let mut stripped = cert.clone();
++    for node in &mut stripped.nodes {
++        if let CertNode::Universal { zone, .. } = node {
++            *zone = None;
++        }
++    }
++    stripped
++}
++
++fn search_stats_signature(stats: &SolveStats) -> String {
++    // Normalize only elapsed-time observations. Debug spelling then compares
++    // every retained count, byte quantity, bin, and first-refusal identity.
++    let mut normalized = *stats;
++    normalized.interior_gate_nanos = 0;
++    normalized.live_ge3_seed_nanos = 0;
++    normalized.closure_debt.pair_generation_nanos = 0;
++    normalized.closure_debt.gate_build_nanos = 0;
++    normalized.closure_debt.second_candidate_nanos = 0;
++    normalized.closure_debt.pair_evaluation_nanos = 0;
++    normalized.closure_debt.dedup_nanos = 0;
++    normalized.closure_debt.avoidable_second_candidate_nanos = 0;
++    normalized.closure_debt.avoidable_pair_evaluation_nanos = 0;
++    normalized.closure_debt.avoidable_dedup_nanos = 0;
++    normalized.threshold_scale.descent_nanos = 0;
++    normalized.threshold_scale.state_apply_undo_nanos = 0;
++    format!("{normalized:?}")
++}
++
++fn telemetry_signature(report: &crate::tss_solver::PnInitTelemetryReport) -> Vec<String> {
++    report
++        .nodes
++        .iter()
++        .map(|node| {
++            format!(
++                "serial={};parent={:?};engine={};mode={:?};depth={};h_rem={:?};phase={};win_arm={};census={:?};lb={:?};gate={};safe={};live_ge4={};live_ge3={};disjoint={};outcome={:?};final={};frozen={:?};state={:?}",
++                node.serial,
++                node.parent_serial,
++                node.engine_node,
++                node.mode,
++                node.depth,
++                node.h_rem,
++                node.phase_code,
++                node.win_arm,
++                node.census,
++                node.lb_plies,
++                node.gate,
++                node.coordinate_safe,
++                node.live_ge4,
++                node.live_ge3,
++                node.disjoint_two_gap,
++                node.outcome,
++                node.final_node_tag,
++                node.frozen_state,
++                node.captured_state.as_ref().map(state_key),
++            )
++        })
++        .collect()
++}
++
++#[test]
++#[ignore = "R-CREL-6 post-hoc zone identity gate; release, serial, --nocapture"]
++fn crel_leaf_zoned_identity_gate() {
++    let _env = EnvGuard::selected_profile();
++    let (eligible_games, batches) = load_batches();
++    println!(
++        "CREL6_ZONE_IDENTITY_META flag=TSS_LEAF_ZONED_EMIT default_off=true cfg_test_only=true corpus={} eligible_games={} games={} roots={} seed=0x{SEED:016X} node_cap={NODE_CAP} tt_bytes={TT_BYTES} horizons={HORIZONS:?} width=vcf_pair_complete lazy_frontier=true interior_census_gate=true shared_fragments=false k_reply=false zone_options=default_off excluded_identity_fields=wall_clock_nanos",
++        corpus_path(),
++        eligible_games,
++        batches.len(),
++        batches.len() * WINDOW_STATES,
++    );
++
++    for horizon in HORIZONS {
++        let expected_hard = if horizon == 8 { 16 } else { 39 };
++        let mut roots = 0usize;
++        let mut hard = 0usize;
++        let mut zoned_certificates = 0usize;
++        let mut zoned_node_total = 0usize;
++        let mut strict_zoned = 0usize;
++        let mut compared_events = 0usize;
++        let mut universal_total = 0usize;
++        let mut implicit_universal_total = 0usize;
++        let mut explicit_universal_total = 0usize;
++        let mut inert_some_strict_accepts = 0usize;
++
++        for (batch_index, batch) in batches.iter().enumerate() {
++            let mut off_solver = make_solver();
++            let mut on_solver = make_solver();
++            for (within_batch, state) in batch.states.iter().enumerate() {
++                let solve_caps = caps(state, horizon);
++
++                std::env::remove_var("TSS_LEAF_ZONED_EMIT");
++                begin_pn_init_leaf_state_telemetry();
++                let off = off_solver.solve_goal(state, &solve_caps, SolveGoal::Win);
++                let off_report =
++                    take_pn_init_telemetry_report().expect("off identity telemetry active");
++                let off_numbers = off_solver.last_wide_root_numbers();
++
++                std::env::set_var("TSS_LEAF_ZONED_EMIT", "1");
++                begin_pn_init_leaf_state_telemetry();
++                let on = on_solver.solve_goal(state, &solve_caps, SolveGoal::Win);
++                let on_report =
++                    take_pn_init_telemetry_report().expect("on identity telemetry active");
++                let on_numbers = on_solver.last_wide_root_numbers();
++                std::env::remove_var("TSS_LEAF_ZONED_EMIT");
++
++                assert_eq!(off.status, on.status, "flag changed root status");
++                assert_eq!(
++                    search_stats_signature(&off.stats),
++                    search_stats_signature(&on.stats),
++                    "flag changed a structural search statistic"
++                );
++                assert_eq!(off_numbers, on_numbers, "flag changed final root PN/DN");
++                let off_events = telemetry_signature(&off_report);
++                let on_events = telemetry_signature(&on_report);
++                assert_eq!(off_events, on_events, "flag changed expansion-event order");
++                compared_events += off_events.len();
++                roots += 1;
++
++                match (off.cert.as_ref(), on.cert.as_ref()) {
++                    (None, None) => assert_eq!(off.status, ProofStatus::Unknown),
++                    (Some(off_cert), Some(on_cert)) => {
++                        assert_ne!(off.status, ProofStatus::Unknown);
++                        assert_eq!(zoned_nodes(off_cert), 0, "off certificate became zoned");
++                        assert_eq!(
++                            without_zones(off_cert),
++                            without_zones(on_cert),
++                            "certificates differ outside zone fields"
++                        );
++                        assert!(TssVerifier.verify(state, off_cert, off.status));
++                        let strict = TssVerifier.verify(state, on_cert, on.status);
++                        assert!(strict, "zoned certificate failed unchanged strict verifier");
++                        let zones = zoned_nodes(on_cert);
++                        let (universals, implicit, explicit) = universal_shapes(on_cert);
++                        universal_total += universals;
++                        implicit_universal_total += implicit;
++                        explicit_universal_total += explicit;
++                        let rederived = crate::tss_verify::round3_rederived_zones(state, on_cert)
++                            .expect("independent zone rederivation");
++                        assert!(
++                            universals == 0 || rederived.is_empty(),
++                            "wide route unexpectedly reached the strict zone boundary"
++                        );
++
++                        // Hostile counterexample attempt: put a deliberately
++                        // bogus d label on an implicit Universal. Acceptance
++                        // demonstrates only that dispatch ignores the field;
++                        // the independent zone rederivation must stay empty.
++                        let mut inert_accepts = false;
++                        for index in 0..off_cert.nodes.len() {
++                            if !matches!(
++                                off_cert.nodes[index],
++                                CertNode::Universal {
++                                    implicit_dispatch: true,
++                                    ..
++                                }
++                            ) {
++                                continue;
++                            }
++                            let mut inert = off_cert.clone();
++                            let CertNode::Universal { zone, .. } = &mut inert.nodes[index] else {
++                                unreachable!()
++                            };
++                            *zone = Some(ZoneInfo {
++                                d: u32::MAX,
++                                build_horizon: inert.semantic_horizon,
++                            });
++                            if TssVerifier.verify(state, &inert, off.status) {
++                                assert!(crate::tss_verify::round3_rederived_zones(state, &inert)
++                                    .expect("inert independent zone rederivation")
++                                    .is_empty());
++                                inert_accepts = true;
++                                break;
++                            }
++                        }
++                        inert_some_strict_accepts += usize::from(inert_accepts);
++                        hard += 1;
++                        zoned_certificates += usize::from(zones > 0);
++                        zoned_node_total += zones;
++                        strict_zoned += usize::from(zones > 0 && strict);
++                        println!(
++                            "CREL6_ZONE_IDENTITY_HARD horizon={horizon} batch={batch_index} within_batch={within_batch} root_hash={:016X} status={:?} nodes={} expansions={} events={} root_numbers={:?} universals={universals} implicit_universals={implicit} explicit_universals={explicit} rederived_zones={} off_zones=0 on_zones={zones} cert_modulo_zones_equal=true on_strict=true inert_some_strict_accepts={inert_accepts}",
++                            state_hash(state),
++                            on.status,
++                            on.stats.nodes,
++                            on.stats.expansions,
++                            on_events.len(),
++                            on_numbers,
++                            rederived.len(),
++                        );
++                    }
++                    _ => panic!("flag changed certificate presence"),
++                }
++            }
++        }
++        assert_eq!(roots, GAME_COUNT * WINDOW_STATES);
++        assert_eq!(hard, expected_hard, "frozen hard-count identity drift");
++        assert_eq!(strict_zoned, zoned_certificates);
++        assert_eq!(explicit_universal_total, 0);
++        assert_eq!(universal_total, implicit_universal_total);
++        println!(
++            "CREL6_ZONE_IDENTITY_SUMMARY horizon={horizon} roots={roots} hard={hard} expected_hard={expected_hard} status_mismatches=0 structural_stat_mismatches=0 root_number_mismatches=0 event_order_mismatches=0 certificate_non_zone_mismatches=0 compared_events={compared_events} universals={universal_total} implicit_universals={implicit_universal_total} explicit_universals={explicit_universal_total} inert_some_strict_accepts={inert_some_strict_accepts} zoned_certificates={zoned_certificates} zoned_nodes={zoned_node_total} strict_zoned={strict_zoned} hard_without_strict=0"
++        );
++    }
++    println!(
++        "CREL6_ZONE_IDENTITY_VERDICT identity=true strict_verifier_unchanged=true search_envelope_unchanged=true"
++    );
++}
++
+ fn sibling_candidates(
+     cluster: &str,
+     report: &crate::tss_solver::PnInitTelemetryReport,
+diff --git a/packages/hexfield_eq/rust/src/tss_solver.rs b/packages/hexfield_eq/rust/src/tss_solver.rs
+index bc58db30..8f2c579e 100644
+--- a/packages/hexfield_eq/rust/src/tss_solver.rs
++++ b/packages/hexfield_eq/rust/src/tss_solver.rs
+@@ -1257,6 +1257,10 @@ impl TssSolver {
+                 }
+             } else {
+                 rebase_zone_distances(&mut cert, state)?;
++                #[cfg(test)]
++                if leaf_zoned_emit_enabled() {
++                    cert = emit_leaf_zones_posthoc(state, cert);
++                }
+             }
+             // Count only imports that survive compaction, dominant relabel,
+             // and (when enabled) strict final-certificate verification.
+@@ -1677,6 +1681,141 @@ fn rebase_zone_distances(cert: &mut TssCertificate, root: &RustHexoState) -> Opt
+     Some(())
+ }
+ 
++/// R-CREL-6 test-only leaf seam. The wide search and materializer finish
++/// before this flag is inspected. Each candidate annotation is replayed by
++/// the unchanged strict verifier; a rejected annotation is never emitted.
++#[cfg(test)]
++fn leaf_zoned_emit_enabled() -> bool {
++    std::env::var("TSS_LEAF_ZONED_EMIT").ok().as_deref() == Some("1")
++}
++
++#[cfg(test)]
++fn certificate_replay_states(
++    cert: &TssCertificate,
++    root: &RustHexoState,
++) -> Option<Vec<RustHexoState>> {
++    let mut states = vec![None; cert.nodes.len()];
++    let mut stack = vec![(cert.root_node, root.clone())];
++    while let Some((id, state)) = stack.pop() {
++        let slot = states.get_mut(id as usize)?;
++        if let Some(seen) = slot.as_ref() {
++            if PositionKey::from_state(seen) != PositionKey::from_state(&state) {
++                return None;
++            }
++            continue;
++        }
++        *slot = Some(state.clone());
++        match cert.nodes.get(id as usize)? {
++            CertNode::Choice { mv, child } => {
++                let mut next = state;
++                let result = apply_placement(&mut next, Placement { coord: *mv }).ok()?;
++                if result.outcome.is_some() {
++                    return None;
++                }
++                stack.push((*child, next));
++            }
++            CertNode::Universal { edges, .. } => {
++                for edge in edges {
++                    let mut next = state.clone();
++                    let result = apply_placement(&mut next, Placement { coord: edge.mv }).ok()?;
++                    if result.outcome.is_some() {
++                        return None;
++                    }
++                    stack.push((edge.child, next));
++                }
++            }
++            CertNode::OrCompletion { .. } | CertNode::Win { .. } | CertNode::Loss { .. } => {}
++        }
++    }
++    states.into_iter().collect()
++}
++
++#[cfg(test)]
++fn emit_leaf_zones_posthoc(root: &RustHexoState, mut cert: TssCertificate) -> TssCertificate {
++    let Some(states) = certificate_replay_states(&cert, root) else {
++        eprintln!(
++            "LEAF_ZONED_EMIT root_ply={} semantic_horizon={} cert_nodes={} failure=replay_states eligible=0 accepted=0 rebase_rejected=0 strict_rejected=0 final_zoned=0 final_strict=false",
++            root.placements_made(),
++            cert.semantic_horizon,
++            cert.nodes.len(),
++        );
++        return cert;
++    };
++    let eligible = cert
++        .nodes
++        .iter()
++        .zip(&states)
++        .enumerate()
++        .filter_map(|(index, (node, state))| {
++            let CertNode::Universal {
++                edges,
++                implicit_dispatch: false,
++                zone: None,
++                ..
++            } = node
++            else {
++                return None;
++            };
++            let analysis = threats::analyze(state);
++            (!edges.is_empty()
++                && !state.is_terminal()
++                && !matches!(state.phase(), TurnPhase::Opening)
++                && state.current_player() != cert.claimant
++                && !analysis.own_win_now
++                && analysis.min_hitting_set.is_none_or(|k| k < analysis.b))
++            .then_some(index)
++        })
++        .collect::<Vec<_>>();
++
++    let claimed = status_for_claimant(root.current_player(), cert.claimant);
++    let mut accepted = 0usize;
++    let mut rebase_rejected = 0usize;
++    let mut strict_rejected = 0usize;
++    for index in eligible.iter().copied() {
++        let mut candidate = cert.clone();
++        let CertNode::Universal { zone, .. } = &mut candidate.nodes[index] else {
++            unreachable!("eligible index must remain Universal");
++        };
++        *zone = Some(ZoneInfo {
++            d: 0,
++            build_horizon: candidate.semantic_horizon,
++        });
++        if rebase_zone_distances(&mut candidate, root).is_none() {
++            rebase_rejected += 1;
++            continue;
++        }
++        if !TssVerifier.verify(root, &candidate, claimed) {
++            strict_rejected += 1;
++            continue;
++        }
++        cert = candidate;
++        accepted += 1;
++    }
++    let final_zoned = cert
++        .nodes
++        .iter()
++        .filter(|node| matches!(node, CertNode::Universal { zone: Some(_), .. }))
++        .count();
++    let final_strict = TssVerifier.verify(root, &cert, claimed);
++    assert!(
++        accepted == 0 || final_strict,
++        "post-hoc zoned certificate must retain strict acceptance"
++    );
++    eprintln!(
++        "LEAF_ZONED_EMIT root_ply={} semantic_horizon={} cert_nodes={} eligible={} accepted={} rebase_rejected={} strict_rejected={} final_zoned={} final_strict={}",
++        root.placements_made(),
++        cert.semantic_horizon,
++        cert.nodes.len(),
++        eligible.len(),
++        accepted,
++        rebase_rejected,
++        strict_rejected,
++        final_zoned,
++        final_strict,
++    );
++    cert
++}
++
+ /// T10/U18 relabelling for an assembled shared DAG. The current Rust grammar
+ /// serializes D14's local budget but not D15/D16 tables, so the representable
+ /// max-dominant join is the exact child-max recurrence below. Reachable

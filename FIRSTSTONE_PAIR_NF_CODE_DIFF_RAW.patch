@@ -1,0 +1,635 @@
+diff --git a/packages/hexfield_eq/rust/src/lib.rs b/packages/hexfield_eq/rust/src/lib.rs
+index f65fa7d9..c0c825b9 100644
+--- a/packages/hexfield_eq/rust/src/lib.rs
++++ b/packages/hexfield_eq/rust/src/lib.rs
+@@ -62,6 +62,9 @@ mod tss_pn_init_hunt;
+ #[cfg(test)]
+ mod tss_leaf_surface_hunt;
+ 
++#[cfg(test)]
++mod tss_firststone_pair_nf_census;
++
+ #[cfg(test)]
+ mod tss_crel_leaf_hunt;
+ 
+diff --git a/packages/hexfield_eq/rust/src/tss_leaf_surface_hunt.rs b/packages/hexfield_eq/rust/src/tss_leaf_surface_hunt.rs
+index 33442943..d1cea033 100644
+--- a/packages/hexfield_eq/rust/src/tss_leaf_surface_hunt.rs
++++ b/packages/hexfield_eq/rust/src/tss_leaf_surface_hunt.rs
+@@ -329,6 +329,25 @@ fn load_batches() -> Vec<Batch> {
+     batches
+ }
+ 
++/// The frozen 50-by-6 leaf-surface input, exposed only to sibling test
++/// campaigns that need to measure the identical deterministic root cohort.
++pub(crate) fn standard_leaf_root_cohort() -> Vec<(String, HexoState)> {
++    load_batches()
++        .into_iter()
++        .flat_map(|batch| {
++            let Batch {
++                hash,
++                start_ply,
++                states,
++            } = batch;
++            states
++                .into_iter()
++                .enumerate()
++                .map(move |(within, state)| (format!("{hash}:ply{}", start_ply + within), state))
++        })
++        .collect()
++}
++
+ fn percentile(values: &[u64], quantile: f64) -> u64 {
+     if values.is_empty() {
+         return 0;
+diff --git a/packages/hexfield_eq/rust/src/tss_firststone_pair_nf_census.rs b/packages/hexfield_eq/rust/src/tss_firststone_pair_nf_census.rs
+new file mode 100644
+index 00000000..6415a9b3
+--- /dev/null
++++ b/packages/hexfield_eq/rust/src/tss_firststone_pair_nf_census.rs
+@@ -0,0 +1,585 @@
++//! R-CREL-6 Phase 3B: test-only FirstStone pair-normal-form census.
++//!
++//! This module observes the frozen leaf-surface roots and the canonical NQ2
++//! parent. It never calls or changes the solver. Every root gets exact L/J
++//! combinatorial counts. The canonical parent and a fixed prefix of eligible
++//! unresolved leaf roots additionally get exhaustive unordered-pair
++//! classifications from exact snapshot geometry. A bounded NQ2 sample alone
++//! is checked by applying both orientations through the engine.
++
++use std::collections::HashSet;
++
++use hexo_engine::{
++    apply_placement, pack_coord, HexCoord, HexoState, PackedCoord, Placement, Player, TurnPhase,
++    WindowKey,
++};
++
++const EXACT_LEAF_ROOTS: usize = 12;
++const NQ2_REPLAY_PAIR_SAMPLES: u64 = 512;
++
++// The FirstStone parent of the 36-placement H1/NQ2 replay. The required pair
++// appends (6,0), (6,-6).
++const NQ2_PARENT_REPLAY: &[(i16, i16)] = &[
++    (0, 0),
++    (-1, 0),
++    (1, -1),
++    (1, 0),
++    (2, 0),
++    (2, -2),
++    (3, -3),
++    (3, 0),
++    (4, 6),
++    (4, -4),
++    (5, -5),
++    (1, 3),
++    (2, 3),
++    (2, 1),
++    (5, 5),
++    (3, 3),
++    (0, 4),
++    (6, 2),
++    (-1, 5),
++    (0, 5),
++    (0, 6),
++    (7, 6),
++    (1, 6),
++    (5, 7),
++    (6, 7),
++    (6, 6),
++    (3, 6),
++    (7, 7),
++    (5, 6),
++    (-1, 6),
++    (1, 4),
++    (6, 5),
++    (7, 4),
++    (7, 3),
++    (7, 5),
++];
++
++type PairKey = (PackedCoord, PackedCoord);
++
++fn pair_key(left: PackedCoord, right: PackedCoord) -> PairKey {
++    if left < right {
++        (left, right)
++    } else {
++        (right, left)
++    }
++}
++
++fn choose_two(size: usize) -> u64 {
++    let size = u64::try_from(size).expect("legal-set size fits u64");
++    size.checked_mul(size.saturating_sub(1))
++        .expect("pair count fits u64")
++        / 2
++}
++
++fn bit(value: bool) -> u64 {
++    if value {
++        1
++    } else {
++        0
++    }
++}
++
++fn fingerprint_bytes(hash: &mut u64, bytes: &[u8]) {
++    for &byte in bytes {
++        *hash ^= u64::from(byte);
++        *hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
++    }
++}
++
++fn fingerprint_u64(hash: &mut u64, value: u64) {
++    fingerprint_bytes(hash, &value.to_le_bytes());
++}
++
++fn replay(moves: &[(i16, i16)]) -> HexoState {
++    let mut state = HexoState::new();
++    for &(q, r) in moves {
++        apply_placement(
++            &mut state,
++            Placement {
++                coord: HexCoord::new(q, r),
++            },
++        )
++        .unwrap_or_else(|error| panic!("illegal frozen replay at ({q},{r}): {error:?}"));
++    }
++    state
++}
++
++struct PairGeometry {
++    join_live: HashSet<PackedCoord>,
++    creates_single: HashSet<PackedCoord>,
++    creates_pair: HashSet<PairKey>,
++    terminal_single: HashSet<PackedCoord>,
++    terminal_pair: HashSet<PairKey>,
++    root_live_ge4: bool,
++}
++
++impl PairGeometry {
++    fn build(state: &HexoState, claimant: Player, legal: &[HexCoord]) -> Self {
++        let legal_ids = legal
++            .iter()
++            .copied()
++            .map(pack_coord)
++            .collect::<HashSet<_>>();
++        let mut geometry = Self {
++            join_live: HashSet::new(),
++            creates_single: HashSet::new(),
++            creates_pair: HashSet::new(),
++            terminal_single: HashSet::new(),
++            terminal_pair: HashSet::new(),
++            root_live_ge4: false,
++        };
++
++        for entry in state.board().windows().entries() {
++            if entry.active_player() != Some(claimant) {
++                continue;
++            }
++            let count = entry.count(claimant);
++            debug_assert!(count >= 1 && entry.count(claimant.other()) == 0);
++            geometry.root_live_ge4 |= count >= 4;
++            let empties = entry
++                .empty_cells()
++                .into_iter()
++                .map(pack_coord)
++                .filter(|coord| legal_ids.contains(coord))
++                .collect::<Vec<_>>();
++            geometry.join_live.extend(empties.iter().copied());
++
++            match count {
++                2 => {
++                    for left in 0..empties.len() {
++                        for right in left + 1..empties.len() {
++                            geometry
++                                .creates_pair
++                                .insert(pair_key(empties[left], empties[right]));
++                        }
++                    }
++                }
++                3 => geometry.creates_single.extend(empties),
++                4 => {
++                    debug_assert_eq!(empties.len(), 2);
++                    if let [left, right] = empties.as_slice() {
++                        geometry.terminal_pair.insert(pair_key(*left, *right));
++                    }
++                }
++                5 => geometry.terminal_single.extend(empties),
++                _ => {}
++            }
++        }
++        geometry
++    }
++
++    fn classify(&self, left: PackedCoord, right: PackedCoord) -> PairClass {
++        let key = pair_key(left, right);
++        let left_first_terminal = self.terminal_single.contains(&left);
++        let right_first_terminal = self.terminal_single.contains(&right);
++        PairClass {
++            retained: self.join_live.contains(&left) || self.join_live.contains(&right),
++            creates_ge4: self.creates_single.contains(&left)
++                || self.creates_single.contains(&right)
++                || self.creates_pair.contains(&key),
++            final_terminal: left_first_terminal
++                || right_first_terminal
++                || self.terminal_pair.contains(&key),
++            left_first_terminal,
++            right_first_terminal,
++        }
++    }
++}
++
++#[derive(Clone, Copy)]
++struct PairClass {
++    retained: bool,
++    creates_ge4: bool,
++    final_terminal: bool,
++    left_first_terminal: bool,
++    right_first_terminal: bool,
++}
++
++#[derive(Default)]
++struct ExactCounts {
++    pairs: u64,
++    retained: u64,
++    terminal: u64,
++    nonterminal_created_ge4: u64,
++    nonterminal_no_new_ge4: u64,
++    outside_nonterminal: u64,
++    outside_nonterminal_created_ge4: u64,
++    outside_nonterminal_no_new_ge4: u64,
++    outside_post_has_ge4: u64,
++    first_terminal_orientations: u64,
++    second_terminal_orientations: u64,
++    completed_nonterminal_orientations: u64,
++}
++
++impl ExactCounts {
++    fn absorb(&mut self, class: PairClass, root_live_ge4: bool) {
++        self.pairs += 1;
++        self.retained += bit(class.retained);
++        self.first_terminal_orientations +=
++            bit(class.left_first_terminal) + bit(class.right_first_terminal);
++        if class.final_terminal {
++            self.terminal += 1;
++            self.second_terminal_orientations +=
++                bit(!class.left_first_terminal) + bit(!class.right_first_terminal);
++            return;
++        }
++
++        self.completed_nonterminal_orientations += 2;
++        if class.creates_ge4 {
++            self.nonterminal_created_ge4 += 1;
++        } else {
++            self.nonterminal_no_new_ge4 += 1;
++        }
++        if !class.retained {
++            self.outside_nonterminal += 1;
++            if class.creates_ge4 {
++                self.outside_nonterminal_created_ge4 += 1;
++            } else {
++                self.outside_nonterminal_no_new_ge4 += 1;
++            }
++            if root_live_ge4 || class.creates_ge4 {
++                self.outside_post_has_ge4 += 1;
++            }
++        }
++    }
++
++    fn assert_complete(&self, expected_pairs: u64, expected_retained: u64) {
++        assert_eq!(self.pairs, expected_pairs, "exact pair enumeration drift");
++        assert_eq!(self.retained, expected_retained, "retained-pair drift");
++        assert_eq!(
++            self.terminal + self.nonterminal_created_ge4 + self.nonterminal_no_new_ge4,
++            self.pairs,
++            "pair classes must partition the universe"
++        );
++        assert_eq!(
++            self.first_terminal_orientations
++                + self.second_terminal_orientations
++                + self.completed_nonterminal_orientations,
++            self.pairs * 2,
++            "orientation classes must partition both pair orders"
++        );
++        assert_eq!(
++            self.outside_nonterminal_created_ge4, 0,
++            "COUNTEREXAMPLE: nonterminal threat-creating pair missed join_live"
++        );
++    }
++}
++
++struct RootCounts {
++    legal: Vec<HexCoord>,
++    geometry: PairGeometry,
++    total: u64,
++    retained: u64,
++}
++
++fn count_root(state: &HexoState, claimant: Player) -> RootCounts {
++    assert!(!state.is_terminal());
++    assert_eq!(state.current_player(), claimant);
++    assert!(matches!(state.phase(), TurnPhase::FirstStone));
++    let mut legal = Vec::new();
++    state.write_legal_moves(&mut legal);
++    let geometry = PairGeometry::build(state, claimant, &legal);
++    let total = choose_two(legal.len());
++    let outside = choose_two(legal.len() - geometry.join_live.len());
++    RootCounts {
++        legal,
++        retained: total - outside,
++        total,
++        geometry,
++    }
++}
++
++fn enumerate_exact(root: &RootCounts) -> ExactCounts {
++    let mut counts = ExactCounts::default();
++    for left in 0..root.legal.len() {
++        let left_id = pack_coord(root.legal[left]);
++        for right in left + 1..root.legal.len() {
++            let right_id = pack_coord(root.legal[right]);
++            counts.absorb(
++                root.geometry.classify(left_id, right_id),
++                root.geometry.root_live_ge4,
++            );
++        }
++    }
++    counts.assert_complete(root.total, root.retained);
++    counts
++}
++
++fn claimant_ge4_keys(state: &HexoState, claimant: Player) -> HashSet<WindowKey> {
++    state
++        .board()
++        .windows()
++        .entries()
++        .filter(|entry| entry.active_player() == Some(claimant) && entry.count(claimant) >= 4)
++        .map(|entry| entry.key())
++        .collect()
++}
++
++fn validate_orientation(
++    work: &mut HexoState,
++    root_ply: u32,
++    claimant: Player,
++    prior_ge4: &HashSet<WindowKey>,
++    first: HexCoord,
++    second: HexCoord,
++    class: PairClass,
++    first_terminal: bool,
++) {
++    let (first_result, first_delta) = work
++        .apply_with_delta(Placement { coord: first })
++        .expect("turn-start legal first orientation");
++    assert_eq!(first_result.outcome.is_some(), first_terminal);
++    if first_result.outcome.is_none() {
++        let (second_result, second_delta) = work
++            .apply_with_delta(Placement { coord: second })
++            .expect("turn-start legal second orientation");
++        assert_eq!(second_result.outcome.is_some(), class.final_terminal);
++        if second_result.outcome.is_none() {
++            let actual_created = claimant_ge4_keys(work, claimant)
++                .iter()
++                .any(|key| !prior_ge4.contains(key));
++            assert_eq!(actual_created, class.creates_ge4);
++            assert_eq!(work.current_player(), claimant.other());
++            assert!(matches!(work.phase(), TurnPhase::FirstStone));
++        }
++        work.undo(second_delta);
++    }
++    work.undo(first_delta);
++    assert_eq!(work.placements_made(), root_ply);
++    assert_eq!(work.current_player(), claimant);
++    assert!(matches!(work.phase(), TurnPhase::FirstStone));
++}
++
++fn validate_nq2_replay_sample(state: &HexoState, root: &RootCounts) -> u64 {
++    let claimant = state.current_player();
++    let prior_ge4 = claimant_ge4_keys(state, claimant);
++    let stride = (root.total / NQ2_REPLAY_PAIR_SAMPLES).max(1);
++    let mut ordinal = 0u64;
++    let mut sampled = 0u64;
++    let mut orientations = 0u64;
++    let mut work = state.clone();
++    for left in 0..root.legal.len() {
++        for right in left + 1..root.legal.len() {
++            if ordinal % stride == 0 && sampled < NQ2_REPLAY_PAIR_SAMPLES {
++                let left_coord = root.legal[left];
++                let right_coord = root.legal[right];
++                let class = root
++                    .geometry
++                    .classify(pack_coord(left_coord), pack_coord(right_coord));
++                validate_orientation(
++                    &mut work,
++                    state.placements_made(),
++                    claimant,
++                    &prior_ge4,
++                    left_coord,
++                    right_coord,
++                    class,
++                    class.left_first_terminal,
++                );
++                validate_orientation(
++                    &mut work,
++                    state.placements_made(),
++                    claimant,
++                    &prior_ge4,
++                    right_coord,
++                    left_coord,
++                    class,
++                    class.right_first_terminal,
++                );
++                sampled += 1;
++                orientations += 2;
++            }
++            ordinal += 1;
++        }
++    }
++    orientations
++}
++
++fn print_root(
++    source: &str,
++    id: &str,
++    state: &HexoState,
++    root: &RootCounts,
++    exact: bool,
++    unresolved_claimant_node: bool,
++) {
++    println!(
++        "FIRSTSTONE_PAIR_NF_ROOT source={source} id={id} ply={} claimant={:?} legal={} join_live={} pair_total={} pair_retained={} pair_outside={} directed_pair_sequences={} safe_canonical_orientations={} aggressive_join_orientations={} root_live_ge4={} unresolved_claimant_node={unresolved_claimant_node} exact_classified={exact}",
++        state.placements_made(),
++        state.current_player(),
++        root.legal.len(),
++        root.geometry.join_live.len(),
++        root.total,
++        root.retained,
++        root.total - root.retained,
++        root.total * 2,
++        root.total,
++        root.retained,
++        root.geometry.root_live_ge4,
++    );
++}
++
++fn print_exact(source: &str, id: &str, counts: &ExactCounts, unresolved_claimant_node: bool) {
++    let strict_quiet = unresolved_claimant_node
++        .then(|| counts.outside_nonterminal_no_new_ge4.to_string())
++        .unwrap_or_else(|| "NA".to_owned());
++    println!(
++        "FIRSTSTONE_PAIR_NF_EXACT source={source} id={id} classification=exact_snapshot_geometry unresolved_claimant_node={unresolved_claimant_node} pairs={} retained={} terminal={} nonterminal_created_ge4={} nonterminal_no_new_ge4={} outside_nonterminal={} outside_created_ge4={} outside_no_new_ge4={} outside_strict_quiet={strict_quiet} outside_post_has_ge4={} first_terminal_orientations={} second_terminal_orientations={} completed_nonterminal_orientations={} theorem_misses={}",
++        counts.pairs,
++        counts.retained,
++        counts.terminal,
++        counts.nonterminal_created_ge4,
++        counts.nonterminal_no_new_ge4,
++        counts.outside_nonterminal,
++        counts.outside_nonterminal_created_ge4,
++        counts.outside_nonterminal_no_new_ge4,
++        counts.outside_post_has_ge4,
++        counts.first_terminal_orientations,
++        counts.second_terminal_orientations,
++        counts.completed_nonterminal_orientations,
++        counts.outside_nonterminal_created_ge4,
++    );
++}
++
++#[test]
++#[ignore = "R-CREL-6 FirstStone pair-normal-form census; exact env opt-in required"]
++fn tss_firststone_pair_nf_census() {
++    assert!(
++        matches!(
++            std::env::var("TSS_FIRSTSTONE_PAIR_NF_CENSUS").as_deref(),
++            Ok("1")
++        ),
++        "set TSS_FIRSTSTONE_PAIR_NF_CENSUS=1 exactly"
++    );
++    println!(
++        "FIRSTSTONE_PAIR_NF_SETUP flag=TSS_FIRSTSTONE_PAIR_NF_CENSUS exact_value=1 seed=0x9E3779B97F4A7C15 leaf_roots_loaded=300 eligibility=nonterminal_claimant_FirstStone_and_not_own_win_now_and_not_forced_loss eligible_roots_counted=all exact_leaf_prefix={EXACT_LEAF_ROOTS} per_root_output=exact_prefix_and_resolved_only classification_method=exact_snapshot_window_geometry engine_replay_scope=nq2_512_pairs_both_orientations strict_quiet_definition=unresolved_root_and_nonterminal_pair_and_no_new_claimant_ge4 theorem=every_nonterminal_new_ge4_pair_intersects_join_live"
++    );
++
++    let nq2 = replay(NQ2_PARENT_REPLAY);
++    assert_eq!(nq2.placements_made(), 35);
++    assert_eq!(nq2.current_player(), Player::Player0);
++    assert!(matches!(nq2.phase(), TurnPhase::FirstStone));
++    assert!(!nq2.is_terminal());
++    let nq2_root = count_root(&nq2, Player::Player0);
++    assert_eq!(nq2_root.legal.len(), 537, "frozen NQ2 L drift");
++    assert_eq!(nq2_root.geometry.join_live.len(), 136, "frozen NQ2 J drift");
++    assert_eq!(nq2_root.total, 143_916, "frozen NQ2 pair total drift");
++    assert_eq!(nq2_root.retained, 63_716, "frozen NQ2 retained-pair drift");
++    let required_first = HexCoord::new(6, 0);
++    let required_second = HexCoord::new(6, -6);
++    assert!(nq2_root.legal.contains(&required_first));
++    assert!(nq2_root.legal.contains(&required_second));
++    let required = nq2_root
++        .geometry
++        .classify(pack_coord(required_first), pack_coord(required_second));
++    assert!(
++        required.retained,
++        "canonical NQ2 pair must survive join_live NF"
++    );
++    // NQ2 is retained as the mandated frozen design fixture even though its
++    // FirstStone claimant has an immediate threat. It is not labelled quiet.
++    print_root("nq2", "canonical_parent", &nq2, &nq2_root, true, false);
++    let nq2_exact = enumerate_exact(&nq2_root);
++    print_exact("nq2", "canonical_parent", &nq2_exact, false);
++    let replayed_orientations = validate_nq2_replay_sample(&nq2, &nq2_root);
++    println!(
++        "FIRSTSTONE_PAIR_NF_NQ2_FREEZE legal=537 join_live=136 pair_total=143916 retained=63716 required_first=(6,0) required_second=(6,-6) required_retained=true replayed_orientations={replayed_orientations} result=PASS"
++    );
++
++    let roots = crate::tss_leaf_surface_hunt::standard_leaf_root_cohort();
++    assert_eq!(roots.len(), 300, "standard leaf-root cohort drift");
++    let mut eligible = 0usize;
++    let mut skipped_terminal = 0usize;
++    let mut skipped_phase = 0usize;
++    let mut skipped_resolved = 0usize;
++    let mut exact_roots = 0usize;
++    let mut total_pairs = 0u64;
++    let mut retained_pairs = 0u64;
++    let mut pair_jj = 0u64;
++    let mut pair_jr = 0u64;
++    let mut pair_rr = 0u64;
++    let mut census_fingerprint = 0xCBF2_9CE4_8422_2325u64;
++    let mut theorem_pairs = 0u64;
++    let mut theorem_misses = 0u64;
++    let mut outside_nonterminal = 0u64;
++    let mut outside_strict_quiet = 0u64;
++    for (id, state) in roots {
++        if state.is_terminal() {
++            skipped_terminal += 1;
++            continue;
++        }
++        if !matches!(state.phase(), TurnPhase::FirstStone) {
++            skipped_phase += 1;
++            continue;
++        }
++        let claimant = state.current_player();
++        let root = count_root(&state, claimant);
++        let analysis = crate::threats_shared::analyze(&state);
++        if analysis.own_win_now || analysis.forced_loss() {
++            skipped_resolved += 1;
++            println!(
++                "FIRSTSTONE_PAIR_NF_SKIP source=leaf300 id={id} ply={} reason=resolved own_win_now={} forced_loss={} legal={} join_live={}",
++                state.placements_made(),
++                analysis.own_win_now,
++                analysis.forced_loss(),
++                root.legal.len(),
++                root.geometry.join_live.len(),
++            );
++            continue;
++        }
++        let exact = exact_roots < EXACT_LEAF_ROOTS;
++        if exact {
++            print_root("leaf300", &id, &state, &root, true, true);
++        }
++        total_pairs += root.total;
++        retained_pairs += root.retained;
++        let join = root.geometry.join_live.len();
++        let remote = root.legal.len() - join;
++        let root_jj = choose_two(join);
++        let root_jr = u64::try_from(join)
++            .expect("join-live size fits u64")
++            .checked_mul(u64::try_from(remote).expect("remote size fits u64"))
++            .expect("J-R pair count fits u64");
++        let root_rr = choose_two(remote);
++        assert_eq!(root_jj + root_jr, root.retained);
++        assert_eq!(root_jj + root_jr + root_rr, root.total);
++        pair_jj += root_jj;
++        pair_jr += root_jr;
++        pair_rr += root_rr;
++        fingerprint_bytes(&mut census_fingerprint, id.as_bytes());
++        fingerprint_bytes(&mut census_fingerprint, &[0]);
++        for value in [
++            u64::try_from(root.legal.len()).expect("legal size fits u64"),
++            u64::try_from(join).expect("join-live size fits u64"),
++            root.total,
++            root.retained,
++        ] {
++            fingerprint_u64(&mut census_fingerprint, value);
++        }
++        if exact {
++            let counts = enumerate_exact(&root);
++            theorem_pairs += counts.nonterminal_created_ge4;
++            theorem_misses += counts.outside_nonterminal_created_ge4;
++            outside_nonterminal += counts.outside_nonterminal;
++            outside_strict_quiet += counts.outside_nonterminal_no_new_ge4;
++            print_exact("leaf300", &id, &counts, true);
++            exact_roots += 1;
++        }
++        eligible += 1;
++    }
++    assert!(
++        eligible >= EXACT_LEAF_ROOTS,
++        "standard cohort must retain the frozen exact unresolved-root prefix"
++    );
++    assert_eq!(exact_roots, EXACT_LEAF_ROOTS);
++    assert_eq!(theorem_misses, 0);
++    println!(
++        "FIRSTSTONE_PAIR_NF_DONE roots_total=300 eligible_unresolved_firststone={eligible} skipped_terminal={skipped_terminal} skipped_phase={skipped_phase} skipped_resolved={skipped_resolved} counted_eligible_roots={eligible} exact_leaf_roots={exact_roots} exact_plus_nq2={} pair_total={total_pairs} pair_retained={retained_pairs} pair_outside={} pair_jj={pair_jj} pair_jr={pair_jr} pair_rr={pair_rr} directed_pair_sequences={} safe_canonical_orientations={total_pairs} aggressive_join_orientations={retained_pairs} theorem_pairs={theorem_pairs} theorem_misses={theorem_misses} exact_outside_nonterminal={outside_nonterminal} exact_outside_strict_quiet={outside_strict_quiet} census_fingerprint={census_fingerprint:016X} classification_scope=exact_snapshot_geometry completeness_scope=canonical_nq2_plus_first_unresolved_deterministic_leaf_prefix engine_replay_scope=nq2_sample_only result=PASS",
++        exact_roots + 1,
++        total_pairs - retained_pairs,
++        total_pairs * 2,
++    );
++}
