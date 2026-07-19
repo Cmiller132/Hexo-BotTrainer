@@ -2,7 +2,9 @@
 //!
 //! Run only via the ignored `opening_atlas_pass1` test. Hard rows are printed
 //! only after the independent strict verifier accepts the returned certificate
-//! at the canonical root and all 12 D6-remapped roots.
+//! at the canonical root.  All 12 D6-remapped roots are also probed and their
+//! accepted-image mask is recorded as diagnostics; only the canonical-root
+//! check is the verdict-minting gate, matching the published atlas schema.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -10,7 +12,7 @@ use std::time::Instant;
 
 use hexo_engine::{apply_placement, HexCoord, HexoState, Placement, Player};
 
-use crate::tss_core::{CertVerify, DeepSolve, ProofStatus, SolveCaps};
+use crate::tss_core::{CertVerify, DeepSolve, ProofStatus, SolveCaps, SolveGoal};
 use crate::tss_solver::{TssSolver, WidthOptions};
 use crate::tss_verify::{
     d6_remap_certificate, d6_transform_coord, CertNode, RootBinding, TssCertificate, TssVerifier,
@@ -39,6 +41,10 @@ struct Candidate {
     canonical_moves: Vec<HexCoord>,
     orbit_size: usize,
     preferred_moves: Vec<HexCoord>,
+    /// Optional all-claimant placement prefixes leading to a certified child.
+    /// Length two covers a complete Hexo turn; longer lines are rejected by
+    /// the claimant-to-move check before solving.
+    preferred_lines: Vec<Vec<HexCoord>>,
 }
 
 #[derive(Clone, Debug)]
@@ -255,6 +261,7 @@ fn shallow_candidates() -> Vec<Candidate> {
             canonical_moves: Vec::new(),
             orbit_size: 1,
             preferred_moves: Vec::new(),
+            preferred_lines: Vec::new(),
         },
         Candidate {
             source: "shallow:origin".to_owned(),
@@ -262,6 +269,7 @@ fn shallow_candidates() -> Vec<Candidate> {
             canonical_moves: vec![HexCoord::ZERO],
             orbit_size: 1,
             preferred_moves: Vec::new(),
+            preferred_lines: Vec::new(),
         },
     ];
     for canonical_moves in reps.into_values() {
@@ -271,6 +279,7 @@ fn shallow_candidates() -> Vec<Candidate> {
             orbit_size: orbit_size(&canonical_moves),
             canonical_moves,
             preferred_moves: Vec::new(),
+            preferred_lines: Vec::new(),
         });
     }
     assert_eq!(out.len(), 26, "2 roots plus 24 first-reply D6 reps");
@@ -327,6 +336,7 @@ fn load_human_candidates(path: &str, game_count: usize, backtrack: usize) -> Vec
                     orbit_size: orbit_size(&canonical_moves),
                     canonical_moves,
                     preferred_moves: Vec::new(),
+                    preferred_lines: Vec::new(),
                 });
             }
         }
@@ -383,6 +393,7 @@ fn load_corpus_first_n(path: &str, game_count: usize, first_n: usize) -> Vec<Can
             orbit_size: orbit_size(&canonical_moves),
             canonical_moves,
             preferred_moves: Vec::new(),
+            preferred_lines: Vec::new(),
         })
         .collect()
 }
@@ -415,14 +426,198 @@ fn load_moves_file(path: &str) -> Vec<Candidate> {
             orbit_size: orbit_size(&canonical_moves),
             canonical_moves,
             preferred_moves: Vec::new(),
+            preferred_lines: Vec::new(),
         });
     }
     out
 }
 
+/// Load roots directly from the published atlas while preserving every
+/// identity-bearing field used by the additive merge.  This is an offline
+/// scheduling seam only: decisive results are still minted exclusively by a
+/// fresh solver certificate followed by the strict canonical verifier gate
+/// in `solve_candidate`; the 12-way D6 probe remains diagnostic.
+fn load_atlas_candidates(path: &str, wanted_status: ProofStatus) -> Vec<Candidate> {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("read OPENING_ATLAS_INPUT_JSON={path}: {error}"));
+    let doc: serde_json::Value = serde_json::from_str(&text)
+        .unwrap_or_else(|error| panic!("parse OPENING_ATLAS_INPUT_JSON={path}: {error}"));
+    let rows = doc["rows"].as_array().expect("atlas rows array");
+    let mut candidates = Vec::new();
+    for row in rows {
+        let status = parse_status(row["status"].as_str().expect("atlas row status"));
+        if status != wanted_status {
+            continue;
+        }
+        let id = row["id"].as_str().expect("atlas row id");
+        let moves = row["moves"]
+            .as_array()
+            .expect("atlas row moves")
+            .iter()
+            .map(|pair| {
+                let pair = pair.as_array().expect("atlas move pair");
+                assert_eq!(pair.len(), 2, "atlas move pair length for {id}");
+                HexCoord::new(
+                    i16::try_from(pair[0].as_i64().expect("atlas move q"))
+                        .expect("atlas move q fits i16"),
+                    i16::try_from(pair[1].as_i64().expect("atlas move r"))
+                        .expect("atlas move r fits i16"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let candidate = Candidate {
+            source: row["source"].as_str().expect("atlas row source").to_owned(),
+            source_prefix: usize::try_from(
+                row["source_prefix"].as_u64().expect("atlas source_prefix"),
+            )
+            .expect("atlas source_prefix fits usize"),
+            canonical_moves: moves,
+            orbit_size: usize::try_from(row["orbit"].as_u64().expect("atlas orbit"))
+                .expect("atlas orbit fits usize"),
+            preferred_moves: Vec::new(),
+            preferred_lines: Vec::new(),
+        };
+        assert_eq!(candidate_id(&candidate), id, "atlas root id mismatch");
+        candidates.push(candidate);
+    }
+    candidates
+}
+
+fn load_seed_roots(
+    atlas_path: &str,
+    upgrade_raw: Option<&str>,
+    min_depth: usize,
+    max_depth: usize,
+) -> Vec<(Candidate, ProofStatus)> {
+    let mut roots = BTreeMap::<String, (Candidate, ProofStatus)>::new();
+    for status in [ProofStatus::Win, ProofStatus::Loss] {
+        for candidate in load_atlas_candidates(atlas_path, status) {
+            if candidate.source_prefix >= min_depth && candidate.source_prefix <= max_depth {
+                roots.insert(candidate_id(&candidate), (candidate, status));
+            }
+        }
+    }
+    if let Some(raw_path) = upgrade_raw {
+        let unknown = load_atlas_candidates(atlas_path, ProofStatus::Unknown)
+            .into_iter()
+            .map(|candidate| (candidate_id(&candidate), candidate))
+            .collect::<BTreeMap<_, _>>();
+        let raw = std::fs::read_to_string(raw_path).unwrap_or_else(|error| {
+            panic!("read OPENING_ATLAS_SEED_UPGRADE_RAW={raw_path}: {error}")
+        });
+        for line in raw.lines().filter(|line| line.starts_with("ATLAS_ROW ")) {
+            if raw_field(line, "certified=") != Some("1") {
+                continue;
+            }
+            let status = parse_status(raw_field(line, "status=").expect("seed raw status"));
+            if status == ProofStatus::Unknown {
+                continue;
+            }
+            let id = raw_field(line, "id=").expect("seed raw id");
+            let candidate = unknown.get(id).expect("seed upgrade id in atlas").clone();
+            if candidate.source_prefix >= min_depth && candidate.source_prefix <= max_depth {
+                if let Some((_, previous)) = roots.insert(id.to_owned(), (candidate, status)) {
+                    assert_eq!(previous, status, "seed verdict conflict for {id}");
+                }
+            }
+        }
+    }
+    let mut roots = roots.into_values().collect::<Vec<_>>();
+    roots.sort_by_key(|(candidate, _)| (candidate.source_prefix, candidate_id(candidate)));
+    roots
+}
+
 fn raw_field<'a>(line: &'a str, name: &str) -> Option<&'a str> {
     line.split_ascii_whitespace()
         .find_map(|token| token.strip_prefix(name))
+}
+
+/// Attach explicitly enumerated transposition-child move lines to the exact
+/// published UNKNOWN parent rows.  The hint file is routing data only: every
+/// line is replayed here, the reached child is solved afresh below, and the
+/// reconstructed parent certificate still has to pass `TssVerifier` before a
+/// row can be emitted.
+fn load_explicit_parent_hints(path: &str, atlas_path: &str) -> Vec<Candidate> {
+    let mut parents = load_atlas_candidates(atlas_path, ProofStatus::Unknown)
+        .into_iter()
+        .map(|candidate| (candidate_id(&candidate), candidate))
+        .collect::<BTreeMap<_, _>>();
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("read OPENING_ATLAS_TRANSPOSE_HINT_RAW={path}: {error}"));
+    let mut accepted = 0usize;
+    for line in text
+        .lines()
+        .filter(|line| line.starts_with("ATLAS_TRANSPOSE_HINT "))
+    {
+        let parent_id = raw_field(line, "parent=").expect("transpose parent id");
+        let Some(parent) = parents.get_mut(parent_id) else {
+            continue;
+        };
+        let values = parse_ints(raw_field(line, "line=").expect("transpose hint line"));
+        assert!(
+            matches!(values.len(), 2 | 4),
+            "transpose hint must contain one or two placements: {line}"
+        );
+        let preferred_line = values
+            .chunks_exact(2)
+            .map(|pair| HexCoord::new(pair[0], pair[1]))
+            .collect::<Vec<_>>();
+        let claimant = replay(&parent.canonical_moves).current_player();
+        assert_eq!(
+            raw_field(line, "claimant="),
+            Some(player_name(claimant)),
+            "transpose hint claimant drift for {parent_id}"
+        );
+        let mut child = replay(&parent.canonical_moves);
+        let mut legal_nonterminal = true;
+        for &mv in &preferred_line {
+            if child.current_player() != claimant
+                || apply_placement(&mut child, Placement { coord: mv }).is_err()
+                || child.is_terminal()
+            {
+                legal_nonterminal = false;
+                break;
+            }
+        }
+        if !legal_nonterminal {
+            continue;
+        }
+        let mut reached_moves = parent.canonical_moves.clone();
+        reached_moves.extend(preferred_line.iter().copied());
+        let reached_moves = canonical_sequence(&reached_moves);
+        let reached = Candidate {
+            source: String::new(),
+            source_prefix: reached_moves.len(),
+            canonical_moves: reached_moves,
+            orbit_size: 0,
+            preferred_moves: Vec::new(),
+            preferred_lines: Vec::new(),
+        };
+        let reached_id = candidate_id(&reached);
+        assert_eq!(
+            raw_field(line, "child="),
+            Some(reached_id.as_str()),
+            "transpose hint child binding drift for {parent_id}"
+        );
+        if !parent.preferred_lines.contains(&preferred_line) {
+            parent.preferred_lines.push(preferred_line);
+            accepted += 1;
+        }
+    }
+    let mut routed = parents
+        .into_values()
+        .filter(|candidate| !candidate.preferred_lines.is_empty())
+        .collect::<Vec<_>>();
+    for candidate in &mut routed {
+        candidate
+            .preferred_lines
+            .sort_by_key(|line| line.iter().copied().map(coord_key).collect::<Vec<_>>());
+    }
+    println!(
+        "ATLAS_TRANSPOSE_HINTS parents={} lines={accepted}",
+        routed.len()
+    );
+    routed
 }
 
 /// Derive root-move hints from certified one-ply descendants. For a
@@ -436,7 +631,7 @@ fn load_parent_win_hints(path: &str, parent_depth: usize) -> Vec<Candidate> {
     let mut parents = BTreeMap::<PositionKey, (Vec<HexCoord>, BTreeSet<(i16, i16)>)>::new();
     for line in text.lines().filter(|line| line.starts_with("ATLAS_ROW ")) {
         if raw_field(line, "certified=") != Some("1")
-            || raw_field(line, "status=") != Some("WIN")
+            || !matches!(raw_field(line, "status="), Some("WIN" | "LOSS"))
             || raw_field(line, "source_prefix=").and_then(|value| value.parse().ok())
                 != Some(child_depth)
         {
@@ -455,10 +650,7 @@ fn load_parent_win_hints(path: &str, parent_depth: usize) -> Vec<Candidate> {
             .collect::<Vec<_>>();
         let parent_moves = &child_moves[..parent_depth];
         let parent_state = replay(parent_moves);
-        let child_state = replay(&child_moves);
-        if parent_state.current_player() != child_state.current_player()
-            || raw_field(line, "claimant=") != Some(player_name(parent_state.current_player()))
-        {
+        if raw_field(line, "claimant=") != Some(player_name(parent_state.current_player())) {
             continue;
         }
         let (canonical_moves, symmetry) = canonical_sequence_with_symmetry(parent_moves);
@@ -482,7 +674,145 @@ fn load_parent_win_hints(path: &str, parent_depth: usize) -> Vec<Candidate> {
                 .into_iter()
                 .map(|(q, r)| HexCoord::new(q, r))
                 .collect(),
+            preferred_lines: Vec::new(),
         })
+        .collect()
+}
+
+/// Expand decisive-child hints across every actual corpus history, including
+/// histories collapsed by the atlas's D6/transposition canonicalization.  The
+/// published UNKNOWN parent row remains the identity/source authority.  A
+/// hint merely schedules a legal child re-solve; no child verdict or raw
+/// certificate is trusted by the eventual parent proof.
+fn load_corpus_parent_win_hints(
+    raw_path: &str,
+    corpus_path: &str,
+    atlas_path: &str,
+    game_count: usize,
+    parent_depth: usize,
+    child_depth: usize,
+) -> Vec<Candidate> {
+    assert!(
+        child_depth > parent_depth && child_depth <= parent_depth + 2,
+        "parent hints may prepend one placement or one complete two-stone turn"
+    );
+    let raw = std::fs::read_to_string(raw_path).unwrap_or_else(|error| {
+        panic!("read OPENING_ATLAS_PARENT_WIN_HINT_RAW={raw_path}: {error}")
+    });
+    let mut decisive_children = BTreeMap::<String, Player>::new();
+    for line in raw.lines().filter(|line| line.starts_with("ATLAS_ROW ")) {
+        if raw_field(line, "certified=") != Some("1")
+            || !matches!(raw_field(line, "status="), Some("WIN" | "LOSS"))
+            || raw_field(line, "source_prefix=").and_then(|value| value.parse().ok())
+                != Some(child_depth)
+        {
+            continue;
+        }
+        let id = raw_field(line, "id=").expect("decisive raw row id");
+        let claimant = parse_player(raw_field(line, "claimant=").expect("decisive claimant"));
+        if let Some(previous) = decisive_children.insert(id.to_owned(), claimant) {
+            assert_eq!(previous, claimant, "raw claimant drift for {id}");
+        }
+    }
+
+    let mut parents = load_atlas_candidates(atlas_path, ProofStatus::Unknown)
+        .into_iter()
+        .filter(|candidate| candidate.source_prefix == parent_depth)
+        .map(|candidate| (candidate_id(&candidate), candidate))
+        .collect::<BTreeMap<_, _>>();
+    let corpus = std::fs::read_to_string(corpus_path).unwrap_or_else(|error| {
+        panic!("read OPENING_ATLAS_PARENT_EDGE_CORPUS={corpus_path}: {error}")
+    });
+    let mut games_seen = 0usize;
+    for line in corpus.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Some(game) = parse_game(line) else {
+            continue;
+        };
+        if games_seen == game_count {
+            break;
+        }
+        games_seen += 1;
+        if game.moves.len() < child_depth {
+            continue;
+        }
+        let actual_parent = &game.moves[..parent_depth];
+        let actual_child = &game.moves[..child_depth];
+        let child_canonical = canonical_sequence(actual_child);
+        let child_candidate = Candidate {
+            source: String::new(),
+            source_prefix: child_depth,
+            canonical_moves: child_canonical,
+            orbit_size: 0,
+            preferred_moves: Vec::new(),
+            preferred_lines: Vec::new(),
+        };
+        let child_id = candidate_id(&child_candidate);
+        let Some(&claimant) = decisive_children.get(&child_id) else {
+            continue;
+        };
+        let parent_canonical = canonical_sequence(actual_parent);
+        let parent_probe = Candidate {
+            source: String::new(),
+            source_prefix: parent_depth,
+            canonical_moves: parent_canonical,
+            orbit_size: 0,
+            preferred_moves: Vec::new(),
+            preferred_lines: Vec::new(),
+        };
+        let parent_id = candidate_id(&parent_probe);
+        let Some(parent) = parents.get_mut(&parent_id) else {
+            continue;
+        };
+        let parent_state = replay(actual_parent);
+        if claimant != parent_state.current_player() {
+            continue;
+        }
+        let mut claimant_prefix = parent_state.clone();
+        let mut claimant_can_play_line = true;
+        for &mv in &game.moves[parent_depth..child_depth] {
+            if claimant_prefix.current_player() != claimant
+                || apply_placement(&mut claimant_prefix, Placement { coord: mv }).is_err()
+                || claimant_prefix.is_terminal()
+            {
+                claimant_can_play_line = false;
+                break;
+            }
+        }
+        if !claimant_can_play_line {
+            continue;
+        }
+        let stored_key = root_position_key(&parent.canonical_moves);
+        for symmetry in 0..D6_SYMMETRY_COUNT {
+            let image = actual_parent
+                .iter()
+                .copied()
+                .map(|coord| {
+                    d6_transform_coord(coord, symmetry).expect("D6 corpus parent coordinate")
+                })
+                .collect::<Vec<_>>();
+            if root_position_key(&image) != stored_key {
+                continue;
+            }
+            let preferred_line = game.moves[parent_depth..child_depth]
+                .iter()
+                .copied()
+                .map(|mv| d6_transform_coord(mv, symmetry).expect("D6 corpus child coordinate"))
+                .collect::<Vec<_>>();
+            if !parent.preferred_lines.contains(&preferred_line) {
+                parent.preferred_lines.push(preferred_line);
+            }
+        }
+    }
+    assert_eq!(
+        games_seen, game_count,
+        "not enough parseable corpus games for parent-edge expansion"
+    );
+    parents
+        .into_values()
+        .filter(|candidate| !candidate.preferred_lines.is_empty())
         .collect()
 }
 
@@ -566,7 +896,8 @@ fn candidate_id(candidate: &Candidate) -> String {
 
 /// Read verifier-backed ids from an earlier raw.  This is only a scheduling
 /// filter: it cannot manufacture a verdict, and all newly found certificates
-/// still pass the canonical and 12-way D6 verifier gates below.
+/// still pass the canonical verifier gate below.  D6-remap acceptance is
+/// recorded separately as a diagnostic mask.
 fn certified_ids_from_raw(path: &str) -> BTreeSet<String> {
     std::fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("read OPENING_ATLAS_SKIP_CERTIFIED_RAW={path}: {error}"))
@@ -577,6 +908,18 @@ fn certified_ids_from_raw(path: &str) -> BTreeSet<String> {
                 .find_map(|token| token.strip_prefix("id="))
                 .map(str::to_owned)
         })
+        .collect()
+}
+
+/// Read every attempted row id from a partial shard aggregate.  This is a
+/// scheduling-only resume filter; UNKNOWN rows remain UNKNOWN and no value is
+/// imported from them.
+fn attempted_ids_from_raw(path: &str) -> BTreeSet<String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("read OPENING_ATLAS_SKIP_ATTEMPTED_RAW={path}: {error}"))
+        .lines()
+        .filter(|line| line.starts_with("ATLAS_ROW "))
+        .filter_map(|line| raw_field(line, "id=").map(str::to_owned))
         .collect()
 }
 
@@ -967,6 +1310,7 @@ fn load_reverify_roots(path: &str) -> Vec<ReverifyRoot> {
             canonical_moves: moves.clone(),
             orbit_size: orbit_size(&moves),
             preferred_moves: Vec::new(),
+            preferred_lines: Vec::new(),
         };
         assert_eq!(candidate_id(&candidate), id, "stored root id mismatch");
         roots.push(ReverifyRoot {
@@ -1225,22 +1569,133 @@ fn verify_all_d6(
     (verified, accepted_mask)
 }
 
+fn width_options(width_name: &str) -> WidthOptions {
+    match width_name {
+        "round3_consume" => WidthOptions::round3_consume(),
+        "quiet_turn_consume" => WidthOptions::quiet_turn_consume(),
+        "ranked_zone_consume" => WidthOptions::ranked_zone_consume(),
+        "vcf_pair_complete" | "" => WidthOptions::vcf_pair_complete(),
+        other => panic!("unknown OPENING_ATLAS_WIDTH={other}"),
+    }
+}
+
+fn solve_goal_from_env() -> SolveGoal {
+    match std::env::var("OPENING_ATLAS_GOAL")
+        .unwrap_or_else(|_| "both".to_owned())
+        .as_str()
+    {
+        "win" => SolveGoal::Win,
+        "loss" => SolveGoal::Loss,
+        "both" | "" => SolveGoal::Both,
+        other => panic!("unknown OPENING_ATLAS_GOAL={other}"),
+    }
+}
+
+fn goal_name(goal: SolveGoal) -> &'static str {
+    match goal {
+        SolveGoal::Win => "win",
+        SolveGoal::Loss => "loss",
+        SolveGoal::Both => "both",
+    }
+}
+
+fn seed_solver_from_verified_roots(
+    solver: &mut TssSolver,
+    atlas_path: &str,
+    upgrade_raw: Option<&str>,
+    width_name: &str,
+    node_cap: u64,
+    tt_bytes: usize,
+    min_depth: usize,
+    max_depth: usize,
+) {
+    let roots = load_seed_roots(atlas_path, upgrade_raw, min_depth, max_depth);
+    println!(
+        "ATLAS_SEED_SETUP roots={} width={} node_cap={} tt_bytes={} min_depth={} max_depth={}",
+        roots.len(),
+        width_name,
+        node_cap,
+        tt_bytes,
+        min_depth,
+        max_depth
+    );
+    let started = Instant::now();
+    let mut reproduced = 0usize;
+    let mut missed = 0usize;
+    let mut nodes = 0u64;
+    let mut fragment_hits = 0u64;
+    let mut fragment_imports = 0u64;
+    std::env::remove_var("TSS_ROOT_PREFERRED_MOVES");
+    solver.set_width_options(width_options(width_name));
+    for (candidate, expected) in roots {
+        let state = replay(&candidate.canonical_moves);
+        let goal = match expected {
+            ProofStatus::Win => SolveGoal::Win,
+            ProofStatus::Loss => SolveGoal::Loss,
+            ProofStatus::Unknown => unreachable!(),
+        };
+        let result = solver.solve_goal(
+            &state,
+            &SolveCaps {
+                node_cap,
+                tt_bytes_cap: tt_bytes,
+                semantic_horizon: u32::MAX,
+            },
+            goal,
+        );
+        nodes = nodes.saturating_add(result.stats.nodes);
+        fragment_hits = fragment_hits.saturating_add(result.stats.fragment_hits);
+        fragment_imports = fragment_imports.saturating_add(result.stats.fragment_imports);
+        if result.status != expected {
+            missed += 1;
+            continue;
+        }
+        let cert = result.cert.as_ref().expect("decisive seed certificate");
+        assert!(
+            TssVerifier.verify(&state, cert, expected),
+            "strict verifier rejected seed certificate"
+        );
+        reproduced += 1;
+    }
+    let snapshot = solver.shared_fragment_store_snapshot();
+    println!(
+        "ATLAS_SEED_DONE reproduced={} missed={} nodes={} fragment_hits={} fragment_imports={} store_entries={} store_bytes={} wall_ms={:.3}",
+        reproduced,
+        missed,
+        nodes,
+        fragment_hits,
+        fragment_imports,
+        snapshot.entries,
+        snapshot.bytes,
+        started.elapsed().as_secs_f64() * 1e3,
+    );
+    std::io::stdout().flush().ok();
+}
+
 fn solve_candidate(
     candidate: &Candidate,
+    solver: &mut TssSolver,
+    reset_solver_each_attempt: bool,
     tt_bytes: usize,
     relative_horizon: u32,
     node_ladder: &[u64],
     unbounded_horizon: bool,
     width_name: &str,
+    goal: SolveGoal,
 ) {
     let state = replay(&candidate.canonical_moves);
-    if candidate.preferred_moves.is_empty() {
+    let mut hint_lines = candidate.preferred_lines.clone();
+    hint_lines.extend(candidate.preferred_moves.iter().copied().map(|mv| vec![mv]));
+    let mut root_preferred = hint_lines
+        .iter()
+        .filter_map(|line| line.first().copied())
+        .collect::<Vec<_>>();
+    root_preferred.sort_by_key(|coord| coord_key(*coord));
+    root_preferred.dedup();
+    if root_preferred.is_empty() {
         std::env::remove_var("TSS_ROOT_PREFERRED_MOVES");
     } else {
-        std::env::set_var(
-            "TSS_ROOT_PREFERRED_MOVES",
-            moves_text(&candidate.preferred_moves),
-        );
+        std::env::set_var("TSS_ROOT_PREFERRED_MOVES", moves_text(&root_preferred));
     }
     // Deep profile: an unbounded ply deadline lets the search go as deep as the
     // node budget allows (depth bounded by the node cap, not an artificial ply
@@ -1258,85 +1713,132 @@ fn solve_candidate(
     let start = Instant::now();
     let mut final_result = None;
     let mut used_cap = 0u64;
-    // A certified same-claimant child can be lifted through one legal
-    // existential move. Re-solve that child with the established deep narrow
-    // profile, prepend a Choice node, and let the parent verifier below judge
-    // the whole certificate. No raw certificate or verdict is trusted.
+    // A certified same-claimant child can be lifted through one or two legal
+    // existential placements (at most one complete Hexo turn). Re-solve that
+    // child with the established deep narrow profile, prepend Choice nodes,
+    // and let the parent verifier below judge the whole certificate. No raw
+    // certificate or verdict is trusted.
     'hint_caps: for &node_cap in node_ladder {
-        for &preferred in &candidate.preferred_moves {
-            let mut child_state = state.clone();
-            if apply_placement(&mut child_state, Placement { coord: preferred }).is_err()
-                || child_state.current_player() != state.current_player()
-                || child_state.is_terminal()
-            {
+        for preferred_line in &hint_lines {
+            if preferred_line.is_empty() {
                 continue;
             }
-            let mut solver = TssSolver::default();
-            solver.set_width_options(WidthOptions::vcf_pair_complete());
-            let mut result = solver.solve(
+            let mut child_state = state.clone();
+            let mut valid_line = true;
+            for &preferred in preferred_line {
+                if child_state.current_player() != state.current_player()
+                    || apply_placement(&mut child_state, Placement { coord: preferred }).is_err()
+                    || child_state.is_terminal()
+                {
+                    valid_line = false;
+                    break;
+                }
+            }
+            if !valid_line {
+                continue;
+            }
+            if reset_solver_each_attempt {
+                *solver = TssSolver::default();
+                solver.set_width_options(WidthOptions::vcf_pair_complete());
+            }
+            let child_goal = if child_state.current_player() == state.current_player() {
+                SolveGoal::Win
+            } else {
+                SolveGoal::Loss
+            };
+            let mut result = solver.solve_goal(
                 &child_state,
                 &SolveCaps {
                     node_cap,
                     tt_bytes_cap: tt_bytes,
                     semantic_horizon,
                 },
+                child_goal,
+            );
+            let mut child_moves = candidate.canonical_moves.clone();
+            child_moves.extend(preferred_line.iter().copied());
+            let child_moves = canonical_sequence(&child_moves);
+            let child_fingerprint =
+                fnv1a64(format!("{:?}", root_position_key(&child_moves)).as_bytes());
+            println!(
+                "ATLAS_HINT parent=oa-{position_fingerprint:016x} child=oa-{child_fingerprint:016x} line={} child_goal={} child_status={} nodes={} expansions={}",
+                moves_text(preferred_line),
+                goal_name(child_goal),
+                status_name(result.status),
+                result.stats.nodes,
+                result.stats.expansions,
             );
             used_cap = node_cap;
-            if result.status != ProofStatus::Win {
+            let expected_child_status = match child_goal {
+                SolveGoal::Win => ProofStatus::Win,
+                SolveGoal::Loss => ProofStatus::Loss,
+                SolveGoal::Both => unreachable!(),
+            };
+            if result.status != expected_child_status {
                 final_result = Some(result);
                 continue;
             }
-            let child_cert = result.cert.take().expect("hinted child WIN certificate");
+            let child_cert = result
+                .cert
+                .take()
+                .expect("hinted decisive child certificate");
             assert!(
-                TssVerifier.verify(&child_state, &child_cert, ProofStatus::Win),
+                TssVerifier.verify(&child_state, &child_cert, expected_child_status),
                 "strict verifier rejected hinted child certificate"
             );
-            if child_cert.nodes.len() >= MAX_CERT_NODES
-                || certificate_graph_depth(&child_cert) >= MAX_CERT_DEPTH
+            assert_eq!(
+                child_cert.claimant,
+                state.current_player(),
+                "hinted child claimant must be the parent mover"
+            );
+            if child_cert.nodes.len().saturating_add(preferred_line.len()) > MAX_CERT_NODES
+                || certificate_graph_depth(&child_cert).saturating_add(preferred_line.len())
+                    > MAX_CERT_DEPTH
             {
                 result.status = ProofStatus::Unknown;
                 final_result = Some(result);
                 continue;
             }
-            let child_root = child_cert.root_node;
+            let mut child_root = child_cert.root_node;
             let mut nodes = child_cert.nodes;
-            let root_node = u32::try_from(nodes.len()).expect("certificate node id fits u32");
-            nodes.push(CertNode::Choice {
-                mv: preferred,
-                child: child_root,
-            });
+            for &preferred in preferred_line.iter().rev() {
+                let root_node = u32::try_from(nodes.len()).expect("certificate node id fits u32");
+                nodes.push(CertNode::Choice {
+                    mv: preferred,
+                    child: child_root,
+                });
+                child_root = root_node;
+            }
             result.cert = Some(TssCertificate {
                 root: RootBinding::from_state(&state),
                 claimant: child_cert.claimant,
-                root_node,
+                root_node: child_root,
                 nodes,
                 semantic_horizon: child_cert.semantic_horizon,
             });
+            result.status = ProofStatus::Win;
             final_result = Some(result);
             break 'hint_caps;
         }
     }
     if final_result.is_none() {
         for &node_cap in node_ladder {
-            let mut solver = TssSolver::default();
+            if reset_solver_each_attempt {
+                *solver = TssSolver::default();
+            }
             // Wider search (round3_consume) is vcf_pair_complete PLUS consuming
             // quiet-turn attacker moves and sound ranked-zone defender pruning. The
             // strict TssVerifier below stays normative: any certified WIN it rejects
             // panics the shard rather than emitting unsound data.
-            solver.set_width_options(match width_name {
-                "round3_consume" => WidthOptions::round3_consume(),
-                "quiet_turn_consume" => WidthOptions::quiet_turn_consume(),
-                "ranked_zone_consume" => WidthOptions::ranked_zone_consume(),
-                "vcf_pair_complete" | "" => WidthOptions::vcf_pair_complete(),
-                other => panic!("unknown OPENING_ATLAS_WIDTH={other}"),
-            });
-            let result = solver.solve(
+            solver.set_width_options(width_options(width_name));
+            let result = solver.solve_goal(
                 &state,
                 &SolveCaps {
                     node_cap,
                     tt_bytes_cap: tt_bytes,
                     semantic_horizon,
                 },
+                goal,
             );
             assert!(
                 result.status == ProofStatus::Unknown || result.cert.is_some(),
@@ -1386,6 +1888,16 @@ fn solve_candidate(
                 win_line_terminal, terminal_six,
                 "atlas terminal-line flag disagrees with literal replay"
             );
+            if std::env::var("OPENING_ATLAS_REQUIRE_TERMINAL_WIN")
+                .ok()
+                .as_deref()
+                == Some("1")
+            {
+                assert!(
+                    terminal_six,
+                    "new atlas WIN lacks a concrete terminal six line"
+                );
+            }
         }
         println!(
             "ATLAS_ROW {base} certified=1 claimant={} cert_nodes={} cert_edges={} cert_commutations={} cert_zones={} derived_horizon={} cert_fnv1a64_debug_v1={cert_fingerprint:016x} d6_verified={} d6_mask=0x{d6_mask:03x} win_line_len={} win_line_terminal={} win_line={} moves={}",
@@ -1408,6 +1920,19 @@ fn solve_candidate(
             moves_text(&candidate.canonical_moves),
         );
     }
+    println!(
+        "ATLAS_STATS id=oa-{position_fingerprint:016x} goal={} fragment_lookups={} fragment_hits={} fragment_imports={} fragment_store_entries={} fragment_store_bytes={} tt_hits={} tt_entries={} tt_evictions={} tt_admission_rejections={}",
+        goal_name(goal),
+        result.stats.fragment_lookups,
+        result.stats.fragment_hits,
+        result.stats.fragment_imports,
+        result.stats.fragment_store_entries,
+        result.stats.fragment_store_bytes,
+        result.stats.tt_hits,
+        result.stats.tt_entries,
+        result.stats.tt_evictions,
+        result.stats.tt_admission_rejections,
+    );
 }
 
 #[test]
@@ -1431,6 +1956,11 @@ fn opening_atlas_pass1() {
     // anything else = vcf_pair_complete (pass1/deep behavior).
     let width_name =
         std::env::var("OPENING_ATLAS_WIDTH").unwrap_or_else(|_| "vcf_pair_complete".to_owned());
+    let goal = solve_goal_from_env();
+    let persistent_solver = std::env::var("OPENING_ATLAS_PERSIST_SOLVER")
+        .ok()
+        .as_deref()
+        == Some("1");
     // Cross-position parallelism: shard the candidate list so N independent
     // worker processes (built once, launched N times) each solve a disjoint
     // stride of positions with their own TT. Round-robin by index balances the
@@ -1447,24 +1977,51 @@ fn opening_atlas_pass1() {
     //  - corpus_first_n: EVERY distinct D6-canonical position within the first
     //    `first_n` plies of ALL corpus games.
     let corpus_first_n = mode == "corpus_first_n";
-    let (candidates, shallow_count) =
-        if let Ok(hints_path) = std::env::var("OPENING_ATLAS_PARENT_WIN_HINT_RAW") {
-            (load_parent_win_hints(&hints_path, first_n), 0usize)
-        } else if let Ok(moves_path) = std::env::var("OPENING_ATLAS_MOVES_FILE") {
-            (load_moves_file(&moves_path), 0usize)
-        } else if corpus_first_n {
-            let path = corpus_path
-                .as_deref()
-                .expect("corpus_first_n mode requires OPENING_ATLAS_CORPUS");
-            (load_corpus_first_n(path, game_count, first_n), 0usize)
+    let (candidates, shallow_count) = if let Ok(hints_path) =
+        std::env::var("OPENING_ATLAS_TRANSPOSE_HINT_RAW")
+    {
+        let atlas_path = std::env::var("OPENING_ATLAS_TRANSPOSE_BASE_JSON")
+            .expect("transpose hints require OPENING_ATLAS_TRANSPOSE_BASE_JSON");
+        (load_explicit_parent_hints(&hints_path, &atlas_path), 0usize)
+    } else if let Ok(hints_path) = std::env::var("OPENING_ATLAS_PARENT_WIN_HINT_RAW") {
+        if let Ok(edge_corpus) = std::env::var("OPENING_ATLAS_PARENT_EDGE_CORPUS") {
+            let atlas_path = std::env::var("OPENING_ATLAS_PARENT_BASE_JSON")
+                .expect("corpus parent hints require OPENING_ATLAS_PARENT_BASE_JSON");
+            let child_depth = env_num("OPENING_ATLAS_HINT_CHILD_DEPTH", first_n.saturating_add(1));
+            (
+                load_corpus_parent_win_hints(
+                    &hints_path,
+                    &edge_corpus,
+                    &atlas_path,
+                    game_count,
+                    first_n,
+                    child_depth,
+                ),
+                0usize,
+            )
         } else {
-            let mut candidates = shallow_candidates();
-            let shallow_count = candidates.len();
-            if let Some(path) = corpus_path.as_deref() {
-                candidates.extend(load_human_candidates(path, game_count, backtrack));
-            }
-            (candidates, shallow_count)
-        };
+            (load_parent_win_hints(&hints_path, first_n), 0usize)
+        }
+    } else if let Ok(atlas_path) = std::env::var("OPENING_ATLAS_INPUT_JSON") {
+        let wanted = parse_status(
+            &std::env::var("OPENING_ATLAS_INPUT_STATUS").unwrap_or_else(|_| "UNKNOWN".to_owned()),
+        );
+        (load_atlas_candidates(&atlas_path, wanted), 0usize)
+    } else if let Ok(moves_path) = std::env::var("OPENING_ATLAS_MOVES_FILE") {
+        (load_moves_file(&moves_path), 0usize)
+    } else if corpus_first_n {
+        let path = corpus_path
+            .as_deref()
+            .expect("corpus_first_n mode requires OPENING_ATLAS_CORPUS");
+        (load_corpus_first_n(path, game_count, first_n), 0usize)
+    } else {
+        let mut candidates = shallow_candidates();
+        let shallow_count = candidates.len();
+        if let Some(path) = corpus_path.as_deref() {
+            candidates.extend(load_human_candidates(path, game_count, backtrack));
+        }
+        (candidates, shallow_count)
+    };
     // Optional depth window (source_prefix in [min,max]). Lets a run focus the
     // budget on the highest-yield depths (deeper positions are closest to a
     // forcing win) instead of spreading thin across all depths.
@@ -1480,6 +2037,22 @@ fn opening_atlas_pass1() {
         let ids = certified_ids_from_raw(&path);
         let before = candidates.len();
         candidates.retain(|candidate| !ids.contains(&candidate_id(candidate)));
+        before - candidates.len()
+    } else {
+        0
+    };
+    let skipped_attempted = if let Ok(path) = std::env::var("OPENING_ATLAS_SKIP_ATTEMPTED_RAW") {
+        let ids = attempted_ids_from_raw(&path);
+        let before = candidates.len();
+        candidates.retain(|candidate| !ids.contains(&candidate_id(candidate)));
+        before - candidates.len()
+    } else {
+        0
+    };
+    let filtered_only = if let Ok(path) = std::env::var("OPENING_ATLAS_ONLY_IDS_RAW") {
+        let ids = attempted_ids_from_raw(&path);
+        let before = candidates.len();
+        candidates.retain(|candidate| ids.contains(&candidate_id(candidate)));
         before - candidates.len()
     } else {
         0
@@ -1505,7 +2078,7 @@ fn opening_atlas_pass1() {
         .collect::<Vec<_>>();
     let shard_total = shard_indices.len();
     println!(
-        "ATLAS_SETUP schema=1 mode={} corpus={} games={} backtrack={} first_n={} shallow={} candidates={} skipped_certified={} skipped_existing={} shard_index={} shard_count={} shard_total={} width={} node_ladder={:?} tt_bytes={} relative_horizon={} unbounded_horizon={} wall_seconds={}",
+        "ATLAS_SETUP schema=1 mode={} corpus={} games={} backtrack={} first_n={} shallow={} candidates={} skipped_certified={} skipped_attempted={} filtered_only={} skipped_existing={} shard_index={} shard_count={} shard_total={} width={} goal={} persistent_solver={} node_ladder={:?} tt_bytes={} relative_horizon={} unbounded_horizon={} wall_seconds={}",
         if mode.is_empty() { "pass1" } else { &mode },
         corpus_path.as_deref().unwrap_or("NONE"),
         game_count,
@@ -1514,11 +2087,15 @@ fn opening_atlas_pass1() {
         shallow_count,
         total,
         skipped_certified,
+        skipped_attempted,
+        filtered_only,
         skipped_existing,
         shard_index,
         shard_count,
         shard_total,
         width_name,
+        goal_name(goal),
+        u8::from(persistent_solver),
         node_ladder,
         tt_bytes,
         relative_horizon,
@@ -1527,6 +2104,33 @@ fn opening_atlas_pass1() {
     );
     std::io::stdout().flush().ok();
 
+    let mut solver = TssSolver::default();
+    solver.set_width_options(width_options(&width_name));
+    if let Ok(seed_atlas) = std::env::var("OPENING_ATLAS_SEED_JSON") {
+        assert!(
+            persistent_solver,
+            "OPENING_ATLAS_SEED_JSON requires OPENING_ATLAS_PERSIST_SOLVER=1"
+        );
+        assert_eq!(
+            std::env::var("TSS_SHARED_FRAGMENTS").ok().as_deref(),
+            Some("1"),
+            "atlas seed roots require TSS_SHARED_FRAGMENTS=1"
+        );
+        let seed_raw = std::env::var("OPENING_ATLAS_SEED_UPGRADE_RAW").ok();
+        let seed_cap = env_num("OPENING_ATLAS_SEED_NODE_CAP", 100_000u64);
+        let seed_min_depth = env_num("OPENING_ATLAS_SEED_MIN_DEPTH", min_depth);
+        let seed_max_depth = env_num("OPENING_ATLAS_SEED_MAX_DEPTH", max_depth);
+        seed_solver_from_verified_roots(
+            &mut solver,
+            &seed_atlas,
+            seed_raw.as_deref(),
+            &width_name,
+            seed_cap,
+            tt_bytes,
+            seed_min_depth,
+            seed_max_depth,
+        );
+    }
     let batch_start = Instant::now();
     let mut attempted = 0usize;
     for &index in &shard_indices {
@@ -1535,11 +2139,14 @@ fn opening_atlas_pass1() {
         }
         solve_candidate(
             &candidates[index],
+            &mut solver,
+            !persistent_solver,
             tt_bytes,
             relative_horizon,
             &node_ladder,
             unbounded_horizon,
             &width_name,
+            goal,
         );
         attempted += 1;
         // Flush every row so a wall-time stop or crash preserves partial output.

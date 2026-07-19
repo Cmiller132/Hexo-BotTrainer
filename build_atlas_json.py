@@ -16,6 +16,13 @@ RAW_DEEP7 = os.path.join(BASE, "OPENING_ATLAS_CORPUS7_DEEP_RAW.txt")
 RAW_SQUEEZE9 = os.path.join(BASE, "OPENING_ATLAS_CORPUS9_SQUEEZE_RAW.txt")
 RAW_EXPAND11 = os.path.join(BASE, "OPENING_ATLAS_CORPUS11_EXPAND_RAW.txt")
 REVERIFY_RAW = os.environ.get("OPENING_ATLAS_REVERIFY_RAW")
+DEFAULT_MAXSOLVE_RAW = os.path.join(BASE, "OPENING_ATLAS_MAXSOLVE_RAW.txt")
+# Once the additive maxsolve artifact exists it becomes a normal immutable
+# input to future rebuilds.  The env override remains useful while staging a
+# candidate raw under a different filename.
+MAXSOLVE_RAW = os.environ.get("OPENING_ATLAS_MAXSOLVE_RAW") or (
+    DEFAULT_MAXSOLVE_RAW if os.path.exists(DEFAULT_MAXSOLVE_RAW) else None
+)
 CORPUS_LAYERS = next(([p] for p in (RAW_DEEP11, RAW_DEEP9, RAW_DEEP7) if os.path.exists(p)), [])
 # The squeeze layer contains the complete first-9 result and is applied after
 # the deepest first-11 layer. The existing never-downgrade rule upgrades only
@@ -185,9 +192,11 @@ corpus7_dupe = sum(1 for r in (parse_raw(CORPUS_LAYERS[-1]) if CORPUS_LAYERS els
 
 # R-EXPAND11 is strictly additive. Treat the already-published atlas as a
 # frozen base and append the validated delta only when every incoming id is
-# absent. On subsequent builds, require every expansion row to match exactly;
-# partial overlap or drift is an error. This is stronger than never-downgrade:
-# no field of an existing WIN, LOSS, or UNKNOWN row can be replaced at all.
+# absent. On subsequent builds, require every expansion row to match exactly,
+# except when the frozen row is itself an exact entry in the configured
+# maxsolve overlay.  That exception makes the two additive layers idempotent;
+# its root is still required to match the original expansion UNKNOWN below.
+# Partial overlap or any other drift is an error.
 frozen_doc = None
 frozen_rows = None
 expansion_rows = []
@@ -208,8 +217,26 @@ if os.path.exists(RAW_EXPAND11):
         expansion_appended = True
     else:
         assert overlap == set(expansion_by_id), "partial expansion overlap with frozen atlas"
+        maxsolve_preflight_rows = parse_raw(MAXSOLVE_RAW) if MAXSOLVE_RAW else []
+        maxsolve_preflight = {r["id"]: r for r in maxsolve_preflight_rows}
+        assert len(maxsolve_preflight) == len(maxsolve_preflight_rows), \
+            "duplicate maxsolve ids during expansion preflight"
+        expansion_root_fields = (
+            "id", "source", "source_prefix", "placements", "side", "phase",
+            "orbit", "moves",
+        )
         for rid, incoming in expansion_by_id.items():
-            assert frozen_by_id[rid] == incoming, f"published expansion row drift: {rid}"
+            published = frozen_by_id[rid]
+            if published == incoming:
+                continue
+            assert rid in maxsolve_preflight, f"published expansion row drift: {rid}"
+            assert published == maxsolve_preflight[rid], \
+                f"published expansion/maxsolve row drift: {rid}"
+            assert incoming["status"] == "UNKNOWN" and incoming["certified"] == 0, \
+                f"maxsolve may only overlay an UNKNOWN expansion row: {rid}"
+            assert all(published[field] == incoming[field]
+                       for field in expansion_root_fields), \
+                f"maxsolve expansion root drift: {rid}"
         rows = list(frozen_rows)
     assert "ATLAS_DONE_AGGREGATE shards=16 attempted=9968 residual=0 rows=9968" in read_text(RAW_EXPAND11)
     assert len(expansion_rows) == 9968, "incomplete expansion raw"
@@ -285,6 +312,91 @@ if REVERIFY_RAW:
         "terminal_line_upgrades": upgraded,
         "prefix_rejected": prefix_rejected,
     }
+
+# R-MAXSOLVE may only replace a currently UNKNOWN row with a decisive,
+# strict-verifier-emitted row for the exact same root.  Row count/order and
+# every pre-existing decisive row are frozen byte-for-byte at the parsed JSON
+# object level; every untouched UNKNOWN is frozen as well.
+maxsolve_summary = None
+if MAXSOLVE_RAW:
+    assert frozen_doc is not None, "maxsolve merge requires the published frozen atlas"
+    before_by_id = {r["id"]: json.loads(json.dumps(r)) for r in rows}
+    before_order = [r["id"] for r in rows]
+    before_decisive = {
+        rid: row for rid, row in before_by_id.items() if row["certified"] == 1
+    }
+    before_decisive_bytes = {
+        rid: json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        for rid, row in before_decisive.items()
+    }
+    upgrades = parse_raw(MAXSOLVE_RAW)
+    upgrade_by_id = {r["id"]: r for r in upgrades}
+    assert len(upgrade_by_id) == len(upgrades), "duplicate maxsolve ids"
+    assert upgrades, "maxsolve raw contains no decisive upgrades"
+    maxsolve_text = read_text(MAXSOLVE_RAW)
+    assert "canonical_verifier_rejects=0" in maxsolve_text
+    assert f"decisive={len(upgrades)}" in maxsolve_text
+    root_fields = (
+        "id", "source", "source_prefix", "placements", "side", "phase",
+        "orbit", "moves",
+    )
+    newly_applied = 0
+    for rid, incoming in upgrade_by_id.items():
+        assert rid in before_by_id, f"maxsolve id absent from frozen atlas: {rid}"
+        old = before_by_id[rid]
+        assert incoming["status"] in ("WIN", "LOSS") and incoming["certified"] == 1
+        if old["certified"] == 1:
+            assert old == incoming, f"published maxsolve row drift: {rid}"
+            continue
+        assert old["status"] == "UNKNOWN" and old["certified"] == 0, (
+            f"maxsolve attempted invalid replacement: {rid}"
+        )
+        newly_applied += 1
+        for field in root_fields:
+            assert incoming[field] == old[field], f"maxsolve root drift {rid}: {field}"
+        expected_claimant = old["side"] if incoming["status"] == "WIN" \
+            else ("P1" if old["side"] == "P0" else "P0")
+        assert incoming["claimant"] == expected_claimant, f"claimant mismatch: {rid}"
+        assert incoming["d6_verified"] >= 1, f"identity verifier missing: {rid}"
+        if incoming["status"] == "WIN":
+            assert incoming["win_line"] and incoming["win_line_terminal"] == 1, (
+                f"maxsolve WIN lacks concrete terminal line: {rid}"
+            )
+    rows = [
+        upgrade_by_id.get(row["id"], row)
+        if row["certified"] == 0
+        else row
+        for row in rows
+    ]
+    assert [r["id"] for r in rows] == before_order, "maxsolve changed row order"
+    after_by_id = {r["id"]: r for r in rows}
+    assert len(after_by_id) == len(before_by_id), "maxsolve changed row count"
+    for rid, old in before_by_id.items():
+        if rid not in upgrade_by_id:
+            assert after_by_id[rid] == old, f"maxsolve changed untouched row: {rid}"
+    for rid, old in before_decisive.items():
+        assert after_by_id[rid] == old, f"maxsolve changed frozen decisive row: {rid}"
+        assert json.dumps(
+            after_by_id[rid], ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8") == before_decisive_bytes[rid], (
+            f"maxsolve changed frozen decisive row bytes: {rid}"
+        )
+    maxsolve_summary = {
+        "raw": os.path.basename(MAXSOLVE_RAW),
+        "upgrades": len(upgrades),
+        "newly_applied": newly_applied,
+        "new_win": sum(r["status"] == "WIN" for r in upgrades),
+        "new_loss": sum(r["status"] == "LOSS" for r in upgrades),
+        "frozen_decisive_unchanged": len(before_decisive),
+        "rows_unchanged_or_upgraded": len(rows),
+    }
+    if newly_applied == 0 and "maxsolve" in frozen_doc:
+        published_summary = frozen_doc["maxsolve"]
+        assert published_summary["raw"] == os.path.basename(MAXSOLVE_RAW)
+        assert published_summary["upgrades"] == len(upgrades)
+        assert published_summary["new_win"] == maxsolve_summary["new_win"]
+        assert published_summary["new_loss"] == maxsolve_summary["new_loss"]
+        maxsolve_summary = published_summary
 
 # ---- Verification ----
 total = len(rows)
@@ -385,6 +497,15 @@ if frozen_doc is not None:
         "new_loss": sum(r["status"] == "LOSS" for r in expansion_rows),
         "new_unknown": sum(r["status"] == "UNKNOWN" for r in expansion_rows),
     }
+    if maxsolve_summary:
+        maxsolve_layer = os.path.basename(MAXSOLVE_RAW)
+        if maxsolve_layer not in corpus_meta["layers"]:
+            corpus_meta["layers"].append(maxsolve_layer)
+            corpus_meta["new_wins_by_layer"][maxsolve_layer] = \
+                maxsolve_summary["new_win"]
+            corpus_meta["win_line_wins"] += maxsolve_summary["new_win"]
+            corpus_meta["win_line_terminal"] += maxsolve_summary["new_win"]
+        corpus_meta["maxsolve"] = maxsolve_summary
 else:
     corpus_meta = {
         "new_rows": corpus7_new,
@@ -408,6 +529,7 @@ doc = {
         if reverify_summary
         else ({"reverify": frozen_doc["reverify"]} if frozen_doc is not None and "reverify" in frozen_doc else {})
     ),
+    **({"maxsolve": maxsolve_summary} if maxsolve_summary else {}),
     "sharp_examples": frozen_doc["sharp_examples"] if frozen_doc is not None else sharp_examples,
     "rows": rows,
 }
@@ -529,6 +651,7 @@ print(json.dumps({
     "win_line_wins": len(win_line_wins),
     "win_line_terminal": win_line_terminal,
     "reverify": reverify_summary,
+    "maxsolve": maxsolve_summary,
     "expand11_rows": len(expansion_rows),
     "expand11_appended": expansion_appended,
     "corpus7_by_depth": {str(k): corpus7_by_depth[k] for k in sorted(corpus7_by_depth)},

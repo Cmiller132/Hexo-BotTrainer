@@ -64,3 +64,14 @@ squeeze9_*.txt
 # Orchestration scratch (Codex prompts/logs) + local server pid.
 .codex-atlas/
 .atlas-server.pid
+# R-MAXSOLVE round/shard scratch — the consolidated OPENING_ATLAS_MAXSOLVE_RAW.txt
+# + OPENING_ATLAS_MAXSOLVE_REPORT.md are the tracked deliverables; the rest is scratch.
+maxsolve_*/
+maxsolve_*.txt
+.maxsolve-baseline-*/
+OPENING_ATLAS_MAXSOLVE_R[0-9]*.txt
+OPENING_ATLAS_MAXSOLVE_CURRENT_RAW.txt
+OPENING_ATLAS_MAXSOLVE_ALL_HINTS.txt
+OPENING_ATLAS_MAXSOLVE_HARD_QUIET_TARGETS.txt
+OPENING_ATLAS_MAXSOLVE_TRANSPOSE_HINTS.txt
+OPENING_ATLAS_MAXSOLVE_TRANSPOSE_REPRO_HINTS.txt
