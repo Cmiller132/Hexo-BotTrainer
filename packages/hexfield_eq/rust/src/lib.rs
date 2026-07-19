@@ -59,6 +59,10 @@ mod tss_pn_init_hunt;
 #[cfg(test)]
 mod tss_leaf_surface_hunt;
 
+// Default-off, ignored harness for the certified opening-atlas artifact.
+#[cfg(test)]
+mod tss_opening_atlas;
+
 #[cfg(feature = "python")]
 mod cache;
 #[cfg(feature = "python")]
