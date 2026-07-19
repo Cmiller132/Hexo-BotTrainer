@@ -289,6 +289,13 @@ select{cursor:pointer}
   stroke-linejoin:round;opacity:.9}
 .threatgap.g0{stroke:var(--p0-soft)}
 .threatgap.g1{stroke:var(--p1-soft)}
+/* projected six-window for a non-terminal certified win: the claimant's leading
+   opponent-free 6-window outlined whole (dashed = projected, NOT a placed six),
+   its empty completion cells drawn as ghost stones in the claimant's colour. */
+.winoutline.projected{stroke-width:2.5;stroke-dasharray:6 4;opacity:.85}
+.ghostwin{pointer-events:none;stroke-width:1.4;stroke-dasharray:4 3}
+.ghostwin.s0{fill:var(--p0);fill-opacity:.17;stroke:var(--p0);stroke-opacity:.72}
+.ghostwin.s1{fill:var(--p1);fill-opacity:.17;stroke:var(--p1);stroke-opacity:.72}
 .cell{fill:var(--tile);stroke:var(--accent);stroke-width:1;stroke-opacity:0;
   vector-effect:non-scaling-stroke;transition:fill .15s ease,stroke-opacity .15s ease}
 .cell:not(.occ):hover{fill:var(--tile-hover);stroke-opacity:.32}

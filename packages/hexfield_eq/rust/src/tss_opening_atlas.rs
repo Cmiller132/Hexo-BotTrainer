@@ -41,6 +41,16 @@ struct Candidate {
     preferred_moves: Vec<HexCoord>,
 }
 
+#[derive(Clone, Debug)]
+struct ReverifyRoot {
+    id: String,
+    moves: Vec<HexCoord>,
+    expected_status: ProofStatus,
+    expected_claimant: Player,
+    terminal_before: bool,
+    first_line_move: Option<HexCoord>,
+}
+
 fn env_num<T: std::str::FromStr>(name: &str, default: T) -> T
 where
     T::Err: std::fmt::Debug,
@@ -497,6 +507,23 @@ fn status_name(status: ProofStatus) -> &'static str {
     }
 }
 
+fn parse_status(value: &str) -> ProofStatus {
+    match value {
+        "WIN" => ProofStatus::Win,
+        "LOSS" => ProofStatus::Loss,
+        "UNKNOWN" => ProofStatus::Unknown,
+        other => panic!("unknown atlas status {other}"),
+    }
+}
+
+fn parse_player(value: &str) -> Player {
+    match value {
+        "P0" => Player::Player0,
+        "P1" => Player::Player1,
+        other => panic!("unknown atlas player {other}"),
+    }
+}
+
 fn phase_name(state: &HexoState) -> &'static str {
     match state.phase() {
         hexo_engine::TurnPhase::Opening => "Opening",
@@ -617,7 +644,7 @@ fn extract_win_line_traced(
     let mut id = cert.root_node;
     let mut terminal_win = false;
 
-    let mut play = |state: &mut HexoState, mv: HexCoord, line: &mut Vec<HexCoord>| -> bool {
+    let play = |state: &mut HexoState, mv: HexCoord, line: &mut Vec<HexCoord>| -> bool {
         if apply_placement(state, Placement { coord: mv }).is_err() {
             return false;
         }
@@ -653,7 +680,11 @@ fn extract_win_line_traced(
                 }
                 break;
             }
-            CertNode::Universal { edges, .. } => {
+            CertNode::Universal {
+                edges,
+                commutations,
+                ..
+            } => {
                 // One principal defender reply is enough for a single line; the
                 // certificate proves every reply loses.
                 path.push(if mover_claimant { 'u' } else { 'U' });
@@ -668,6 +699,43 @@ fn extract_win_line_traced(
                 if let Some(outcome) = state.terminal() {
                     terminal_win = outcome.winner == claimant;
                     break;
+                }
+                // Preserve the established principal choice (`edges.first`).
+                // If its SecondStone child omitted the matching commuted reply,
+                // replay that concrete second placement and continue through
+                // the mirror-order edge at the identical pair position.
+                let empty_child = matches!(
+                    cert.nodes.get(edge.child as usize),
+                    Some(CertNode::Universal { edges, .. }) if edges.is_empty()
+                );
+                if empty_child {
+                    if let Some(item) = commutations.iter().find(|item| item.first == edge.mv) {
+                        path.push('M');
+                        if !play(&mut state, item.omitted_second, &mut line) {
+                            path.push('!');
+                            break;
+                        }
+                        if let Some(outcome) = state.terminal() {
+                            terminal_win = outcome.winner == claimant;
+                            break;
+                        }
+                        let Some(CertNode::Universal {
+                            edges: mirror_edges,
+                            ..
+                        }) = cert.nodes.get(item.mirror_child as usize)
+                        else {
+                            path.push('!');
+                            break;
+                        };
+                        let Some(mirror_edge) =
+                            mirror_edges.iter().find(|mirror| mirror.mv == item.first)
+                        else {
+                            path.push('!');
+                            break;
+                        };
+                        id = mirror_edge.child;
+                        continue;
+                    }
                 }
                 id = edge.child;
             }
@@ -784,6 +852,320 @@ fn find_finish(state: &HexoState, claimant: Player, depth: usize) -> Option<Vec<
     } else {
         principal
     }
+}
+
+/// Replay an extracted line exactly. A terminal line is accepted only when its
+/// final placement creates a real claimant six; a terminal prefix with trailing
+/// moves is rejected. This is deliberately independent of the extractor's flag.
+fn validate_extracted_line(
+    root_state: &HexoState,
+    line: &[HexCoord],
+    claimant: Player,
+) -> (bool, bool) {
+    let mut state = root_state.clone();
+    for (index, &mv) in line.iter().enumerate() {
+        if state.is_terminal() || apply_placement(&mut state, Placement { coord: mv }).is_err() {
+            return (false, false);
+        }
+        if let Some(outcome) = state.terminal() {
+            let literal_six = state
+                .board()
+                .windows()
+                .entries()
+                .any(|entry| entry.count(claimant) == 6 && entry.count(claimant.other()) == 0);
+            return (
+                index + 1 == line.len(),
+                index + 1 == line.len() && outcome.winner == claimant && literal_six,
+            );
+        }
+    }
+    (true, false)
+}
+
+fn load_reverify_roots(path: &str) -> Vec<ReverifyRoot> {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("read OPENING_ATLAS_REVERIFY_JSON={path}: {error}"));
+    let doc: serde_json::Value = serde_json::from_str(&text)
+        .unwrap_or_else(|error| panic!("parse OPENING_ATLAS_REVERIFY_JSON={path}: {error}"));
+    let rows = doc["rows"].as_array().expect("atlas rows array");
+    let mut roots = Vec::new();
+    for row in rows {
+        if row["certified"].as_u64() != Some(1) {
+            continue;
+        }
+        let id = row["id"].as_str().expect("certified row id").to_owned();
+        let expected_status = parse_status(
+            row["status"]
+                .as_str()
+                .expect("certified row decisive status"),
+        );
+        assert_ne!(
+            expected_status,
+            ProofStatus::Unknown,
+            "certified row {id} is UNKNOWN"
+        );
+        let expected_claimant =
+            parse_player(row["claimant"].as_str().expect("certified row claimant"));
+        let moves = row["moves"]
+            .as_array()
+            .expect("certified row moves")
+            .iter()
+            .map(|pair| {
+                let pair = pair.as_array().expect("atlas move pair");
+                assert_eq!(pair.len(), 2, "atlas move pair length for {id}");
+                let q = i16::try_from(pair[0].as_i64().expect("atlas move q"))
+                    .expect("atlas move q fits i16");
+                let r = i16::try_from(pair[1].as_i64().expect("atlas move r"))
+                    .expect("atlas move r fits i16");
+                HexCoord::new(q, r)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            row["placements"].as_u64(),
+            Some(moves.len() as u64),
+            "atlas placement count for {id}"
+        );
+        let state = replay(&moves);
+        let actual_claimant = match expected_status {
+            ProofStatus::Win => state.current_player(),
+            ProofStatus::Loss => state.current_player().other(),
+            ProofStatus::Unknown => unreachable!(),
+        };
+        assert_eq!(
+            expected_claimant, actual_claimant,
+            "stored claimant disagrees with stored verdict for {id}"
+        );
+        let candidate = Candidate {
+            source: "reverify".to_owned(),
+            source_prefix: moves.len(),
+            canonical_moves: moves.clone(),
+            orbit_size: orbit_size(&moves),
+            preferred_moves: Vec::new(),
+        };
+        assert_eq!(candidate_id(&candidate), id, "stored root id mismatch");
+        roots.push(ReverifyRoot {
+            id,
+            moves,
+            expected_status,
+            expected_claimant,
+            terminal_before: row["win_line_terminal"].as_u64() == Some(1),
+            first_line_move: row["win_line"]
+                .as_array()
+                .and_then(|line| line.first())
+                .map(|pair| {
+                    let pair = pair.as_array().expect("atlas win-line move pair");
+                    HexCoord::new(
+                        i16::try_from(pair[0].as_i64().expect("atlas win-line q"))
+                            .expect("atlas win-line q fits i16"),
+                        i16::try_from(pair[1].as_i64().expect("atlas win-line r"))
+                            .expect("atlas win-line r fits i16"),
+                    )
+                }),
+        });
+    }
+    assert_eq!(roots.len(), 2_190, "certified atlas root count changed");
+    roots
+}
+
+fn solve_reverify_root(root: &ReverifyRoot, tt_bytes: usize, node_ladder: &[u64]) {
+    let state = replay(&root.moves);
+    std::env::remove_var("TSS_ROOT_PREFERRED_MOVES");
+    let start = Instant::now();
+    let mut final_result = None;
+    let mut used_cap = 0u64;
+    let mut solve_path = "root";
+    for &node_cap in node_ladder {
+        let mut solver = TssSolver::default();
+        solver.set_width_options(WidthOptions::vcf_pair_complete());
+        let result = solver.solve(
+            &state,
+            &SolveCaps {
+                node_cap,
+                tt_bytes_cap: tt_bytes,
+                semantic_horizon: u32::MAX,
+            },
+        );
+        assert!(
+            result.status == ProofStatus::Unknown || result.cert.is_some(),
+            "decisive re-verification result without certificate for {}",
+            root.id
+        );
+        used_cap = node_cap;
+        let decisive = result.status != ProofStatus::Unknown;
+        final_result = Some(result);
+        if decisive {
+            break;
+        }
+    }
+    // The squeeze layer contains seven roots certified by a same-claimant child
+    // lift. If the direct narrow generator returns UNKNOWN, solve the stored
+    // first continuation afresh under the normative width and prepend a Choice.
+    // The move is only a scheduling hint: the strict root verifier below remains
+    // the authority for the reconstructed certificate.
+    if final_result
+        .as_ref()
+        .is_some_and(|result| result.status == ProofStatus::Unknown)
+        && root.expected_status == ProofStatus::Win
+    {
+        if let Some(preferred) = root.first_line_move {
+            let mut child_state = state.clone();
+            if apply_placement(&mut child_state, Placement { coord: preferred }).is_ok()
+                && child_state.current_player() == state.current_player()
+                && !child_state.is_terminal()
+            {
+                for &node_cap in node_ladder {
+                    let mut solver = TssSolver::default();
+                    solver.set_width_options(WidthOptions::vcf_pair_complete());
+                    let mut result = solver.solve(
+                        &child_state,
+                        &SolveCaps {
+                            node_cap,
+                            tt_bytes_cap: tt_bytes,
+                            semantic_horizon: u32::MAX,
+                        },
+                    );
+                    used_cap = node_cap;
+                    if result.status != ProofStatus::Win {
+                        final_result = Some(result);
+                        continue;
+                    }
+                    let child_cert = result.cert.take().expect("lifted child WIN certificate");
+                    assert!(
+                        TssVerifier.verify(&child_state, &child_cert, ProofStatus::Win),
+                        "strict verifier rejected lifted child certificate for {}",
+                        root.id
+                    );
+                    assert!(
+                        child_cert.nodes.len() < MAX_CERT_NODES
+                            && certificate_graph_depth(&child_cert) < MAX_CERT_DEPTH,
+                        "lifted child certificate too large for {}",
+                        root.id
+                    );
+                    let child_root = child_cert.root_node;
+                    let mut nodes = child_cert.nodes;
+                    let root_node =
+                        u32::try_from(nodes.len()).expect("certificate node id fits u32");
+                    nodes.push(CertNode::Choice {
+                        mv: preferred,
+                        child: child_root,
+                    });
+                    result.cert = Some(TssCertificate {
+                        root: RootBinding::from_state(&state),
+                        claimant: child_cert.claimant,
+                        root_node,
+                        nodes,
+                        semantic_horizon: child_cert.semantic_horizon,
+                    });
+                    result.status = ProofStatus::Win;
+                    final_result = Some(result);
+                    solve_path = "same_claimant_child_lift";
+                    break;
+                }
+            }
+        }
+    }
+    let result = final_result.expect("re-verification node ladder is nonempty");
+    let reproduced_claimant = result.cert.as_ref().map(|cert| cert.claimant);
+    let mut verifier_ok = false;
+    let mut win_line = Vec::new();
+    let mut win_line_terminal = false;
+    let mut win_line_path = "NA".to_owned();
+    if let Some(cert) = result.cert.as_ref() {
+        verifier_ok = TssVerifier.verify(&state, cert, result.status);
+        assert!(
+            verifier_ok,
+            "strict verifier rejected re-verification certificate for {}",
+            root.id
+        );
+        if result.status == ProofStatus::Win && cert.claimant == root.expected_claimant {
+            (win_line, win_line_terminal, win_line_path) = extract_win_line_traced(cert, &state);
+            let (line_legal, terminal_six) =
+                validate_extracted_line(&state, &win_line, cert.claimant);
+            assert!(line_legal, "extracted line is illegal for {}", root.id);
+            assert_eq!(
+                win_line_terminal, terminal_six,
+                "terminal-line flag disagrees with literal replay for {}",
+                root.id
+            );
+        }
+    }
+    let same_verdict = result.status == root.expected_status
+        && reproduced_claimant == Some(root.expected_claimant);
+    println!(
+        "ATLAS_REVERIFY_ROW schema=1 id={} expected_status={} expected_claimant={} reproduced_status={} reproduced_claimant={} same_verdict={} verifier_ok={} solve_path={} cap={} nodes={} expansions={} ms={:.3} terminal_before={} win_line_len={} win_line_terminal={} win_line_path={} win_line={} moves={}",
+        root.id,
+        status_name(root.expected_status),
+        player_name(root.expected_claimant),
+        status_name(result.status),
+        reproduced_claimant.map(player_name).unwrap_or("NA"),
+        u8::from(same_verdict),
+        u8::from(verifier_ok),
+        solve_path,
+        used_cap,
+        result.stats.nodes,
+        result.stats.expansions,
+        start.elapsed().as_secs_f64() * 1e3,
+        u8::from(root.terminal_before),
+        win_line.len(),
+        u8::from(win_line_terminal),
+        win_line_path,
+        if win_line.is_empty() { "NA".to_owned() } else { moves_text(&win_line) },
+        moves_text(&root.moves),
+    );
+}
+
+fn opening_atlas_reverify_certified() {
+    let path = std::env::var("OPENING_ATLAS_REVERIFY_JSON")
+        .expect("reverify_certified mode requires OPENING_ATLAS_REVERIFY_JSON");
+    let roots = load_reverify_roots(&path);
+    let tt_bytes = env_num("OPENING_ATLAS_TT_BYTES", DEFAULT_TT_BYTES);
+    let node_ladder = env_ladder("OPENING_ATLAS_NODE_LADDER", &[100_000, 1_000_000]);
+    let wall_seconds = env_num("OPENING_ATLAS_WALL_SECONDS", 14_400u64);
+    let shard_count = env_num::<usize>("SHARD_COUNT", 1).max(1);
+    let shard_index = env_num::<usize>("SHARD_INDEX", 0);
+    assert!(
+        shard_index < shard_count,
+        "SHARD_INDEX must be < SHARD_COUNT"
+    );
+    let assigned = (0..roots.len())
+        .filter(|index| index % shard_count == shard_index)
+        .collect::<Vec<_>>();
+    println!(
+        "ATLAS_REVERIFY_SETUP schema=1 roots={} shard_index={} shard_count={} shard_total={} width=vcf_pair_complete horizon={} node_ladder={:?} tt_bytes={} wall_seconds={}",
+        roots.len(),
+        shard_index,
+        shard_count,
+        assigned.len(),
+        u32::MAX,
+        node_ladder,
+        tt_bytes,
+        wall_seconds,
+    );
+    std::io::stdout().flush().ok();
+    let batch_start = Instant::now();
+    let mut attempted = 0usize;
+    for index in assigned {
+        if attempted > 0 && batch_start.elapsed().as_secs() >= wall_seconds {
+            break;
+        }
+        solve_reverify_root(&roots[index], tt_bytes, &node_ladder);
+        attempted += 1;
+        std::io::stdout().flush().ok();
+    }
+    println!(
+        "ATLAS_REVERIFY_DONE shard_index={} shard_count={} attempted={} residual={} wall_ms={:.3}",
+        shard_index,
+        shard_count,
+        attempted,
+        roots
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| index % shard_count == shard_index)
+            .count()
+            - attempted,
+        batch_start.elapsed().as_secs_f64() * 1e3,
+    );
+    std::io::stdout().flush().ok();
 }
 
 fn verify_all_d6(
@@ -997,6 +1379,10 @@ fn solve_candidate(
 #[ignore = "default-off certified opening-atlas pass; run explicitly"]
 fn opening_atlas_pass1() {
     let mode = std::env::var("OPENING_ATLAS_MODE").unwrap_or_default();
+    if mode == "reverify_certified" {
+        opening_atlas_reverify_certified();
+        return;
+    }
     let corpus_path = std::env::var("OPENING_ATLAS_CORPUS").ok();
     let game_count = env_num("OPENING_ATLAS_GAME_COUNT", DEFAULT_GAME_COUNT);
     let backtrack = env_num("OPENING_ATLAS_BACKTRACK", DEFAULT_BACKTRACK);

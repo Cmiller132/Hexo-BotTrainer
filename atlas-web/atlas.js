@@ -24,7 +24,7 @@ const vq = base => base + VERQ;                 // base carries no existing quer
 
 // Bound at boot by loadModules() — every reference lives inside a function that
 // runs only after boot() awaits the dynamic imports below.
-let createBoard, findWin, findThreats, ownerAt, deriveBinding, canonicalId, miniBoardSVG;
+let createBoard, findWin, findThreats, bestClaimantWindow, ownerAt, deriveBinding, canonicalId, miniBoardSVG;
 async function loadModules() {
   const [B, D, M] = await Promise.all([
     import("./board.js" + VERQ),
@@ -32,6 +32,7 @@ async function loadModules() {
     import("./mini-board.js" + VERQ),
   ]);
   createBoard = B.createBoard; findWin = B.findWin; findThreats = B.findThreats;
+  bestClaimantWindow = B.bestClaimantWindow;
   ownerAt = D.ownerAt; deriveBinding = D.deriveBinding; canonicalId = D.canonicalId;
   miniBoardSVG = M.miniBoardSVG;
 }
@@ -450,10 +451,10 @@ function renderReadout(row) {
         sub += ` · <span class="ro-win">${c} forces the win — the line replays all the way to six-in-a-row &rarr;</span>`;
         break;
       case "threat":
-        sub += ` · <span class="ro-win">${c}'s win is certified. The recorded line runs ${winLineArr.length} placements to the proven-won position shown — it stops before the sixth stone, and the certificate proves the win continues from here (${c}'s leading four(s) highlighted) &rarr;</span>`;
+        sub += ` · <span class="ro-win">${c}'s win is certified. The recorded line runs ${winLineArr.length} placements to the proven-won position shown — it stops before the sixth stone, so ${c}'s leading six-in-a-row window is outlined with its completion cells as ghosts; the certificate proves the win continues from here &rarr;</span>`;
         break;
       case "recorded-absent":
-        sub += ` · <span class="ro-win">forced win certified for ${c}${certShapeNote(row)} · the exact line was not recorded, but ${c} already holds a strong four on the board (highlighted) — the win is proven by the certificate, not by the shown four alone</span>`;
+        sub += ` · <span class="ro-win">forced win certified for ${c}${certShapeNote(row)} · the exact line was not recorded, but ${c} already holds a leading six-window on the board (outlined, completion cells ghosted) — the win is proven by the certificate, not by the shown window alone</span>`;
         break;
       case "proof-only":
         sub += ` · <span class="ro-proof">forced win certified for ${c} by proof structure${certShapeNote(row)} · the forced six is deep — no line was recorded and no board-level four is visible, so only the certificate proves it (not board-obvious)</span>`;
@@ -638,11 +639,13 @@ function renderScrub(k) {
     ? findWin(stones) : null;
   board.setStones(stones, winCells, openingN, claimantIdx);
   // At the terminal of a certified win that DOESN'T show a six (non-terminal
-  // line, or an empty-line human win), overlay the claimant's unstoppable four
-  // so the board still reads as won. Never drawn mid-scrub or when a six exists.
-  const threatGaps = (row.status === "WIN" && atTerminal && !winCells && claimantIdx !== null)
-    ? findThreats(stones, claimantIdx) : null;
-  board.setThreats(threatGaps, claimantIdx);
+  // line, or an empty-line human win), outline the claimant's strongest 6-window
+  // as a whole with ghost completion cells, so the board shows the FULL six
+  // window forming rather than a placed six. Never drawn mid-scrub or when a real
+  // six already exists. Null when no board-level four exists (a deep proof).
+  const projWin = (row.status === "WIN" && atTerminal && !winCells && claimantIdx !== null)
+    ? bestClaimantWindow(stones, claimantIdx) : null;
+  board.setProjectedWin(projWin, claimantIdx);
   if (!atTerminal && k >= 1) {
     const last = subset[k - 1];
     board.setScrubHighlight({ q: last[0], r: last[1], color: ownerAt(k - 1) });
@@ -654,7 +657,7 @@ function renderScrub(k) {
   let tag;
   if (row.status === "WIN" && atTerminal)
     tag = winCells ? "atlas · forced win · six-in-a-row"
-      : (threatGaps && threatGaps.length) ? "atlas · forced win · proven-won position"
+      : projWin ? "atlas · forced win · projected six (proven-won)"
       : "atlas · forced win · proof-certified";
   else if (k > openingN) tag = "atlas · forced win";
   else tag = `atlas · ${row.status.toLowerCase()}`;

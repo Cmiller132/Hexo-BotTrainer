@@ -14,6 +14,7 @@ RAW_DEEP11 = os.path.join(BASE, "OPENING_ATLAS_CORPUS11_DEEP_RAW.txt")
 RAW_DEEP9 = os.path.join(BASE, "OPENING_ATLAS_CORPUS9_DEEP_RAW.txt")
 RAW_DEEP7 = os.path.join(BASE, "OPENING_ATLAS_CORPUS7_DEEP_RAW.txt")
 RAW_SQUEEZE9 = os.path.join(BASE, "OPENING_ATLAS_CORPUS9_SQUEEZE_RAW.txt")
+REVERIFY_RAW = os.environ.get("OPENING_ATLAS_REVERIFY_RAW")
 CORPUS_LAYERS = next(([p] for p in (RAW_DEEP11, RAW_DEEP9, RAW_DEEP7) if os.path.exists(p)), [])
 # The squeeze layer contains the complete first-9 result and is applied after
 # the deepest first-11 layer. The existing never-downgrade rule upgrades only
@@ -131,6 +132,26 @@ def parse_raw(path):
         rows.append(row)
     return rows
 
+def parse_reverify_raw(path):
+    """Parse the default-off certified-root audit emitted by the ignored Rust test."""
+    rows = []
+    for line in read_text(path).splitlines():
+        line = line.rstrip("\r")
+        if not line.startswith("ATLAS_REVERIFY_ROW "):
+            continue
+        rec = {}
+        for tok in line[len("ATLAS_REVERIFY_ROW "):].split(" "):
+            if "=" in tok:
+                k, v = tok.split("=", 1)
+                rec[k] = v
+        for key in ("same_verdict", "verifier_ok", "terminal_before",
+                    "win_line_len", "win_line_terminal"):
+            rec[key] = int(rec[key])
+        rec["win_line"] = [] if rec["win_line"] == "NA" else parse_moves(rec["win_line"])
+        rec["moves"] = parse_moves(rec["moves"])
+        rows.append(rec)
+    return rows
+
 # ---- Load + layered merge ----
 # pass1 ids are authoritative and never overwritten. Corpus layers stack in
 # order; within corpus ids, an incoming row replaces the current one iff it is
@@ -160,6 +181,73 @@ rows = list(pass1_rows) + [corpus[rid] for rid in corpus_order]
 corpus7_new = len(corpus_order)
 corpus7_dupe = sum(1 for r in (parse_raw(CORPUS_LAYERS[-1]) if CORPUS_LAYERS else [])
                    if r["id"] in pass1_ids)
+
+# A re-verification raw may only upgrade an existing nonterminal WIN line to a
+# literal terminal six. It cannot add/remove rows, alter verdicts, replace an
+# existing terminal line, or select a different principal-line prefix.
+reverify_summary = None
+if REVERIFY_RAW:
+    before_frozen = {
+        r["id"]: (r["status"], r["claimant"], r["certified"], r["moves"])
+        for r in rows
+    }
+    certified_ids = {r["id"] for r in rows if r["certified"] == 1}
+    terminal_before_count = sum(
+        1 for r in rows
+        if r["certified"] == 1 and r["status"] == "WIN"
+        and r.get("win_line_terminal") == 1
+    )
+    audit_rows = parse_reverify_raw(REVERIFY_RAW)
+    audit = {r["id"]: r for r in audit_rows}
+    assert len(audit_rows) == len(audit), "duplicate ids in re-verification raw"
+    assert set(audit) == certified_ids, (
+        f"re-verification root set mismatch: missing={sorted(certified_ids-set(audit))[:10]} "
+        f"extra={sorted(set(audit)-certified_ids)[:10]}"
+    )
+    upgraded = 0
+    prefix_rejected = []
+    by_id = {r["id"]: r for r in rows}
+    for rid, check in audit.items():
+        current = by_id[rid]
+        assert check["expected_status"] == current["status"], f"expected status drift: {rid}"
+        assert check["expected_claimant"] == current["claimant"], f"expected claimant drift: {rid}"
+        assert check["reproduced_status"] == current["status"], f"reproduced status mismatch: {rid}"
+        assert check["reproduced_claimant"] == current["claimant"], f"claimant mismatch: {rid}"
+        assert check["same_verdict"] == 1, f"verdict did not reproduce: {rid}"
+        assert check["verifier_ok"] == 1, f"strict verifier did not accept: {rid}"
+        assert check["moves"] == current["moves"], f"root moves changed: {rid}"
+        assert check["terminal_before"] == int(current.get("win_line_terminal") == 1), (
+            f"terminal-before drift: {rid}"
+        )
+        assert check["win_line_len"] == len(check["win_line"]), f"line length mismatch: {rid}"
+        if current["status"] != "WIN" or current.get("win_line_terminal") == 1 \
+                or check["win_line_terminal"] != 1:
+            continue
+        old_line = current.get("win_line", [])
+        new_line = check["win_line"]
+        if len(new_line) <= len(old_line) or new_line[:len(old_line)] != old_line:
+            prefix_rejected.append(rid)
+            continue
+        current["win_line"] = new_line
+        current["win_line_len"] = len(new_line)
+        current["win_line_terminal"] = 1
+        upgraded += 1
+    after_frozen = {
+        r["id"]: (r["status"], r["claimant"], r["certified"], r["moves"])
+        for r in rows
+    }
+    assert before_frozen == after_frozen, "re-verification merge changed frozen atlas fields"
+    reverify_summary = {
+        "raw": os.path.basename(REVERIFY_RAW),
+        "roots": len(audit),
+        "reproduced_and_verified": sum(
+            1 for r in audit_rows if r["same_verdict"] == 1 and r["verifier_ok"] == 1
+        ),
+        "terminal_before": terminal_before_count,
+        "terminal_after": terminal_before_count + upgraded,
+        "terminal_line_upgrades": upgraded,
+        "prefix_rejected": prefix_rejected,
+    }
 
 # ---- Verification ----
 total = len(rows)
@@ -248,6 +336,7 @@ doc = {
         "win_line_wins": len(win_line_wins),
         "win_line_terminal": win_line_terminal,
     },
+    **({"reverify": reverify_summary} if reverify_summary else {}),
     "sharp_examples": sharp_examples,
     "rows": rows,
 }
@@ -311,7 +400,14 @@ atlas_bytes = os.path.getsize(OUT)
 # Slim served frequencies (counts only), pre-gzipped. Derived from the full
 # frequencies.json if present; the site degrades gracefully when it is absent.
 freq_web_raw = freq_web_gz = 0
-if os.path.exists(FREQ_SRC):
+if REVERIFY_RAW:
+    # Re-verification is atlas-data-only. Preserve the separately generated
+    # frequencies artifacts byte-for-byte (they may contain unrelated work).
+    if os.path.exists(FREQ_WEB_BASE + ".json"):
+        freq_web_raw = os.path.getsize(FREQ_WEB_BASE + ".json")
+    if os.path.exists(FREQ_WEB_BASE + ".json.gz"):
+        freq_web_gz = os.path.getsize(FREQ_WEB_BASE + ".json.gz")
+elif os.path.exists(FREQ_SRC):
     with open(FREQ_SRC, encoding="utf-8") as f:
         _fq = json.load(f)
     freq_web = {
@@ -346,7 +442,7 @@ VERSION = _sha1_files(
 _html = open(INDEX_HTML, encoding="utf-8").read()
 _new_html = re.sub(r'src="atlas\.js(?:\?v=[^"]*)?"', f'src="atlas.js?v={VERSION}"', _html)
 _new_html = re.sub(r'href="style\.css(?:\?v=[^"]*)?"', f'href="style.css?v={VERSION}"', _new_html)
-if _new_html != _html:
+if not REVERIFY_RAW and _new_html != _html:
     open(INDEX_HTML, "w", encoding="utf-8").write(_new_html)
 
 print(json.dumps({
@@ -361,6 +457,7 @@ print(json.dumps({
     "certified_loss": sum(1 for r in rows if r["certified"]==1 and r["status"]=="LOSS"),
     "win_line_wins": len(win_line_wins),
     "win_line_terminal": win_line_terminal,
+    "reverify": reverify_summary,
     "corpus7_by_depth": {str(k): corpus7_by_depth[k] for k in sorted(corpus7_by_depth)},
     "out_atlas_json_bytes": atlas_bytes,
     "index_raw_bytes": idx_raw, "index_gz_bytes": idx_gz,

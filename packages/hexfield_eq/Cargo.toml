@@ -26,3 +26,6 @@ half = "2"
 pyo3 = { workspace = true, optional = true }
 rand.workspace = true
 rayon.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

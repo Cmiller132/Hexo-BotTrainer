@@ -95,6 +95,51 @@ export function findThreats(stones, claimantIdx) {
   return [...gaps.values()];
 }
 
+/* The claimant's single STRONGEST length-6 window at a non-terminal certified
+ * win: an opponent-free 6-window holding the most claimant stones (>=4), so the
+ * board can outline the whole projected six-in-a-row (with its empty completion
+ * cells) instead of only ringing scattered gaps. Like findThreats this asserts
+ * nothing — the win is proven by the certificate; this window just shows WHERE
+ * the six is forming. Prefers more claimant stones, then fewer gaps, then a
+ * deterministic base-cell tiebreak so re-renders are stable. Returns
+ * {cells:[6 {q,r}], gaps:[empty {q,r}], cl} or null when no >=4 window exists
+ * (a deep proof with no board-level four). */
+export function bestClaimantWindow(stones, claimantIdx) {
+  if (typeof claimantIdx !== "number") return null;
+  const col = new Map();
+  for (const m of stones) col.set(key(m.q, m.r), m.color);
+  const seen = new Set();
+  let best = null;
+  for (const m of stones) {
+    if (m.color !== claimantIdx) continue;
+    for (const [dq, dr] of WIN_DIRS) {
+      for (let off = -5; off <= 0; off++) {
+        const bq = m.q + dq * off, br = m.r + dr * off;
+        const wk = bq + "," + br + "," + dq + "," + dr;
+        if (seen.has(wk)) continue;
+        seen.add(wk);
+        let cl = 0, blocked = false;
+        const cells = [], gaps = [];
+        for (let s = 0; s < 6; s++) {
+          const c = { q: bq + dq * s, r: br + dr * s };
+          cells.push(c);
+          const o = col.get(key(c.q, c.r));
+          if (o === claimantIdx) cl++;
+          else if (o === undefined) gaps.push(c);
+          else { blocked = true; break; }
+        }
+        if (blocked || cl < 4) continue;
+        if (!best || cl > best.cl ||
+            (cl === best.cl && gaps.length < best.gaps.length) ||
+            (cl === best.cl && gaps.length === best.gaps.length &&
+              (bq < best.bq || (bq === best.bq && br < best.br))))
+          best = { cells, gaps, cl, bq, br };
+      }
+    }
+  }
+  return best;
+}
+
 /* Union boundary of the winning tiles: for each cell keep the hex edges not
  * shared with another winning cell, then chain the directed segments into one
  * closed loop. Edge i (vertex i -> i+1) faces axial neighbor EDGE_NB[i]. */
@@ -146,9 +191,11 @@ export function createBoard(svg, opts = {}) {
     svg.appendChild(g);
     return g;
   };
-  // draw order: grid (tiles + tengen), heat, stones ABOVE heat, marks, threat, scrub-ring, ghost
+  // draw order: grid (tiles + tengen), heat, stones ABOVE heat, marks, threat,
+  // projected-win (outline + ghost completions), scrub-ring, ghost
   const grid = mk("gridg"), heat = mk("heatg"), stones = mk("stonesg"),
-        marks = mk("marksg"), threatG = mk("threatg"), scrub = mk("scrubg"), ghostG = mk("ghostg");
+        marks = mk("marksg"), threatG = mk("threatg"), projG = mk("projg"),
+        scrub = mk("scrubg"), ghostG = mk("ghostg");
   const tilesG = document.createElementNS(NS, "g");
   grid.appendChild(tilesG);
   const tengen = document.createElementNS(NS, "circle");
@@ -418,6 +465,7 @@ export function createBoard(svg, opts = {}) {
     stones.textContent = "";
     marks.textContent = "";
     threatG.textContent = "";   // threat overlay is re-set per render (renderScrub); clear stale
+    projG.textContent = "";     // projected-win overlay likewise (esp. on the terminal-six early return)
     occupied.clear();
     const hasCont = typeof openingLen === "number" && openingLen >= 0;
     for (let i = 0; i < moves.length; i++) {
@@ -522,12 +570,35 @@ export function createBoard(svg, opts = {}) {
     }
   }
 
+  /* Projected six-in-a-row window for a non-terminal certified win: outline the
+   * claimant's strongest opponent-free 6-window (from bestClaimantWindow) as a
+   * whole and draw ghost stones on its empty completion cells, so a board that
+   * stops before the sixth stone still shows the FULL six window forming — not
+   * just scattered gaps. Dashed/ghost styling keeps it clearly projected (never
+   * a placed six). Own group, cleared each render; null clears it (deep proofs
+   * with no board four). */
+  function setProjectedWin(win, claimantIdx) {
+    projG.textContent = "";
+    if (!win || !win.cells || win.cells.length !== 6) return;
+    const path = document.createElementNS(NS, "path");
+    path.setAttribute("d", outlinePath(win.cells));
+    path.setAttribute("class", "winoutline projected");
+    projG.appendChild(path);
+    const gc = "ghostwin " + (claimantIdx === 1 ? "s1" : "s0");
+    for (const g of win.gaps || []) {
+      const el = document.createElementNS(NS, "polygon");
+      el.setAttribute("points", hexPts(axialX(g.q, g.r), axialY(g.r), S * 0.8));
+      el.setAttribute("class", gc);
+      projG.appendChild(el);
+    }
+  }
+
   apply();
   updateVirtual();
 
   return {
     svg, setStones, setLegal, setHeat, clearHeat,
-    stage, clearStage, hideHoverGhost, setScrubHighlight, setThreats,
+    stage, clearStage, hideHoverGhost, setScrubHighlight, setThreats, setProjectedWin,
     resetView: goHome,
     tileCount: () => tiles.size,
   };
