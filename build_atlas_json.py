@@ -14,6 +14,7 @@ RAW_DEEP11 = os.path.join(BASE, "OPENING_ATLAS_CORPUS11_DEEP_RAW.txt")
 RAW_DEEP9 = os.path.join(BASE, "OPENING_ATLAS_CORPUS9_DEEP_RAW.txt")
 RAW_DEEP7 = os.path.join(BASE, "OPENING_ATLAS_CORPUS7_DEEP_RAW.txt")
 RAW_SQUEEZE9 = os.path.join(BASE, "OPENING_ATLAS_CORPUS9_SQUEEZE_RAW.txt")
+RAW_EXPAND11 = os.path.join(BASE, "OPENING_ATLAS_CORPUS11_EXPAND_RAW.txt")
 REVERIFY_RAW = os.environ.get("OPENING_ATLAS_REVERIFY_RAW")
 CORPUS_LAYERS = next(([p] for p in (RAW_DEEP11, RAW_DEEP9, RAW_DEEP7) if os.path.exists(p)), [])
 # The squeeze layer contains the complete first-9 result and is applied after
@@ -182,6 +183,42 @@ corpus7_new = len(corpus_order)
 corpus7_dupe = sum(1 for r in (parse_raw(CORPUS_LAYERS[-1]) if CORPUS_LAYERS else [])
                    if r["id"] in pass1_ids)
 
+# R-EXPAND11 is strictly additive. Treat the already-published atlas as a
+# frozen base and append the validated delta only when every incoming id is
+# absent. On subsequent builds, require every expansion row to match exactly;
+# partial overlap or drift is an error. This is stronger than never-downgrade:
+# no field of an existing WIN, LOSS, or UNKNOWN row can be replaced at all.
+frozen_doc = None
+frozen_rows = None
+expansion_rows = []
+expansion_appended = False
+if os.path.exists(RAW_EXPAND11):
+    assert os.path.exists(OUT), "additive expansion requires the frozen atlas.json base"
+    with open(OUT, encoding="utf-8") as f:
+        frozen_doc = json.load(f)
+    frozen_rows = frozen_doc["rows"]
+    frozen_by_id = {r["id"]: r for r in frozen_rows}
+    assert len(frozen_by_id) == len(frozen_rows), "duplicate ids in frozen atlas"
+    expansion_rows = parse_raw(RAW_EXPAND11)
+    expansion_by_id = {r["id"]: r for r in expansion_rows}
+    assert len(expansion_by_id) == len(expansion_rows), "duplicate ids in expansion raw"
+    overlap = set(frozen_by_id).intersection(expansion_by_id)
+    if not overlap:
+        rows = list(frozen_rows) + expansion_rows
+        expansion_appended = True
+    else:
+        assert overlap == set(expansion_by_id), "partial expansion overlap with frozen atlas"
+        for rid, incoming in expansion_by_id.items():
+            assert frozen_by_id[rid] == incoming, f"published expansion row drift: {rid}"
+        rows = list(frozen_rows)
+    assert "ATLAS_DONE_AGGREGATE shards=16 attempted=9968 residual=0 rows=9968" in read_text(RAW_EXPAND11)
+    assert len(expansion_rows) == 9968, "incomplete expansion raw"
+    assert all(r["certified"] == int(r["status"] in ("WIN", "LOSS")) for r in expansion_rows)
+    assert all(
+        r["win_line"] and r["win_line_terminal"] == 1
+        for r in expansion_rows if r["status"] == "WIN"
+    ), "every expansion WIN must carry a concrete terminal line"
+
 # A re-verification raw may only upgrade an existing nonterminal WIN line to a
 # literal terminal six. It cannot add/remove rows, alter verdicts, replace an
 # existing terminal line, or select a different principal-line prefix.
@@ -321,13 +358,35 @@ sharp_examples = [
     },
 ]
 
-doc = {
-    "schema": 1,
-    "generated_from": COMMIT,
-    "census": census,
-    "summary": {"total": total, "win": win, "loss": loss,
-                "unknown": unknown, "certified": certified},
-    "corpus7": {
+if frozen_doc is not None:
+    corpus_meta = json.loads(json.dumps(frozen_doc["corpus7"]))
+    if expansion_appended:
+        expansion_by_depth = {}
+        for r in expansion_rows:
+            depth = str(r["source_prefix"])
+            expansion_by_depth[depth] = expansion_by_depth.get(depth, 0) + 1
+        corpus_meta["new_rows"] += len(expansion_rows)
+        for depth, count in expansion_by_depth.items():
+            corpus_meta["by_depth"][depth] = corpus_meta["by_depth"].get(depth, 0) + count
+        corpus_meta["layers"].append(os.path.basename(RAW_EXPAND11))
+        corpus_meta["new_wins_by_layer"][os.path.basename(RAW_EXPAND11)] = sum(
+            r["status"] == "WIN" for r in expansion_rows
+        )
+        corpus_meta["win_line_wins"] += sum(r["status"] == "WIN" for r in expansion_rows)
+        corpus_meta["win_line_terminal"] += sum(
+            r["status"] == "WIN" and r["win_line_terminal"] == 1 for r in expansion_rows
+        )
+    corpus_meta["expand11"] = {
+        "corpus_games": 8698,
+        "distinct_first_11": 47808,
+        "skipped_existing": 37840,
+        "new_rows": len(expansion_rows),
+        "new_win": sum(r["status"] == "WIN" for r in expansion_rows),
+        "new_loss": sum(r["status"] == "LOSS" for r in expansion_rows),
+        "new_unknown": sum(r["status"] == "UNKNOWN" for r in expansion_rows),
+    }
+else:
+    corpus_meta = {
         "new_rows": corpus7_new,
         "duplicate_of_pass1": corpus7_dupe,
         "by_depth": {str(k): corpus7_by_depth[k] for k in sorted(corpus7_by_depth)},
@@ -335,9 +394,21 @@ doc = {
         "new_wins_by_layer": layer_new,
         "win_line_wins": len(win_line_wins),
         "win_line_terminal": win_line_terminal,
-    },
-    **({"reverify": reverify_summary} if reverify_summary else {}),
-    "sharp_examples": sharp_examples,
+    }
+
+doc = {
+    "schema": frozen_doc["schema"] if frozen_doc is not None else 1,
+    "generated_from": COMMIT,
+    "census": frozen_doc["census"] if frozen_doc is not None else census,
+    "summary": {"total": total, "win": win, "loss": loss,
+                "unknown": unknown, "certified": certified},
+    "corpus7": corpus_meta,
+    **(
+        {"reverify": reverify_summary}
+        if reverify_summary
+        else ({"reverify": frozen_doc["reverify"]} if frozen_doc is not None and "reverify" in frozen_doc else {})
+    ),
+    "sharp_examples": frozen_doc["sharp_examples"] if frozen_doc is not None else sharp_examples,
     "rows": rows,
 }
 
@@ -400,7 +471,7 @@ atlas_bytes = os.path.getsize(OUT)
 # Slim served frequencies (counts only), pre-gzipped. Derived from the full
 # frequencies.json if present; the site degrades gracefully when it is absent.
 freq_web_raw = freq_web_gz = 0
-if REVERIFY_RAW:
+if REVERIFY_RAW or frozen_doc is not None:
     # Re-verification is atlas-data-only. Preserve the separately generated
     # frequencies artifacts byte-for-byte (they may contain unrelated work).
     if os.path.exists(FREQ_WEB_BASE + ".json"):
@@ -458,6 +529,8 @@ print(json.dumps({
     "win_line_wins": len(win_line_wins),
     "win_line_terminal": win_line_terminal,
     "reverify": reverify_summary,
+    "expand11_rows": len(expansion_rows),
+    "expand11_appended": expansion_appended,
     "corpus7_by_depth": {str(k): corpus7_by_depth[k] for k in sorted(corpus7_by_depth)},
     "out_atlas_json_bytes": atlas_bytes,
     "index_raw_bytes": idx_raw, "index_gz_bytes": idx_gz,

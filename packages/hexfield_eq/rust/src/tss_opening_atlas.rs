@@ -341,10 +341,11 @@ type PositionKey = (u8, (u8, i16, i16), Vec<(i16, i16, u8)>);
 /// `root_position_key` (symmetric/transposed duplicates fold together) and
 /// returned in a deterministic order: shallow depths first, then by canonical
 /// position key. Illegal or terminal prefixes are skipped defensively.
-fn load_corpus_first_n(path: &str, first_n: usize) -> Vec<Candidate> {
+fn load_corpus_first_n(path: &str, game_count: usize, first_n: usize) -> Vec<Candidate> {
     let text = std::fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("read OPENING_ATLAS_CORPUS={path}: {error}"));
     let mut reps: BTreeMap<(usize, PositionKey), Vec<HexCoord>> = BTreeMap::new();
+    let mut games_seen = 0usize;
     for line in text.lines() {
         if line.trim().is_empty() {
             continue;
@@ -353,6 +354,10 @@ fn load_corpus_first_n(path: &str, first_n: usize) -> Vec<Candidate> {
             Some(game) => game,
             None => continue,
         };
+        if games_seen == game_count {
+            break;
+        }
+        games_seen += 1;
         let mut state = HexoState::new();
         for (ply, &coord) in game.moves.iter().take(first_n).enumerate() {
             if apply_placement(&mut state, Placement { coord }).is_err() {
@@ -367,6 +372,10 @@ fn load_corpus_first_n(path: &str, first_n: usize) -> Vec<Candidate> {
             reps.entry((prefix, key)).or_insert(canonical_moves);
         }
     }
+    assert_eq!(
+        games_seen, game_count,
+        "not enough parseable corpus games for first-N enumeration"
+    );
     reps.into_iter()
         .map(|((prefix, _key), canonical_moves)| Candidate {
             source: format!("corpus{first_n}:depth{prefix}"),
@@ -569,6 +578,23 @@ fn certified_ids_from_raw(path: &str) -> BTreeSet<String> {
                 .map(str::to_owned)
         })
         .collect()
+}
+
+/// Read every row id from the currently published atlas. This is a scheduling
+/// filter only: the additive expansion must never spend solver time on, or
+/// emit a replacement for, an existing WIN, LOSS, or UNKNOWN row.
+fn all_ids_from_atlas_json(path: &str) -> BTreeSet<String> {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("read OPENING_ATLAS_SKIP_ALL_JSON={path}: {error}"));
+    let doc: serde_json::Value = serde_json::from_str(&text)
+        .unwrap_or_else(|error| panic!("parse OPENING_ATLAS_SKIP_ALL_JSON={path}: {error}"));
+    let rows = doc["rows"].as_array().expect("atlas rows array");
+    let ids = rows
+        .iter()
+        .map(|row| row["id"].as_str().expect("atlas row id").to_owned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(ids.len(), rows.len(), "duplicate ids in skip atlas");
+    ids
 }
 
 fn cert_metrics(cert: &TssCertificate) -> (u32, usize, usize, usize) {
@@ -1352,6 +1378,15 @@ fn solve_candidate(
         let certificate_debug = format!("{cert:?}");
         let cert_fingerprint = fnv1a64(certificate_debug.as_bytes());
         let (win_line, win_line_terminal) = extract_win_line(cert, &state);
+        if result.status == ProofStatus::Win {
+            let (line_legal, terminal_six) =
+                validate_extracted_line(&state, &win_line, cert.claimant);
+            assert!(line_legal, "extracted atlas win line is illegal");
+            assert_eq!(
+                win_line_terminal, terminal_six,
+                "atlas terminal-line flag disagrees with literal replay"
+            );
+        }
         println!(
             "ATLAS_ROW {base} certified=1 claimant={} cert_nodes={} cert_edges={} cert_commutations={} cert_zones={} derived_horizon={} cert_fnv1a64_debug_v1={cert_fingerprint:016x} d6_verified={} d6_mask=0x{d6_mask:03x} win_line_len={} win_line_terminal={} win_line={} moves={}",
             player_name(cert.claimant),
@@ -1421,7 +1456,7 @@ fn opening_atlas_pass1() {
             let path = corpus_path
                 .as_deref()
                 .expect("corpus_first_n mode requires OPENING_ATLAS_CORPUS");
-            (load_corpus_first_n(path, first_n), 0usize)
+            (load_corpus_first_n(path, game_count, first_n), 0usize)
         } else {
             let mut candidates = shallow_candidates();
             let shallow_count = candidates.len();
@@ -1449,6 +1484,14 @@ fn opening_atlas_pass1() {
     } else {
         0
     };
+    let skipped_existing = if let Ok(path) = std::env::var("OPENING_ATLAS_SKIP_ALL_JSON") {
+        let ids = all_ids_from_atlas_json(&path);
+        let before = candidates.len();
+        candidates.retain(|candidate| !ids.contains(&candidate_id(candidate)));
+        before - candidates.len()
+    } else {
+        0
+    };
     // Optional ordering: "desc" puts the deepest (highest win-yield) positions
     // first so a wall-ceiling truncation leaves only low-value shallow residual.
     if std::env::var("OPENING_ATLAS_ORDER").unwrap_or_default() == "desc" {
@@ -1462,7 +1505,7 @@ fn opening_atlas_pass1() {
         .collect::<Vec<_>>();
     let shard_total = shard_indices.len();
     println!(
-        "ATLAS_SETUP schema=1 mode={} corpus={} games={} backtrack={} first_n={} shallow={} candidates={} skipped_certified={} shard_index={} shard_count={} shard_total={} width={} node_ladder={:?} tt_bytes={} relative_horizon={} unbounded_horizon={} wall_seconds={}",
+        "ATLAS_SETUP schema=1 mode={} corpus={} games={} backtrack={} first_n={} shallow={} candidates={} skipped_certified={} skipped_existing={} shard_index={} shard_count={} shard_total={} width={} node_ladder={:?} tt_bytes={} relative_horizon={} unbounded_horizon={} wall_seconds={}",
         if mode.is_empty() { "pass1" } else { &mode },
         corpus_path.as_deref().unwrap_or("NONE"),
         game_count,
@@ -1471,6 +1514,7 @@ fn opening_atlas_pass1() {
         shallow_count,
         total,
         skipped_certified,
+        skipped_existing,
         shard_index,
         shard_count,
         shard_total,

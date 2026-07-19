@@ -58,5 +58,9 @@ target-wsl/
 target-wsl-py/
 packages/hexfield_eq/rust/target-wsl-lifo/
 corpus11_shards/
+corpus11_expand_shards*/
 squeeze9_*/
 squeeze9_*.txt
+# Orchestration scratch (Codex prompts/logs) + local server pid.
+.codex-atlas/
+.atlas-server.pid
