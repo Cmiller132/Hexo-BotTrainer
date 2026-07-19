@@ -8,41 +8,103 @@
  * minted against (root_position_key -> Rust {:?} Debug -> FNV-1a-64), validated
  * to reproduce every stored row id (see selfcheck.mjs).
  */
-import { createBoard, findWin } from "./board.js";
-import { ownerAt, deriveBinding, canonicalId } from "./d6.js";
-import { miniBoardSVG } from "./mini-board.js";
+/* Code + data are cache-busted with a single version token, read from this
+ * module's own URL (index.html stamps atlas.js?v=<commit> at build time). The
+ * board/d6/mini-board modules are loaded DYNAMICALLY below so they inherit the
+ * token — the stale-atlas.js bug (old code bounding the slider to the opening)
+ * can never resurface once the token changes. Under file:// the query is
+ * dropped (local files ignore it; a query can break file resolution). */
+const VER = (() => {
+  try { return new URL(import.meta.url).searchParams.get("v") || ""; }
+  catch (_) { return ""; }
+})();
+const FILE = location.protocol === "file:";
+const VERQ = (!FILE && VER) ? ("?v=" + encodeURIComponent(VER)) : "";
+const vq = base => base + VERQ;                 // base carries no existing query
+
+// Bound at boot by loadModules() — every reference lives inside a function that
+// runs only after boot() awaits the dynamic imports below.
+let createBoard, findWin, ownerAt, deriveBinding, canonicalId, miniBoardSVG;
+async function loadModules() {
+  const [B, D, M] = await Promise.all([
+    import("./board.js" + VERQ),
+    import("./d6.js" + VERQ),
+    import("./mini-board.js" + VERQ),
+  ]);
+  createBoard = B.createBoard; findWin = B.findWin;
+  ownerAt = D.ownerAt; deriveBinding = D.deriveBinding; canonicalId = D.canonicalId;
+  miniBoardSVG = M.miniBoardSVG;
+}
 
 const $ = id => document.getElementById(id);
 
 /* ------------------------------------------------------------------ *
- * Data loading (fetch on a server; JSONP shim for file://)
+ * Data loading — split into a light browse index (up front) and a lazy
+ * per-id detail store (one fetch on first select). Each doc has three forms:
+ * pre-gzipped .json.gz (served fast path, inflated via DecompressionStream),
+ * plain .json (fetch fallback), and a window-global .jsonp.js (file:// shim).
  * ------------------------------------------------------------------ */
-async function loadAtlas() {
-  try {
-    const res = await fetch("data/atlas.json", { cache: "no-store" });
-    if (res.ok) return await res.json();
-    throw new Error("http " + res.status);
-  } catch (_) {
-    // file:// — fetch of a local file is blocked; load the JSONP shim instead.
-    return await new Promise((resolve, reject) => {
-      const s = document.createElement("script");
-      s.src = "data/atlas.jsonp.js";
-      s.onload = () => window.__ATLAS__ ? resolve(window.__ATLAS__) : reject(new Error("shim empty"));
-      s.onerror = () => reject(new Error("could not load atlas data (need a static server, or data/atlas.jsonp.js)"));
-      document.head.appendChild(s);
-    });
+async function loadDoc(base, globalName) {
+  // 1. gzip fast path (a dumb static server won't compress; we ship pre-gzipped)
+  if (!FILE && typeof DecompressionStream !== "undefined") {
+    try {
+      const res = await fetch(vq(base + ".json.gz"), { cache: "no-store" });
+      if (res.ok && res.body) {
+        const txt = await new Response(
+          res.body.pipeThrough(new DecompressionStream("gzip"))).text();
+        return JSON.parse(txt);
+      }
+    } catch (_) { /* fall through */ }
   }
+  // 2. plain json
+  if (!FILE) {
+    try {
+      const res = await fetch(vq(base + ".json"), { cache: "no-store" });
+      if (res.ok) return await res.json();
+    } catch (_) { /* file:// or blocked — fall through to the shim */ }
+  }
+  // 3. file:// — a bare fetch of a local file is blocked; load the JSONP shim.
+  return await new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = vq(base + ".jsonp.js");
+    s.onload = () => window[globalName]
+      ? resolve(window[globalName])
+      : reject(new Error("shim empty (" + globalName + ")"));
+    s.onerror = () => reject(new Error(
+      "could not load " + base + " (need a static server, or " + base + ".jsonp.js)"));
+    document.head.appendChild(s);
+  });
+}
+
+async function loadIndex() { return loadDoc("data/atlas-index", "__ATLAS_INDEX__"); }
+
+/* Lazy detail store: fetched once per session on the first row select, then
+ * memoized. Returns a Map(id -> detailObj). */
+let _detailsPromise = null, DETAILS = null;
+function ensureDetails() {
+  if (!_detailsPromise)
+    _detailsPromise = loadDoc("data/atlas-details", "__ATLAS_DETAILS__")
+      .then(obj => { DETAILS = new Map(Object.entries(obj)); return DETAILS; });
+  return _detailsPromise;
+}
+// Merge a row's lazy detail fields onto it (idempotent). renderDetails/setupScrub
+// read these; before the merge they're absent and both degrade gracefully.
+function mergeDetails(row) {
+  if (row._merged) return;
+  const d = DETAILS && DETAILS.get(row.id);
+  if (d) { Object.assign(row, d); row._merged = true; }
 }
 
 /* Human-game usage counts (D6-collapsed), keyed by canonical atlas id.
- * Optional: degrades to "no counts" (badge hidden, freq sort inert) if absent
- * or under file:// where a bare fetch is blocked. */
+ * Served as the slim, pre-gzipped frequencies-web doc (counts only; the full
+ * frequencies.json with its unused by_depth map never hits the wire). Uses the
+ * same gzip / plain / jsonp loadDoc path as the atlas docs, so it is compact,
+ * cache-busted, AND works under file://. Optional: degrades to "no counts"
+ * (badge hidden, freq sort inert) if the doc is absent. */
 async function loadFrequencies() {
   try {
-    const res = await fetch("data/frequencies.json", { cache: "no-store" });
-    if (res.ok) return await res.json();
-  } catch (_) { /* file:// or missing — degrade gracefully */ }
-  return null;
+    return await loadDoc("data/frequencies-web", "__ATLAS_FREQ__");
+  } catch (_) { /* missing — degrade gracefully */ return null; }
 }
 
 /* ------------------------------------------------------------------ *
@@ -69,28 +131,19 @@ let scrubK = 0;              // current slider position (stones shown)
 let playTimer = null;        // auto-advance interval id, or null when paused
 const PLAY_MS = 700;         // autoplay step interval
 
-/* ---- lazy mini-board icons (IntersectionObserver, smooth at ~12k rows) ---- */
+/* ---- mini-board icons — built on demand for the visible window only ---- */
 const MINI_PX = 44;
-const FREQ_FIELD = "freq";      // corpus usage count attached per row from frequencies.json
-const _miniCache = new Map();   // row.id -> svg string (survives re-filters)
-let _miniObserver = null;
-
-function ensureMiniObserver() {
-  if (_miniObserver) return _miniObserver;
-  _miniObserver = new IntersectionObserver(entries => {
-    for (const e of entries) {
-      if (!e.isIntersecting) continue;
-      const slot = e.target;
-      _miniObserver.unobserve(slot);
-      if (slot.firstChild) continue;                 // already filled
-      const row = INDEX.get(slot.dataset.id);
-      if (!row) continue;
-      let svg = _miniCache.get(row.id);
-      if (!svg) { svg = miniBoardSVG(row.moves, MINI_PX); _miniCache.set(row.id, svg); }
-      slot.innerHTML = svg;
-    }
-  }, { root: $("atlasList"), rootMargin: "300px 0px" });  // prefetch a screen ahead
-  return _miniObserver;
+const FREQ_FIELD = "freq";        // corpus usage count attached per row from frequencies.json
+const _miniCache = new Map();     // row.id -> svg string (insertion-ordered LRU)
+const MINI_CACHE_MAX = 500;       // cap so scrolling 35k unknown rows can't retain 35k SVGs
+function miniSVGFor(row) {
+  let svg = _miniCache.get(row.id);
+  if (svg) return svg;
+  svg = miniBoardSVG(row.moves, MINI_PX);
+  _miniCache.set(row.id, svg);
+  if (_miniCache.size > MINI_CACHE_MAX)
+    _miniCache.delete(_miniCache.keys().next().value);   // evict oldest
+  return svg;
 }
 
 function toStones(moves) {
@@ -193,11 +246,7 @@ function rowMatches(row, f) {
   if (f.verdict === "unknown" && row.status !== "UNKNOWN") return false;
   if (f.verdict === "certified" && row.certified !== 1) return false;
   if (f.source && row.source.split(":")[0] !== f.source) return false;
-  if (f.q) {
-    const hay = (row.id + " " + row.source + " " + row.placements + " " +
-      row.moves.map(m => m.join(",")).join(" ")).toLowerCase();
-    if (!hay.includes(f.q)) return false;
-  }
+  if (f.q && !row._hay.includes(f.q)) return false;   // _hay precomputed once at boot
   return true;
 }
 
@@ -220,42 +269,107 @@ function sortRows(rows, mode) {
 }
 function cmp_freq_fallback(a, b) { return (_freq(b) - _freq(a)) || (b.placements - a.placements); }
 
-function renderList() {
-  const f = currentFilter();
-  const rows = sortRows(ATLAS.rows.filter(r => rowMatches(r, f)), currentSort());
+/* ---- virtualized browse list -----------------------------------------------
+ * Rows are a uniform height, so the list renders only the rows intersecting the
+ * scroll viewport into a small recycled node pool absolutely positioned inside a
+ * full-height spacer. Filter/sort/search recompute the id array (VIEW) once; a
+ * rAF-throttled scroll repaints the window. This keeps the all/unknown tiles
+ * (35k+ rows) from ever building 35k DOM nodes. */
+const ROW_PITCH = 60;             // 58px row (44px mini + 6px×2 pad + 1px×2 border) + 2px gap
+const OVERSCAN = 6;               // rows rendered beyond the viewport each side
+let VIEW = [];                    // filtered+sorted rows currently browsable
+let _pool = [];                   // reusable .arow buttons
+let _spacer = null;               // full-height inner scroll spacer
+let _win = { a: -1, b: -1 };      // last rendered [first, last) window
+let _scrollRAF = 0;
+
+function ensureListDOM() {
+  if (_spacer) return;
   const list = $("atlasList");
-  const ob = ensureMiniObserver();
-  ob.disconnect();                                   // drop stale targets from prior render
   list.textContent = "";
-  $("filterCount").textContent = `${rows.length} of ${ATLAS.rows.length} shown`;
-  for (const row of rows) {
-    const v = verdictClass(row);
-    const freq = row[FREQ_FIELD];
-    // primary browse fact = who wins; UNKNOWN just states the verdict
-    const badge = row.status === "WIN" ? `${row.claimant} WIN`
-      : row.status === "LOSS" ? `${row.side} LOSS`
-      : row.status;
-    const b = document.createElement("button");
-    b.className = "arow" + (row.id === selectedId ? " sel" : "");
-    b.dataset.id = row.id;
-    b.innerHTML =
-      `<span class="mini-slot" data-id="${row.id}"></span>` +
-      `<span class="a-main">` +
-        `<span class="a-label">${sourceLabel(row)}</span>` +
-        `<span class="a-sub">${row.placements}st · ×${row.orbit}</span>` +
-      `</span>` +
-      `<span class="a-right">` +
-        `<span class="a-badge ${v}">${badge}</span>` +
-        (freq ? `<span class="a-freq">used ${freq.toLocaleString()}×</span>` : ``) +
-      `</span>`;
-    list.appendChild(b);
-    ob.observe(b.firstElementChild);                 // the .mini-slot
+  list.style.display = "block";       // was flex column; we position rows ourselves
+  list.style.position = "relative";
+  _spacer = document.createElement("div");
+  _spacer.style.position = "relative";
+  _spacer.style.width = "100%";
+  list.appendChild(_spacer);
+  list.addEventListener("scroll", () => {
+    if (_scrollRAF) return;
+    _scrollRAF = requestAnimationFrame(() => { _scrollRAF = 0; renderWindow(); });
+  }, { passive: true });
+}
+
+function buildRowNode() {
+  const b = document.createElement("button");
+  b.className = "arow";
+  b.style.position = "absolute";
+  b.style.left = "0";
+  b.style.right = "0";
+  b.innerHTML =
+    `<span class="mini-slot"></span>` +
+    `<span class="a-main"><span class="a-label"></span><span class="a-sub"></span></span>` +
+    `<span class="a-right"><span class="a-badge"></span><span class="a-freq"></span></span>`;
+  b._slot = b.querySelector(".mini-slot");
+  b._label = b.querySelector(".a-label");
+  b._sub = b.querySelector(".a-sub");
+  b._badge = b.querySelector(".a-badge");
+  b._freq = b.querySelector(".a-freq");
+  return b;
+}
+
+function fillRowNode(b, row, top) {
+  b.style.top = top + "px";
+  b.dataset.id = row.id;
+  b.classList.toggle("sel", row.id === selectedId);
+  b._label.textContent = sourceLabel(row);
+  b._sub.textContent = `${row.placements}st · ×${row.orbit}`;
+  b._badge.className = "a-badge " + verdictClass(row);
+  // primary browse fact = who wins; UNKNOWN just states the verdict
+  b._badge.textContent = row.status === "WIN" ? `${row.claimant} WIN`
+    : row.status === "LOSS" ? `${row.side} LOSS`
+    : row.status;
+  const freq = row[FREQ_FIELD];
+  b._freq.textContent = freq ? `used ${freq.toLocaleString()}×` : "";
+  if (b._slot._id !== row.id) {          // only rebuild the SVG when the row changes
+    b._slot.innerHTML = miniSVGFor(row);
+    b._slot._id = row.id;
   }
 }
 
+function renderWindow() {
+  if (!_spacer) return;
+  const list = $("atlasList");
+  const vh = list.clientHeight || 400;
+  const first = Math.max(0, Math.floor(list.scrollTop / ROW_PITCH) - OVERSCAN);
+  const last = Math.min(VIEW.length, Math.ceil((list.scrollTop + vh) / ROW_PITCH) + OVERSCAN);
+  if (first === _win.a && last === _win.b) return;
+  _win = { a: first, b: last };
+  const need = last - first;
+  while (_pool.length < need) { const b = buildRowNode(); _pool.push(b); _spacer.appendChild(b); }
+  for (let i = 0; i < _pool.length; i++) {
+    const b = _pool[i], idx = first + i;
+    if (idx < last) { b.style.display = ""; fillRowNode(b, VIEW[idx], idx * ROW_PITCH); }
+    else { b.style.display = "none"; b.dataset.id = ""; }
+  }
+}
+
+function renderList() {
+  const f = currentFilter();
+  VIEW = sortRows(ATLAS.rows.filter(r => rowMatches(r, f)), currentSort());
+  $("filterCount").textContent = `${VIEW.length} of ${ATLAS.rows.length} shown`;
+  ensureListDOM();
+  _spacer.style.height = (VIEW.length * ROW_PITCH) + "px";
+  $("atlasList").scrollTop = 0;
+  _win = { a: -1, b: -1 };
+  renderWindow();
+}
+
+// Only the small visible pool exists in the DOM; toggle sel across it.
 function markSelection() {
-  for (const el of $("atlasList").querySelectorAll(".arow"))
-    el.classList.toggle("sel", el.dataset.id === selectedId);
+  for (const b of _pool) {
+    if (b.style.display === "none") continue;
+    b.classList.toggle("sel", b.dataset.id === selectedId);
+  }
 }
 
 /* ---- selecting / rendering a stored position ---- */
@@ -266,19 +380,10 @@ function setSideFrame(side) {
   else if (side === "P1" || side === 1) f.classList.add("side-p1");
 }
 
-function selectRow(id, reframe) {
-  const row = INDEX.get(id);
-  if (!row) return;
-  selectedId = id;
-  markSelection();
-
-  board.setLegal(null);            // read-only in browse
-  setupScrub(row);                 // move-history slider: opening + forced win
-  renderScrub(totalN);             // draw the full line (terminal frames the six)
-  if (reframe) board.resetView();
-  setSideFrame(row.side);
-
-  // readout strip — name the OUTCOME honestly (claimant is always the winner)
+// readout strip — name the OUTCOME honestly (claimant is always the winner).
+// winLineArr reflects the CURRENT setupScrub: empty before details merge (shows
+// "loading…"), the validated forced line after (shows "forces the win in N →").
+function renderReadout(row) {
   let verdict;
   if (row.status === "UNKNOWN")
     verdict = "UNKNOWN — no certificate within pass bounds";
@@ -290,12 +395,47 @@ function selectRow(id, reframe) {
 
   let sub = `<b>${sourceLabel(row)}</b> · ${row.placements} stones · ${row.side} to move · ${row.phase}`;
   if (row.status === "WIN") {
-    sub += winLineArr.length
-      ? ` · <span class="ro-win">${row.claimant} forces the win in ${winLineArr.length} placements &rarr;</span>`
-      : ` · <span class="ro-pending">forced win certified for ${row.claimant}; winning line: computing (not in this snapshot)</span>`;
+    if (winLineArr.length)
+      sub += ` · <span class="ro-win">${row.claimant} forces the win in ${winLineArr.length} placements &rarr;</span>`;
+    else if (row._merged)   // details loaded, but this entry carries no recorded line (e.g. legacy human wins)
+      sub += ` · <span class="ro-pending">forced win certified for ${row.claimant} · winning line not recorded for this entry</span>`;
+    else                    // details still in flight
+      sub += ` · <span class="ro-pending">forced win certified for ${row.claimant}; loading the winning line&hellip;</span>`;
   }
   $("roT").innerHTML = sub;
+}
 
+function markDetailPending() {
+  const body = $("detailBody");
+  body.className = "mod-status";
+  body.textContent = "loading certificate…";
+}
+
+/* Select a row. Detail fields (win_line + the whole certificate readout, plus
+ * cap/horizon/nodes) live in the lazy store, so we paint the opening + a pending
+ * state immediately, then await the (once-per-session) details fetch and re-run
+ * the scrub — this is what extends the slider through the forced win. The
+ * selectedId guard drops a stale fetch if a newer selection superseded us. */
+async function selectRow(id, reframe) {
+  const row = INDEX.get(id);
+  if (!row) return;
+  selectedId = id;
+  markSelection();
+
+  board.setLegal(null);            // read-only in browse
+  setupScrub(row);                 // opening-only for now (win_line still absent → graceful)
+  renderScrub(totalN);
+  if (reframe) board.resetView();
+  setSideFrame(row.side);
+  renderReadout(row);
+  markDetailPending();
+
+  await ensureDetails();
+  if (selectedId !== id) return;   // a newer selection won the race
+  mergeDetails(row);               // win_line + cert fields now on the row
+  setupScrub(row);                 // re-run: slider now extends through the forced win
+  renderScrub(totalN);
+  renderReadout(row);              // "forces the win in N placements →"
   renderDetails(row);
 }
 
@@ -626,8 +766,8 @@ function clearStage() {
   $("placeChip").classList.remove("show");
 }
 
-function lookupVerdict() {
-  const { id, binding } = canonicalId(buildMoves);
+async function lookupVerdict() {
+  const { id } = canonicalId(buildMoves);
   const row = INDEX.get(id);
   const big = $("verdictBig"), cap = $("verdictCap"), st = $("testStatus");
 
@@ -647,20 +787,21 @@ function lookupVerdict() {
       : `${row.side} is lost · ${row.claimant} wins`;
     st.textContent = `Strict TssVerifier-accepted · source ${sourceLabel(row)}. Selecting its atlas row.`;
     st.className = "mod-status ok";
-    // also surface the matching row's details + select it in the list
-    selectedId = row.id;
-    markSelection();
-    renderDetails(row);
   } else {
     big.textContent = "UNKNOWN";
     big.className = "value-big";
     cap.textContent = "in atlas · no certificate";
     st.textContent = "This root is in the atlas but was left UNKNOWN within pass bounds. Not a draw or balance claim.";
     st.className = "mod-status";
-    selectedId = row.id;
-    markSelection();
-    renderDetails(row);
   }
+  // surface the matching row's details (cert fields are lazy — await the store)
+  selectedId = row.id;
+  markSelection();
+  markDetailPending();
+  await ensureDetails();
+  if (selectedId !== row.id) return;
+  mergeDetails(row);
+  renderDetails(row);
 }
 
 /* ------------------------------------------------------------------ *
@@ -711,14 +852,20 @@ function selfCheck() {
 
 async function boot() {
   try {
-    ATLAS = await loadAtlas();
+    await loadModules();
+    ATLAS = await loadIndex();
   } catch (e) {
     document.querySelector(".atlas-main").insertAdjacentHTML("afterbegin",
       `<div class="vocab-note" style="border-left-color:#5c2f2c;color:var(--p1-soft)">Could not load atlas data: ${e.message}. ` +
-      `Serve this folder over HTTP (e.g. <b>python -m http.server</b>) or generate data/atlas.jsonp.js.</div>`);
+      `Serve this folder over HTTP (e.g. <b>python -m http.server</b>) or generate data/atlas-index.jsonp.js.</div>`);
     return;
   }
   INDEX = new Map(ATLAS.rows.map(r => [r.id, r]));
+
+  // Precompute the search haystack once (was rebuilt per keystroke over 38k rows).
+  for (const r of ATLAS.rows)
+    r._hay = (r.id + " " + r.source + " " + r.placements + " " +
+      r.moves.map(m => m.join(",")).join(" ")).toLowerCase();
 
   // Attach human-game usage counts (D6-collapsed) onto each row, keyed by id.
   const FREQ = await loadFrequencies();
@@ -734,11 +881,12 @@ async function boot() {
   fillSummary();
   fillSharp();
   buildSourceFilter();
-  // land the browse list on the 269 proven openings, not a wall of UNKNOWN
+  // land the browse list on the proven openings, not a wall of UNKNOWN
   $("fVerdict").value = "certified";
   renderList();
 
-  // one debounced search + one delegated click for the whole (up to ~12.8k) list
+  // one debounced search + one delegated click for the whole (37.9k-row) list;
+  // the list is virtualized, so a filter/search repaints only the visible window
   let searchTimer = null;
   $("fSearch").addEventListener("input", () => {
     clearTimeout(searchTimer);
@@ -777,9 +925,13 @@ async function boot() {
   $("clearBtn").addEventListener("click", clearBuild);
 
   // land on a shallow, frequently-played certified WIN so the first frame is a
-  // proven line that scrubs to six-in-a-row (not the 78-stone endgame).
+  // proven line that scrubs to six-in-a-row (not the 78-stone endgame). PREFER a
+  // win whose forced line actually completes a six (win_line_terminal === 1,
+  // promoted into the index) — many PV lines end at a proven-won node without the
+  // six placed, and opening on one of those looks like "the win isn't shown".
   const wins = ATLAS.rows.filter(r => r.status === "WIN");
-  const first = wins.slice().sort((a, b) =>
+  const sixWins = wins.filter(r => r.win_line_terminal === 1);
+  const first = (sixWins.length ? sixWins : wins).slice().sort((a, b) =>
     (a.placements - b.placements) || (_freq(b) - _freq(a)) ||
     (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))[0] ||
     sortRows(ATLAS.rows, "freq")[0];

@@ -1,4 +1,4 @@
-import json, os
+import json, os, gzip, re, hashlib
 
 BASE = r"E:/Hexo-BotTrainer-hexgt/.claude/worktrees/opening-atlas"
 RAW_PASS1 = os.path.join(BASE, "OPENING_ATLAS_PASS1_RAW.txt")
@@ -15,9 +15,41 @@ RAW_DEEP9 = os.path.join(BASE, "OPENING_ATLAS_CORPUS9_DEEP_RAW.txt")
 RAW_DEEP7 = os.path.join(BASE, "OPENING_ATLAS_CORPUS7_DEEP_RAW.txt")
 CORPUS_LAYERS = next(([p] for p in (RAW_DEEP11, RAW_DEEP9, RAW_DEEP7) if os.path.exists(p)), [])
 OUT_DIR = os.path.join(BASE, "atlas-web", "data")
-OUT = os.path.join(OUT_DIR, "atlas.json")
-OUT_JSONP = os.path.join(OUT_DIR, "atlas.jsonp.js")
+OUT = os.path.join(OUT_DIR, "atlas.json")           # full doc, kept for selfcheck.mjs
+OUT_JSONP = os.path.join(OUT_DIR, "atlas.jsonp.js")  # legacy shim — removed on build
+IDX_BASE = os.path.join(OUT_DIR, "atlas-index")      # light browse index (loaded up front)
+DET_BASE = os.path.join(OUT_DIR, "atlas-details")    # per-id detail store (lazy, one fetch)
+# Served frequencies: a SLIM (counts-only) gzipped derivative of the full
+# frequencies.json emitted by build_frequencies.mjs. The site only reads
+# .counts / .total_games, so by_depth (~half the file) is dropped from the wire
+# and the doc is pre-gzipped like the other split docs. frequencies.json itself
+# is left untouched (kept for provenance / external analysis).
+FREQ_SRC = os.path.join(OUT_DIR, "frequencies.json")
+FREQ_WEB_BASE = os.path.join(OUT_DIR, "frequencies-web")
+# UI code the cache-bust token must cover (any edit here must re-fetch, not run a
+# stale cached module/stylesheet). Keyed alongside the generated data in the hash.
+CODE_FILES = [os.path.join(BASE, "atlas-web", n)
+              for n in ("atlas.js", "board.js", "d6.js", "mini-board.js", "style.css")]
+INDEX_HTML = os.path.join(BASE, "atlas-web", "index.html")
 COMMIT = "db96d1b136021212ef32e1f1fdf747bc2262e1c7"
+
+# The light index carries only the fields the browse list / sort / search /
+# sharp card / build-lookup / mini-board / canonicalId touch synchronously.
+# win_line_terminal is the ONE detail-tier field promoted into the index: it lets
+# boot() pick a first showcase win whose forced line actually completes a six
+# (terminal==1) WITHOUT first paying the lazy details fetch. It is emitted only
+# for the rows that carry it (certified wins) — see _index_row below — so the
+# 35k UNKNOWN rows never gain a null field.
+INDEX_FIELDS = ["id", "moves", "status", "side", "claimant",
+                "placements", "orbit", "source", "certified", "phase",
+                "win_line_terminal"]
+# The lazy detail store holds every field renderDetails()/setupScrub() read that
+# is NOT already in the index. expansions/ms/tt_bytes/peak_tt_bytes are dropped
+# from both split files (the UI never reads them); they remain in atlas.json.
+DETAIL_FIELDS = ["win_line", "win_line_len", "win_line_terminal",
+                 "cap", "horizon", "derived_horizon", "nodes",
+                 "cert_nodes", "cert_edges", "cert_commutations", "cert_zones",
+                 "cert_fnv1a64_debug_v1", "d6_verified", "d6_mask"]
 
 INT_FIELDS = {"source_prefix","placements","orbit","cap","horizon","nodes",
               "expansions","tt_bytes","peak_tt_bytes","certified","cert_nodes",
@@ -214,13 +246,102 @@ doc = {
     "rows": rows,
 }
 
+# ---- Split index / details docs ----
+def _index_row(r):
+    d = {}
+    for k in INDEX_FIELDS:
+        if k not in r:
+            continue
+        # keep the index lean: only wins carry win_line_terminal (0/1); drop the
+        # None it holds on every UNKNOWN/LOSS row so it costs nothing there.
+        if k == "win_line_terminal" and r[k] is None:
+            continue
+        d[k] = r[k]
+    return d
+index_rows = [_index_row(r) for r in rows]
+index_doc = {
+    "schema": doc["schema"],
+    "generated_from": doc["generated_from"],
+    "census": doc["census"],
+    "summary": doc["summary"],
+    "corpus7": doc["corpus7"],
+    "sharp_examples": doc["sharp_examples"],
+    "rows": index_rows,
+}
+details = {r["id"]: {k: r[k] for k in DETAIL_FIELDS if k in r} for r in rows}
+
+def _compact(obj):
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+def write_split(base, obj, global_name):
+    """Emit <base>.json (plain), <base>.json.gz (served fast path, inflated in
+    JS via DecompressionStream), and <base>.jsonp.js (window global — the
+    file:// fallback). All compact. Returns (raw_bytes, gz_bytes)."""
+    txt = _compact(obj)
+    raw = txt.encode("utf-8")
+    gz = gzip.compress(raw, 9)
+    with open(base + ".json", "wb") as f:
+        f.write(raw)
+    with open(base + ".json.gz", "wb") as f:
+        f.write(gz)
+    with open(base + ".jsonp.js", "w", encoding="utf-8") as f:
+        f.write("window." + global_name + " = " + txt + ";\n")
+    return len(raw), len(gz)
+
 os.makedirs(OUT_DIR, exist_ok=True)
+# Full doc: kept ONLY for selfcheck.mjs (id round-trip + counts). Compact now
+# (was indent=2); selfcheck is whitespace-agnostic. The browser never fetches it.
 with open(OUT, "w", encoding="utf-8") as f:
-    json.dump(doc, f, ensure_ascii=False, indent=2)
-with open(OUT_JSONP, "w", encoding="utf-8") as f:
-    f.write("window.__ATLAS__ = ")
-    json.dump(doc, f, ensure_ascii=False, indent=2)
-    f.write(";\n")
+    json.dump(doc, f, ensure_ascii=False, separators=(",", ":"))
+# Old monolithic shim is superseded by the two split shims — remove it so a
+# stale pre-win_line copy can never be served under the old filename.
+if os.path.exists(OUT_JSONP):
+    os.remove(OUT_JSONP)
+
+idx_raw, idx_gz = write_split(IDX_BASE, index_doc, "__ATLAS_INDEX__")
+det_raw, det_gz = write_split(DET_BASE, details, "__ATLAS_DETAILS__")
+atlas_bytes = os.path.getsize(OUT)
+
+# Slim served frequencies (counts only), pre-gzipped. Derived from the full
+# frequencies.json if present; the site degrades gracefully when it is absent.
+freq_web_raw = freq_web_gz = 0
+if os.path.exists(FREQ_SRC):
+    with open(FREQ_SRC, encoding="utf-8") as f:
+        _fq = json.load(f)
+    freq_web = {
+        "schema": _fq.get("schema", 1),
+        "total_games": _fq.get("total_games"),
+        "generated_from": _fq.get("generated_from"),
+        "counts": _fq.get("counts", {}),
+    }
+    freq_web_raw, freq_web_gz = write_split(FREQ_WEB_BASE, freq_web, "__ATLAS_FREQ__")
+
+# Content-derived cache-bust token: sha1 over the served data (index + details +
+# slim frequencies) AND the UI code modules. ANY change to code or data flips the
+# token, so the browser can never re-run a stale atlas.js/board.js/etc. (COMMIT
+# stays the *provenance* stamp — the solver commit the certificates were minted
+# against — shown as "minted from" in the census; it is NOT a cache key.)
+def _sha1_files(paths):
+    h = hashlib.sha1()
+    for p in paths:
+        if os.path.exists(p):
+            with open(p, "rb") as fh:
+                h.update(fh.read())
+    return h.hexdigest()
+VERSION = _sha1_files(
+    [IDX_BASE + ".json", DET_BASE + ".json"] +
+    ([FREQ_WEB_BASE + ".json"] if freq_web_raw else []) +
+    CODE_FILES)
+
+# Stamp the cache-busting version token into the served atlas.js URL so a
+# rebuilt site can never re-run a stale (pre-win_line) atlas.js module. The
+# dynamically-imported board/d6/mini-board modules inherit the same token from
+# atlas.js's own URL, so one stamp busts the whole module graph.
+_html = open(INDEX_HTML, encoding="utf-8").read()
+_new_html = re.sub(r'src="atlas\.js(?:\?v=[^"]*)?"', f'src="atlas.js?v={VERSION}"', _html)
+_new_html = re.sub(r'href="style\.css(?:\?v=[^"]*)?"', f'href="style.css?v={VERSION}"', _new_html)
+if _new_html != _html:
+    open(INDEX_HTML, "w", encoding="utf-8").write(_new_html)
 
 print(json.dumps({
     "pass1_rows": len(pass1_rows),
@@ -235,5 +356,13 @@ print(json.dumps({
     "win_line_wins": len(win_line_wins),
     "win_line_terminal": win_line_terminal,
     "corpus7_by_depth": {str(k): corpus7_by_depth[k] for k in sorted(corpus7_by_depth)},
-    "out": OUT, "out_jsonp": OUT_JSONP,
+    "out_atlas_json_bytes": atlas_bytes,
+    "index_raw_bytes": idx_raw, "index_gz_bytes": idx_gz,
+    "details_raw_bytes": det_raw, "details_gz_bytes": det_gz,
+    "freq_web_raw_bytes": freq_web_raw, "freq_web_gz_bytes": freq_web_gz,
+    "initial_wire_gz_bytes": idx_gz + freq_web_gz,   # up-front, before first select
+    "provenance_commit": COMMIT,
+    "cache_bust_version": VERSION,
+    "files": [OUT, IDX_BASE + ".json(.gz|p.js)", DET_BASE + ".json(.gz|p.js)",
+              FREQ_WEB_BASE + ".json(.gz|p.js)"],
 }, indent=2))
