@@ -35,8 +35,9 @@
     <h1>Opening Atlas <span class="cont">— certified verdicts explorer</span></h1>
     <p class="lede">A proven partial atlas of Hexo openings. Each entry is a root position that the
       solver attempted and an <em>independent strict verifier</em> either certified (WIN / LOSS) or left
-      UNKNOWN. Browse the certified representatives, replay them on the board, or build your own opening
-      and look up its canonical D6 verdict.</p>
+      UNKNOWN. Openings are <b>de-duplicated by D6 symmetry</b> and <b>ranked by human-game frequency</b>
+      (most-played first), so the top of the list is what people actually play. Browse the representatives,
+      replay them on the board, or build your own opening and look up its canonical D6 verdict.</p>
   </div>
 
   <!-- summary counts -->
@@ -104,6 +105,11 @@
           </select>
           <select id="fSource">
             <option value="">all sources</option>
+          </select>
+          <select id="fSort" aria-label="Sort order">
+            <option value="freq">sort · most used</option>
+            <option value="verdict">sort · verdict</option>
+            <option value="depth">sort · depth</option>
           </select>
         </div>
         <div class="filter-count" id="filterCount">—</div>

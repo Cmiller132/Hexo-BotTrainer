@@ -10,6 +10,7 @@
  */
 import { createBoard, findWin } from "./board.js";
 import { ownerAt, deriveBinding, canonicalId } from "./d6.js";
+import { miniBoardSVG } from "./mini-board.js";
 
 const $ = id => document.getElementById(id);
 
@@ -33,6 +34,17 @@ async function loadAtlas() {
   }
 }
 
+/* Human-game usage counts (D6-collapsed), keyed by canonical atlas id.
+ * Optional: degrades to "no counts" (badge hidden, freq sort inert) if absent
+ * or under file:// where a bare fetch is blocked. */
+async function loadFrequencies() {
+  try {
+    const res = await fetch("data/frequencies.json", { cache: "no-store" });
+    if (res.ok) return await res.json();
+  } catch (_) { /* file:// or missing — degrade gracefully */ }
+  return null;
+}
+
 /* ------------------------------------------------------------------ *
  * App
  * ------------------------------------------------------------------ */
@@ -44,6 +56,31 @@ let buildMoves = [];        // [[q,r],...] placed in build mode
 let selectedId = null;
 let lastPlaceT = 0;
 let staged = null;
+let TOTAL_GAMES = null;      // corpus denominator (from frequencies.json)
+
+/* ---- lazy mini-board icons (IntersectionObserver, smooth at ~12k rows) ---- */
+const MINI_PX = 44;
+const FREQ_FIELD = "freq";      // corpus usage count attached per row from frequencies.json
+const _miniCache = new Map();   // row.id -> svg string (survives re-filters)
+let _miniObserver = null;
+
+function ensureMiniObserver() {
+  if (_miniObserver) return _miniObserver;
+  _miniObserver = new IntersectionObserver(entries => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      const slot = e.target;
+      _miniObserver.unobserve(slot);
+      if (slot.firstChild) continue;                 // already filled
+      const row = INDEX.get(slot.dataset.id);
+      if (!row) continue;
+      let svg = _miniCache.get(row.id);
+      if (!svg) { svg = miniBoardSVG(row.moves, MINI_PX); _miniCache.set(row.id, svg); }
+      slot.innerHTML = svg;
+    }
+  }, { root: $("atlasList"), rootMargin: "300px 0px" });  // prefetch a screen ahead
+  return _miniObserver;
+}
 
 function toStones(moves) {
   return moves.map(([q, r], i) => ({ q, r, color: ownerAt(i) }));
@@ -102,11 +139,6 @@ function verdictClass(row) {
   if (row.status === "LOSS") return "loss";
   return "unknown";
 }
-function glyphClass(row) {
-  if (row.status === "WIN") return "gh0";
-  if (row.status === "LOSS") return "gh1";
-  return "ghx";
-}
 function sourceLabel(row) {
   // "human:<hash>:winner=-1" -> "human <hash>"; "shallow:empty" -> "shallow empty"
   const parts = row.source.split(":");
@@ -134,6 +166,11 @@ function currentFilter() {
   };
 }
 
+function currentSort() {
+  const el = $("fSort");
+  return (el && el.value) || "freq";
+}
+
 function rowMatches(row, f) {
   if (f.verdict === "win" && row.status !== "WIN") return false;
   if (f.verdict === "loss" && row.status !== "LOSS") return false;
@@ -147,31 +184,52 @@ function rowMatches(row, f) {
   return true;
 }
 
-// Sort: certified first (WIN then LOSS), then by placements desc.
-function sortRows(rows) {
+// Sort orders for the browse list. Default "freq" ranks by human-game usage
+// (most-played openings first); ties break to the deeper/canonical row so the
+// depth-1 origin (6902) precedes the empty root (6902), matching the census.
+const _freq = r => (r[FREQ_FIELD] || 0);
+function sortRows(rows, mode) {
+  mode = mode || "freq";
   const rank = r => r.status === "WIN" ? 0 : r.status === "LOSS" ? 1 : 2;
-  return rows.slice().sort((a, b) => (rank(a) - rank(b)) || (b.placements - a.placements));
+  const cmp = {
+    freq: (a, b) => (_freq(b) - _freq(a)) || (b.placements - a.placements) ||
+      (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+    verdict: (a, b) => (rank(a) - rank(b)) || (b.placements - a.placements) ||
+      (_freq(b) - _freq(a)),
+    depth: (a, b) => (b.placements - a.placements) || (_freq(b) - _freq(a)) ||
+      (rank(a) - rank(b)),
+  }[mode] || cmp_freq_fallback;
+  return rows.slice().sort(cmp);
 }
+function cmp_freq_fallback(a, b) { return (_freq(b) - _freq(a)) || (b.placements - a.placements); }
 
 function renderList() {
   const f = currentFilter();
-  const rows = sortRows(ATLAS.rows.filter(r => rowMatches(r, f)));
+  const rows = sortRows(ATLAS.rows.filter(r => rowMatches(r, f)), currentSort());
   const list = $("atlasList");
+  const ob = ensureMiniObserver();
+  ob.disconnect();                                   // drop stale targets from prior render
   list.textContent = "";
   $("filterCount").textContent = `${rows.length} of ${ATLAS.rows.length} shown`;
   for (const row of rows) {
     const v = verdictClass(row);
+    const freq = row[FREQ_FIELD];
     const b = document.createElement("button");
     b.className = "arow" + (row.id === selectedId ? " sel" : "");
     b.dataset.id = row.id;
     b.innerHTML =
-      `<svg class="g-glyph" width="10" height="11" viewBox="-5.5 -5.5 11 11" aria-hidden="true">` +
-      `<polygon class="${glyphClass(row)}" points="4.33,-2.5 4.33,2.5 0,5 -4.33,2.5 -4.33,-2.5 0,-5"/></svg>` +
-      `<span class="a-label">${sourceLabel(row)}</span>` +
-      `<span class="a-sub">${row.placements}st · ×${row.orbit}</span>` +
-      `<span class="a-badge ${v}">${row.status}</span>`;
+      `<span class="mini-slot" data-id="${row.id}"></span>` +
+      `<span class="a-main">` +
+        `<span class="a-label">${sourceLabel(row)}</span>` +
+        `<span class="a-sub">${row.placements}st · ×${row.orbit}</span>` +
+      `</span>` +
+      `<span class="a-right">` +
+        `<span class="a-badge ${v}">${row.status}</span>` +
+        (freq ? `<span class="a-freq">used ${freq.toLocaleString()}×</span>` : ``) +
+      `</span>`;
     b.addEventListener("click", () => selectRow(row.id, true));
     list.appendChild(b);
+    ob.observe(b.firstElementChild);                 // the .mini-slot
   }
 }
 
@@ -467,6 +525,15 @@ async function boot() {
   }
   INDEX = new Map(ATLAS.rows.map(r => [r.id, r]));
 
+  // Attach human-game usage counts (D6-collapsed) onto each row, keyed by id.
+  const FREQ = await loadFrequencies();
+  const counts = (FREQ && FREQ.counts) || {};
+  TOTAL_GAMES = FREQ ? FREQ.total_games : null;
+  for (const r of ATLAS.rows) {
+    const c = counts[r.id];
+    if (c != null) r[FREQ_FIELD] = c;                // absent (deep/off-scope) => badge hidden
+  }
+
   initBoard();
   fillSummary();
   fillSharp();
@@ -476,6 +543,7 @@ async function boot() {
   $("fSearch").addEventListener("input", renderList);
   $("fVerdict").addEventListener("change", renderList);
   $("fSource").addEventListener("change", renderList);
+  $("fSort").addEventListener("change", renderList);
 
   for (const btn of $("modeSeg").querySelectorAll("button"))
     btn.addEventListener("click", () => setMode(btn.dataset.mode));
@@ -484,8 +552,8 @@ async function boot() {
   $("clearBtn").addEventListener("click", clearBuild);
 
   // land on the deepest certified WIN for a strong first impression
-  const first = sortRows(ATLAS.rows.filter(r => r.status === "WIN"))[0] ||
-                sortRows(ATLAS.rows)[0];
+  const first = sortRows(ATLAS.rows.filter(r => r.status === "WIN"), "verdict")[0] ||
+                sortRows(ATLAS.rows, "freq")[0];
   if (first) selectRow(first.id, true);
 
   selfCheck();

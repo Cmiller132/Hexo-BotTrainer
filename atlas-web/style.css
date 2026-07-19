@@ -200,8 +200,35 @@ select{cursor:pointer}
 .a-badge.win{color:var(--accent);border-color:var(--accent-dim)}
 .a-badge.loss{color:var(--p1-soft);border-color:#5c2f2c}
 .a-badge.unknown{color:var(--dim);border-color:var(--line)}
-.g-glyph{flex:none}
-.gh0{fill:var(--p0)}.gh1{fill:var(--p1)}.ghx{fill:var(--dim)}
+
+/* row now leads with a 44px mini-board and stacks label+sub beside it */
+.arow{content-visibility:auto;contain-intrinsic-size:auto 58px} /* skip offscreen work */
+.a-main{display:flex;flex-direction:column;gap:1px;flex:1;min-width:0}
+.a-right{display:flex;flex-direction:column;align-items:flex-end;gap:2px;flex:none}
+
+/* ---- mini-board icon ---- */
+.mini-slot{flex:none;width:44px;height:44px;display:block}
+.mini-board{
+  display:block;width:100%;height:100%;
+  background:radial-gradient(120% 100% at 50% 0%, #12171d 0%, var(--seam) 78%);
+  border:1px solid var(--line-soft);border-radius:3px;
+}
+.mini-cells polygon{
+  fill:var(--tile);fill-opacity:.5;
+  stroke:var(--line);stroke-width:.6;stroke-opacity:.8;
+  vector-effect:non-scaling-stroke;
+}
+.mini-tengen{fill:var(--dim)}
+.mini-stones circle{stroke:rgba(0,0,0,.4);stroke-width:.5;vector-effect:non-scaling-stroke}
+.mini-stones .m0{fill:var(--p0)}      /* P0 — blue, moves first */
+.mini-stones .m1{fill:var(--p1)}      /* P1 — red */
+
+/* ---- "used N times" frequency badge ---- */
+.a-freq{
+  font-family:var(--mono);font-size:8.5px;letter-spacing:.06em;
+  color:var(--dim);white-space:nowrap;
+}
+.arow.sel .a-freq{color:var(--muted)}
 
 /* ---------- board frame ---------- */
 .board-frame{border:1px solid var(--line);
