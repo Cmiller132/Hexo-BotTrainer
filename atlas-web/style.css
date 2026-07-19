@@ -279,6 +279,46 @@ select{cursor:pointer}
 .board-frame.side-p0{box-shadow:inset 0 0 0 1px rgba(79,147,255,.28)}
 .board-frame.side-p1{box-shadow:inset 0 0 0 1px rgba(255,86,80,.26)}
 
+/* scrub ring — the most-recently-placed stone during move-history scrubbing */
+.scrubring{pointer-events:none;fill:none;stroke:var(--accent);stroke-width:2.5;
+  stroke-linejoin:round;opacity:.95}
+
+/* ---------- move-history slider ---------- */
+.move-scrub{
+  margin-top:12px;border:1px solid var(--line);
+  background:linear-gradient(180deg,#171c23 0%,#141a20 100%);padding:10px 12px;
+}
+.move-scrub[hidden]{display:none}
+.ms-row{display:flex;align-items:center;gap:10px}
+.ms-btns{display:flex;gap:4px;flex:none}
+.ms-btn{
+  font-family:var(--mono);font-size:11px;line-height:1;color:var(--muted);
+  border:1px solid var(--line);padding:5px 9px;min-width:30px;text-align:center;
+  transition:color .15s ease,border-color .15s ease;
+}
+.ms-btn:hover:not(:disabled){color:var(--accent);border-color:var(--accent-dim)}
+.ms-btn:disabled{opacity:.35;cursor:default}
+.ms-play{color:var(--accent);border-color:var(--accent-dim)}
+.ms-range{
+  -webkit-appearance:none;appearance:none;flex:1;min-width:0;height:4px;
+  background:var(--line);border:none;padding:0;cursor:pointer;outline:none;
+}
+.ms-range:focus-visible{outline:1px solid var(--accent);outline-offset:4px}
+.ms-range::-webkit-slider-thumb{
+  -webkit-appearance:none;appearance:none;width:14px;height:14px;border-radius:50%;
+  background:var(--accent);border:1px solid var(--seam);cursor:pointer;
+}
+.ms-range::-moz-range-thumb{
+  width:14px;height:14px;border-radius:50%;background:var(--accent);
+  border:1px solid var(--seam);cursor:pointer;
+}
+.ms-range::-moz-range-track{height:4px;background:var(--line)}
+.ms-range:disabled{opacity:.4;cursor:default}
+.ms-read{
+  flex:none;font-family:var(--mono);font-size:10px;letter-spacing:.06em;color:var(--muted);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:46%;
+}
+
 /* ---------- readout strip ---------- */
 .lab-readout{font-family:var(--mono);font-size:11.5px;line-height:1.55;color:var(--muted);
   min-height:52px;border:1px solid var(--line);border-top:none;

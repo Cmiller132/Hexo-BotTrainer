@@ -118,8 +118,8 @@
     </div>
 
     <!-- CENTER: board -->
-    <div class="board-col">
-      <div class="board-frame" id="boardFrame">
+    <div class="board-col" id="boardCol">
+      <div class="board-frame" id="boardFrame" tabindex="0">
         <span class="frame-tag" id="atlasTag">atlas · position</span>
         <span class="frame-read">cursor <b id="cursorPos">—</b></span>
         <svg class="board" id="atlasBoard" role="img" aria-label="Hexo atlas board"></svg>
@@ -128,6 +128,19 @@
       <div class="lab-readout">
         <span class="ro-k" id="roK">position</span>
         <span class="ro-t" id="roT">select an opening from the list, or build one in Test mode &rarr;</span>
+      </div>
+
+      <!-- move-history slider: scrub the selected opening's placements -->
+      <div class="move-scrub" id="moveScrub" hidden>
+        <div class="ms-row">
+          <div class="ms-btns">
+            <button class="ms-btn" id="msPrev" type="button" aria-label="Previous placement" title="Previous placement">&#9664;</button>
+            <button class="ms-btn ms-play" id="msPlay" type="button" aria-label="Play move history" title="Play / pause">&#9654;</button>
+            <button class="ms-btn" id="msNext" type="button" aria-label="Next placement" title="Next placement">&#9654;</button>
+          </div>
+          <input type="range" class="ms-range" id="msRange" min="0" max="0" value="0" step="1" aria-label="Move history position">
+          <span class="ms-read" id="msRead">start</span>
+        </div>
       </div>
 
       <div class="sec" id="detailSec" style="margin-top:14px">

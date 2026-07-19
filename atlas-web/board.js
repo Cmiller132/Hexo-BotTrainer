@@ -107,9 +107,9 @@ export function createBoard(svg, opts = {}) {
     svg.appendChild(g);
     return g;
   };
-  // draw order: grid (tiles + tengen), heat, stones ABOVE heat, marks, ghost
+  // draw order: grid (tiles + tengen), heat, stones ABOVE heat, marks, scrub-ring, ghost
   const grid = mk("gridg"), heat = mk("heatg"), stones = mk("stonesg"),
-        marks = mk("marksg"), ghostG = mk("ghostg");
+        marks = mk("marksg"), scrub = mk("scrubg"), ghostG = mk("ghostg");
   const tilesG = document.createElementNS(NS, "g");
   grid.appendChild(tilesG);
   const tengen = document.createElementNS(NS, "circle");
@@ -442,12 +442,24 @@ export function createBoard(svg, opts = {}) {
   const clearStage = () => { stagedGhost.style.display = "none"; };
   const hideHoverGhost = () => { hoverGhost.style.display = "none"; };
 
+  /* Move-history scrub: ring the most-recently-placed stone. Lives in its own
+   * group so setStones (which only clears stones + marks) leaves it intact; the
+   * caller clears it (setScrubHighlight(null)) when showing the full position. */
+  function setScrubHighlight(cell) {
+    scrub.textContent = "";
+    if (!cell) return;
+    const ring = document.createElementNS(NS, "polygon");
+    ring.setAttribute("points", hexPts(axialX(cell.q, cell.r), axialY(cell.r), S * 0.94));
+    ring.setAttribute("class", "scrubring " + (cell.color === 0 ? "r0" : "r1"));
+    scrub.appendChild(ring);
+  }
+
   apply();
   updateVirtual();
 
   return {
     svg, setStones, setLegal, setHeat, clearHeat,
-    stage, clearStage, hideHoverGhost,
+    stage, clearStage, hideHoverGhost, setScrubHighlight,
     resetView: goHome,
     tileCount: () => tiles.size,
   };

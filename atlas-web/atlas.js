@@ -58,6 +58,12 @@ let lastPlaceT = 0;
 let staged = null;
 let TOTAL_GAMES = null;      // corpus denominator (from frequencies.json)
 
+/* ---- move-history slider state (scrub the selected opening) ---- */
+let scrubRow = null;         // row whose placements the slider scrubs
+let scrubN = 0;              // number of placements in that row
+let scrubK = 0;              // current slider position (stones shown)
+let playTimer = null;        // auto-advance interval id, or null when paused
+
 /* ---- lazy mini-board icons (IntersectionObserver, smooth at ~12k rows) ---- */
 const MINI_PX = 44;
 const FREQ_FIELD = "freq";      // corpus usage count attached per row from frequencies.json
@@ -252,11 +258,9 @@ function selectRow(id, reframe) {
   selectedId = id;
   markSelection();
 
-  const moves = row.moves;
-  const stones = toStones(moves);
-  const winCells = row.status === "WIN" ? findWin(stones) : null;
   board.setLegal(null);            // read-only in browse
-  board.setStones(stones, winCells);
+  setupScrub(row);                 // move-history slider: default to the full position
+  renderScrub(scrubN);             // draw the full position (identical to the plain view)
   if (reframe) board.resetView();
   setSideFrame(row.side);
   $("atlasTag").textContent = `atlas · ${row.status.toLowerCase()}`;
@@ -318,6 +322,103 @@ function renderDetails(row) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Move-history slider — scrub the selected opening's placements
+ *
+ * Reuses the board renderer: renderScrub(k) draws exactly the first k stones
+ * (owners by Hexo turn order via toStones/ownerAt) and rings the k-th. At k=N
+ * it reproduces the plain browse render byte-for-byte (win outline + last-two
+ * dots, no scrub ring), so the full view is unchanged.
+ * ------------------------------------------------------------------ */
+function setupScrub(row) {
+  stopPlay();
+  scrubRow = row;
+  scrubN = row.moves.length;
+  scrubK = scrubN;
+  const rng = $("msRange");
+  rng.min = "0";
+  rng.max = String(scrubN);
+  rng.step = "1";
+  rng.value = String(scrubN);
+  rng.disabled = scrubN === 0;     // empty root: nothing to scrub
+  $("moveScrub").hidden = false;
+}
+
+function renderScrub(k) {
+  const row = scrubRow;
+  if (!row) return;
+  const N = scrubN;
+  k = Math.max(0, Math.min(N, k));
+  scrubK = k;
+  const subset = row.moves.slice(0, k);
+  const stones = toStones(subset);
+  if (k === N) {
+    // full position — identical to the plain browse render (win outline, dots)
+    const winCells = row.status === "WIN" ? findWin(stones) : null;
+    board.setStones(stones, winCells);
+    board.setScrubHighlight(null);
+  } else {
+    board.setStones(stones, null);
+    if (k >= 1) {
+      const last = subset[k - 1];
+      board.setScrubHighlight({ q: last[0], r: last[1], color: ownerAt(k - 1) });
+    } else {
+      board.setScrubHighlight(null);   // position 0 = empty board
+    }
+  }
+  const rng = $("msRange");
+  if (rng.value !== String(k)) rng.value = String(k);
+  updateScrubRead(k, N, row);
+  updateScrubControls();
+}
+
+function updateScrubRead(k, N, row) {
+  const el = $("msRead");
+  if (k === 0) { el.textContent = "start · empty board"; return; }
+  const m = row.moves[k - 1];
+  el.textContent = `move ${k} / ${N} — P${ownerAt(k - 1)} at (${m[0]},${m[1]})`;
+}
+
+function updateScrubControls() {
+  const playing = playTimer !== null;
+  $("msPrev").disabled = scrubK <= 0;
+  $("msNext").disabled = scrubK >= scrubN;
+  $("msPlay").disabled = scrubN === 0;
+  const play = $("msPlay");
+  play.innerHTML = playing ? "&#9208;" : "&#9654;";           // ⏸ / ▶
+  play.setAttribute("aria-label", playing ? "Pause move history" : "Play move history");
+}
+
+function stepScrub(d) { renderScrub(scrubK + d); }
+
+function startPlay() {
+  if (scrubN === 0) return;
+  if (scrubK >= scrubN) renderScrub(0);          // at the end: replay from empty
+  playTimer = setInterval(() => {
+    renderScrub(scrubK + 1);
+    if (scrubK >= scrubN) stopPlay();            // stop once the full position is reached
+  }, 700);
+  updateScrubControls();
+}
+function stopPlay() {
+  if (playTimer !== null) { clearInterval(playTimer); playTimer = null; }
+  updateScrubControls();
+}
+function togglePlay() { (playTimer !== null) ? stopPlay() : startPlay(); }
+
+function wireScrub() {
+  $("msRange").addEventListener("input", e => { stopPlay(); renderScrub(+e.target.value); });
+  $("msPrev").addEventListener("click", () => { stopPlay(); stepScrub(-1); });
+  $("msNext").addEventListener("click", () => { stopPlay(); stepScrub(1); });
+  $("msPlay").addEventListener("click", togglePlay);
+  // arrow keys step when the slider or the board area holds focus
+  $("boardCol").addEventListener("keydown", e => {
+    if ($("moveScrub").hidden || e.target === $("msRange")) return;  // range handles its own arrows
+    if (e.key === "ArrowLeft") { e.preventDefault(); stopPlay(); stepScrub(-1); }
+    else if (e.key === "ArrowRight") { e.preventDefault(); stopPlay(); stepScrub(1); }
+  });
+}
+
+/* ------------------------------------------------------------------ *
  * Build / test mode
  * ------------------------------------------------------------------ */
 function setMode(m) {
@@ -334,6 +435,9 @@ function setMode(m) {
   $("modeHint").style.opacity = building ? "1" : ".55";
 
   if (building) {
+    stopPlay();
+    $("moveScrub").hidden = true;   // scrubber is a browse-mode affordance
+    scrubRow = null;
     selectedId = null;
     markSelection();
     $("atlasTag").textContent = "atlas · build";
@@ -535,6 +639,7 @@ async function boot() {
   }
 
   initBoard();
+  wireScrub();
   fillSummary();
   fillSharp();
   buildSourceFilter();
