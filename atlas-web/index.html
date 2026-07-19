@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hexo — Opening Atlas Explorer</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- stone gradient defs (used by board.js stones) -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <linearGradient id="gradS0" x1="0.22" y1="0" x2="0.78" y2="1">
+      <stop offset="0" stop-color="#7db4ff"/><stop offset="0.45" stop-color="#4f93ff"/><stop offset="1" stop-color="#2f62c4"/>
+    </linearGradient>
+    <linearGradient id="gradS1" x1="0.22" y1="0" x2="0.78" y2="1">
+      <stop offset="0" stop-color="#ff8a80"/><stop offset="0.45" stop-color="#f0524c"/><stop offset="1" stop-color="#b93732"/>
+    </linearGradient>
+  </defs>
+</svg>
+
+<header class="learn-header">
+  <a class="wordmark" href="../">hexo</a>
+  <nav class="learn-nav" aria-label="How it works">
+    <a href="../">Overview</a>
+    <a href="../learn/lab.html">Lab</a>
+    <a href="index.html" class="current" aria-current="page">Atlas</a>
+  </nav>
+</header>
+
+<main class="atlas-main">
+
+  <div class="page-head">
+    <h1>Opening Atlas <span class="cont">— certified verdicts explorer</span></h1>
+    <p class="lede">A proven partial atlas of Hexo openings. Each entry is a root position that the
+      solver attempted and an <em>independent strict verifier</em> either certified (WIN / LOSS) or left
+      UNKNOWN. Browse the certified representatives, replay them on the board, or build your own opening
+      and look up its canonical D6 verdict.</p>
+  </div>
+
+  <!-- summary counts -->
+  <div class="totals" id="atlasTotals">
+    <div class="totals-cell"><div class="tn" id="totPos">—</div><div class="tl">positions</div></div>
+    <div class="totals-cell"><div class="tn win" id="totWin">—</div><div class="tl">certified win</div></div>
+    <div class="totals-cell"><div class="tn loss" id="totLoss">—</div><div class="tl">certified loss</div></div>
+    <div class="totals-cell"><div class="tn unknown" id="totUnknown">—</div><div class="tl">unknown</div></div>
+    <div class="totals-cell"><div class="tn" id="totCert">—</div><div class="tl">certified total</div></div>
+  </div>
+
+  <!-- census -->
+  <div class="census-strip" id="censusStrip">
+    <span>opening census · <b id="cPly2raw">—</b> raw first moves &rarr; <b id="cPly2d6">—</b> D6 classes</span>
+    <span>· <b id="cPly3raw">—</b> raw pairs &rarr; <b id="cPly3d6">—</b> D6 classes</span>
+    <span>· minted from <b id="cGen">—</b></span>
+  </div>
+
+  <!-- vocabulary note -->
+  <div class="vocab-note">
+    <b>Reading the verdicts.</b>
+    <span class="tag-win">CERTIFIED WIN</span> / <span class="tag-loss">CERTIFIED LOSS</span> means the solver
+    produced a certificate that the <b>strict TssVerifier accepted</b> for the exact canonical (symmetry-0)
+    representative — a proof, not an estimate.
+    <span class="tag-unk">UNKNOWN</span> means no certificate finished inside this pass's bounds.
+    <b>UNKNOWN is not a draw, a balanced position, or a loss</b> — Hexo has no draw outcome, and CERTIFIED&nbsp;DRAW
+    is reserved in the schema but is never emitted. Shallow openings (the empty root, all 24 first-reply classes,
+    and the entire 3,684-class two-stone layer) are UNKNOWN by design; the certified content is a thin, deep slice
+    of covered human-game prefixes (the final-ply slice of eight decisive corpus games).
+  </div>
+
+  <!-- sharp example -->
+  <div class="sharp-card" id="sharpCard" role="button" tabindex="0" aria-label="Load verdict-flip example onto the board">
+    <div class="sc-k">Sharp example · verdict flip · game <span id="scGame">—</span></div>
+    <div class="sc-flip">
+      <div class="sc-state">
+        <span class="sc-v win-p0" id="scBefore">CERTIFIED P0 WIN</span>
+        <span class="sc-sub" id="scBeforeSub">prefix 44 · P0 · SecondStone</span>
+      </div>
+      <span class="sc-move" id="scMove">plays (14,-3)</span>
+      <span class="sc-arrow">&rarr;</span>
+      <div class="sc-state">
+        <span class="sc-v win-p1" id="scAfter">CERTIFIED P1 WIN</span>
+        <span class="sc-sub" id="scAfterSub">prefix 45 · P1 · FirstStone</span>
+      </div>
+    </div>
+    <div class="sc-desc" id="scDesc">A single placement flips the proven winner. The move is a certificate-backed losing blunder.</div>
+    <div class="sc-cta">click to load the "before" position onto the board &rarr;</div>
+  </div>
+
+  <!-- 3-region grid -->
+  <div class="atlas-grid">
+
+    <!-- LEFT: list -->
+    <div class="atlas-list-col">
+      <div class="sec">
+        <h2 class="k">Positions</h2>
+        <div class="hist-filters">
+          <input type="text" id="fSearch" placeholder="search id / source / moves" spellcheck="false" autocomplete="off">
+          <select id="fVerdict">
+            <option value="">all verdicts</option>
+            <option value="win">certified win</option>
+            <option value="loss">certified loss</option>
+            <option value="unknown">unknown</option>
+          </select>
+          <select id="fSource">
+            <option value="">all sources</option>
+          </select>
+        </div>
+        <div class="filter-count" id="filterCount">—</div>
+        <div id="atlasList"></div>
+      </div>
+    </div>
+
+    <!-- CENTER: board -->
+    <div class="board-col">
+      <div class="board-frame" id="boardFrame">
+        <span class="frame-tag" id="atlasTag">atlas · position</span>
+        <span class="frame-read">cursor <b id="cursorPos">—</b></span>
+        <svg class="board" id="atlasBoard" role="img" aria-label="Hexo atlas board"></svg>
+        <button class="place-chip" id="placeChip">place</button>
+      </div>
+      <div class="lab-readout">
+        <span class="ro-k" id="roK">position</span>
+        <span class="ro-t" id="roT">select an opening from the list, or build one in Test mode &rarr;</span>
+      </div>
+
+      <div class="sec" id="detailSec" style="margin-top:14px">
+        <h2 class="k">Details</h2>
+        <div id="detailBody" class="mod-status">no position selected.</div>
+      </div>
+    </div>
+
+    <!-- RIGHT: test panel -->
+    <aside class="panel">
+      <div class="sec">
+        <h2 class="k">Test an opening</h2>
+        <div class="seg" id="modeSeg" role="radiogroup" aria-label="Mode">
+          <button data-mode="view" class="sel" role="radio" aria-checked="true">Browse</button>
+          <button data-mode="build" role="radio" aria-checked="false">Build &amp; test</button>
+        </div>
+        <p class="fineprint" id="modeHint">In <b>Build</b> mode, click empty cells to place stones in Hexo
+          turn order (P0 opens at origin, then two stones per turn). Side-to-move and phase are derived
+          automatically for the lookup.</p>
+
+        <div class="btn-row">
+          <button class="line-btn" id="undoBtn" disabled>Undo</button>
+          <button class="line-btn" id="clearBtn" disabled>Clear</button>
+        </div>
+        <button class="line-btn" id="testBtn" disabled>Look up verdict</button>
+
+        <div class="value-read">
+          <span class="value-big" id="verdictBig">—</span>
+          <span class="value-cap" id="verdictCap"></span>
+        </div>
+        <div class="mod-status" id="testStatus"></div>
+
+        <div class="meta-grid">
+          <div class="mg-cell"><div class="n" id="mgStones">0</div><div class="l">stones</div></div>
+          <div class="mg-cell"><div class="n is-p0" id="mgToMove">P0</div><div class="l">to move</div></div>
+          <div class="mg-cell"><div class="n" id="mgPhase">Opening</div><div class="l">phase</div></div>
+        </div>
+
+        <div class="canon-line" id="canonLine">canonical id · <b id="canonId">—</b></div>
+        <div class="movelist" id="moveList"></div>
+        <p class="fineprint" id="testFine">Lookup is exact: it hashes the D6-canonical root and matches the
+          atlas by id. A miss is honestly reported as UNKNOWN / not in atlas — never as a draw or balance claim.</p>
+      </div>
+    </aside>
+
+  </div>
+</main>
+
+<div class="toast-wrap" id="toastWrap" aria-live="polite"></div>
+
+<script type="module" src="atlas.js"></script>
+</body>
+</html>
