@@ -58,3 +58,5 @@ target-wsl/
 target-wsl-py/
 packages/hexfield_eq/rust/target-wsl-lifo/
 corpus11_shards/
+squeeze9_*/
+squeeze9_*.txt

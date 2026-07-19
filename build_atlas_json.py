@@ -13,7 +13,13 @@ RAW_PASS1 = os.path.join(BASE, "OPENING_ATLAS_PASS1_RAW.txt")
 RAW_DEEP11 = os.path.join(BASE, "OPENING_ATLAS_CORPUS11_DEEP_RAW.txt")
 RAW_DEEP9 = os.path.join(BASE, "OPENING_ATLAS_CORPUS9_DEEP_RAW.txt")
 RAW_DEEP7 = os.path.join(BASE, "OPENING_ATLAS_CORPUS7_DEEP_RAW.txt")
+RAW_SQUEEZE9 = os.path.join(BASE, "OPENING_ATLAS_CORPUS9_SQUEEZE_RAW.txt")
 CORPUS_LAYERS = next(([p] for p in (RAW_DEEP11, RAW_DEEP9, RAW_DEEP7) if os.path.exists(p)), [])
+# The squeeze layer contains the complete first-9 result and is applied after
+# the deepest first-11 layer. The existing never-downgrade rule upgrades only
+# newly certified first-9 rows while depth-10/11 wins remain untouched.
+if os.path.exists(RAW_SQUEEZE9):
+    CORPUS_LAYERS.append(RAW_SQUEEZE9)
 OUT_DIR = os.path.join(BASE, "atlas-web", "data")
 OUT = os.path.join(OUT_DIR, "atlas.json")           # full doc, kept for selfcheck.mjs
 OUT_JSONP = os.path.join(OUT_DIR, "atlas.jsonp.js")  # legacy shim — removed on build

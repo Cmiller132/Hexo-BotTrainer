@@ -14,7 +14,7 @@ use crate::tss_core::{CertVerify, DeepSolve, ProofStatus, SolveCaps};
 use crate::tss_solver::{TssSolver, WidthOptions};
 use crate::tss_verify::{
     d6_remap_certificate, d6_transform_coord, CertNode, RootBinding, TssCertificate, TssVerifier,
-    D6_SYMMETRY_COUNT,
+    D6_SYMMETRY_COUNT, MAX_CERT_DEPTH, MAX_CERT_NODES,
 };
 
 const DEFAULT_TT_BYTES: usize = 512 << 20;
@@ -38,6 +38,7 @@ struct Candidate {
     source_prefix: usize,
     canonical_moves: Vec<HexCoord>,
     orbit_size: usize,
+    preferred_moves: Vec<HexCoord>,
 }
 
 fn env_num<T: std::str::FromStr>(name: &str, default: T) -> T
@@ -61,7 +62,11 @@ fn env_ladder(name: &str, default: &[u64]) -> Vec<u64> {
                 .split(',')
                 .map(|token| token.trim())
                 .filter(|token| !token.is_empty())
-                .map(|token| token.parse::<u64>().unwrap_or_else(|error| panic!("{name}: {error:?}")))
+                .map(|token| {
+                    token
+                        .parse::<u64>()
+                        .unwrap_or_else(|error| panic!("{name}: {error:?}"))
+                })
                 .collect::<Vec<_>>();
             assert!(!ladder.is_empty(), "{name} must list at least one node cap");
             ladder
@@ -167,17 +172,22 @@ fn root_position_key(moves: &[HexCoord]) -> (u8, (u8, i16, i16), Vec<(i16, i16, 
     (player, phase, stones)
 }
 
-fn canonical_sequence(moves: &[HexCoord]) -> Vec<HexCoord> {
+fn canonical_sequence_with_symmetry(moves: &[HexCoord]) -> (Vec<HexCoord>, u8) {
     (0..D6_SYMMETRY_COUNT)
         .map(|symmetry| {
-            moves
+            let image = moves
                 .iter()
                 .copied()
                 .map(|coord| d6_transform_coord(coord, symmetry).expect("D6 coordinate in range"))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (image, symmetry)
         })
-        .min_by_key(|image| (root_position_key(image), sequence_key(image)))
+        .min_by_key(|(image, _)| (root_position_key(image), sequence_key(image)))
         .expect("D6 is nonempty")
+}
+
+fn canonical_sequence(moves: &[HexCoord]) -> Vec<HexCoord> {
+    canonical_sequence_with_symmetry(moves).0
 }
 
 fn canonical_unordered_pair(a: HexCoord, b: HexCoord) -> Vec<HexCoord> {
@@ -234,12 +244,14 @@ fn shallow_candidates() -> Vec<Candidate> {
             source_prefix: 0,
             canonical_moves: Vec::new(),
             orbit_size: 1,
+            preferred_moves: Vec::new(),
         },
         Candidate {
             source: "shallow:origin".to_owned(),
             source_prefix: 1,
             canonical_moves: vec![HexCoord::ZERO],
             orbit_size: 1,
+            preferred_moves: Vec::new(),
         },
     ];
     for canonical_moves in reps.into_values() {
@@ -248,6 +260,7 @@ fn shallow_candidates() -> Vec<Candidate> {
             source_prefix: 2,
             orbit_size: orbit_size(&canonical_moves),
             canonical_moves,
+            preferred_moves: Vec::new(),
         });
     }
     assert_eq!(out.len(), 26, "2 roots plus 24 first-reply D6 reps");
@@ -303,6 +316,7 @@ fn load_human_candidates(path: &str, game_count: usize, backtrack: usize) -> Vec
                     source_prefix: prefix,
                     orbit_size: orbit_size(&canonical_moves),
                     canonical_moves,
+                    preferred_moves: Vec::new(),
                 });
             }
         }
@@ -349,6 +363,7 @@ fn load_corpus_first_n(path: &str, first_n: usize) -> Vec<Candidate> {
             source_prefix: prefix,
             orbit_size: orbit_size(&canonical_moves),
             canonical_moves,
+            preferred_moves: Vec::new(),
         })
         .collect()
 }
@@ -380,9 +395,76 @@ fn load_moves_file(path: &str) -> Vec<Candidate> {
             source_prefix: canonical_moves.len(),
             orbit_size: orbit_size(&canonical_moves),
             canonical_moves,
+            preferred_moves: Vec::new(),
         });
     }
     out
+}
+
+fn raw_field<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+    line.split_ascii_whitespace()
+        .find_map(|token| token.strip_prefix(name))
+}
+
+/// Derive root-move hints from certified one-ply descendants. For a
+/// FirstStone parent the same player owns the SecondStone child, so a verified
+/// child WIN supplies a constructive existential move. The parent is still
+/// solved afresh and must pass every normal verifier gate before emission.
+fn load_parent_win_hints(path: &str, parent_depth: usize) -> Vec<Candidate> {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("read OPENING_ATLAS_PARENT_WIN_HINT_RAW={path}: {error}"));
+    let child_depth = parent_depth + 1;
+    let mut parents = BTreeMap::<PositionKey, (Vec<HexCoord>, BTreeSet<(i16, i16)>)>::new();
+    for line in text.lines().filter(|line| line.starts_with("ATLAS_ROW ")) {
+        if raw_field(line, "certified=") != Some("1")
+            || raw_field(line, "status=") != Some("WIN")
+            || raw_field(line, "source_prefix=").and_then(|value| value.parse().ok())
+                != Some(child_depth)
+        {
+            continue;
+        }
+        let Some(moves_value) = raw_field(line, "moves=") else {
+            continue;
+        };
+        let ints = parse_ints(moves_value);
+        if ints.len() != child_depth * 2 {
+            continue;
+        }
+        let child_moves = ints
+            .chunks_exact(2)
+            .map(|pair| HexCoord::new(pair[0], pair[1]))
+            .collect::<Vec<_>>();
+        let parent_moves = &child_moves[..parent_depth];
+        let parent_state = replay(parent_moves);
+        let child_state = replay(&child_moves);
+        if parent_state.current_player() != child_state.current_player()
+            || raw_field(line, "claimant=") != Some(player_name(parent_state.current_player()))
+        {
+            continue;
+        }
+        let (canonical_moves, symmetry) = canonical_sequence_with_symmetry(parent_moves);
+        let preferred = d6_transform_coord(child_moves[parent_depth], symmetry)
+            .expect("D6 hinted coordinate in range");
+        let key = root_position_key(&canonical_moves);
+        parents
+            .entry(key)
+            .or_insert_with(|| (canonical_moves, BTreeSet::new()))
+            .1
+            .insert(coord_key(preferred));
+    }
+    parents
+        .into_values()
+        .map(|(canonical_moves, hints)| Candidate {
+            source: format!("corpus{parent_depth}:depth{parent_depth}"),
+            source_prefix: parent_depth,
+            orbit_size: orbit_size(&canonical_moves),
+            canonical_moves,
+            preferred_moves: hints
+                .into_iter()
+                .map(|(q, r)| HexCoord::new(q, r))
+                .collect(),
+        })
+        .collect()
 }
 
 fn replay_unchecked(moves: &[HexCoord]) -> HexoState {
@@ -440,6 +522,28 @@ fn moves_text(moves: &[HexCoord]) -> String {
         .join(";")
 }
 
+fn candidate_id(candidate: &Candidate) -> String {
+    let fingerprint =
+        fnv1a64(format!("{:?}", root_position_key(&candidate.canonical_moves)).as_bytes());
+    format!("oa-{fingerprint:016x}")
+}
+
+/// Read verifier-backed ids from an earlier raw.  This is only a scheduling
+/// filter: it cannot manufacture a verdict, and all newly found certificates
+/// still pass the canonical and 12-way D6 verifier gates below.
+fn certified_ids_from_raw(path: &str) -> BTreeSet<String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("read OPENING_ATLAS_SKIP_CERTIFIED_RAW={path}: {error}"))
+        .lines()
+        .filter(|line| line.starts_with("ATLAS_ROW ") && line.contains(" certified=1 "))
+        .filter_map(|line| {
+            line.split_ascii_whitespace()
+                .find_map(|token| token.strip_prefix("id="))
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
 fn cert_metrics(cert: &TssCertificate) -> (u32, usize, usize, usize) {
     let mut derived_horizon = cert.root.placements_made;
     let mut edges = 0usize;
@@ -467,6 +571,28 @@ fn cert_metrics(cert: &TssCertificate) -> (u32, usize, usize, usize) {
         }
     }
     (derived_horizon, edges, commutations, zones)
+}
+
+fn certificate_graph_depth(cert: &TssCertificate) -> usize {
+    fn visit(cert: &TssCertificate, id: u32, memo: &mut [Option<usize>]) -> usize {
+        if let Some(depth) = memo[id as usize] {
+            return depth;
+        }
+        let child_depth = match &cert.nodes[id as usize] {
+            CertNode::Choice { child, .. } => visit(cert, *child, memo),
+            CertNode::Universal { edges, .. } => edges
+                .iter()
+                .map(|edge| visit(cert, edge.child, memo))
+                .max()
+                .unwrap_or(0),
+            CertNode::OrCompletion { .. } | CertNode::Win { .. } | CertNode::Loss { .. } => 0,
+        };
+        let depth = child_depth.saturating_add(1);
+        memo[id as usize] = Some(depth);
+        depth
+    }
+    let mut memo = vec![None; cert.nodes.len()];
+    visit(cert, cert.root_node, &mut memo)
 }
 
 /// Extract the PRINCIPAL forced-win line from a certificate, as the ordered
@@ -697,9 +823,17 @@ fn solve_candidate(
     relative_horizon: u32,
     node_ladder: &[u64],
     unbounded_horizon: bool,
-    wide: bool,
+    width_name: &str,
 ) {
     let state = replay(&candidate.canonical_moves);
+    if candidate.preferred_moves.is_empty() {
+        std::env::remove_var("TSS_ROOT_PREFERRED_MOVES");
+    } else {
+        std::env::set_var(
+            "TSS_ROOT_PREFERRED_MOVES",
+            moves_text(&candidate.preferred_moves),
+        );
+    }
     // Deep profile: an unbounded ply deadline lets the search go as deep as the
     // node budget allows (depth bounded by the node cap, not an artificial ply
     // limit). Default keeps the +relative_horizon deadline (pass1 behavior).
@@ -716,34 +850,96 @@ fn solve_candidate(
     let start = Instant::now();
     let mut final_result = None;
     let mut used_cap = 0u64;
-    for &node_cap in node_ladder {
-        let mut solver = TssSolver::default();
-        // Wider search (round3_consume) is vcf_pair_complete PLUS consuming
-        // quiet-turn attacker moves and sound ranked-zone defender pruning. The
-        // strict TssVerifier below stays normative: any certified WIN it rejects
-        // panics the shard rather than emitting unsound data.
-        solver.set_width_options(if wide {
-            WidthOptions::round3_consume()
-        } else {
-            WidthOptions::vcf_pair_complete()
-        });
-        let result = solver.solve(
-            &state,
-            &SolveCaps {
-                node_cap,
-                tt_bytes_cap: tt_bytes,
-                semantic_horizon,
-            },
-        );
-        assert!(
-            result.status == ProofStatus::Unknown || result.cert.is_some(),
-            "hard result without certificate"
-        );
-        used_cap = node_cap;
-        let hard = result.status != ProofStatus::Unknown;
-        final_result = Some(result);
-        if hard {
-            break;
+    // A certified same-claimant child can be lifted through one legal
+    // existential move. Re-solve that child with the established deep narrow
+    // profile, prepend a Choice node, and let the parent verifier below judge
+    // the whole certificate. No raw certificate or verdict is trusted.
+    'hint_caps: for &node_cap in node_ladder {
+        for &preferred in &candidate.preferred_moves {
+            let mut child_state = state.clone();
+            if apply_placement(&mut child_state, Placement { coord: preferred }).is_err()
+                || child_state.current_player() != state.current_player()
+                || child_state.is_terminal()
+            {
+                continue;
+            }
+            let mut solver = TssSolver::default();
+            solver.set_width_options(WidthOptions::vcf_pair_complete());
+            let mut result = solver.solve(
+                &child_state,
+                &SolveCaps {
+                    node_cap,
+                    tt_bytes_cap: tt_bytes,
+                    semantic_horizon,
+                },
+            );
+            used_cap = node_cap;
+            if result.status != ProofStatus::Win {
+                final_result = Some(result);
+                continue;
+            }
+            let child_cert = result.cert.take().expect("hinted child WIN certificate");
+            assert!(
+                TssVerifier.verify(&child_state, &child_cert, ProofStatus::Win),
+                "strict verifier rejected hinted child certificate"
+            );
+            if child_cert.nodes.len() >= MAX_CERT_NODES
+                || certificate_graph_depth(&child_cert) >= MAX_CERT_DEPTH
+            {
+                result.status = ProofStatus::Unknown;
+                final_result = Some(result);
+                continue;
+            }
+            let child_root = child_cert.root_node;
+            let mut nodes = child_cert.nodes;
+            let root_node = u32::try_from(nodes.len()).expect("certificate node id fits u32");
+            nodes.push(CertNode::Choice {
+                mv: preferred,
+                child: child_root,
+            });
+            result.cert = Some(TssCertificate {
+                root: RootBinding::from_state(&state),
+                claimant: child_cert.claimant,
+                root_node,
+                nodes,
+                semantic_horizon: child_cert.semantic_horizon,
+            });
+            final_result = Some(result);
+            break 'hint_caps;
+        }
+    }
+    if final_result.is_none() {
+        for &node_cap in node_ladder {
+            let mut solver = TssSolver::default();
+            // Wider search (round3_consume) is vcf_pair_complete PLUS consuming
+            // quiet-turn attacker moves and sound ranked-zone defender pruning. The
+            // strict TssVerifier below stays normative: any certified WIN it rejects
+            // panics the shard rather than emitting unsound data.
+            solver.set_width_options(match width_name {
+                "round3_consume" => WidthOptions::round3_consume(),
+                "quiet_turn_consume" => WidthOptions::quiet_turn_consume(),
+                "ranked_zone_consume" => WidthOptions::ranked_zone_consume(),
+                "vcf_pair_complete" | "" => WidthOptions::vcf_pair_complete(),
+                other => panic!("unknown OPENING_ATLAS_WIDTH={other}"),
+            });
+            let result = solver.solve(
+                &state,
+                &SolveCaps {
+                    node_cap,
+                    tt_bytes_cap: tt_bytes,
+                    semantic_horizon,
+                },
+            );
+            assert!(
+                result.status == ProofStatus::Unknown || result.cert.is_some(),
+                "hard result without certificate"
+            );
+            used_cap = node_cap;
+            let hard = result.status != ProofStatus::Unknown;
+            final_result = Some(result);
+            if hard {
+                break;
+            }
         }
     }
     let result = final_result.expect("node ladder is nonempty");
@@ -812,36 +1008,42 @@ fn opening_atlas_pass1() {
     let unbounded_horizon = env_num::<u8>("OPENING_ATLAS_UNBOUNDED", 0) != 0;
     // Search width: "round3_consume" = wider (quiet-turn + ranked-zone consume);
     // anything else = vcf_pair_complete (pass1/deep behavior).
-    let wide = std::env::var("OPENING_ATLAS_WIDTH").unwrap_or_default() == "round3_consume";
+    let width_name =
+        std::env::var("OPENING_ATLAS_WIDTH").unwrap_or_else(|_| "vcf_pair_complete".to_owned());
     // Cross-position parallelism: shard the candidate list so N independent
     // worker processes (built once, launched N times) each solve a disjoint
     // stride of positions with their own TT. Round-robin by index balances the
     // depth mix (and thus the expensive positions) across workers.
     let shard_count = env_num::<usize>("SHARD_COUNT", 1).max(1);
     let shard_index = env_num::<usize>("SHARD_INDEX", 0);
-    assert!(shard_index < shard_count, "SHARD_INDEX must be < SHARD_COUNT");
+    assert!(
+        shard_index < shard_count,
+        "SHARD_INDEX must be < SHARD_COUNT"
+    );
 
     // Two candidate modes share the same solve+strict-verify emit loop:
     //  - default: shallow D6 census (+ optional deep human backtrack)
     //  - corpus_first_n: EVERY distinct D6-canonical position within the first
     //    `first_n` plies of ALL corpus games.
     let corpus_first_n = mode == "corpus_first_n";
-    let (candidates, shallow_count) = if let Ok(moves_path) = std::env::var("OPENING_ATLAS_MOVES_FILE")
-    {
-        (load_moves_file(&moves_path), 0usize)
-    } else if corpus_first_n {
-        let path = corpus_path
-            .as_deref()
-            .expect("corpus_first_n mode requires OPENING_ATLAS_CORPUS");
-        (load_corpus_first_n(path, first_n), 0usize)
-    } else {
-        let mut candidates = shallow_candidates();
-        let shallow_count = candidates.len();
-        if let Some(path) = corpus_path.as_deref() {
-            candidates.extend(load_human_candidates(path, game_count, backtrack));
-        }
-        (candidates, shallow_count)
-    };
+    let (candidates, shallow_count) =
+        if let Ok(hints_path) = std::env::var("OPENING_ATLAS_PARENT_WIN_HINT_RAW") {
+            (load_parent_win_hints(&hints_path, first_n), 0usize)
+        } else if let Ok(moves_path) = std::env::var("OPENING_ATLAS_MOVES_FILE") {
+            (load_moves_file(&moves_path), 0usize)
+        } else if corpus_first_n {
+            let path = corpus_path
+                .as_deref()
+                .expect("corpus_first_n mode requires OPENING_ATLAS_CORPUS");
+            (load_corpus_first_n(path, first_n), 0usize)
+        } else {
+            let mut candidates = shallow_candidates();
+            let shallow_count = candidates.len();
+            if let Some(path) = corpus_path.as_deref() {
+                candidates.extend(load_human_candidates(path, game_count, backtrack));
+            }
+            (candidates, shallow_count)
+        };
     // Optional depth window (source_prefix in [min,max]). Lets a run focus the
     // budget on the highest-yield depths (deeper positions are closest to a
     // forcing win) instead of spreading thin across all depths.
@@ -849,8 +1051,18 @@ fn opening_atlas_pass1() {
     let max_depth = env_num::<usize>("OPENING_ATLAS_MAX_DEPTH", usize::MAX);
     let mut candidates = candidates
         .into_iter()
-        .filter(|candidate| candidate.source_prefix >= min_depth && candidate.source_prefix <= max_depth)
+        .filter(|candidate| {
+            candidate.source_prefix >= min_depth && candidate.source_prefix <= max_depth
+        })
         .collect::<Vec<_>>();
+    let skipped_certified = if let Ok(path) = std::env::var("OPENING_ATLAS_SKIP_CERTIFIED_RAW") {
+        let ids = certified_ids_from_raw(&path);
+        let before = candidates.len();
+        candidates.retain(|candidate| !ids.contains(&candidate_id(candidate)));
+        before - candidates.len()
+    } else {
+        0
+    };
     // Optional ordering: "desc" puts the deepest (highest win-yield) positions
     // first so a wall-ceiling truncation leaves only low-value shallow residual.
     if std::env::var("OPENING_ATLAS_ORDER").unwrap_or_default() == "desc" {
@@ -864,7 +1076,7 @@ fn opening_atlas_pass1() {
         .collect::<Vec<_>>();
     let shard_total = shard_indices.len();
     println!(
-        "ATLAS_SETUP schema=1 mode={} corpus={} games={} backtrack={} first_n={} shallow={} candidates={} shard_index={} shard_count={} shard_total={} width={} node_ladder={:?} tt_bytes={} relative_horizon={} unbounded_horizon={} wall_seconds={}",
+        "ATLAS_SETUP schema=1 mode={} corpus={} games={} backtrack={} first_n={} shallow={} candidates={} skipped_certified={} shard_index={} shard_count={} shard_total={} width={} node_ladder={:?} tt_bytes={} relative_horizon={} unbounded_horizon={} wall_seconds={}",
         if mode.is_empty() { "pass1" } else { &mode },
         corpus_path.as_deref().unwrap_or("NONE"),
         game_count,
@@ -872,10 +1084,11 @@ fn opening_atlas_pass1() {
         first_n,
         shallow_count,
         total,
+        skipped_certified,
         shard_index,
         shard_count,
         shard_total,
-        if wide { "round3_consume" } else { "vcf_pair_complete" },
+        width_name,
         node_ladder,
         tt_bytes,
         relative_horizon,
@@ -896,7 +1109,7 @@ fn opening_atlas_pass1() {
             relative_horizon,
             &node_ladder,
             unbounded_horizon,
-            wide,
+            &width_name,
         );
         attempted += 1;
         // Flush every row so a wall-time stop or crash preserves partial output.

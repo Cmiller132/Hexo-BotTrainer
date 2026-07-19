@@ -686,6 +686,31 @@ impl WidthOptions {
         }
     }
 
+    /// Atlas-only intermediate profile: widen claimant OR nodes to the complete
+    /// quiet-turn universe while leaving defender-zone consumption disabled.
+    /// This deliberately remains on the resumable wide-PN route, unlike the
+    /// combined round-3 consume profile.  Every result is still independently
+    /// checked by `TssVerifier` in the opening-atlas harness.
+    #[cfg(test)]
+    pub(crate) fn quiet_turn_consume() -> Self {
+        Self {
+            vcf_pair_complete: true,
+            quiet_turn_or_edges: Round3Flag::Consume,
+            ranked_unforced_defender_zone: Round3Flag::Off,
+        }
+    }
+
+    /// Atlas calibration profile: keep the claimant generator narrow but
+    /// consume the verifier-replayable ranked defender zone.
+    #[cfg(test)]
+    pub(crate) fn ranked_zone_consume() -> Self {
+        Self {
+            vcf_pair_complete: true,
+            quiet_turn_or_edges: Round3Flag::Off,
+            ranked_unforced_defender_zone: Round3Flag::Consume,
+        }
+    }
+
     fn consumes_quiet_turns(self) -> bool {
         self.quiet_turn_or_edges == Round3Flag::Consume
     }
@@ -7634,6 +7659,12 @@ impl<'a> NarrowCompatSearch<'a> {
         } else {
             None
         };
+        // A candidate that reached the recursive child and failed has exactly
+        // the same semantics in the later complete-quiet loop.  Remember it so
+        // the fallback does not pay for the identical subtree twice.  Moves
+        // rejected by the VCF turn gate are intentionally *not* recorded:
+        // quiet-turn mode must reconsider those without the forcing gate.
+        let mut exhausted_candidates = HashSet::new();
         for candidate in candidates {
             let Ok((result, delta)) = state.apply_with_delta(Placement {
                 coord: candidate.coord,
@@ -7684,6 +7715,7 @@ impl<'a> NarrowCompatSearch<'a> {
                     turn_start_legal: turn_start_legal.clone(),
                 })
             });
+            exhausted_candidates.insert(candidate.coord);
             let child = self.prove(state, claimant, ply.checked_add(1)?, pair_context.as_ref());
             state.undo(delta);
 
@@ -7700,7 +7732,8 @@ impl<'a> NarrowCompatSearch<'a> {
                 return None;
             }
         }
-        if self.width.consumes_quiet_turns() {
+        let quiet_root_only = std::env::var("TSS_QUIET_ROOT_ONLY").ok().as_deref() == Some("1");
+        if self.width.consumes_quiet_turns() && (!quiet_root_only || ply == self.root_ply) {
             let mut complete = Vec::new();
             state.write_legal_moves(&mut complete);
             #[cfg(test)]
@@ -7740,13 +7773,96 @@ impl<'a> NarrowCompatSearch<'a> {
             if let Some(pair) = pair {
                 restrict_pair_candidates(&mut complete, pair);
             }
+            complete.retain(|coord| !exhausted_candidates.contains(coord));
             let frame = canonical_frame(state);
+            let root_preferred = (ply == self.root_ply)
+                .then(|| {
+                    std::env::var("TSS_ROOT_PREFERRED_MOVES")
+                        .ok()
+                        .into_iter()
+                        .flat_map(|value| {
+                            value
+                                .split(';')
+                                .filter_map(|token| {
+                                    let (q, r) = token.split_once(',')?;
+                                    Some(HexCoord::new(q.parse().ok()?, r.parse().ok()?))
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .enumerate()
+                        .map(|(rank, coord)| (coord, rank))
+                        .collect::<HashMap<_, _>>()
+                })
+                .unwrap_or_default();
+            // Default-off atlas scheduling for an intermediate attacker width.
+            // A complete quiet universe is enormous on an opening board.  Rank
+            // cells participating in claimant-pure windows ahead of remote
+            // cells, then optionally retain only the first N.  This restricts
+            // existential (claimant) choices only, so a returned proof remains
+            // sound; the strict verifier is still normative at the harness.
+            let prioritize_quiet =
+                std::env::var("TSS_QUIET_PROXIMITY_ORDER").ok().as_deref() == Some("1");
+            let mut quiet_windows = HashMap::<HexCoord, (u8, usize)>::new();
+            let claimant_stones = prioritize_quiet.then(|| {
+                for entry in state.board().windows().entries() {
+                    if entry.active_player() != Some(claimant) {
+                        continue;
+                    }
+                    let strength = entry.count(claimant);
+                    for coord in entry.empty_cells() {
+                        let rank = quiet_windows.entry(coord).or_insert((0, 0));
+                        rank.0 = rank.0.max(strength);
+                        rank.1 = rank.1.saturating_add(1);
+                    }
+                }
+                state
+                    .board()
+                    .occupied_cells()
+                    .iter()
+                    .copied()
+                    .filter(|coord| state.board().get(*coord) == Some(claimant))
+                    .collect::<Vec<_>>()
+            });
             complete.sort_by_key(|coord| {
+                let (window_strength, window_degree) =
+                    quiet_windows.get(coord).copied().unwrap_or((0, 0));
+                let proximity = claimant_stones
+                    .as_ref()
+                    .map(|stones| {
+                        stones
+                            .iter()
+                            .map(|stone| hex_distance(*coord, *stone))
+                            .min()
+                            .unwrap_or(i16::MAX)
+                    })
+                    .unwrap_or(0);
                 (
+                    root_preferred.get(coord).copied().unwrap_or(usize::MAX),
                     quiet_priority.get(coord).copied().unwrap_or(usize::MAX),
+                    Reverse(window_strength),
+                    Reverse(window_degree),
+                    proximity,
                     canonical_coord_key(frame, *coord),
                 )
             });
+            let quiet_offset = std::env::var("TSS_QUIET_TURN_OFFSET")
+                .ok()
+                .map(|value| {
+                    value
+                        .parse::<usize>()
+                        .expect("TSS_QUIET_TURN_OFFSET must be a nonnegative integer")
+                })
+                .unwrap_or(0);
+            if quiet_offset > 0 {
+                complete.drain(..quiet_offset.min(complete.len()));
+            }
+            if let Some(limit) = std::env::var("TSS_QUIET_TURN_LIMIT").ok().map(|value| {
+                value
+                    .parse::<usize>()
+                    .expect("TSS_QUIET_TURN_LIMIT must be a nonnegative integer")
+            }) {
+                complete.truncate(limit);
+            }
             for coord in complete {
                 let Ok((result, delta)) = state.apply_with_delta(Placement { coord }) else {
                     continue;
