@@ -7,13 +7,13 @@ RAW_PASS1 = os.path.join(BASE, "OPENING_ATLAS_PASS1_RAW.txt")
 # never replaced by an UNKNOWN), so the deep vcf layer backfills any position
 # the wider round3 layer left UNKNOWN or never reached, and round3 upgrades any
 # newly-proven win.
-# The 9-ply deep run (vcf + unbounded horizon, 8M cap) supersedes the 7-ply
-# deep set and carries the win_line PV on every certified win. The 7-ply raw is
-# kept only as a fallback if the 9-ply raw is absent.
+# The deepest available corpus first-N run (vcf + unbounded horizon, 8M cap)
+# supersedes the shallower sets and carries the win_line PV on every certified
+# win. Later (deeper) raws take precedence; shallower ones are fallbacks only.
+RAW_DEEP11 = os.path.join(BASE, "OPENING_ATLAS_CORPUS11_DEEP_RAW.txt")
 RAW_DEEP9 = os.path.join(BASE, "OPENING_ATLAS_CORPUS9_DEEP_RAW.txt")
 RAW_DEEP7 = os.path.join(BASE, "OPENING_ATLAS_CORPUS7_DEEP_RAW.txt")
-CORPUS_LAYERS = [p for p in (RAW_DEEP9,) if os.path.exists(p)] or \
-                [p for p in (RAW_DEEP7,) if os.path.exists(p)]
+CORPUS_LAYERS = next(([p] for p in (RAW_DEEP11, RAW_DEEP9, RAW_DEEP7) if os.path.exists(p)), [])
 OUT_DIR = os.path.join(BASE, "atlas-web", "data")
 OUT = os.path.join(OUT_DIR, "atlas.json")
 OUT_JSONP = os.path.join(OUT_DIR, "atlas.jsonp.js")
