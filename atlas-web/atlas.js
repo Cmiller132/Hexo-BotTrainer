@@ -6,7 +6,7 @@
  *
  * The canonicalization here is byte-for-byte the identity the certificates were
  * minted against (root_position_key -> Rust {:?} Debug -> FNV-1a-64), validated
- * to reproduce all 122 stored ids.
+ * to reproduce every stored row id (see selfcheck.mjs).
  */
 import { createBoard, findWin } from "./board.js";
 import { ownerAt, deriveBinding, canonicalId } from "./d6.js";
@@ -60,9 +60,14 @@ let TOTAL_GAMES = null;      // corpus denominator (from frequencies.json)
 
 /* ---- move-history slider state (scrub the selected opening) ---- */
 let scrubRow = null;         // row whose placements the slider scrubs
-let scrubN = 0;              // number of placements in that row
+let openingN = 0;            // placements in the opening itself
+let totalN = 0;              // opening + forced-win continuation
+let fullMoves = [];          // row.moves concat the (validated) win_line
+let winLineArr = [];         // validated forced-win continuation, or []
+let claimantIdx = null;      // 0/1 index of the proven winner, or null
 let scrubK = 0;              // current slider position (stones shown)
 let playTimer = null;        // auto-advance interval id, or null when paused
+const PLAY_MS = 700;         // autoplay step interval
 
 /* ---- lazy mini-board icons (IntersectionObserver, smooth at ~12k rows) ---- */
 const MINI_PX = 44;
@@ -104,11 +109,11 @@ function toast(msg, err) {
 /* ---- summary / census ---- */
 function fillSummary() {
   const s = ATLAS.summary, c = ATLAS.census;
-  $("totPos").textContent = s.total;
-  $("totWin").textContent = s.win;
-  $("totLoss").textContent = s.loss;
-  $("totUnknown").textContent = s.unknown;
-  $("totCert").textContent = s.certified;
+  $("totPos").textContent = s.total.toLocaleString();
+  $("totWin").textContent = s.win.toLocaleString();
+  $("totLoss").textContent = s.loss.toLocaleString();
+  $("totUnknown").textContent = s.unknown.toLocaleString();
+  $("totCert").textContent = s.certified.toLocaleString();
   $("cPly2raw").textContent = c.ply2_raw.toLocaleString();
   $("cPly2d6").textContent = c.ply2_d6.toLocaleString();
   $("cPly3raw").textContent = c.ply3_raw.toLocaleString();
@@ -120,10 +125,15 @@ function fillSummary() {
 function fillSharp() {
   const flip = (ATLAS.sharp_examples || []).find(e => e.kind === "verdict_flip");
   if (!flip) { $("sharpCard").style.display = "none"; return; }
+  // colour the verdict pill by the player the text names, straight from data,
+  // so a future flip direction keeps colour matched to text.
+  const vClass = v => "sc-v " + (/\bP1\b/.test(v) ? "win-p1" : "win-p0");
   $("scGame").textContent = flip.game;
   $("scBefore").textContent = flip.before.verdict;
+  $("scBefore").className = vClass(flip.before.verdict);
   $("scBeforeSub").textContent = `prefix ${flip.before.prefix} · ${flip.before.side} · ${flip.before.phase}`;
   $("scAfter").textContent = flip.after.verdict;
+  $("scAfter").className = vClass(flip.after.verdict);
   $("scAfterSub").textContent = `prefix ${flip.after.prefix} · ${flip.after.side} · ${flip.after.phase}`;
   $("scMove").textContent = `plays (${flip.flip_move[0]},${flip.flip_move[1]})`;
   $("scDesc").textContent = flip.description;
@@ -181,6 +191,7 @@ function rowMatches(row, f) {
   if (f.verdict === "win" && row.status !== "WIN") return false;
   if (f.verdict === "loss" && row.status !== "LOSS") return false;
   if (f.verdict === "unknown" && row.status !== "UNKNOWN") return false;
+  if (f.verdict === "certified" && row.certified !== 1) return false;
   if (f.source && row.source.split(":")[0] !== f.source) return false;
   if (f.q) {
     const hay = (row.id + " " + row.source + " " + row.placements + " " +
@@ -220,6 +231,10 @@ function renderList() {
   for (const row of rows) {
     const v = verdictClass(row);
     const freq = row[FREQ_FIELD];
+    // primary browse fact = who wins; UNKNOWN just states the verdict
+    const badge = row.status === "WIN" ? `${row.claimant} WIN`
+      : row.status === "LOSS" ? `${row.side} LOSS`
+      : row.status;
     const b = document.createElement("button");
     b.className = "arow" + (row.id === selectedId ? " sel" : "");
     b.dataset.id = row.id;
@@ -230,10 +245,9 @@ function renderList() {
         `<span class="a-sub">${row.placements}st · ×${row.orbit}</span>` +
       `</span>` +
       `<span class="a-right">` +
-        `<span class="a-badge ${v}">${row.status}</span>` +
+        `<span class="a-badge ${v}">${badge}</span>` +
         (freq ? `<span class="a-freq">used ${freq.toLocaleString()}×</span>` : ``) +
       `</span>`;
-    b.addEventListener("click", () => selectRow(row.id, true));
     list.appendChild(b);
     ob.observe(b.firstElementChild);                 // the .mini-slot
   }
@@ -259,25 +273,36 @@ function selectRow(id, reframe) {
   markSelection();
 
   board.setLegal(null);            // read-only in browse
-  setupScrub(row);                 // move-history slider: default to the full position
-  renderScrub(scrubN);             // draw the full position (identical to the plain view)
+  setupScrub(row);                 // move-history slider: opening + forced win
+  renderScrub(totalN);             // draw the full line (terminal frames the six)
   if (reframe) board.resetView();
   setSideFrame(row.side);
-  $("atlasTag").textContent = `atlas · ${row.status.toLowerCase()}`;
 
-  // readout strip
-  const verdict = row.status === "UNKNOWN"
-    ? "UNKNOWN — no certificate within pass bounds"
-    : `CERTIFIED ${row.status} for ${row.claimant}`;
+  // readout strip — name the OUTCOME honestly (claimant is always the winner)
+  let verdict;
+  if (row.status === "UNKNOWN")
+    verdict = "UNKNOWN — no certificate within pass bounds";
+  else if (row.status === "WIN")
+    verdict = `CERTIFIED WIN — ${row.claimant} (side to move) forces the win`;
+  else // LOSS: side-to-move is lost; the claimant is the proven winner
+    verdict = `CERTIFIED LOSS — ${row.side} is lost; ${row.claimant} forces the win`;
   $("roK").textContent = verdict;
-  $("roT").innerHTML = `<b>${sourceLabel(row)}</b> · ${row.placements} stones · ${row.side} to move · ${row.phase}`;
+
+  let sub = `<b>${sourceLabel(row)}</b> · ${row.placements} stones · ${row.side} to move · ${row.phase}`;
+  if (row.status === "WIN") {
+    sub += winLineArr.length
+      ? ` · <span class="ro-win">${row.claimant} forces the win in ${winLineArr.length} placements &rarr;</span>`
+      : ` · <span class="ro-pending">forced win certified for ${row.claimant}; winning line: computing (not in this snapshot)</span>`;
+  }
+  $("roT").innerHTML = sub;
 
   renderDetails(row);
 }
 
 function renderDetails(row) {
   const body = $("detailBody");
-  const cell = (k, v, cls) => `<dt>${k}</dt><dd class="${cls || ""}">${v}</dd>`;
+  const cell = (k, v, cls, title) =>
+    `<dt${title ? ` title="${title}"` : ""}>${k}</dt><dd class="${cls || ""}">${v}</dd>`;
   const na = v => (v === null || v === undefined) ? "—" : v;
   const sideCls = row.side === "P0" ? "p0" : "p1";
   const claimCls = row.claimant === "P0" ? "p0" : row.claimant === "P1" ? "p1" : "muted";
@@ -285,29 +310,33 @@ function renderDetails(row) {
   let html = `<dl class="detail-grid">`;
   html += cell("id", row.id);
   html += cell("status", row.status, verdictClass(row) === "win" ? "p0" : verdictClass(row) === "loss" ? "p1" : "muted");
-  html += cell("claimant", na(row.claimant), claimCls);
+  html += cell("winner (proven)", na(row.claimant), claimCls,
+    "the player the certificate proves can force the win");
   html += cell("side to move", row.side, sideCls);
   html += cell("phase", row.phase);
   html += cell("source", row.source);
   html += cell("placements", row.placements);
-  html += cell("orbit size", "×" + row.orbit);
-  html += cell("cap rung", row.cap.toLocaleString());
-  html += cell("horizon", row.horizon);
-  html += cell("derived horizon", na(row.derived_horizon), "muted");
-  html += cell("search nodes", row.nodes.toLocaleString());
+  html += cell("orbit size", "×" + row.orbit, "",
+    `this canonical opening represents ${row.orbit} D6-symmetric variant${row.orbit === 1 ? "" : "s"} collapsed into one`);
+  html += cell("cap rung", row.cap.toLocaleString(), "", "node-budget tier the search ran under");
+  html += cell("horizon", row.horizon, "", "search depth budget (plies)");
+  html += cell("derived horizon", na(row.derived_horizon), "muted", "depth the finished proof actually needed");
+  html += cell("search nodes", row.nodes.toLocaleString(), "",
+    "positions explored to find the proof (larger than the compact certificate)");
   html += `</dl>`;
 
   // certificate shape
   if (row.certified === 1) {
+    const zeroZones = !row.cert_zones;
     html += `<div class="cert-shape">` +
-      `<span class="cert-chip">cert nodes <b>${row.cert_nodes}</b></span>` +
-      `<span class="cert-chip">edges <b>${row.cert_edges}</b></span>` +
-      `<span class="cert-chip">commutations <b>${row.cert_commutations}</b></span>` +
-      `<span class="cert-chip">zones <b>${row.cert_zones}</b></span>` +
+      `<span class="cert-chip" title="positions in the proof itself">cert nodes <b>${row.cert_nodes}</b></span>` +
+      `<span class="cert-chip" title="proof moves (edges of the proof tree)">edges <b>${row.cert_edges}</b></span>` +
+      `<span class="cert-chip" title="order-independent move swaps folded out of the proof">commutations <b>${row.cert_commutations}</b></span>` +
+      `<span class="cert-chip${zeroZones ? " muted" : ""}" title="defender move-set zone reductions used">zones <b>${zeroZones ? "—" : row.cert_zones}</b></span>` +
       `</div>`;
     // D6 audit mask
     const full = row.d6_mask === "0xfff";
-    html += `<div class="d6-note${full ? "" : " seam"}">D6 remap audit · verified ${row.d6_verified}/12 images · mask ${row.d6_mask}` +
+    html += `<div class="d6-note${full ? "" : " seam"}" title="raw remap-audit bitmask · ${row.d6_mask}">D6 remap audit · verified ${row.d6_verified}/12 images` +
       (full ? " (all images accepted)."
             : ". Fewer than 12 images pass the <em>remap audit</em> — this is a certificate-remapping seam, NOT a weaker verdict. The strict WIN/LOSS is minted for the exact canonical (symmetry-0) representative.") +
       `</div>`;
@@ -322,67 +351,127 @@ function renderDetails(row) {
 }
 
 /* ------------------------------------------------------------------ *
- * Move-history slider — scrub the selected opening's placements
+ * Move-history slider — scrub the opening AND its forced-win line
  *
- * Reuses the board renderer: renderScrub(k) draws exactly the first k stones
- * (owners by Hexo turn order via toStones/ownerAt) and rings the k-th. At k=N
- * it reproduces the plain browse render byte-for-byte (win outline + last-two
- * dots, no scrub ring), so the full view is unchanged.
+ * Reuses the board renderer: renderScrub(k) draws exactly the first k stones of
+ * `fullMoves` (= row.moves + the validated win_line continuation), owners by
+ * Hexo turn order via toStones/ownerAt, and rings the k-th. Past the opening the
+ * continuation stones are tagged (attacker vs. forced reply) and the true
+ * terminal (k === totalN) frames the winning six. win_line is feature-detected:
+ * when absent the slider is bounded to the opening exactly as before.
  * ------------------------------------------------------------------ */
+
+/* Validate a per-row win_line: array of integer [q,r] not colliding with the
+ * opening or each other. Any malformation => [] (fall back to opening-only).
+ * The board is unbounded (virtualized/infinite) and stored openings already
+ * reach axial distance ~32, so the distance test is only a coarse garbage guard
+ * — NOT a board bound. It must sit well above real coordinates or a legitimate
+ * forced-win line that extends outward would be silently dropped. */
+const WINLINE_SANITY_DIST = 64;   // 2x the widest stored opening coordinate
+function sanitizeWinLine(row, wl) {
+  if (!Array.isArray(wl) || !wl.length) return [];
+  const occ = new Set(row.moves.map(([q, r]) => q + "," + r));
+  const out = [];
+  for (const mv of wl) {
+    if (!Array.isArray(mv) || mv.length < 2) return [];
+    const q = mv[0], r = mv[1];
+    if (!Number.isInteger(q) || !Number.isInteger(r)) return [];
+    if (Math.max(Math.abs(q), Math.abs(r), Math.abs(q + r)) > WINLINE_SANITY_DIST) return [];
+    const k = q + "," + r;
+    if (occ.has(k)) return [];
+    occ.add(k);
+    out.push([q, r]);
+  }
+  return out;
+}
+
 function setupScrub(row) {
   stopPlay();
   scrubRow = row;
-  scrubN = row.moves.length;
-  scrubK = scrubN;
+  winLineArr = (row.status === "WIN" && Array.isArray(row.win_line))
+    ? sanitizeWinLine(row, row.win_line) : [];
+  openingN = row.moves.length;
+  fullMoves = row.moves.concat(winLineArr);
+  totalN = fullMoves.length;
+  claimantIdx = row.claimant === "P0" ? 0 : row.claimant === "P1" ? 1 : null;
+  scrubK = totalN;
   const rng = $("msRange");
   rng.min = "0";
-  rng.max = String(scrubN);
+  rng.max = String(totalN);
   rng.step = "1";
-  rng.value = String(scrubN);
-  rng.disabled = scrubN === 0;     // empty root: nothing to scrub
+  rng.value = String(totalN);
+  rng.disabled = totalN === 0;     // empty root: nothing to scrub
   $("moveScrub").hidden = false;
+  updateScrubTrack();
+  const leg = $("msLegend");
+  if (leg) leg.hidden = winLineArr.length === 0;
+}
+
+// Two-tone the slider track: opening in --line, forced-win portion in win-blue.
+function updateScrubTrack() {
+  const rng = $("msRange");
+  if (totalN > 0 && winLineArr.length && openingN < totalN) {
+    const pct = (openingN / totalN * 100).toFixed(1);
+    rng.style.background =
+      `linear-gradient(90deg, var(--line) 0 ${pct}%, var(--p0) ${pct}% 100%)`;
+  } else {
+    rng.style.background = "";
+  }
 }
 
 function renderScrub(k) {
   const row = scrubRow;
   if (!row) return;
-  const N = scrubN;
+  const N = totalN;
   k = Math.max(0, Math.min(N, k));
   scrubK = k;
-  const subset = row.moves.slice(0, k);
+  const subset = fullMoves.slice(0, k);
   const stones = toStones(subset);
-  if (k === N) {
-    // full position — identical to the plain browse render (win outline, dots)
-    const winCells = row.status === "WIN" ? findWin(stones) : null;
-    board.setStones(stones, winCells);
-    board.setScrubHighlight(null);
+  const atTerminal = k === N;
+  // draw the winning six only at the true terminal of a real forced line
+  const winCells = (row.status === "WIN" && atTerminal && winLineArr.length)
+    ? findWin(stones) : null;
+  board.setStones(stones, winCells, openingN, claimantIdx);
+  if (!atTerminal && k >= 1) {
+    const last = subset[k - 1];
+    board.setScrubHighlight({ q: last[0], r: last[1], color: ownerAt(k - 1) });
   } else {
-    board.setStones(stones, null);
-    if (k >= 1) {
-      const last = subset[k - 1];
-      board.setScrubHighlight({ q: last[0], r: last[1], color: ownerAt(k - 1) });
-    } else {
-      board.setScrubHighlight(null);   // position 0 = empty board
-    }
+    board.setScrubHighlight(null);   // terminal or empty board: no scrub ring
   }
   const rng = $("msRange");
   if (rng.value !== String(k)) rng.value = String(k);
-  updateScrubRead(k, N, row);
+  $("atlasTag").textContent = (k > openingN)
+    ? "atlas · forced win"
+    : `atlas · ${row.status.toLowerCase()}`;
+  updateScrubRead(k);
   updateScrubControls();
 }
 
-function updateScrubRead(k, N, row) {
+function updateScrubRead(k) {
   const el = $("msRead");
-  if (k === 0) { el.textContent = "start · empty board"; return; }
-  const m = row.moves[k - 1];
-  el.textContent = `move ${k} / ${N} — P${ownerAt(k - 1)} at (${m[0]},${m[1]})`;
+  let text;
+  if (k === 0) {
+    text = "start · empty board";
+  } else {
+    const m = fullMoves[k - 1];
+    const owner = ownerAt(k - 1);
+    if (k <= openingN) {
+      text = `opening · move ${k} / ${openingN} — P${owner} at (${m[0]},${m[1]})`;
+    } else {
+      const j = k - openingN;
+      const role = (claimantIdx !== null && owner === claimantIdx) ? "attacker" : "forced reply";
+      text = `forced win · move ${j} / ${winLineArr.length} — P${owner} (${role}) at (${m[0]},${m[1]})`;
+    }
+  }
+  el.textContent = text;
+  $("msRange").setAttribute("aria-valuetext", text);   // mirror for screen readers
 }
 
 function updateScrubControls() {
   const playing = playTimer !== null;
   $("msPrev").disabled = scrubK <= 0;
-  $("msNext").disabled = scrubK >= scrubN;
-  $("msPlay").disabled = scrubN === 0;
+  $("msNext").disabled = scrubK >= totalN;
+  $("msPlay").disabled = totalN === 0;
   const play = $("msPlay");
   play.innerHTML = playing ? "&#9208;" : "&#9654;";           // ⏸ / ▶
   play.setAttribute("aria-label", playing ? "Pause move history" : "Play move history");
@@ -391,12 +480,12 @@ function updateScrubControls() {
 function stepScrub(d) { renderScrub(scrubK + d); }
 
 function startPlay() {
-  if (scrubN === 0) return;
-  if (scrubK >= scrubN) renderScrub(0);          // at the end: replay from empty
+  if (totalN === 0) return;
+  if (scrubK >= totalN) renderScrub(0);          // at the end: replay from empty
   playTimer = setInterval(() => {
     renderScrub(scrubK + 1);
-    if (scrubK >= scrubN) stopPlay();            // stop once the full position is reached
-  }, 700);
+    if (scrubK >= totalN) stopPlay();            // stop at the terminal (the six)
+  }, PLAY_MS);
   updateScrubControls();
 }
 function stopPlay() {
@@ -553,7 +642,9 @@ function lookupVerdict() {
   if (row.status === "WIN" || row.status === "LOSS") {
     big.textContent = "CERTIFIED " + row.status;
     big.className = "value-big " + (row.status === "WIN" ? "pos" : "neg");
-    cap.textContent = "for " + row.claimant;
+    cap.textContent = row.status === "WIN"
+      ? `${row.claimant} forces the win`
+      : `${row.side} is lost · ${row.claimant} wins`;
     st.textContent = `Strict TssVerifier-accepted · source ${sourceLabel(row)}. Selecting its atlas row.`;
     st.className = "mod-status ok";
     // also surface the matching row's details + select it in the list
@@ -643,12 +734,41 @@ async function boot() {
   fillSummary();
   fillSharp();
   buildSourceFilter();
+  // land the browse list on the 269 proven openings, not a wall of UNKNOWN
+  $("fVerdict").value = "certified";
   renderList();
 
-  $("fSearch").addEventListener("input", renderList);
+  // one debounced search + one delegated click for the whole (up to ~12.8k) list
+  let searchTimer = null;
+  $("fSearch").addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(renderList, 150);
+  });
   $("fVerdict").addEventListener("change", renderList);
   $("fSource").addEventListener("change", renderList);
   $("fSort").addEventListener("change", renderList);
+  $("atlasList").addEventListener("click", e => {
+    const row = e.target.closest(".arow");
+    if (row && row.dataset.id) selectRow(row.dataset.id, true);
+  });
+
+  // totals tiles double as one-click verdict filters
+  $("atlasTotals").addEventListener("click", e => {
+    const cell = e.target.closest("[data-filter]");
+    if (!cell) return;
+    setMode("view");
+    $("fVerdict").value = cell.dataset.filter;
+    renderList();
+  });
+  $("atlasTotals").addEventListener("keydown", e => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    const cell = e.target.closest("[data-filter]");
+    if (!cell) return;
+    e.preventDefault();
+    setMode("view");
+    $("fVerdict").value = cell.dataset.filter;
+    renderList();
+  });
 
   for (const btn of $("modeSeg").querySelectorAll("button"))
     btn.addEventListener("click", () => setMode(btn.dataset.mode));
@@ -656,9 +776,13 @@ async function boot() {
   $("undoBtn").addEventListener("click", undo);
   $("clearBtn").addEventListener("click", clearBuild);
 
-  // land on the deepest certified WIN for a strong first impression
-  const first = sortRows(ATLAS.rows.filter(r => r.status === "WIN"), "verdict")[0] ||
-                sortRows(ATLAS.rows, "freq")[0];
+  // land on a shallow, frequently-played certified WIN so the first frame is a
+  // proven line that scrubs to six-in-a-row (not the 78-stone endgame).
+  const wins = ATLAS.rows.filter(r => r.status === "WIN");
+  const first = wins.slice().sort((a, b) =>
+    (a.placements - b.placements) || (_freq(b) - _freq(a)) ||
+    (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))[0] ||
+    sortRows(ATLAS.rows, "freq")[0];
   if (first) selectRow(first.id, true);
 
   selfCheck();

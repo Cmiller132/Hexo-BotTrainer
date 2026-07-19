@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Hexo — Opening Atlas Explorer</title>
+<!-- inline hex-motif favicon: keeps the showcase LAN page free of a spurious /favicon.ico 404, no external request -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D'http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg'%20viewBox%3D'0%200%2032%2032'%3E%3Cpolygon%20points%3D'28.1%2C9%2028.1%2C23%2016%2C30%203.9%2C23%203.9%2C9%2016%2C2'%20fill%3D'%23141a20'%20stroke%3D'%234f93ff'%20stroke-width%3D'2'%2F%3E%3Ccircle%20cx%3D'16'%20cy%3D'16'%20r%3D'2.6'%20fill%3D'%234f93ff'%2F%3E%3C%2Fsvg%3E">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -36,17 +38,20 @@
     <p class="lede">A proven partial atlas of Hexo openings. Each entry is a root position that the
       solver attempted and an <em>independent strict verifier</em> either certified (WIN / LOSS) or left
       UNKNOWN. Openings are <b>de-duplicated by D6 symmetry</b> and <b>ranked by human-game frequency</b>
-      (most-played first), so the top of the list is what people actually play. Browse the representatives,
-      replay them on the board, or build your own opening and look up its canonical D6 verdict.</p>
+      (most-played first), so the top of the list is what people actually play — and those most-played
+      openings are still <b>UNKNOWN by design</b>; certified verdicts live deeper in the tree.
+      <b>P0</b> is the first player (opens at the origin, blue); <b>P1</b> is second (red).
+      Browse the representatives, replay a certified win through its forced line, or build your own
+      opening and look up its canonical D6 verdict.</p>
   </div>
 
-  <!-- summary counts -->
+  <!-- summary counts — each tile filters the list to that verdict -->
   <div class="totals" id="atlasTotals">
-    <div class="totals-cell"><div class="tn" id="totPos">—</div><div class="tl">positions</div></div>
-    <div class="totals-cell"><div class="tn win" id="totWin">—</div><div class="tl">certified win</div></div>
-    <div class="totals-cell"><div class="tn loss" id="totLoss">—</div><div class="tl">certified loss</div></div>
-    <div class="totals-cell"><div class="tn unknown" id="totUnknown">—</div><div class="tl">unknown</div></div>
-    <div class="totals-cell"><div class="tn" id="totCert">—</div><div class="tl">certified total</div></div>
+    <div class="totals-cell" data-filter="" role="button" tabindex="0" aria-label="Show all positions"><div class="tn" id="totPos">—</div><div class="tl">positions</div></div>
+    <div class="totals-cell" data-filter="win" role="button" tabindex="0" aria-label="Filter to certified wins"><div class="tn win" id="totWin">—</div><div class="tl">certified win</div></div>
+    <div class="totals-cell" data-filter="loss" role="button" tabindex="0" aria-label="Filter to certified losses"><div class="tn loss" id="totLoss">—</div><div class="tl">certified loss</div></div>
+    <div class="totals-cell" data-filter="unknown" role="button" tabindex="0" aria-label="Filter to unknown positions"><div class="tn unknown" id="totUnknown">—</div><div class="tl">unknown</div></div>
+    <div class="totals-cell" data-filter="certified" role="button" tabindex="0" aria-label="Filter to all certified positions"><div class="tn" id="totCert">—</div><div class="tl">certified total</div></div>
   </div>
 
   <!-- census -->
@@ -65,8 +70,9 @@
     <span class="tag-unk">UNKNOWN</span> means no certificate finished inside this pass's bounds.
     <b>UNKNOWN is not a draw, a balanced position, or a loss</b> — Hexo has no draw outcome, and CERTIFIED&nbsp;DRAW
     is reserved in the schema but is never emitted. Shallow openings (the empty root, all 24 first-reply classes,
-    and the entire 3,684-class two-stone layer) are UNKNOWN by design; the certified content is a thin, deep slice
-    of covered human-game prefixes (the final-ply slice of eight decisive corpus games).
+    and the entire 3,684-class two-stone layer) are UNKNOWN by design. The certified slice is an exhaustive
+    7-ply corpus layer (<b>226</b> certified wins at depth 7) plus deep human-game endings
+    (<b>37</b> wins and <b>6</b> losses drawn from played games) — <b>269</b> proven verdicts in all.
   </div>
 
   <!-- sharp example -->
@@ -96,14 +102,15 @@
       <div class="sec">
         <h2 class="k">Positions</h2>
         <div class="hist-filters">
-          <input type="text" id="fSearch" placeholder="search id / source / moves" spellcheck="false" autocomplete="off">
-          <select id="fVerdict">
+          <input type="text" id="fSearch" placeholder="search id / source / moves" spellcheck="false" autocomplete="off" aria-label="Search positions">
+          <select id="fVerdict" aria-label="Filter by verdict">
             <option value="">all verdicts</option>
+            <option value="certified">certified (win or loss)</option>
             <option value="win">certified win</option>
             <option value="loss">certified loss</option>
             <option value="unknown">unknown</option>
           </select>
-          <select id="fSource">
+          <select id="fSource" aria-label="Filter by source">
             <option value="">all sources</option>
           </select>
           <select id="fSort" aria-label="Sort order">
@@ -119,18 +126,18 @@
 
     <!-- CENTER: board -->
     <div class="board-col" id="boardCol">
-      <div class="board-frame" id="boardFrame" tabindex="0">
+      <div class="board-frame" id="boardFrame" tabindex="0" aria-label="Hexo atlas board — pan, zoom, and scrub the selected opening">
         <span class="frame-tag" id="atlasTag">atlas · position</span>
         <span class="frame-read">cursor <b id="cursorPos">—</b></span>
         <svg class="board" id="atlasBoard" role="img" aria-label="Hexo atlas board"></svg>
         <button class="place-chip" id="placeChip">place</button>
       </div>
-      <div class="lab-readout">
+      <div class="lab-readout" aria-live="polite">
         <span class="ro-k" id="roK">position</span>
         <span class="ro-t" id="roT">select an opening from the list, or build one in Test mode &rarr;</span>
       </div>
 
-      <!-- move-history slider: scrub the selected opening's placements -->
+      <!-- move-history slider: scrub the opening AND its forced-win line -->
       <div class="move-scrub" id="moveScrub" hidden>
         <div class="ms-row">
           <div class="ms-btns">
@@ -138,12 +145,22 @@
             <button class="ms-btn ms-play" id="msPlay" type="button" aria-label="Play move history" title="Play / pause">&#9654;</button>
             <button class="ms-btn" id="msNext" type="button" aria-label="Next placement" title="Next placement">&#9654;</button>
           </div>
-          <input type="range" class="ms-range" id="msRange" min="0" max="0" value="0" step="1" aria-label="Move history position">
+          <input type="range" class="ms-range" id="msRange" min="0" max="0" value="0" step="1" aria-label="Move history position" aria-valuetext="start">
           <span class="ms-read" id="msRead">start</span>
         </div>
+        <div class="ms-legend" id="msLegend" hidden><span class="ms-leg-op">opening</span> &rarr; <span class="ms-leg-win">forced win</span></div>
       </div>
 
-      <div class="sec" id="detailSec" style="margin-top:14px">
+      <!-- board legend -->
+      <div class="board-legend" aria-hidden="true">
+        <span><i class="lg-dot p0"></i> P0 (first, blue)</span>
+        <span><i class="lg-dot p1"></i> P1 (second, red)</span>
+        <span><i class="lg-mark"></i> last placed pair</span>
+        <span><i class="lg-out"></i> certified six-in-a-row</span>
+        <span><i class="lg-ring"></i> current scrub move</span>
+      </div>
+
+      <div class="sec" id="detailSec">
         <h2 class="k">Details</h2>
         <div id="detailBody" class="mod-status">no position selected.</div>
       </div>
@@ -171,7 +188,7 @@
           <span class="value-big" id="verdictBig">—</span>
           <span class="value-cap" id="verdictCap"></span>
         </div>
-        <div class="mod-status" id="testStatus"></div>
+        <div class="mod-status" id="testStatus" aria-live="polite"></div>
 
         <div class="meta-grid">
           <div class="mg-cell"><div class="n" id="mgStones">0</div><div class="l">stones</div></div>

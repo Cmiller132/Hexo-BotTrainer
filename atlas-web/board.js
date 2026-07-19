@@ -370,16 +370,28 @@ export function createBoard(svg, opts = {}) {
   });
 
   // ---- public rendering API -------------------------------------------------
-  function setStones(moves, winCells) {
+  /* moves: [{q,r,color}]. winCells: winning six to outline, or null.
+   * openingLen (optional): stones at index >= openingLen are the forced-win
+   *   continuation and are tagged .cont; if claimantIdx is given, the winner's
+   *   continuation stones get .atk (attacker) and the rest .reply (forced). */
+  function setStones(moves, winCells, openingLen, claimantIdx) {
     stoneList = moves;
     stones.textContent = "";
     marks.textContent = "";
     occupied.clear();
-    for (const m of moves) {
+    const hasCont = typeof openingLen === "number" && openingLen >= 0;
+    for (let i = 0; i < moves.length; i++) {
+      const m = moves[i];
       occupied.add(key(m.q, m.r));
       const el = document.createElementNS(NS, "polygon");
       el.setAttribute("points", hexPts(axialX(m.q, m.r), axialY(m.r), S * 0.8));
-      el.setAttribute("class", "stone " + (m.color === 0 ? "s0" : "s1"));
+      let cls = "stone " + (m.color === 0 ? "s0" : "s1");
+      if (hasCont && i >= openingLen) {
+        cls += " cont";
+        if (typeof claimantIdx === "number")
+          cls += (m.color === claimantIdx ? " atk" : " reply");
+      }
+      el.setAttribute("class", cls);
       stones.appendChild(el);
     }
     for (const [k, el] of tiles) el.classList.toggle("occ", occupied.has(k));
