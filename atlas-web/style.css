@@ -207,6 +207,7 @@ select{cursor:pointer}
 .a-badge{flex:none;font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;
   padding:1px 6px;border:1px solid transparent}
 .a-badge.win{color:var(--p0-soft);border-color:var(--p0-dim)}
+.a-badge.win.c-p1{color:var(--p1-soft);border-color:#5c2f2c}   /* P1 WIN — match P1's red */
 .a-badge.loss{color:var(--p1-soft);border-color:#5c2f2c}
 .a-badge.unknown{color:var(--dim);border-color:var(--line)}
 
@@ -281,6 +282,13 @@ select{cursor:pointer}
 .lastdot.prev{opacity:.38}
 .winoutline{pointer-events:none;fill:none;stroke:var(--accent);stroke-width:2.5;
   stroke-linecap:round;stroke-linejoin:round;opacity:.95}
+/* winning-threat overlay: the empty completion cells of the claimant's
+   unstoppable four(s), shown at a non-terminal certified win's proven-won node.
+   Dashed + in the claimant's colour so it never passes for a placed stone. */
+.threatgap{pointer-events:none;fill:none;stroke-width:2;stroke-dasharray:4 3;
+  stroke-linejoin:round;opacity:.9}
+.threatgap.g0{stroke:var(--p0-soft)}
+.threatgap.g1{stroke:var(--p1-soft)}
 .cell{fill:var(--tile);stroke:var(--accent);stroke-width:1;stroke-opacity:0;
   vector-effect:non-scaling-stroke;transition:fill .15s ease,stroke-opacity .15s ease}
 .cell:not(.occ):hover{fill:var(--tile-hover);stroke-opacity:.32}
@@ -354,6 +362,8 @@ select{cursor:pointer}
 .board-legend .lg-dot.p1{background:var(--p1)}
 .board-legend .lg-mark{width:7px;height:7px;border-radius:50%;background:var(--accent)}
 .board-legend .lg-out{width:11px;height:8px;border:1.6px solid var(--accent);border-radius:2px}
+.board-legend .lg-threat{width:10px;height:10px;border-radius:2px;
+  border:1.8px dashed var(--p0-soft);background:transparent}
 .board-legend .lg-ring{width:9px;height:9px;border-radius:50%;
   border:1.8px solid var(--p0);background:transparent}
 
@@ -367,6 +377,10 @@ select{cursor:pointer}
 .lab-readout .ro-t b{color:var(--text);font-weight:400}
 .lab-readout .ro-win{color:var(--p0-soft)}
 .lab-readout .ro-pending{color:var(--muted);font-style:italic}
+/* proof-structure-only wins (no line, no board four): honest, distinct from a
+   board-obvious win — readable neutral with a dotted mark, never the win-blue. */
+.lab-readout .ro-proof{color:var(--muted);font-style:italic;
+  text-decoration:underline dotted var(--accent-dim);text-underline-offset:3px}
 
 /* ---------- details panel ---------- */
 .detail-grid{display:grid;grid-template-columns:auto 1fr;gap:5px 14px;

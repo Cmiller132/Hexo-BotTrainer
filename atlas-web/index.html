@@ -70,9 +70,10 @@
     <span class="tag-unk">UNKNOWN</span> means no certificate finished inside this pass's bounds.
     <b>UNKNOWN is not a draw, a balanced position, or a loss</b> — Hexo has no draw outcome, and CERTIFIED&nbsp;DRAW
     is reserved in the schema but is never emitted. Shallow openings (the empty root, all 24 first-reply classes,
-    and the entire 3,684-class two-stone layer) are UNKNOWN by design. The certified slice is an exhaustive
-    7-ply corpus layer (<b>226</b> certified wins at depth 7) plus deep human-game endings
-    (<b>37</b> wins and <b>6</b> losses drawn from played games) — <b>269</b> proven verdicts in all.
+    and the entire 3,684-class two-stone layer) are UNKNOWN by design. The certified slice is a deep solver-proven
+    corpus (depths <b id="vnDepthRange">—</b>, <b id="vnCorpusWins">—</b> certified wins) plus deep human-game
+    endings (<b id="vnHumanWins">—</b> wins and <b id="vnLoss">—</b> losses drawn from played games) —
+    <b id="vnCertTotal">—</b> proven verdicts in all.
   </div>
 
   <!-- sharp example -->
@@ -156,7 +157,8 @@
         <span><i class="lg-dot p0"></i> P0 (first, blue)</span>
         <span><i class="lg-dot p1"></i> P1 (second, red)</span>
         <span><i class="lg-mark"></i> last placed pair</span>
-        <span><i class="lg-out"></i> certified six-in-a-row</span>
+        <span><i class="lg-out"></i> six-in-a-row (terminal wins)</span>
+        <span><i class="lg-threat"></i> claimant's leading four (proven-won board)</span>
         <span><i class="lg-ring"></i> current scrub move</span>
       </div>
 

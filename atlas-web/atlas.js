@@ -24,14 +24,14 @@ const vq = base => base + VERQ;                 // base carries no existing quer
 
 // Bound at boot by loadModules() — every reference lives inside a function that
 // runs only after boot() awaits the dynamic imports below.
-let createBoard, findWin, ownerAt, deriveBinding, canonicalId, miniBoardSVG;
+let createBoard, findWin, findThreats, ownerAt, deriveBinding, canonicalId, miniBoardSVG;
 async function loadModules() {
   const [B, D, M] = await Promise.all([
     import("./board.js" + VERQ),
     import("./d6.js" + VERQ),
     import("./mini-board.js" + VERQ),
   ]);
-  createBoard = B.createBoard; findWin = B.findWin;
+  createBoard = B.createBoard; findWin = B.findWin; findThreats = B.findThreats;
   ownerAt = D.ownerAt; deriveBinding = D.deriveBinding; canonicalId = D.canonicalId;
   miniBoardSVG = M.miniBoardSVG;
 }
@@ -118,7 +118,6 @@ let buildMoves = [];        // [[q,r],...] placed in build mode
 let selectedId = null;
 let lastPlaceT = 0;
 let staged = null;
-let TOTAL_GAMES = null;      // corpus denominator (from frequencies.json)
 
 /* ---- move-history slider state (scrub the selected opening) ---- */
 let scrubRow = null;         // row whose placements the slider scrubs
@@ -172,6 +171,20 @@ function fillSummary() {
   $("cPly3raw").textContent = c.ply3_raw.toLocaleString();
   $("cPly3d6").textContent = c.ply3_d6.toLocaleString();
   $("cGen").textContent = (ATLAS.generated_from || "").slice(0, 12);
+
+  // Vocabulary-note figures — derived from the same data the tiles use, so they
+  // can never drift from the totals above (was hardcoded "7-ply / 226 / 269").
+  const wins = ATLAS.rows.filter(r => r.status === "WIN");
+  const humanWins = wins.filter(r => r.source.split(":")[0] === "human").length;
+  const corpusWins = wins.length - humanWins;
+  const byDepth = (ATLAS.corpus7 && ATLAS.corpus7.by_depth) || {};
+  const depths = Object.keys(byDepth).map(Number).filter(n => !isNaN(n)).sort((a, b) => a - b);
+  const set = (id, v) => { const el = $(id); if (el) el.textContent = v; };
+  set("vnDepthRange", depths.length ? `${depths[0]}–${depths[depths.length - 1]}` : "—");
+  set("vnCorpusWins", corpusWins.toLocaleString());
+  set("vnHumanWins", humanWins.toLocaleString());
+  set("vnLoss", s.loss.toLocaleString());
+  set("vnCertTotal", s.certified.toLocaleString());
 }
 
 /* ---- sharp example card ---- */
@@ -323,7 +336,10 @@ function fillRowNode(b, row, top) {
   b.classList.toggle("sel", row.id === selectedId);
   b._label.textContent = sourceLabel(row);
   b._sub.textContent = `${row.placements}st · ×${row.orbit}`;
-  b._badge.className = "a-badge " + verdictClass(row);
+  // colour the WIN badge by the CLAIMANT (p0 blue / p1 red) so a "P1 WIN" badge
+  // isn't tinted blue while P1's stones are red; LOSS/UNKNOWN keep their class.
+  b._badge.className = "a-badge " + verdictClass(row) +
+    (row.status === "WIN" && row.claimant === "P1" ? " c-p1" : "");
   // primary browse fact = who wins; UNKNOWN just states the verdict
   b._badge.textContent = row.status === "WIN" ? `${row.claimant} WIN`
     : row.status === "LOSS" ? `${row.side} LOSS`
@@ -380,9 +396,42 @@ function setSideFrame(side) {
   else if (side === "P1" || side === 1) f.classList.add("side-p1");
 }
 
-// readout strip — name the OUTCOME honestly (claimant is always the winner).
-// winLineArr reflects the CURRENT setupScrub: empty before details merge (shows
-// "loading…"), the validated forced line after (shows "forces the win in N →").
+/* Empty completion cells of the claimant's leading four(s) in the CURRENT scrub
+ * position (fullMoves = opening + validated win_line). Cheap (<100 stones) and
+ * purely descriptive — the WIN is proven by the certificate, not by this four;
+ * this only marks where the claimant is strong. Returns [] when no board-level
+ * four exists (a deep win). */
+function currentThreatGaps() {
+  if (claimantIdx === null || !findThreats) return [];
+  return findThreats(toStones(fullMoves), claimantIdx);
+}
+
+/* Presentation state of a certified WIN, keyed off fields already in the data
+ * (win_line_terminal + presence of win_line) plus a live threat scan — so it is
+ * regeneration-proof and never asserts a six the board doesn't show:
+ *   "terminal"  win_line replays to a real six (win_line_terminal === 1)
+ *   "threat"    win_line stops before the six at a proven-won, four-holding node
+ *   "recorded-absent" no line recorded, but a board-level four is visible
+ *   "proof-only"      no line recorded AND no board four — a deep proof cert
+ *   "loading"   details still in flight                                       */
+function winState(row) {
+  if (row.status !== "WIN") return null;
+  if (row.win_line_terminal === 1) return "terminal";
+  if (winLineArr.length) return "threat";
+  if (!row._merged) return "loading";
+  return currentThreatGaps().length ? "recorded-absent" : "proof-only";
+}
+
+function certShapeNote(row) {
+  return (row._merged && typeof row.cert_nodes === "number")
+    ? ` (${row.cert_nodes} proof node${row.cert_nodes === 1 ? "" : "s"} / ${row.cert_edges} edge${row.cert_edges === 1 ? "" : "s"})`
+    : "";
+}
+
+// readout strip — name the OUTCOME honestly (claimant is always the winner) AND
+// be explicit about whether the shown board is the six or a proven-won position
+// short of it, so a non-terminal certified win never reads as a bald "FORCED
+// WIN" on a board with no six.
 function renderReadout(row) {
   let verdict;
   if (row.status === "UNKNOWN")
@@ -395,12 +444,23 @@ function renderReadout(row) {
 
   let sub = `<b>${sourceLabel(row)}</b> · ${row.placements} stones · ${row.side} to move · ${row.phase}`;
   if (row.status === "WIN") {
-    if (winLineArr.length)
-      sub += ` · <span class="ro-win">${row.claimant} forces the win in ${winLineArr.length} placements &rarr;</span>`;
-    else if (row._merged)   // details loaded, but this entry carries no recorded line (e.g. legacy human wins)
-      sub += ` · <span class="ro-pending">forced win certified for ${row.claimant} · winning line not recorded for this entry</span>`;
-    else                    // details still in flight
-      sub += ` · <span class="ro-pending">forced win certified for ${row.claimant}; loading the winning line&hellip;</span>`;
+    const c = row.claimant;
+    switch (winState(row)) {
+      case "terminal":
+        sub += ` · <span class="ro-win">${c} forces the win — the line replays all the way to six-in-a-row &rarr;</span>`;
+        break;
+      case "threat":
+        sub += ` · <span class="ro-win">${c}'s win is certified. The recorded line runs ${winLineArr.length} placements to the proven-won position shown — it stops before the sixth stone, and the certificate proves the win continues from here (${c}'s leading four(s) highlighted) &rarr;</span>`;
+        break;
+      case "recorded-absent":
+        sub += ` · <span class="ro-win">forced win certified for ${c}${certShapeNote(row)} · the exact line was not recorded, but ${c} already holds a strong four on the board (highlighted) — the win is proven by the certificate, not by the shown four alone</span>`;
+        break;
+      case "proof-only":
+        sub += ` · <span class="ro-proof">forced win certified for ${c} by proof structure${certShapeNote(row)} · the forced six is deep — no line was recorded and no board-level four is visible, so only the certificate proves it (not board-obvious)</span>`;
+        break;
+      default: // loading
+        sub += ` · <span class="ro-pending">forced win certified for ${c}; loading the winning line&hellip;</span>`;
+    }
   }
   $("roT").innerHTML = sub;
 }
@@ -449,7 +509,9 @@ function renderDetails(row) {
 
   let html = `<dl class="detail-grid">`;
   html += cell("id", row.id);
-  html += cell("status", row.status, verdictClass(row) === "win" ? "p0" : verdictClass(row) === "loss" ? "p1" : "muted");
+  html += cell("status", row.status,
+    row.status === "WIN" ? (row.claimant === "P1" ? "p1" : "p0")
+      : row.status === "LOSS" ? "p1" : "muted");
   html += cell("winner (proven)", na(row.claimant), claimCls,
     "the player the certificate proves can force the win");
   html += cell("side to move", row.side, sideCls);
@@ -504,10 +566,13 @@ function renderDetails(row) {
 /* Validate a per-row win_line: array of integer [q,r] not colliding with the
  * opening or each other. Any malformation => [] (fall back to opening-only).
  * The board is unbounded (virtualized/infinite) and stored openings already
- * reach axial distance ~32, so the distance test is only a coarse garbage guard
- * — NOT a board bound. It must sit well above real coordinates or a legitimate
- * forced-win line that extends outward would be silently dropped. */
-const WINLINE_SANITY_DIST = 64;   // 2x the widest stored opening coordinate
+ * reach axial distance ~48 (win_line extends up to ~17 further), so the distance
+ * test is only a coarse garbage guard against non-coordinate junk — NOT a board
+ * bound. It must sit FAR above any real coordinate, or a legitimate forced-win
+ * line that extends outward on a future regeneration would be silently dropped,
+ * collapsing a terminal win to an opening-only board with no six and no error.
+ * 256 clears the current max (~65) by ~4x while still catching garbage. */
+const WINLINE_SANITY_DIST = 256;
 function sanitizeWinLine(row, wl) {
   if (!Array.isArray(wl) || !wl.length) return [];
   const occ = new Set(row.moves.map(([q, r]) => q + "," + r));
@@ -572,6 +637,12 @@ function renderScrub(k) {
   const winCells = (row.status === "WIN" && atTerminal && winLineArr.length)
     ? findWin(stones) : null;
   board.setStones(stones, winCells, openingN, claimantIdx);
+  // At the terminal of a certified win that DOESN'T show a six (non-terminal
+  // line, or an empty-line human win), overlay the claimant's unstoppable four
+  // so the board still reads as won. Never drawn mid-scrub or when a six exists.
+  const threatGaps = (row.status === "WIN" && atTerminal && !winCells && claimantIdx !== null)
+    ? findThreats(stones, claimantIdx) : null;
+  board.setThreats(threatGaps, claimantIdx);
   if (!atTerminal && k >= 1) {
     const last = subset[k - 1];
     board.setScrubHighlight({ q: last[0], r: last[1], color: ownerAt(k - 1) });
@@ -580,9 +651,14 @@ function renderScrub(k) {
   }
   const rng = $("msRange");
   if (rng.value !== String(k)) rng.value = String(k);
-  $("atlasTag").textContent = (k > openingN)
-    ? "atlas · forced win"
-    : `atlas · ${row.status.toLowerCase()}`;
+  let tag;
+  if (row.status === "WIN" && atTerminal)
+    tag = winCells ? "atlas · forced win · six-in-a-row"
+      : (threatGaps && threatGaps.length) ? "atlas · forced win · proven-won position"
+      : "atlas · forced win · proof-certified";
+  else if (k > openingN) tag = "atlas · forced win";
+  else tag = `atlas · ${row.status.toLowerCase()}`;
+  $("atlasTag").textContent = tag;
   updateScrubRead(k);
   updateScrubControls();
 }
@@ -779,29 +855,32 @@ async function lookupVerdict() {
     st.className = "mod-status";
     return;
   }
+  // Determine the verdict readout, then LOAD the canonical row onto the board in
+  // view mode. buildMoves may be a D6 rotation of the certified representative;
+  // showing row.moves (+ its forced-win scrubber) instead of the raw build makes
+  // the board, the details panel, and the highlighted list row all agree — and,
+  // for a WIN, actually surfaces the forced-win line (the whole point).
+  let bigT, bigC, capT, stT;
   if (row.status === "WIN" || row.status === "LOSS") {
-    big.textContent = "CERTIFIED " + row.status;
-    big.className = "value-big " + (row.status === "WIN" ? "pos" : "neg");
-    cap.textContent = row.status === "WIN"
+    bigT = "CERTIFIED " + row.status;
+    bigC = "value-big " + (row.status === "WIN" ? "pos" : "neg");
+    capT = row.status === "WIN"
       ? `${row.claimant} forces the win`
       : `${row.side} is lost · ${row.claimant} wins`;
-    st.textContent = `Strict TssVerifier-accepted · source ${sourceLabel(row)}. Selecting its atlas row.`;
-    st.className = "mod-status ok";
+    stT = `Strict TssVerifier-accepted · source ${sourceLabel(row)}. Loaded onto the board (canonical D6 representative).`;
   } else {
-    big.textContent = "UNKNOWN";
-    big.className = "value-big";
-    cap.textContent = "in atlas · no certificate";
-    st.textContent = "This root is in the atlas but was left UNKNOWN within pass bounds. Not a draw or balance claim.";
-    st.className = "mod-status";
+    bigT = "UNKNOWN";
+    bigC = "value-big";
+    capT = "in atlas · no certificate";
+    stT = "This root is in the atlas but was left UNKNOWN within pass bounds. Not a draw or balance claim.";
   }
-  // surface the matching row's details (cert fields are lazy — await the store)
-  selectedId = row.id;
-  markSelection();
-  markDetailPending();
-  await ensureDetails();
-  if (selectedId !== row.id) return;
-  mergeDetails(row);
-  renderDetails(row);
+  setMode("view");                 // switch to browse (clears the build readout)
+  selectRow(row.id, true);         // paints the canonical board + forced-win scrub + details
+  big.textContent = bigT;          // re-assert the lookup verdict (view mode reset it)
+  big.className = bigC;
+  cap.textContent = capT;
+  st.textContent = stT;
+  st.className = "mod-status ok";
 }
 
 /* ------------------------------------------------------------------ *
@@ -870,7 +949,6 @@ async function boot() {
   // Attach human-game usage counts (D6-collapsed) onto each row, keyed by id.
   const FREQ = await loadFrequencies();
   const counts = (FREQ && FREQ.counts) || {};
-  TOTAL_GAMES = FREQ ? FREQ.total_games : null;
   for (const r of ATLAS.rows) {
     const c = counts[r.id];
     if (c != null) r[FREQ_FIELD] = c;                // absent (deep/off-scope) => badge hidden
