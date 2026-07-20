@@ -41,6 +41,45 @@ use crate::tss_verify::{
     MAX_CERT_ROOT_STONES, MAX_CERT_WITNESSES,
 };
 
+/// Solve-level child-ordering policy. The mode is configuration; the actual
+/// coordinate weights are position-specific and are consumed by one solve.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SolveOrdering {
+    #[default]
+    Off,
+    Prior,
+}
+
+impl SolveOrdering {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Prior => "prior",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct OrderingHints {
+    weights: HashMap<HexCoord, f32>,
+}
+
+impl OrderingHints {
+    fn from_entries(entries: Vec<(HexCoord, f32)>) -> Self {
+        Self {
+            weights: entries.into_iter().collect(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.weights.is_empty()
+    }
+
+    fn weight(&self, coord: HexCoord) -> Option<f32> {
+        self.weights.get(&coord).copied()
+    }
+}
+
 #[cfg(test)]
 pub(crate) const ORDERING_STUDY_ORDERS: [&str; 7] = [
     "baseline",
@@ -721,6 +760,7 @@ pub(crate) struct SolveRuntimeFlags {
 pub(crate) struct EffectiveSolveConfig {
     pub(crate) vcf_pair_complete: bool,
     pub(crate) dual_pass: bool,
+    pub(crate) ordering: &'static str,
     pub(crate) quiet_turn_or_edges: &'static str,
     pub(crate) ranked_unforced_defender_zone: &'static str,
     pub(crate) tt_enabled: bool,
@@ -751,6 +791,10 @@ pub(crate) struct TssSolver {
     /// Reuse an undecided wide `Both` primal's unspent nodes for the dual
     /// claim. Default-off preserves the historical primal-only wide split.
     dual_pass: bool,
+    ordering: SolveOrdering,
+    /// Position-specific policy weights. `solve_goal` takes this value at its
+    /// boundary, so even early returns leave no hint available to a later root.
+    ordering_hints: Option<OrderingHints>,
     /// Leaf-profile overrides (PLAN_TSS_MCTS_INTEGRATION.md §3). When `Some`,
     /// they replace the per-solve environment reads for the lazy defender
     /// frontier and the interior census gate, so the trainer leaf/root/async
@@ -788,6 +832,8 @@ impl Default for TssSolver {
             zone: ZoneSearchCaps::default(),
             width: WidthOptions::default(),
             dual_pass: false,
+            ordering: SolveOrdering::Off,
+            ordering_hints: None,
             force_lazy_frontier: None,
             force_interior_census_gate: None,
             #[cfg(test)]
@@ -883,6 +929,26 @@ impl TssSolver {
         self.dual_pass = dual_pass;
     }
 
+    pub(crate) fn set_ordering(&mut self, ordering: SolveOrdering) {
+        if self.ordering != ordering {
+            self.shared_tt.clear();
+            self.fragment_store.clear();
+        }
+        self.ordering = ordering;
+    }
+
+    /// Install policy weights for exactly the next `solve_goal`. Hinted
+    /// searches are cold on both sides so their order-sensitive fragment
+    /// provenance cannot affect either this solve or the following one.
+    pub(crate) fn set_ordering_hints(&mut self, hints: Vec<(HexCoord, f32)>) {
+        let hints = OrderingHints::from_entries(hints);
+        if self.ordering == SolveOrdering::Prior && !hints.is_empty() {
+            self.shared_tt.clear();
+            self.fragment_store.clear();
+        }
+        self.ordering_hints = Some(hints);
+    }
+
     /// Configure this solver to the campaign leaf-decided profile
     /// (PLAN_TSS_MCTS_INTEGRATION.md §3, HUNT_REPORT_LEAF_SURFACE config D):
     /// wide `vcf_pair_complete` attacker width, the lazy defender frontier ON,
@@ -946,6 +1012,7 @@ impl TssSolver {
         EffectiveSolveConfig {
             vcf_pair_complete: self.width.vcf_pair_complete,
             dual_pass: self.dual_pass,
+            ordering: self.ordering.name(),
             quiet_turn_or_edges: self.width.quiet_turn_or_edges.name(),
             ranked_unforced_defender_zone: self.width.ranked_unforced_defender_zone.name(),
             tt_enabled: self.tt_enabled,
@@ -979,6 +1046,8 @@ impl TssSolver {
             zone: ZoneSearchCaps::default(),
             width: WidthOptions::default(),
             dual_pass: false,
+            ordering: SolveOrdering::Off,
+            ordering_hints: None,
             force_lazy_frontier: None,
             force_interior_census_gate: None,
             last_narrow_signatures: Vec::new(),
@@ -1003,6 +1072,8 @@ impl TssSolver {
             zone: ZoneSearchCaps::default(),
             width: WidthOptions::default(),
             dual_pass: false,
+            ordering: SolveOrdering::Off,
+            ordering_hints: None,
             force_lazy_frontier: None,
             force_interior_census_gate: None,
             last_narrow_signatures: Vec::new(),
@@ -1022,6 +1093,32 @@ impl TssSolver {
         state: &RustHexoState,
         caps: &SolveCaps,
         goal: SolveGoal,
+    ) -> DeepResult<TssCertificate> {
+        let ordering_hints = self.ordering_hints.take().and_then(|hints| {
+            (self.ordering == SolveOrdering::Prior && !hints.is_empty()).then_some(hints)
+        });
+        let hinted = ordering_hints.is_some();
+        if hinted {
+            self.shared_tt.clear();
+            self.fragment_store.clear();
+        }
+        let result = self.solve_goal_inner(state, caps, goal, ordering_hints.as_ref());
+        if hinted {
+            // Positive fragments are sound across orders, but their warm-hit
+            // node costs are not. Drop both persistent stores to guarantee the
+            // next unhinted position observes its ordinary cold ordering.
+            self.shared_tt.clear();
+            self.fragment_store.clear();
+        }
+        result
+    }
+
+    fn solve_goal_inner(
+        &mut self,
+        state: &RustHexoState,
+        caps: &SolveCaps,
+        goal: SolveGoal,
+        ordering_hints: Option<&OrderingHints>,
     ) -> DeepResult<TssCertificate> {
         #[cfg(test)]
         {
@@ -1143,6 +1240,7 @@ impl TssSolver {
                 effective.k_reply_consume,
                 effective.interior_census_gate,
                 effective.lazy_frontier,
+                ordering_hints,
             );
             #[cfg(test)]
             if let Some(signature) = attempt.tt_signature.as_ref() {
@@ -1176,6 +1274,7 @@ impl TssSolver {
                 effective.k_reply_consume,
                 effective.interior_census_gate,
                 effective.lazy_frontier,
+                ordering_hints,
             );
             #[cfg(test)]
             if let Some(signature) = attempt.tt_signature.as_ref() {
@@ -1217,6 +1316,7 @@ impl TssSolver {
         k_reply_consume: bool,
         interior_census_gate: bool,
         lazy_frontier: bool,
+        ordering_hints: Option<&OrderingHints>,
     ) -> AttemptResult {
         if !width.vcf_pair_complete
             || (width.consumes_quiet_turns() && width.consumes_ranked_zone())
@@ -1261,6 +1361,7 @@ impl TssSolver {
             width,
             interior_census_gate,
             lazy_frontier,
+            ordering_hints,
         )
     }
 
@@ -1289,6 +1390,7 @@ impl TssSolver {
             width,
             interior_census_gate,
             lazy_frontier,
+            None,
         )
     }
 
@@ -1304,6 +1406,7 @@ impl TssSolver {
         width: WidthOptions,
         interior_census_gate: bool,
         lazy_frontier: bool,
+        ordering_hints: Option<&OrderingHints>,
     ) -> AttemptResult {
         let fragments_enabled = self.shared_fragments_enabled;
         let shared_bytes = self
@@ -1323,6 +1426,7 @@ impl TssSolver {
         );
         search.interior_census_gate = interior_census_gate;
         search.lazy_frontier = lazy_frontier;
+        search.ordering_hints = ordering_hints.cloned();
         let root = search.insert_root(state);
         search.run(state, root);
         #[cfg(test)]
@@ -2398,6 +2502,29 @@ enum WidePnMove {
     /// wide pair-canonicalization path; unlike `Pair`, it materializes as an
     /// implicit Universal turn with a checked commutation witness.
     DefenderPair(HexCoord, HexCoord),
+}
+
+fn compare_hint_weight(left: Option<f32>, right: Option<f32>) -> std::cmp::Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => left.total_cmp(&right),
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
+fn hint_weights_for_move(hints: &OrderingHints, mv: WidePnMove) -> [Option<f32>; 2] {
+    let (first, second) = match mv {
+        WidePnMove::One(coord) => (hints.weight(coord), None),
+        WidePnMove::Pair(first, second) | WidePnMove::DefenderPair(first, second) => {
+            (hints.weight(first), hints.weight(second))
+        }
+    };
+    if compare_hint_weight(first, second).is_lt() {
+        [second, first]
+    } else {
+        [first, second]
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3739,6 +3866,9 @@ struct WidePnSearch<'store> {
     /// historical selector branch without computing or consulting a key.
     zone_order_mode: ZoneOrderMode,
     zone_order_band: u32,
+    /// Optional coordinate priors copied from the owning solve. They are read
+    /// only after a node's complete historical child vector has been built.
+    ordering_hints: Option<OrderingHints>,
     /// Read once when this solve-local search is created. Default-off keeps the
     /// historical eager defender-frontier admission path byte-for-byte in the
     /// decision logic.
@@ -4020,6 +4150,7 @@ impl<'store> WidePnSearch<'store> {
             width,
             zone_order_mode,
             zone_order_band,
+            ordering_hints: None,
             lazy_frontier,
             horizon_cuts: 0,
             kb_death_cuts: 0,
@@ -5301,6 +5432,22 @@ impl<'store> WidePnSearch<'store> {
         sequential_root_probe: bool,
         prefer_width_tier: bool,
     ) -> Option<usize> {
+        if self.children_have_hint(children) {
+            // The complete vector has already been stably prior-sorted. Drive
+            // its first still-live edge so the external ordering is effective
+            // without changing membership or any terminal classification.
+            return children.iter().enumerate().find_map(|(index, child)| {
+                match kind {
+                    WidePnKind::Choice if !self.child_is_genuinely_refuted(child) => Some(index),
+                    WidePnKind::Universal { .. }
+                        if !self.child_is_genuinely_proven(child) =>
+                    {
+                        Some(index)
+                    }
+                    _ => None,
+                }
+            });
+        }
         if kind != WidePnKind::Choice || !self.zone_order_mode.enabled() {
             return self.select_child_index_baseline(
                 kind,
@@ -5536,6 +5683,13 @@ impl<'store> WidePnSearch<'store> {
             {
                 return Some(index);
             }
+        }
+        if self.children_have_hint(children) {
+            return children
+                .iter()
+                .enumerate()
+                .find(|(index, child)| selectable(*index, child))
+                .map(|(index, _)| index);
         }
         children
             .iter()
@@ -6190,6 +6344,7 @@ impl<'store> WidePnSearch<'store> {
         } else {
             None
         };
+        self.order_children_by_hints(&mut children);
         children.shrink_to_fit();
         self.entries[id].node = if children.is_empty() {
             WidePnNode::Refuted
@@ -6220,6 +6375,30 @@ impl<'store> WidePnSearch<'store> {
             }
             TurnPhase::Opening => self.attack_single_children(state, depth, None),
         }
+    }
+
+    /// Stable-sort a fully generated child vector. This placement makes set
+    /// invariance structural: hints cannot participate in generation, gates,
+    /// deduplication, legality checks, or pruning. Atomic two-stone edges rank
+    /// by their larger hinted weight, then their smaller hinted weight.
+    fn order_children_by_hints(&self, children: &mut [WidePnChild]) {
+        let Some(hints) = self.ordering_hints.as_ref() else {
+            return;
+        };
+        children.sort_by(|left, right| {
+            let left = hint_weights_for_move(hints, left.mv);
+            let right = hint_weights_for_move(hints, right.mv);
+            compare_hint_weight(right[0], left[0])
+                .then_with(|| compare_hint_weight(right[1], left[1]))
+        });
+    }
+
+    fn children_have_hint(&self, children: &[WidePnChild]) -> bool {
+        self.ordering_hints.as_ref().is_some_and(|hints| {
+            children
+                .iter()
+                .any(|child| hint_weights_for_move(hints, child.mv)[0].is_some())
+        })
     }
 
     /// Enumerate complete attacker turns. A first stone is never admitted to
@@ -14268,6 +14447,195 @@ mod tests {
         solver.configure_leaf_profile();
         solver.set_dual_pass(dual_pass);
         solver
+    }
+
+    fn ordering_constructive_fixture() -> RustHexoState {
+        crate::tss_spare_corpus::mining_candidate("forcing_prefix:acly7kb:93")
+    }
+
+    fn solve_with_ordering_hint(
+        state: &RustHexoState,
+        caps: &SolveCaps,
+        goal: SolveGoal,
+        hint: HexCoord,
+    ) -> DeepResult<TssCertificate> {
+        let mut solver = wide_solver_with_dual_pass(false);
+        solver.set_ordering(SolveOrdering::Prior);
+        solver.set_ordering_hints(vec![(hint, 1.0)]);
+        solver.solve_goal(state, caps, goal)
+    }
+
+    #[test]
+    fn wide_ordering_no_hints_is_node_identical_on_fixture_battery() {
+        let caps = SolveCaps {
+            node_cap: 500,
+            tt_bytes_cap: 256 << 10,
+            semantic_horizon: u32::MAX,
+        };
+        for (name, state, goal) in [
+            ("win", win_now_fixture(), SolveGoal::Both),
+            ("loss", forced_loss_fixture(), SolveGoal::Both),
+            ("unknown", pair_width_first_stone_fixture(), SolveGoal::Win),
+            ("quiet", quiet_fixture(), SolveGoal::Win),
+        ] {
+            let off = wide_solver_with_dual_pass(false).solve_goal(&state, &caps, goal);
+            let mut prior_without_data = wide_solver_with_dual_pass(false);
+            prior_without_data.set_ordering(SolveOrdering::Prior);
+            let prior = prior_without_data.solve_goal(&state, &caps, goal);
+            assert_eq!(prior.status, off.status, "status fixture={name}");
+            assert_eq!(prior.cert, off.cert, "certificate fixture={name}");
+            assert_eq!(prior.stats.nodes, off.stats.nodes, "nodes fixture={name}");
+        }
+    }
+
+    #[test]
+    fn wide_ordering_hints_preserve_unbounded_verdicts() {
+        let caps = SolveCaps {
+            node_cap: 500,
+            tt_bytes_cap: 256 << 10,
+            semantic_horizon: u32::MAX,
+        };
+        for (name, state, goal, hint) in [
+            (
+                "constructive-win",
+                ordering_constructive_fixture(),
+                SolveGoal::Win,
+                HexCoord::new(3, -6),
+            ),
+            (
+                "root-win",
+                win_now_fixture(),
+                SolveGoal::Both,
+                HexCoord::new(99, 99),
+            ),
+            (
+                "root-loss",
+                forced_loss_fixture(),
+                SolveGoal::Both,
+                HexCoord::new(-8, 0),
+            ),
+        ] {
+            let baseline = wide_solver_with_dual_pass(false).solve_goal(&state, &caps, goal);
+            let hinted = solve_with_ordering_hint(&state, &caps, goal, hint);
+            assert_eq!(hinted.status, baseline.status, "fixture={name}");
+            if let Some(cert) = hinted.cert.as_ref() {
+                assert!(TssVerifier.verify(&state, cert, hinted.status), "fixture={name}");
+            }
+        }
+    }
+
+    #[test]
+    fn wide_ordering_correct_hint_reduces_nodes_vs_away_hint() {
+        let state = ordering_constructive_fixture();
+        let caps = SolveCaps {
+            node_cap: 500,
+            tt_bytes_cap: 256 << 10,
+            semantic_horizon: u32::MAX,
+        };
+        let proving = solve_with_ordering_hint(
+            &state,
+            &caps,
+            SolveGoal::Win,
+            HexCoord::new(3, -6),
+        );
+        let away = solve_with_ordering_hint(
+            &state,
+            &caps,
+            SolveGoal::Win,
+            HexCoord::new(0, -6),
+        );
+        for result in [&proving, &away] {
+            assert_eq!(result.status, ProofStatus::Win);
+            assert!(TssVerifier.verify(&state, result.cert.as_ref().unwrap(), result.status));
+        }
+        let proving_root = proving.cert.as_ref().and_then(|cert| {
+            match cert.nodes.get(cert.root_node as usize) {
+                Some(CertNode::Choice { mv, .. }) => Some(*mv),
+                _ => None,
+            }
+        });
+        assert_eq!(proving_root, Some(HexCoord::new(3, -6)));
+        assert!(
+            proving.stats.nodes < away.stats.nodes,
+            "proving={} away={}",
+            proving.stats.nodes,
+            away.stats.nodes
+        );
+    }
+
+    #[test]
+    fn wide_ordering_hints_do_not_leak_to_next_solve() {
+        let a = ordering_constructive_fixture();
+        let b = xsnfyll_forced_defender_fixture();
+        let caps = SolveCaps {
+            node_cap: 500,
+            tt_bytes_cap: 256 << 10,
+            semantic_horizon: u32::MAX,
+        };
+        let mut sequence = wide_solver_with_dual_pass(false);
+        sequence.set_shared_fragments_for_test(true);
+        sequence.set_ordering(SolveOrdering::Prior);
+        sequence.set_ordering_hints(vec![(HexCoord::new(3, -6), 1.0)]);
+        assert_eq!(
+            sequence.solve_goal(&a, &caps, SolveGoal::Win).status,
+            ProofStatus::Win
+        );
+        let after_hinted = sequence.solve_goal(&b, &caps, SolveGoal::Loss);
+
+        let mut alone = wide_solver_with_dual_pass(false);
+        alone.set_shared_fragments_for_test(true);
+        alone.set_ordering(SolveOrdering::Prior);
+        let cold = alone.solve_goal(&b, &caps, SolveGoal::Loss);
+        assert_eq!(after_hinted.status, cold.status);
+        assert_eq!(after_hinted.cert, cold.cert);
+        assert_eq!(after_hinted.stats.nodes, cold.stats.nodes);
+        assert_eq!(after_hinted.stats.fragment_hits, cold.stats.fragment_hits);
+    }
+
+    #[test]
+    fn wide_ordering_root_candidate_set_is_invariant() {
+        fn key(mv: WidePnMove) -> (u8, i16, i16, i16, i16) {
+            match mv {
+                WidePnMove::One(coord) => (0, coord.q, coord.r, 0, 0),
+                WidePnMove::Pair(first, second) => (1, first.q, first.r, second.q, second.r),
+                WidePnMove::DefenderPair(first, second) => {
+                    (2, first.q, first.r, second.q, second.r)
+                }
+            }
+        }
+
+        let state = ordering_constructive_fixture();
+        let baseline_search = WidePnSearch::new(
+            state.current_player(),
+            state.placements_made(),
+            500,
+            256 << 10,
+            u32::MAX,
+            MAX_SEARCH_DEPTH,
+        );
+        let baseline = baseline_search.attack_children(&mut state.clone(), 0);
+
+        let mut hinted_search = WidePnSearch::new(
+            state.current_player(),
+            state.placements_made(),
+            500,
+            256 << 10,
+            u32::MAX,
+            MAX_SEARCH_DEPTH,
+        );
+        hinted_search.ordering_hints = Some(OrderingHints::from_entries(vec![(
+            HexCoord::new(0, -6),
+            1.0,
+        )]));
+        let mut hinted = hinted_search.attack_children(&mut state.clone(), 0);
+        hinted_search.order_children_by_hints(&mut hinted);
+
+        assert_ne!(baseline.first().map(|child| child.mv), hinted.first().map(|child| child.mv));
+        let mut baseline_set = baseline.into_iter().map(|child| key(child.mv)).collect::<Vec<_>>();
+        let mut hinted_set = hinted.into_iter().map(|child| key(child.mv)).collect::<Vec<_>>();
+        baseline_set.sort_unstable();
+        hinted_set.sort_unstable();
+        assert_eq!(hinted_set, baseline_set);
     }
 
     #[test]
