@@ -411,6 +411,21 @@ impl WindowStore {
         !self.live_threats.is_empty()
     }
 
+    /// Iterate the live (count >= 4 single-colour) threat windows with their
+    /// owners via the incrementally maintained `live_threats` index: the same
+    /// (player, entry) multiset as `threats()`, in unspecified order, without
+    /// scanning every touched window. O(active threats) instead of O(all
+    /// windows) — intended for hot callers whose outputs are order-insensitive
+    /// (e.g. threat analysis); order-sensitive consumers must keep `threats()`.
+    pub fn live_threat_entries(&self) -> impl Iterator<Item = (Player, WindowEntry)> + '_ {
+        self.live_threats.iter().filter_map(|(&key, &player)| {
+            self.masks_by_key
+                .get(&key)
+                .copied()
+                .map(|masks| (player, WindowEntry { key, masks }))
+        })
+    }
+
     /// Build a window store from a flat placement list, without a full
     /// `HexoState`.
     ///
