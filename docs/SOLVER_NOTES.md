@@ -218,6 +218,17 @@ Consequences:
   proof-participation statistics (residue map, in flight), threat-
   proximity statics, refutation-first defender ordering (strongest reply
   first at AND nodes). OPEN — mechanism ready, oracle wanted.
+  **Threat-proximity statics also REJECTED (same night): +19/−99 on human
+  dev at cap 500 — worse than policy priors.** Reading: wide-pn's native
+  generation order already encodes forcing structure; EVERY generic
+  reorder tried so far destroys it. The bar for an oracle is now high —
+  proof-participation data or nothing.
+- **Batch-order dependence: MEASURED ZERO** (human dev n=2,185, forward
+  vs reversed batch at cap 500: 0 verdict changes, 0 contradictions).
+  The documented TT-carryover caveat affects node counts at most, not
+  verdicts; sample-vs-full comparisons are safe at this cap. Also clears
+  hinted-vs-baseline A/Bs of the cold-cache confound (hinted solves run
+  cold by design; carryover demonstrably doesn't move verdicts).
 - ~~Verdict injection (Lever-2)~~ — OWNER RULING: production consumption
   already improves search/policy/value (steered visits + outcomes are the
   training targets); direct target-swapping is NOT a solver lane. Dropped
