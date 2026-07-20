@@ -31,6 +31,10 @@ The controlling read-only normative source for this repair is
 `E:\Hexo-BotTrainer-hexgt\.claude\worktrees\consolidate-main\docs\PROOF_TSS_DEFENDER_ZONES.md`,
 2011 lines, SHA-256
 `39197460D068CE5442BA0AFFC687F1408DF3F28EEEB26C4DD7192B87A202064B`.
+This authority is repository-committed (R-Z11-REV erratum 3, portable
+pin): path `docs/PROOF_TSS_DEFENDER_ZONES.md` on branch
+`claude/consolidate-main`, commit `148536cd`, pushed to origin; the SHA-256
+above binds that exact blob on any machine.
 The 899-line local `docs/PROOF_TSS_DEFENDER_ZONES.md` was neither used as
 authority nor edited. For R-Z11 this paragraph supersedes section 0's
 historical R-Z10 source-reconciliation narrative; every D14--D21/T3/T11
@@ -543,24 +547,29 @@ path. This is the point omitted from the withdrawn exposition.
   `d in W` row. The ancestor's branch-paired child clock includes all later
   direct charges, ordinary opportunities, LOSS remainders, and escape floors.
   No common real/ghost pre-count is assumed.
-- If no earlier real-only `W` fill exists, real count is at most ghost count
-  before the current edge; a ghost-only `s in W` can only make that inequality
-  safer. For a touched ghost `W`, every empty is already ghost-legal, so a
-  nonincident `d` changes neither count nor the needed legality. An incident
-  `d` changes the real count by exactly one and (N-touch) uses `1+q`.
-- If the ghost parent `W` is all-empty and `d in W`, the current placement is
-  the first real fill and costs exactly one. A completion would require five
-  more child fills, so the edge is admissible exactly on the safe side
-  `1+q<6`. When `q>=5`, the strict guard fails; equivalently N-virgin would
-  demand `dist(d,W)>8(1+q-6)` at distance zero and cannot pass.
-- If the ghost parent `W` is all-empty and `d notin W`, all six real fills
-  remain in the child. For `q<6` the child hazard bound makes completion
-  impossible. For `q>=6`, if the transition were the first causal source of
-  a ghost-illegal fill, its first such seed `z` lies in
-  `GI(G) intersect B_8(d)`; spending six of the `q` child hazards in `W`
-  leaves at most `q-6` radius-eight links before reaching `W`, hence
-  `z in B_{8(q-6)}(W)`, contradicting (WC). If (WC) fails, the one unit and
-  (N-virgin) restore D22-N's transition-inclusive envelope.
+- Otherwise no earlier real-only `W` fill exists: real count is at most
+  ghost count before the current edge, and a ghost-only `s in W` can only
+  make that inequality safer. Exactly one of the following three subcases
+  applies — the nesting is load-bearing (R-Z11-REV erratum 1): each subcase
+  is reachable ONLY under this no-earlier-fill hypothesis, never as an
+  independent peer of the first bullet.
+  - For a touched ghost `W`, every empty is already ghost-legal, so a
+    nonincident `d` changes neither count nor the needed legality. An
+    incident `d` changes the real count by exactly one and (N-touch) uses
+    `1+q`.
+  - If the ghost parent `W` is all-empty and `d in W`, the current placement
+    is the first real fill and costs exactly one. A completion would require
+    five more child fills, so the edge is admissible exactly on the safe
+    side `1+q<6`. When `q>=5`, the strict guard fails; equivalently N-virgin
+    would demand `dist(d,W)>8(1+q-6)` at distance zero and cannot pass.
+  - If the ghost parent `W` is all-empty and `d notin W`, all six real fills
+    remain in the child. For `q<6` the child hazard bound makes completion
+    impossible. For `q>=6`, if the transition were the first causal source
+    of a ghost-illegal fill, its first such seed `z` lies in
+    `GI(G) intersect B_8(d)`; spending six of the `q` child hazards in `W`
+    leaves at most `q-6` radius-eight links before reaching `W`, hence
+    `z in B_{8(q-6)}(W)`, contradicting (WC). If (WC) fails, the one unit
+    and (N-virgin) restore D22-N's transition-inclusive envelope.
 
 These rows are mutually exclusive and exhaust every D-alive window because
 incidence is Boolean and the ghost window is touched or all-empty. The
@@ -643,7 +652,10 @@ pass/fail, and record all four `(d in W,s in W)` incidence pairs. Terminal,
 OR, ordinary AND, LOSS, off-kernel escape, and DAG-unfolding cases remain the
 seven outer grammar rows in section 1.2.
 
-The resulting window leaves are exactly:
+The resulting table is the complete **charge partition** (R-Z11-REV
+erratum 2): it is exact for charge rows; the exact verifier leaves
+additionally split each row by the pass/fail outcome of its retained
+mandatory guard (touched guard, N-touch, direct `1+q<6`, WC, N-virgin):
 
 | edge/window leaf | charge | required check |
 |---|---:|---|
