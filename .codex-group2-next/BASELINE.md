@@ -1,0 +1,18 @@
+# R-G2-IMPL baseline audit
+
+- Worktree HEAD: `bee6a085378f8fdf35c1502c47af6afd34b00486`
+- Branch: `hunt/group2-zones`
+- Host toolchain: `cargo 1.95.0 (f2d3ce0bd 2026-03-21)`; `rustc 1.95.0 (59807616e 2026-04-14)`
+- Host/required target: `x86_64-pc-windows-msvc`
+- Strict verifier SHA-256 at audit start: `9990D38618DA2204351E328CA0143BE2AEF98BB3001E4A0462CF346B707F2CE8`
+- `git diff --exit-code -- packages/hexfield_eq/rust/src/tss_verify.rs`: PASS
+- Cargo builds/tests run: none. The frozen contract failed its pre-implementation authority and representation checks described in `OBSTRUCTIONS.md`.
+
+Source SHA-256 values:
+
+```text
+78C00B31CA249DCE8EAE5BE7950F3015155E0B39F77FFE68889AF99AA5BE7A0C  DESIGN_GROUP2_NEXT.md
+BA3AD5233CFC3B42AAB2CA44D1C288B15FDD72E36E7FF7B2FF7604930DFABB20  PROOF_TSS_ZONES_FHW.md
+2591071BDF2FA77A88E2A7E7EC57B60A7F9FD871B252EA908ECAEA58D72A677F  PROOF_TSS_ZONES_FHW_REVIEW2.md
+6A9C10ACD67DE242E10B2E60B2AA79ABF5280711EFD9849D7D2876F3BC7CABBC  docs/PROOF_TSS_DEFENDER_ZONES.md
+```
