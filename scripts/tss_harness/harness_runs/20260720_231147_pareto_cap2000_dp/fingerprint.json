@@ -1,0 +1,17 @@
+{
+  "git_rev": "",
+  "platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+  "python": "3.12.3",
+  "schema": 1,
+  "set_hashes": {
+    "canaries_v1": "fc88fa40e3062929b052d3c07bdfe9c04e750f8b381b524bc792d7e2eddaaab2",
+    "canaries_v2": "390013733e8bb770a5e68ee21d004fa4cf24049d2be64fd79355c9aa9d1f846f",
+    "human_v1": "5784defe2531db55360e9860ddddc9b89b148547b16a0c970ff7d83f407c66b6",
+    "puzzle_v1": "6a0702a79667ecf4688f8fdef5c917ab3a6c816fc7ba8e870c918e6353370fcd",
+    "puzzle_v2": "8122f6c038c7b9a4e664ab741b72e6668ed1916ca6f32c10fd57eba6f66e70e3",
+    "puzzle_v3": "12b79c6ea132b8d0caa3c2a9108d5830039cd407b2e774670b59a144ea3495e7",
+    "selfplay_v1": "d8b4256408dfdabf71a90d3653962160bcc05ec66bba580dd6379149d998b708"
+  },
+  "tss_env": {},
+  "utc": "2026-07-20T23:11:47Z"
+}

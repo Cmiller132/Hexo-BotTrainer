@@ -1,0 +1,44 @@
+[
+  {
+    "detail": "",
+    "gate": "features_have_canaries",
+    "hard": true,
+    "passed": true
+  },
+  {
+    "detail": "",
+    "gate": "manifest_subset_match",
+    "hard": true,
+    "passed": true
+  },
+  {
+    "detail": "",
+    "gate": "soundness",
+    "hard": true,
+    "passed": true
+  },
+  {
+    "detail": "",
+    "gate": "soundness",
+    "hard": true,
+    "passed": true
+  },
+  {
+    "detail": "",
+    "gate": "soundness",
+    "hard": true,
+    "passed": true
+  },
+  {
+    "detail": "lost must-solve verdicts: ['atlas_oa-273c7ba1f9049f2e', 'atlas_oa-e1a6d89c7066b6f9']",
+    "gate": "ground_truth",
+    "hard": true,
+    "passed": false
+  },
+  {
+    "detail": "",
+    "gate": "determinism",
+    "hard": true,
+    "passed": true
+  }
+]

@@ -223,6 +223,24 @@ Consequences:
   generation order already encodes forcing structure; EVERY generic
   reorder tried so far destroys it. The bar for an oracle is now high —
   proof-participation data or nothing.
+- **Dual-pass ADOPTION RUN (dev+holdout): ALL PASS, no overfitting**
+  (human: dev 14.5%W/12.3%L vs holdout 14.2%W/12.1%L; selfplay similar).
+  Box checked for the production flag flip.
+- **Cap×dual-pass Pareto (quick samples): cap 250 FAILS the must-solve
+  floor** (2 atlas wins lost — the ground-truth gate correctly rejects
+  it; the envelope floor is between 250 and 500). 500→2000 grows human
+  sample coverage 90→98 and puzzle 13→42/48; 2000→4000 adds ~2 — the
+  knee is at ~2000. Standard-tier promotion candidate = cap 2000 +
+  dual_pass, pending bench throughput at that cap.
+- **WIDTH-INCOMPLETENESS WITNESSES FOUND (atlas-deep probe at 100k):**
+  of the 5 certified-WIN atlas rows unprovable at the 20k labeling cap,
+  2 crack at 22k/31k nodes (deep but reachable) — but **3 width-exhaust
+  at 21–43 nodes**: the wide profile PROVES no vcf_pair_complete win
+  exists, yet the atlas certificate says WIN. These are the first
+  concrete witnesses that the width misses real wins at ANY budget.
+  Implication: some fraction of the 96 width-exhausted grinds may be
+  true wins too — the width-completeness study (owner passed earlier)
+  now has hard evidence instead of a hypothesis.
 - **Batch-order dependence: MEASURED ZERO** (human dev n=2,185, forward
   vs reversed batch at cap 500: 0 verdict changes, 0 contradictions).
   The documented TT-carryover caveat affects node counts at most, not
