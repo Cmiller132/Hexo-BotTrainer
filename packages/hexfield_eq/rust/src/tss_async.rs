@@ -222,6 +222,7 @@ pub struct SolveRequest {
     pub goal: SolveGoal,
     pub zone: ZoneSearchCaps,
     pub horizon: SolverHorizon,
+    pub dual_pass: bool,
 }
 
 /// A completed, already-verified solve. `hard` is `Some` only when the
@@ -575,6 +576,7 @@ fn worker_loop(
         // the pool.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut counters = TssCounters::default();
+            solver.set_dual_pass(request.dual_pass);
             let solved = tss_solve_verified(
                 &request.state,
                 request.node_cap,
@@ -685,6 +687,7 @@ mod tests {
             goal: SolveGoal::Both,
             zone: ZoneSearchCaps::default(),
             horizon: SolverHorizon::DEFAULT,
+            dual_pass: false,
         }
     }
 
@@ -825,6 +828,7 @@ mod tests {
             goal: SolveGoal::Both,
             zone: ZoneSearchCaps::default(),
             horizon: SolverHorizon::DEFAULT,
+            dual_pass: false,
         }));
         let response = drain_one(&pool);
         assert_eq!(response.slot, 7);

@@ -56,6 +56,10 @@ class TssBatchAdapter:
         # full budget (verdict-identical for wins) and surfaces the cheap
         # forced losses the primal search proves along the way.
         "goal": "both",
+        # Engine-side unused-budget dual pass (R-TWOPASS-IMPL, owner-approved
+        # 2026-07-20): an undecided wide Both WIN attempt's leftover nodes go
+        # to the opponent-WIN attempt. Default off = pre-change engine.
+        "dual_pass": False,
         "shared_fragments": False,
     }
 
@@ -86,6 +90,7 @@ class TssBatchAdapter:
             bool(self.config["ladder"]),
             bool(self.config["zone"]),
             bool(self.config["wide"]),
+            bool(self.config["dual_pass"]),
         )
         m["goal"] = self.config["goal"]
         m["adapter"] = self.name
@@ -108,6 +113,7 @@ class TssBatchAdapter:
                 bool(self.config["ladder"]),
                 bool(self.config["zone"]),
                 bool(self.config["wide"]),
+                bool(self.config["dual_pass"]),
             )
 
         everyone = list(range(len(states)))
@@ -168,6 +174,10 @@ def declared_features(config: dict[str, Any]) -> tuple[str, ...]:
         feats.append("warmth")
     if int(config.get("horizon", 0)) == 0:
         feats.append("unbounded_horizon")
+    if config.get("dual_pass"):
+        # Engine-side dual pass: the loss canary must observe real verified
+        # LOSS verdicts from the arm's own goal path (both + dual_pass).
+        feats.append("loss_detection")
     if config.get("goal", "win") in ("loss", "both", "two_pass"):
         # goal=both under the wide profile currently gives the loss attempt
         # zero budget (SOLVER_NOTES §5) — such an arm will FAIL this canary,
@@ -179,4 +189,4 @@ def declared_features(config: dict[str, Any]) -> tuple[str, ...]:
         feats.append("zone")            # no canary exists -> unclaimable
     if config.get("ladder"):
         feats.append("ladder")          # no canary exists -> unclaimable
-    return tuple(feats)
+    return tuple(dict.fromkeys(feats))  # dedup, order-preserving

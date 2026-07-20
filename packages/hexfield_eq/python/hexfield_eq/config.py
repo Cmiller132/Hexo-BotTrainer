@@ -139,6 +139,9 @@ class SelfplayConfig:
     # only budget). The 1..=15 band is rejected loudly at the Rust seam.
     # Replaces the historical hardcoded +12 in tss_solve_verified.
     tss_solver_horizon: int = 16
+    # Reuse an undecided wide Both WIN attempt's remaining node budget for the
+    # opponent-WIN attempt. Default off preserves the primal-only wide split.
+    tss_solver_dual_pass: bool = False
     # Horizon ladder (default off): a bounded base solve that came back Unknown
     # while still depth-cut (horizon_cuts > 0) is re-solved once at 2x horizon
     # on the same solver instance. Unbounded bases skip it.
@@ -633,6 +636,7 @@ def build_divergence_overrides(
         # TSS deep-solve semantic horizon (owner floor h16, or 0 = unbounded;
         # the 1..=15 band is rejected at the Rust seam) and the horizon ladder.
         "tss_solver_horizon": int(sp.tss_solver_horizon),
+        "tss_solver_dual_pass": bool(sp.tss_solver_dual_pass),
         "tss_solver_horizon_ladder": bool(sp.tss_solver_horizon_ladder),
         # Gumbel AlphaZero levers (default OFF).
         "gumbel_target": bool(sp.gumbel_target_enabled),

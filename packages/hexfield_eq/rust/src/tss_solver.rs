@@ -720,6 +720,7 @@ pub(crate) struct SolveRuntimeFlags {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct EffectiveSolveConfig {
     pub(crate) vcf_pair_complete: bool,
+    pub(crate) dual_pass: bool,
     pub(crate) quiet_turn_or_edges: &'static str,
     pub(crate) ranked_unforced_defender_zone: &'static str,
     pub(crate) tt_enabled: bool,
@@ -747,6 +748,9 @@ pub(crate) struct TssSolver {
     fragment_store: ProvenFragmentStore,
     zone: ZoneSearchCaps,
     width: WidthOptions,
+    /// Reuse an undecided wide `Both` primal's unspent nodes for the dual
+    /// claim. Default-off preserves the historical primal-only wide split.
+    dual_pass: bool,
     /// Leaf-profile overrides (PLAN_TSS_MCTS_INTEGRATION.md §3). When `Some`,
     /// they replace the per-solve environment reads for the lazy defender
     /// frontier and the interior census gate, so the trainer leaf/root/async
@@ -783,6 +787,7 @@ impl Default for TssSolver {
             fragment_store: ProvenFragmentStore::new(0, u64::MAX),
             zone: ZoneSearchCaps::default(),
             width: WidthOptions::default(),
+            dual_pass: false,
             force_lazy_frontier: None,
             force_interior_census_gate: None,
             #[cfg(test)]
@@ -870,6 +875,14 @@ impl TssSolver {
         self.width = width;
     }
 
+    pub(crate) fn set_dual_pass(&mut self, dual_pass: bool) {
+        if self.dual_pass != dual_pass {
+            self.shared_tt.clear();
+            self.fragment_store.clear();
+        }
+        self.dual_pass = dual_pass;
+    }
+
     /// Configure this solver to the campaign leaf-decided profile
     /// (PLAN_TSS_MCTS_INTEGRATION.md §3, HUNT_REPORT_LEAF_SURFACE config D):
     /// wide `vcf_pair_complete` attacker width, the lazy defender frontier ON,
@@ -932,6 +945,7 @@ impl TssSolver {
         };
         EffectiveSolveConfig {
             vcf_pair_complete: self.width.vcf_pair_complete,
+            dual_pass: self.dual_pass,
             quiet_turn_or_edges: self.width.quiet_turn_or_edges.name(),
             ranked_unforced_defender_zone: self.width.ranked_unforced_defender_zone.name(),
             tt_enabled: self.tt_enabled,
@@ -964,6 +978,7 @@ impl TssSolver {
             fragment_store: ProvenFragmentStore::new(0, u64::MAX),
             zone: ZoneSearchCaps::default(),
             width: WidthOptions::default(),
+            dual_pass: false,
             force_lazy_frontier: None,
             force_interior_census_gate: None,
             last_narrow_signatures: Vec::new(),
@@ -987,6 +1002,7 @@ impl TssSolver {
             fragment_store: ProvenFragmentStore::new(0, hash_mask),
             zone: ZoneSearchCaps::default(),
             width: WidthOptions::default(),
+            dual_pass: false,
             force_lazy_frontier: None,
             force_interior_census_gate: None,
             last_narrow_signatures: Vec::new(),
@@ -1102,7 +1118,7 @@ impl TssSolver {
         }
 
         let remaining = caps.node_cap - 1;
-        let (primal_cap, dual_cap) = match goal {
+        let (primal_cap, mut dual_cap) = match goal {
             SolveGoal::Win => (remaining, 0),
             SolveGoal::Loss => (0, remaining),
             // Pair-complete mode is deliberately a restricted VCF WIN search.
@@ -1139,6 +1155,12 @@ impl TssSolver {
                     cert: Some(cert),
                     stats,
                 };
+            }
+            if goal == SolveGoal::Both
+                && effective.vcf_pair_complete
+                && effective.dual_pass
+            {
+                dual_cap = caps.node_cap.saturating_sub(stats.nodes);
             }
         }
 
@@ -14239,6 +14261,105 @@ mod tests {
         assert_eq!(both.status, ProofStatus::Unknown);
         assert_eq!(win.status, ProofStatus::Win);
         assert!(TssVerifier.verify(&state, win.cert.as_ref().unwrap(), win.status));
+    }
+
+    fn wide_solver_with_dual_pass(dual_pass: bool) -> TssSolver {
+        let mut solver = TssSolver::default();
+        solver.configure_leaf_profile();
+        solver.set_dual_pass(dual_pass);
+        solver
+    }
+
+    #[test]
+    fn wide_both_dual_pass_recovers_a_cheap_verified_loss_within_budget() {
+        let caps = SolveCaps {
+            node_cap: 500,
+            tt_bytes_cap: 256 << 10,
+            semantic_horizon: u32::MAX,
+        };
+
+        // The existing forced-loss fixture is already a root lambda-one fact,
+        // so today's flag-off `Both` path decides it before the budget split.
+        // Pin that current behavior explicitly.
+        let root_fact = forced_loss_fixture();
+        let root_off = wide_solver_with_dual_pass(false)
+            .solve_goal(&root_fact, &caps, SolveGoal::Both);
+        let root_on = wide_solver_with_dual_pass(true)
+            .solve_goal(&root_fact, &caps, SolveGoal::Both);
+        assert_eq!(root_off.status, ProofStatus::Loss);
+        assert_eq!(root_off.status, root_on.status);
+        assert_eq!(root_off.stats.nodes, root_on.stats.nodes);
+        assert!(TssVerifier.verify(
+            &root_fact,
+            root_off.cert.as_ref().unwrap(),
+            root_off.status,
+        ));
+
+        // This existing non-lambda-one forced-defender fixture has a cheap
+        // opponent-WIN proof, while the wide primal leaves budget unused.
+        let state = xsnfyll_forced_defender_fixture();
+        let off = wide_solver_with_dual_pass(false).solve_goal(&state, &caps, SolveGoal::Both);
+        assert_eq!(off.status, ProofStatus::Unknown);
+        assert!(off.cert.is_none());
+
+        let on = wide_solver_with_dual_pass(true).solve_goal(&state, &caps, SolveGoal::Both);
+        assert_eq!(on.status, ProofStatus::Loss);
+        assert!(on.stats.nodes > off.stats.nodes, "both attempts must run");
+        assert!(on.stats.nodes <= caps.node_cap);
+        assert!(TssVerifier.verify(
+            &state,
+            on.cert.as_ref().expect("dual loss carries a certificate"),
+            on.status,
+        ));
+    }
+
+    #[test]
+    fn wide_dual_pass_full_budget_primal_matches_flag_off() {
+        let state = quiet_fixture();
+        let caps = SolveCaps {
+            node_cap: 2,
+            tt_bytes_cap: 0,
+            semantic_horizon: u32::MAX,
+        };
+        let off = wide_solver_with_dual_pass(false).solve_goal(&state, &caps, SolveGoal::Both);
+        let on = wide_solver_with_dual_pass(true).solve_goal(&state, &caps, SolveGoal::Both);
+        assert_eq!(off.status, on.status);
+        assert_eq!(off.cert, on.cert);
+        assert_eq!(off.stats.nodes, caps.node_cap);
+        assert_eq!(on.stats.nodes, caps.node_cap);
+    }
+
+    #[test]
+    fn wide_dual_pass_known_win_has_flag_parity() {
+        let state = win_now_fixture();
+        let caps = SolveCaps {
+            node_cap: 500,
+            tt_bytes_cap: 256 << 10,
+            semantic_horizon: u32::MAX,
+        };
+        let off = wide_solver_with_dual_pass(false).solve_goal(&state, &caps, SolveGoal::Both);
+        let on = wide_solver_with_dual_pass(true).solve_goal(&state, &caps, SolveGoal::Both);
+        assert_eq!(off.status, ProofStatus::Win);
+        assert_eq!(off.status, on.status);
+        assert_eq!(off.cert, on.cert);
+        assert_eq!(off.stats.nodes, on.stats.nodes);
+    }
+
+    #[test]
+    fn wide_dual_pass_flag_off_keeps_legacy_primal_only_split() {
+        let caps = SolveCaps {
+            node_cap: 32,
+            tt_bytes_cap: 256 << 10,
+            semantic_horizon: u32::MAX,
+        };
+        for state in [quiet_fixture(), pair_width_first_stone_fixture()] {
+            let both = wide_solver_with_dual_pass(false)
+                .solve_goal(&state, &caps, SolveGoal::Both);
+            let win = wide_solver_with_dual_pass(false).solve_goal(&state, &caps, SolveGoal::Win);
+            assert_eq!(both.status, win.status);
+            assert_eq!(both.cert, win.cert);
+            assert_eq!(both.stats.nodes, win.stats.nodes);
+        }
     }
 
     #[test]

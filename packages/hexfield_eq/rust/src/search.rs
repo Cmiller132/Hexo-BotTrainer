@@ -3446,6 +3446,7 @@ const KNOWN_DIVERGENCE_KEYS: &[&str] = &[
     "tss_zone_count2",
     "tss_pair_commutation",
     "tss_solver_horizon",
+    "tss_solver_dual_pass",
     "tss_solver_horizon_ladder",
     // Fast-class Gumbel levers (main_8: PUCT Full / Gumbel Fast). These name the
     // Fast view's values; the driver's Python side folds them into the SECOND
@@ -3625,6 +3626,9 @@ fn resolve_divergences(
         }
         if let Some(v) = overrides.get_item("tss_solver_horizon")? {
             dv.tss_solver_horizon = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("tss_solver_dual_pass")? {
+            dv.tss_solver_dual_pass = v.extract()?;
         }
         if let Some(v) = overrides.get_item("tss_solver_horizon_ladder")? {
             dv.tss_solver_horizon_ladder = v.extract()?;
@@ -4113,6 +4117,7 @@ fn build_search_result_payload_native(
             // per-search persistent cache; one root solve per move is cheap.
             let mut root_solver = crate::tss_solver::TssSolver::default();
             root_solver.configure_leaf_profile();
+            root_solver.set_dual_pass(div.tss_solver_dual_pass);
             let solved = tss_solve_verified(
                 &search.root_state,
                 div.tss_solver_node_cap as u64,
@@ -4725,12 +4730,13 @@ fn harness_zone_caps(zone: bool) -> ZoneSearchCaps {
     }
 }
 
-fn harness_solver(wide: bool, zone: ZoneSearchCaps) -> TssSolver {
+fn harness_solver(wide: bool, zone: ZoneSearchCaps, dual_pass: bool) -> TssSolver {
     let mut solver = TssSolver::default();
     if wide {
         solver.configure_leaf_profile();
     }
     solver.set_zone_options(zone);
+    solver.set_dual_pass(dual_pass);
     solver
 }
 
@@ -4754,8 +4760,9 @@ fn harness_solver_manifest(
     horizon: SolverHorizon,
     zone: bool,
     wide: bool,
+    dual_pass: bool,
 ) -> HarnessSolverManifest {
-    let solver = harness_solver(wide, harness_zone_caps(zone));
+    let solver = harness_solver(wide, harness_zone_caps(zone), dual_pass);
     let caps = tss_verified_solve_caps(0, node_cap, horizon);
     let effective = solver.effective_solve_config(&caps, solver.sample_runtime_flags());
     HarnessSolverManifest {
@@ -4797,7 +4804,7 @@ fn set_solve_stats(d: &Bound<'_, PyDict>, stats: &SolveStats) -> PyResult<()> {
 /// values come from the same pure resolver consumed by `solve_goal`, with the
 /// production verified caps resolved for a placements=0 root.
 #[pyfunction]
-#[pyo3(signature = (node_cap, horizon, ladder, zone, wide))]
+#[pyo3(signature = (node_cap, horizon, ladder, zone, wide, dual_pass=false))]
 pub fn hexfield_eq_solver_manifest(
     py: Python<'_>,
     node_cap: u64,
@@ -4805,6 +4812,7 @@ pub fn hexfield_eq_solver_manifest(
     ladder: bool,
     zone: bool,
     wide: bool,
+    dual_pass: bool,
 ) -> PyResult<Py<PyAny>> {
     validate_harness_horizon(horizon, ladder)?;
     let manifest = harness_solver_manifest(
@@ -4812,10 +4820,12 @@ pub fn hexfield_eq_solver_manifest(
         SolverHorizon { horizon, ladder },
         zone,
         wide,
+        dual_pass,
     );
     let effective = manifest.effective;
     let d = PyDict::new(py);
     d.set_item("vcf_pair_complete", effective.vcf_pair_complete)?;
+    d.set_item("dual_pass", effective.dual_pass)?;
     d.set_item("quiet_turn_or_edges", effective.quiet_turn_or_edges)?;
     d.set_item(
         "ranked_unforced_defender_zone",
@@ -4908,7 +4918,7 @@ pub fn hexfield_eq_deep_solve_probe(
     let zone_caps = harness_zone_caps(zone);
     let placements = s.placements_made();
 
-    let mut solver = harness_solver(wide, zone_caps);
+    let mut solver = harness_solver(wide, zone_caps, false);
     let mut counters = TssCounters::default();
     let start = Instant::now();
     let solved = tss_solve_verified(
@@ -5000,7 +5010,7 @@ pub fn hexfield_eq_deep_solve_probe(
     d.set_item("zone_verify_failed", counters.zone_verify_failed)?;
 
     if with_stats {
-        let mut stats_solver = harness_solver(wide, zone_caps);
+        let mut stats_solver = harness_solver(wide, zone_caps, false);
         // Shared production-cap constructor keeps this cold diagnostic at the
         // trainer leaf/root/async memory profile.
         let caps = tss_verified_solve_caps(
@@ -5027,7 +5037,7 @@ pub fn hexfield_eq_deep_solve_probe(
 /// verified-path counters, and actual aggregate `stats_*` telemetry from this
 /// persistent solver. Measurement only.
 #[pyfunction]
-#[pyo3(signature = (states, node_cap, goal, horizon, ladder, zone, wide))]
+#[pyo3(signature = (states, node_cap, goal, horizon, ladder, zone, wide, dual_pass=false))]
 #[allow(clippy::too_many_arguments)]
 pub fn hexfield_eq_deep_solve_batch(
     py: Python<'_>,
@@ -5038,6 +5048,7 @@ pub fn hexfield_eq_deep_solve_batch(
     ladder: bool,
     zone: bool,
     wide: bool,
+    dual_pass: bool,
 ) -> PyResult<Py<PyAny>> {
     validate_harness_horizon(horizon, ladder)?;
     let goal_enum = match goal {
@@ -5051,7 +5062,7 @@ pub fn hexfield_eq_deep_solve_batch(
         }
     };
     let zone_caps = harness_zone_caps(zone);
-    let mut solver = harness_solver(wide, zone_caps);
+    let mut solver = harness_solver(wide, zone_caps, dual_pass);
     let out = PyList::empty(py);
     for state_any in states.iter() {
         let s = single_state_from_py(py, &state_any)?;
@@ -5428,6 +5439,7 @@ mod fallback_tests {
             },
             false,
             true,
+            false,
         );
         assert_eq!(off.env.shared_fragments, None);
         assert!(!off.effective.shared_fragments_enabled);
@@ -5442,6 +5454,7 @@ mod fallback_tests {
             },
             false,
             true,
+            false,
         );
         assert_eq!(on.env.shared_fragments.as_deref(), Some("1"));
         assert!(on.effective.shared_fragments_enabled);
@@ -5458,10 +5471,10 @@ mod fallback_tests {
             horizon: 0,
             ladder: false,
         };
-        let manifest = harness_solver_manifest(500, horizon, false, true);
+        let manifest = harness_solver_manifest(500, horizon, false, true, false);
         let state = RustHexoState::new();
         let zone = harness_zone_caps(false);
-        let mut solver = harness_solver(true, zone);
+        let mut solver = harness_solver(true, zone, false);
         let mut counters = TssCounters::default();
         let _ = tss_solve_verified(
             &state,
@@ -5477,6 +5490,42 @@ mod fallback_tests {
         assert_eq!(real_caps.node_cap, manifest.caps.node_cap);
         assert_eq!(real_caps.tt_bytes_cap, manifest.caps.tt_bytes_cap);
         assert_eq!(real_caps.semantic_horizon, manifest.caps.semantic_horizon);
+    }
+
+    #[test]
+    fn solver_manifest_echoes_dual_pass_from_shared_resolver() {
+        let horizon = SolverHorizon {
+            horizon: 0,
+            ladder: false,
+        };
+        for dual_pass in [false, true] {
+            let manifest = harness_solver_manifest(500, horizon, false, true, dual_pass);
+            assert_eq!(manifest.effective.dual_pass, dual_pass);
+
+            let solver = harness_solver(true, harness_zone_caps(false), dual_pass);
+            let caps = tss_verified_solve_caps(0, 500, horizon);
+            assert_eq!(
+                solver.effective_solve_config(&caps, solver.sample_runtime_flags()),
+                manifest.effective,
+            );
+
+            Python::initialize();
+            Python::attach(|py| {
+                let echoed = hexfield_eq_solver_manifest(
+                    py, 500, 0, false, false, true, dual_pass,
+                )
+                .unwrap();
+                let dict = echoed.bind(py).cast::<PyDict>().unwrap();
+                assert_eq!(
+                    dict.get_item("dual_pass")
+                        .unwrap()
+                        .unwrap()
+                        .extract::<bool>()
+                        .unwrap(),
+                    dual_pass,
+                );
+            });
+        }
     }
 
     fn shared_fragment_batch_fixture() -> RustHexoState {
@@ -5516,7 +5565,7 @@ mod fallback_tests {
         };
 
         env.set(Some("1"));
-        let mut warm_solver = harness_solver(true, zone);
+        let mut warm_solver = harness_solver(true, zone, false);
         let mut first_counters = TssCounters::default();
         let first = tss_solve_verified_with_stats(
             &state,
@@ -5545,7 +5594,7 @@ mod fallback_tests {
         assert_eq!(second.stats.nodes, second_counters.deep_nodes);
 
         env.set(None);
-        let mut cold_solver = harness_solver(true, zone);
+        let mut cold_solver = harness_solver(true, zone, false);
         let mut cold_first_counters = TssCounters::default();
         let _ = tss_solve_verified_with_stats(
             &state,
@@ -6316,6 +6365,12 @@ mod fallback_tests {
             assert!(av.tss_solver_park);
             assert_eq!(av.tss_solver_park_timeout_ms, 200);
             assert_eq!(av.tss_solver_async_inline_16, 4);
+
+            let dual_pass = PyDict::new(py);
+            dual_pass.set_item("tss_solver_dual_pass", true).unwrap();
+            let dv = resolve_divergences(None, Some(&dual_pass))
+                .expect("tss_solver_dual_pass must pass the known-keys gate");
+            assert!(dv.tss_solver_dual_pass);
 
             let park_without_async = PyDict::new(py);
             park_without_async.set_item("tss_solver_park", true).unwrap();

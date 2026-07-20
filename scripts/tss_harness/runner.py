@@ -71,6 +71,7 @@ def _bench_overlay(effective: dict) -> dict:
         "tss_solver_horizon": int(effective["horizon"]),
         "tss_solver_horizon_ladder": bool(effective["ladder"]),
         "tss_zone": bool(effective["zone"]),
+        "tss_solver_dual_pass": bool(effective.get("dual_pass", False)),
     }
 
 
@@ -86,6 +87,11 @@ def gate_bench_identity(manifest: dict, scorecard: dict) -> GateResult:
         if int(eff.get("tss_solver_node_cap", -1)) != int(manifest["node_cap"]):
             problems.append(
                 f"node_cap {eff.get('tss_solver_node_cap')} != {manifest['node_cap']}")
+        if bool(eff.get("tss_solver_dual_pass", False)) != bool(
+                manifest.get("dual_pass", False)):
+            problems.append(
+                f"dual_pass mismatch: bench {eff.get('tss_solver_dual_pass')} "
+                f"vs manifest {manifest.get('dual_pass')}")
         bench_unbounded = int(eff.get("tss_solver_horizon", -1)) == 0
         arm_unbounded = int(manifest["semantic_horizon"]) == U32_MAX
         if bench_unbounded != arm_unbounded:

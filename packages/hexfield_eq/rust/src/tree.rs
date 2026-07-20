@@ -223,6 +223,9 @@ pub struct Divergences {
     /// only budget). Values `1..=15` are rejected at the Rust seam. Replaces
     /// the historical hardcoded `+12` in `tss_solve_verified`.
     pub tss_solver_horizon: u32,
+    /// Reuse the unused portion of an undecided wide `Both` WIN attempt for
+    /// the opponent-WIN attempt. Default off preserves the primal-only split.
+    pub tss_solver_dual_pass: bool,
     /// Horizon-ladder escalation (default off): when the base solve is Unknown
     /// with `horizon_cuts > 0`, re-solve ONCE at `2 * horizon` on the same
     /// solver instance (the shared TT replays the proven prefix). Unbounded
@@ -285,6 +288,7 @@ impl Divergences {
             tss_zone_count2: false,
             tss_pair_commutation: false,
             tss_solver_horizon: 16,
+            tss_solver_dual_pass: false,
             tss_solver_horizon_ladder: false,
         }
     }
@@ -1467,6 +1471,7 @@ impl RustSearch {
                                 horizon: self.divergences.tss_solver_horizon,
                                 ladder: self.divergences.tss_solver_horizon_ladder,
                             },
+                            dual_pass: self.divergences.tss_solver_dual_pass,
                         })
                     })
                     .flatten();
@@ -1587,6 +1592,7 @@ impl RustSearch {
                                         horizon: self.divergences.tss_solver_horizon,
                                         ladder: self.divergences.tss_solver_horizon_ladder,
                                     },
+                                    dual_pass: self.divergences.tss_solver_dual_pass,
                                 })
                             })
                             .flatten();
@@ -1612,6 +1618,9 @@ impl RustSearch {
             }
             _ => {
                 let node_cap = self.divergences.tss_solver_node_cap as u64;
+                self.tss_solver
+                    .0
+                    .set_dual_pass(self.divergences.tss_solver_dual_pass);
                 let solved = tss_solve_verified(
                     state,
                     node_cap,
