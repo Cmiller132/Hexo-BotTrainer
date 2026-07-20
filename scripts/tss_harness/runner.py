@@ -72,6 +72,8 @@ def _bench_overlay(effective: dict) -> dict:
         "tss_solver_horizon_ladder": bool(effective["ladder"]),
         "tss_zone": bool(effective["zone"]),
         "tss_solver_dual_pass": bool(effective.get("dual_pass", False)),
+        "tss_solver_loss_reserve_nodes": int(
+            effective.get("loss_reserve_nodes", 0)),
     }
 
 

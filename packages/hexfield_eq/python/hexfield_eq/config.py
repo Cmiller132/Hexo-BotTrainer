@@ -142,6 +142,11 @@ class SelfplayConfig:
     # Reuse an undecided wide Both WIN attempt's remaining node budget for the
     # opponent-WIN attempt. Default off preserves the primal-only wide split.
     tss_solver_dual_pass: bool = False
+    # Hold this many post-root nodes out of the wide Both primal for an
+    # opponent-WIN attempt. A positive value schedules its fixed floor;
+    # dual_pass additionally upgrades it to every actual leftover node. The
+    # Rust split always leaves a primal node, and 0 preserves current behavior.
+    tss_solver_loss_reserve_nodes: int = 0
     # Horizon ladder (default off): a bounded base solve that came back Unknown
     # while still depth-cut (horizon_cuts > 0) is re-solved once at 2x horizon
     # on the same solver instance. Unbounded bases skip it.
@@ -637,6 +642,7 @@ def build_divergence_overrides(
         # the 1..=15 band is rejected at the Rust seam) and the horizon ladder.
         "tss_solver_horizon": int(sp.tss_solver_horizon),
         "tss_solver_dual_pass": bool(sp.tss_solver_dual_pass),
+        "tss_solver_loss_reserve_nodes": int(sp.tss_solver_loss_reserve_nodes),
         "tss_solver_horizon_ladder": bool(sp.tss_solver_horizon_ladder),
         # Gumbel AlphaZero levers (default OFF).
         "gumbel_target": bool(sp.gumbel_target_enabled),

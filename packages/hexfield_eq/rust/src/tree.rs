@@ -226,6 +226,10 @@ pub struct Divergences {
     /// Reuse the unused portion of an undecided wide `Both` WIN attempt for
     /// the opponent-WIN attempt. Default off preserves the primal-only split.
     pub tss_solver_dual_pass: bool,
+    /// Post-root budget reserved for the opponent-WIN attempt in wide `Both`
+    /// solves. A positive value schedules the floor independently; dual-pass
+    /// additionally donates unused primal work. Zero preserves current policy.
+    pub tss_solver_loss_reserve_nodes: u32,
     /// Horizon-ladder escalation (default off): when the base solve is Unknown
     /// with `horizon_cuts > 0`, re-solve ONCE at `2 * horizon` on the same
     /// solver instance (the shared TT replays the proven prefix). Unbounded
@@ -289,6 +293,7 @@ impl Divergences {
             tss_pair_commutation: false,
             tss_solver_horizon: 16,
             tss_solver_dual_pass: false,
+            tss_solver_loss_reserve_nodes: 0,
             tss_solver_horizon_ladder: false,
         }
     }
@@ -1472,6 +1477,7 @@ impl RustSearch {
                                 ladder: self.divergences.tss_solver_horizon_ladder,
                             },
                             dual_pass: self.divergences.tss_solver_dual_pass,
+                            loss_reserve_nodes: self.divergences.tss_solver_loss_reserve_nodes,
                         })
                     })
                     .flatten();
@@ -1593,6 +1599,9 @@ impl RustSearch {
                                         ladder: self.divergences.tss_solver_horizon_ladder,
                                     },
                                     dual_pass: self.divergences.tss_solver_dual_pass,
+                                    loss_reserve_nodes: self
+                                        .divergences
+                                        .tss_solver_loss_reserve_nodes,
                                 })
                             })
                             .flatten();
@@ -1621,6 +1630,9 @@ impl RustSearch {
                 self.tss_solver
                     .0
                     .set_dual_pass(self.divergences.tss_solver_dual_pass);
+                self.tss_solver
+                    .0
+                    .set_loss_reserve_nodes(self.divergences.tss_solver_loss_reserve_nodes);
                 let solved = tss_solve_verified(
                     state,
                     node_cap,

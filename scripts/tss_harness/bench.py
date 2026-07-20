@@ -739,7 +739,7 @@ def run_benchmark(
         for k in (
             "tss_enabled", "tss_solver_mode", "tss_solver_node_cap",
             "tss_solver_horizon", "tss_solver_horizon_ladder", "tss_zone",
-            "tss_solver_dual_pass",
+            "tss_solver_dual_pass", "tss_solver_loss_reserve_nodes",
         )
     }
     return build_scorecard(

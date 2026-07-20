@@ -1,0 +1,17 @@
+{
+  "label_a": "baseline",
+  "label_b": "loss_reserve32_gated",
+  "paired": 343,
+  "coverage_a": 25,
+  "coverage_b": 25,
+  "upgrades_b_over_a": [],
+  "downgrades_b_under_a": [],
+  "verified_contradictions": [],
+  "discordant": {
+    "a_only": 0,
+    "b_only": 0
+  },
+  "mcnemar_p": 1.0,
+  "significant": false,
+  "cost_delta_total": -734
+}

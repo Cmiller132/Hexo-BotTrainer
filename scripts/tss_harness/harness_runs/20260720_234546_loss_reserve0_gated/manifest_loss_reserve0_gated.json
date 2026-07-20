@@ -1,0 +1,26 @@
+{
+  "adapter": "tss_batch",
+  "architecture": "tss-dfpn-v1",
+  "cert_version": 2,
+  "dual_pass": true,
+  "env": {
+    "TSS_INTERIOR_CENSUS_GATE": null,
+    "TSS_K_REPLY_CONSUME": null,
+    "TSS_K_REPLY_SHADOW": null,
+    "TSS_SHARED_FRAGMENTS": null
+  },
+  "fragment_store_cap_bytes": 0,
+  "goal": "both",
+  "interior_census_gate": true,
+  "k_reply_consume": false,
+  "lazy_frontier": true,
+  "loss_reserve_nodes": 0,
+  "node_cap": 500,
+  "quiet_turn_or_edges": "off",
+  "ranked_unforced_defender_zone": "off",
+  "semantic_horizon": 4294967295,
+  "shared_fragments_enabled": false,
+  "tt_bytes_cap": 262144,
+  "tt_enabled": true,
+  "vcf_pair_complete": true
+}

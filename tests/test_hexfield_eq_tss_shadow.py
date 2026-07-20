@@ -743,15 +743,22 @@ def test_interior_guard_config_plumbing():
     assert build_divergence_overrides(sp_on, fast=True)["tss_interior_guard"] is True
 
 
-def test_dual_pass_config_plumbing():
-    """The wide Both dual pass defaults off and rides both divergence maps."""
+def test_loss_budget_config_plumbing():
+    """Loss-side budget controls default off and ride both divergence maps."""
     from hexfield_eq.config import SelfplayConfig, build_divergence_overrides
 
     defaults = build_divergence_overrides(SelfplayConfig())
     assert defaults["tss_solver_dual_pass"] is False
-    enabled = SelfplayConfig(tss_solver_dual_pass=True)
+    assert defaults["tss_solver_loss_reserve_nodes"] == 0
+    enabled = SelfplayConfig(
+        tss_solver_dual_pass=True,
+        tss_solver_loss_reserve_nodes=32,
+    )
     assert build_divergence_overrides(enabled)["tss_solver_dual_pass"] is True
     assert build_divergence_overrides(enabled, fast=True)["tss_solver_dual_pass"] is True
+    assert build_divergence_overrides(enabled)["tss_solver_loss_reserve_nodes"] == 32
+    assert build_divergence_overrides(
+        enabled, fast=True)["tss_solver_loss_reserve_nodes"] == 32
 
 
 def test_park_config_plumbing():

@@ -721,6 +721,7 @@ pub(crate) struct SolveRuntimeFlags {
 pub(crate) struct EffectiveSolveConfig {
     pub(crate) vcf_pair_complete: bool,
     pub(crate) dual_pass: bool,
+    pub(crate) loss_reserve_nodes: u32,
     pub(crate) quiet_turn_or_edges: &'static str,
     pub(crate) ranked_unforced_defender_zone: &'static str,
     pub(crate) tt_enabled: bool,
@@ -751,6 +752,12 @@ pub(crate) struct TssSolver {
     /// Reuse an undecided wide `Both` primal's unspent nodes for the dual
     /// claim. Default-off preserves the historical primal-only wide split.
     dual_pass: bool,
+    /// Hold this many post-root nodes out of the wide `Both` primal for an
+    /// opponent-WIN attempt. A positive reserve schedules that attempt even
+    /// without the leftover policy; if the primal returns early, an enabled
+    /// dual pass upgrades it to every actual leftover node. Zero preserves the
+    /// current full-primal allocation.
+    loss_reserve_nodes: u32,
     /// Leaf-profile overrides (PLAN_TSS_MCTS_INTEGRATION.md §3). When `Some`,
     /// they replace the per-solve environment reads for the lazy defender
     /// frontier and the interior census gate, so the trainer leaf/root/async
@@ -788,6 +795,7 @@ impl Default for TssSolver {
             zone: ZoneSearchCaps::default(),
             width: WidthOptions::default(),
             dual_pass: false,
+            loss_reserve_nodes: 0,
             force_lazy_frontier: None,
             force_interior_census_gate: None,
             #[cfg(test)]
@@ -883,6 +891,14 @@ impl TssSolver {
         self.dual_pass = dual_pass;
     }
 
+    pub(crate) fn set_loss_reserve_nodes(&mut self, loss_reserve_nodes: u32) {
+        if self.loss_reserve_nodes != loss_reserve_nodes {
+            self.shared_tt.clear();
+            self.fragment_store.clear();
+        }
+        self.loss_reserve_nodes = loss_reserve_nodes;
+    }
+
     /// Configure this solver to the campaign leaf-decided profile
     /// (PLAN_TSS_MCTS_INTEGRATION.md §3, HUNT_REPORT_LEAF_SURFACE config D):
     /// wide `vcf_pair_complete` attacker width, the lazy defender frontier ON,
@@ -946,6 +962,7 @@ impl TssSolver {
         EffectiveSolveConfig {
             vcf_pair_complete: self.width.vcf_pair_complete,
             dual_pass: self.dual_pass,
+            loss_reserve_nodes: self.loss_reserve_nodes,
             quiet_turn_or_edges: self.width.quiet_turn_or_edges.name(),
             ranked_unforced_defender_zone: self.width.ranked_unforced_defender_zone.name(),
             tt_enabled: self.tt_enabled,
@@ -979,6 +996,7 @@ impl TssSolver {
             zone: ZoneSearchCaps::default(),
             width: WidthOptions::default(),
             dual_pass: false,
+            loss_reserve_nodes: 0,
             force_lazy_frontier: None,
             force_interior_census_gate: None,
             last_narrow_signatures: Vec::new(),
@@ -1003,6 +1021,7 @@ impl TssSolver {
             zone: ZoneSearchCaps::default(),
             width: WidthOptions::default(),
             dual_pass: false,
+            loss_reserve_nodes: 0,
             force_lazy_frontier: None,
             force_interior_census_gate: None,
             last_narrow_signatures: Vec::new(),
@@ -1122,11 +1141,13 @@ impl TssSolver {
             SolveGoal::Win => (remaining, 0),
             SolveGoal::Loss => (0, remaining),
             // Pair-complete mode is deliberately a restricted VCF WIN search.
-            // Spending half of a `Both` budget on the opponent's independent
-            // restricted attack cannot establish a useful NO result for this
-            // profile (the corpus accepts Loss or Unknown there), while it
-            // halves the advertised forcing-proof cap.
-            SolveGoal::Both if self.width.vcf_pair_complete => (remaining, 0),
+            // The default reserve is zero, preserving its full advertised
+            // forcing-proof cap. A configured floor is an explicit policy
+            // experiment and remains a positive opponent-claim search only;
+            // its failure can establish no NO result.
+            SolveGoal::Both if self.width.vcf_pair_complete => {
+                wide_both_initial_caps(remaining, effective.loss_reserve_nodes)
+            }
             SolveGoal::Both => ((remaining + 1) / 2, remaining / 2),
         };
         let root_player = state.current_player();
@@ -1931,6 +1952,14 @@ fn rebase_shared_fragment_labels(cert: &mut TssCertificate, root: &RustHexoState
 fn split_tt_cap(total: usize) -> (usize, usize) {
     let shared = total / 2;
     (total - shared, shared)
+}
+
+/// Split the post-root wide `Both` allowance while always leaving a nonempty
+/// primal allowance when any post-root work is available. This rules out a
+/// configuration value silently turning a `Both` solve into loss-only search.
+fn wide_both_initial_caps(remaining: u64, loss_reserve_nodes: u32) -> (u64, u64) {
+    let reserve = u64::from(loss_reserve_nodes).min(remaining.saturating_sub(1));
+    (remaining - reserve, reserve)
 }
 
 fn goal_accepts(goal: SolveGoal, status: ProofStatus) -> bool {
@@ -14265,9 +14294,27 @@ mod tests {
 
     fn wide_solver_with_dual_pass(dual_pass: bool) -> TssSolver {
         let mut solver = TssSolver::default();
+        // Keep policy tests independent of the process-global warmth env used
+        // by parallel campaign tests elsewhere in the crate.
+        solver.set_shared_fragments_for_test(false);
         solver.configure_leaf_profile();
         solver.set_dual_pass(dual_pass);
         solver
+    }
+
+    fn wide_solver_with_loss_budget(dual_pass: bool, loss_reserve_nodes: u32) -> TssSolver {
+        let mut solver = wide_solver_with_dual_pass(dual_pass);
+        solver.set_loss_reserve_nodes(loss_reserve_nodes);
+        solver
+    }
+
+    fn assert_deep_result_identical(
+        actual: &DeepResult<TssCertificate>,
+        expected: &DeepResult<TssCertificate>,
+    ) {
+        assert_eq!(actual.status, expected.status);
+        assert_eq!(actual.cert, expected.cert);
+        assert_eq!(format!("{:?}", actual.stats), format!("{:?}", expected.stats));
     }
 
     #[test]
@@ -14360,6 +14407,120 @@ mod tests {
             assert_eq!(both.cert, win.cert);
             assert_eq!(both.stats.nodes, win.stats.nodes);
         }
+    }
+
+    #[test]
+    fn wide_loss_reserve_zero_is_bit_identical_with_dual_off_and_on() {
+        let caps = SolveCaps {
+            node_cap: 64,
+            tt_bytes_cap: 256 << 10,
+            semantic_horizon: u32::MAX,
+        };
+        for dual_pass in [false, true] {
+            for state in [
+                quiet_fixture(),
+                xsnfyll_forced_defender_fixture(),
+                win_now_fixture(),
+            ] {
+                let implicit_zero = wide_solver_with_dual_pass(dual_pass)
+                    .solve_goal(&state, &caps, SolveGoal::Both);
+                let explicit_zero = wide_solver_with_loss_budget(dual_pass, 0)
+                    .solve_goal(&state, &caps, SolveGoal::Both);
+                assert_deep_result_identical(&implicit_zero, &explicit_zero);
+            }
+        }
+    }
+
+    #[test]
+    fn wide_loss_reserve_preserves_an_early_exit_dual_loss() {
+        let state = xsnfyll_forced_defender_fixture();
+        let caps = SolveCaps {
+            node_cap: 500,
+            tt_bytes_cap: 256 << 10,
+            semantic_horizon: u32::MAX,
+        };
+        let current = wide_solver_with_loss_budget(true, 0)
+            .solve_goal(&state, &caps, SolveGoal::Both);
+        let reserved = wide_solver_with_loss_budget(true, 64)
+            .solve_goal(&state, &caps, SolveGoal::Both);
+        assert_eq!(current.status, ProofStatus::Loss);
+        assert_deep_result_identical(&reserved, &current);
+        assert!(TssVerifier.verify(
+            &state,
+            reserved.cert.as_ref().expect("reserved loss carries a certificate"),
+            reserved.status,
+        ));
+    }
+
+    #[test]
+    fn wide_loss_reserve_schedules_its_floor_without_leftover_policy() {
+        let state = xsnfyll_forced_defender_fixture();
+        let caps = SolveCaps {
+            node_cap: 500,
+            tt_bytes_cap: 256 << 10,
+            semantic_horizon: u32::MAX,
+        };
+        let current = wide_solver_with_loss_budget(false, 0)
+            .solve_goal(&state, &caps, SolveGoal::Both);
+        let reserved = wide_solver_with_loss_budget(false, 64)
+            .solve_goal(&state, &caps, SolveGoal::Both);
+        assert_eq!(current.status, ProofStatus::Unknown);
+        assert_eq!(reserved.status, ProofStatus::Loss);
+        assert!(TssVerifier.verify(
+            &state,
+            reserved.cert.as_ref().expect("reserved loss carries a certificate"),
+            reserved.status,
+        ));
+        assert!(reserved.stats.nodes <= caps.node_cap);
+    }
+
+    #[test]
+    fn wide_loss_reserve_never_skips_a_nonempty_primal_allowance() {
+        assert_eq!(wide_both_initial_caps(0, u32::MAX), (0, 0));
+        assert_eq!(wide_both_initial_caps(1, u32::MAX), (1, 0));
+        assert_eq!(wide_both_initial_caps(499, u32::MAX), (1, 498));
+        assert_eq!(wide_both_initial_caps(499, 32), (467, 32));
+    }
+
+    #[test]
+    fn wide_loss_reserve_keeps_combined_attempts_inside_the_original_cap() {
+        let state = quiet_fixture();
+        let caps = SolveCaps {
+            node_cap: 3,
+            tt_bytes_cap: 0,
+            semantic_horizon: u32::MAX,
+        };
+        let current = wide_solver_with_loss_budget(true, 0)
+            .solve_goal(&state, &caps, SolveGoal::Both);
+        let reserved = wide_solver_with_loss_budget(true, 1)
+            .solve_goal(&state, &caps, SolveGoal::Both);
+        assert_eq!(current.status, ProofStatus::Unknown);
+        assert_eq!(reserved.status, ProofStatus::Unknown);
+        assert_eq!(current.stats.nodes, caps.node_cap);
+        assert_eq!(reserved.stats.nodes, caps.node_cap);
+        assert!(reserved.cert.is_none());
+    }
+
+    #[test]
+    fn loss_reserve_is_inert_outside_wide_both() {
+        let caps = SolveCaps {
+            node_cap: 32,
+            tt_bytes_cap: 256 << 10,
+            semantic_horizon: u32::MAX,
+        };
+        for goal in [SolveGoal::Win, SolveGoal::Loss] {
+            let state = quiet_fixture();
+            let off = wide_solver_with_loss_budget(true, 0).solve_goal(&state, &caps, goal);
+            let on = wide_solver_with_loss_budget(true, 16).solve_goal(&state, &caps, goal);
+            assert_deep_result_identical(&on, &off);
+        }
+
+        let state = quiet_fixture();
+        let off = TssSolver::default().solve_goal(&state, &caps, SolveGoal::Both);
+        let mut on_solver = TssSolver::default();
+        on_solver.set_loss_reserve_nodes(16);
+        let on = on_solver.solve_goal(&state, &caps, SolveGoal::Both);
+        assert_deep_result_identical(&on, &off);
     }
 
     #[test]
