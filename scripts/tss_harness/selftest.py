@@ -94,6 +94,20 @@ def main() -> int:
     check("diff: mcnemar p sane",
           abs(mcnemar_p(0, 0) - 1.0) < 1e-9 and mcnemar_p(0, 15) < 1e-3)
 
+    # 7. Bench identity: the bench must have measured the coverage arm.
+    from tss_harness.runner import gate_bench_identity
+    manifest = {"node_cap": 500, "semantic_horizon": 4294967295}
+    good = {"effective_tss": {"tss_enabled": True, "tss_solver_node_cap": 500,
+                              "tss_solver_horizon": 0}}
+    h16 = {"effective_tss": {"tss_enabled": True, "tss_solver_node_cap": 500,
+                             "tss_solver_horizon": 16}}
+    check("bench identity: h16 bench under unbounded arm",
+          not gate_bench_identity(manifest, h16).passed)
+    check("bench identity: missing echo",
+          not gate_bench_identity(manifest, {}).passed)
+    check("bench identity: matching passes",
+          gate_bench_identity(manifest, good).passed)
+
     missed = [n for n, caught, _ in CHECKS if not caught]
     print(f"\n{len(CHECKS) - len(missed)}/{len(CHECKS)} violations caught")
     if missed:

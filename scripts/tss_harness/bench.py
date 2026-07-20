@@ -357,6 +357,7 @@ def build_scorecard(
     set_hash: str,
     checkpoint: str,
     arm_config: dict[str, Any],
+    effective_tss: dict[str, Any] | None = None,
     profile: BenchProfile,
     accounting: WindowAccounting,
     games_finished: int,
@@ -375,6 +376,7 @@ def build_scorecard(
         "set_hash": set_hash,
         "checkpoint": checkpoint,
         "arm_config": arm_config,
+        "effective_tss": effective_tss or {},
         "window_seconds": profile.window_seconds,
         "warmup_seconds": profile.warmup_seconds,
         "games_active": profile.games_active,
@@ -712,10 +714,22 @@ def run_benchmark(
     gpu_values = sampler.values_between(accounting.start_ns, accounting.end_ns)
     if not gpu_values:
         raise BenchmarkError("no 1-second GPU utilization samples landed in measured window")
+    # Echo the RESOLVED solver fields (not the requested overlay) so the
+    # runner can gate bench-arm identity against the coverage arm's manifest
+    # — caught live 2026-07-20: config {} silently benched the engine-default
+    # h16 while the coverage sweep ran unbounded.
+    effective_tss = {
+        k: getattr(sp, k)
+        for k in (
+            "tss_enabled", "tss_solver_mode", "tss_solver_node_cap",
+            "tss_solver_horizon", "tss_solver_horizon_ladder", "tss_zone",
+        )
+    }
     return build_scorecard(
         set_hash=str(manifest["sha256"]),
         checkpoint=str(CHECKPOINT),
         arm_config=arm_config,
+        effective_tss=effective_tss,
         profile=profile,
         accounting=accounting,
         games_finished=accounting.games_finished,

@@ -16,6 +16,10 @@ Canary sources (V1/rerun evidence, SOLVER_NOTES):
   narrow profile cannot... narrow is not reachable through this adapter
   (wholesale-wide port), so the wide canary instead asserts the manifest
   echoes vcf_pair_complete=True AND a known wide-proven fixture solves.
+- loss_detection: V1 goal=loss positions both loss arms proved LOSS. Guards
+  the structural fact (SOLVER_NOTES §5) that SolveGoal::Both under the wide
+  profile gives the loss attempt ZERO budget — an arm declaring goal=both
+  today will honestly FAIL this canary until that is fixed.
 """
 
 from __future__ import annotations
@@ -23,10 +27,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .contract import Position, WIN, UNKNOWN
+from .contract import Position, LOSS, WIN, UNKNOWN
 from .gates import register_canary
 
-_FIXTURES = Path(__file__).resolve().parent / "sets" / "canaries_v1.jsonl"
+_FIXTURES = Path(__file__).resolve().parent / "sets" / "canaries_v2.jsonl"
 
 
 def _load(kind: str) -> list[Position]:
@@ -48,8 +52,10 @@ def warmth_canary(make_adapter) -> tuple[bool, str]:
     """Fragment store must import+lookup on the warm sequence when the arm
     claims warmth, and stay at exactly zero when it does not."""
     seq = _load("warmth_sequence")
-    on = make_adapter({"shared_fragments": True}).solve_sequence(seq)
-    off = make_adapter({"shared_fragments": False}).solve_sequence(seq)
+    # goal pinned: canaries test THEIR feature independent of the arm's goal
+    # (a goal=loss arm must not spuriously fail win-fixture canaries).
+    on = make_adapter({"shared_fragments": True, "goal": "win"}).solve_sequence(seq)
+    off = make_adapter({"shared_fragments": False, "goal": "win"}).solve_sequence(seq)
     imports_on = sum(r.counters.get("stats_fragment_imports", 0) for r in on)
     lookups_on = sum(r.counters.get("stats_fragment_lookups", 0) for r in on)
     any_off = sum(
@@ -72,8 +78,8 @@ def unbounded_horizon_canary(make_adapter) -> tuple[bool, str]:
     """The deep-win fixture must be WIN under horizon=0 and Unknown under
     h16 — proves the horizon parameter actually reaches the search."""
     fx = _load("deep_win")
-    unbounded = make_adapter({"horizon": 0}).solve_sequence(fx)
-    bounded = make_adapter({"horizon": 16}).solve_sequence(fx)
+    unbounded = make_adapter({"horizon": 0, "goal": "win"}).solve_sequence(fx)
+    bounded = make_adapter({"horizon": 16, "goal": "win"}).solve_sequence(fx)
     deep_ok = [r for r in unbounded if r.status == WIN and r.verified]
     shallow_ok = [r for r in bounded if r.status == UNKNOWN]
     if not deep_ok:
@@ -88,7 +94,7 @@ def wide_canary(make_adapter) -> tuple[bool, str]:
     """Manifest must echo the wide width profile and the wide-proven fixture
     must solve. (Narrow is unreachable in this engine build — wholesale-wide
     port — so the OFF direction is manifest-only.)"""
-    adapter = make_adapter({"wide": True})
+    adapter = make_adapter({"wide": True, "goal": "win"})
     m = adapter.manifest()
     if not m.get("vcf_pair_complete"):
         return False, "wide claimed but manifest lacks vcf_pair_complete"
@@ -98,3 +104,26 @@ def wide_canary(make_adapter) -> tuple[bool, str]:
     if len(wins) != len(fx):
         return False, f"wide fixture wins {len(wins)}/{len(fx)}"
     return True, f"manifest wide + {len(wins)}/{len(fx)} fixture wins"
+
+
+@register_canary("loss_detection")
+def loss_detection_canary(make_adapter) -> tuple[bool, str]:
+    """An arm claiming loss detection (goal loss/both) must prove the known
+    V1 losses as verified LOSS with ITS OWN goal setting; a win-goal arm must
+    return zero loss verdicts on the same fixtures (no bleed). NOTE: goal=
+    both under the wide profile currently allocates the loss attempt zero
+    budget (tss_solver.rs solve_goal budget split) — a both arm failing here
+    is the harness telling the truth, not a fixture problem."""
+    fx = _load("loss_pos")
+    claimed = make_adapter({}).solve_sequence(fx)   # arm's own goal
+    off = make_adapter({"goal": "win"}).solve_sequence(fx)
+    losses = [r for r in claimed if r.status == LOSS and r.verified]
+    bleed = [r for r in off if r.status == LOSS]
+    if len(losses) != len(fx):
+        return False, (
+            f"loss detection claimed but proved {len(losses)}/{len(fx)} "
+            f"known losses (goal budget never reaches the loss attempt?)"
+        )
+    if bleed:
+        return False, f"goal=win arm returned {len(bleed)} loss verdicts"
+    return True, f"{len(losses)}/{len(fx)} known losses proven, win-arm clean"

@@ -45,7 +45,13 @@ class TssBatchAdapter:
         "ladder": False,
         "zone": False,
         "wide": True,
-        "goal": "win",
+        # "both" = production parity (mode 3). goal=win FILTERS loss facts at
+        # the root (solve_goal_filters_root_facts) — a win-goal sweep reports
+        # loss=0 by construction, which hid real loss coverage until
+        # 2026-07-20. Under the wide profile Both gives the win attempt the
+        # full budget (verdict-identical for wins) and surfaces the cheap
+        # forced losses the primal search proves along the way.
+        "goal": "both",
         "shared_fragments": False,
     }
 
@@ -129,6 +135,11 @@ def declared_features(config: dict[str, Any]) -> tuple[str, ...]:
         feats.append("warmth")
     if int(config.get("horizon", 0)) == 0:
         feats.append("unbounded_horizon")
+    if config.get("goal", "win") in ("loss", "both"):
+        # goal=both under the wide profile currently gives the loss attempt
+        # zero budget (SOLVER_NOTES §5) — such an arm will FAIL this canary,
+        # which is the honest outcome until the budget split is fixed.
+        feats.append("loss_detection")
     if config.get("wide", True):
         feats.append("wide")
     if config.get("zone"):

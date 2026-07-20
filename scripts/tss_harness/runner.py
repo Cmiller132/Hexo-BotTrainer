@@ -46,6 +46,57 @@ from tss_harness.sets import SETS_DIR, load_set
 BENCH_PYTHON = "/root/.venvs/hexo-bottrainer-wsl/bin/python"
 COVERAGE_SETS = ("selfplay_v1", "human_v1", "puzzle_v1")   # frozen-if-present
 
+U32_MAX = 4294967295
+
+
+def _bench_overlay(effective: dict) -> dict:
+    """Translate the adapter's effective config into the bench's tss_* toml
+    vocabulary. The bench builds its config from the production toml, whose
+    defaults are NOT the arm's defaults (caught live 2026-07-20: config {}
+    benched engine-default h16 while the coverage sweep ran unbounded) — so
+    the FULL effective arm config is always passed, never just the user's
+    delta. Raises on arm fields the bench cannot express rather than
+    silently benching something else."""
+    if not effective.get("wide", True):
+        raise RuntimeError("bench cannot express the narrow profile")
+    if effective.get("shared_fragments"):
+        # TSS_SHARED_FRAGMENTS would need to travel via subprocess env AND
+        # be verified engine-side; not wired yet — refuse, don't fake.
+        raise RuntimeError("bench cannot yet carry shared_fragments arms")
+    return {
+        "tss_solver_node_cap": int(effective["node_cap"]),
+        "tss_solver_horizon": int(effective["horizon"]),
+        "tss_solver_horizon_ladder": bool(effective["ladder"]),
+        "tss_zone": bool(effective["zone"]),
+    }
+
+
+def gate_bench_identity(manifest: dict, scorecard: dict) -> GateResult:
+    """The bench must have measured the SAME solver arm the coverage sweep
+    solved with: compare the bench's resolved tss fields against the arm
+    manifest (both are echoes, not intents)."""
+    eff = scorecard.get("effective_tss") or {}
+    problems = []
+    if not eff:
+        problems.append("scorecard carries no effective_tss echo")
+    else:
+        if int(eff.get("tss_solver_node_cap", -1)) != int(manifest["node_cap"]):
+            problems.append(
+                f"node_cap {eff.get('tss_solver_node_cap')} != {manifest['node_cap']}")
+        bench_unbounded = int(eff.get("tss_solver_horizon", -1)) == 0
+        arm_unbounded = int(manifest["semantic_horizon"]) == U32_MAX
+        if bench_unbounded != arm_unbounded:
+            problems.append(
+                f"horizon mismatch: bench tss_solver_horizon="
+                f"{eff.get('tss_solver_horizon')} vs manifest semantic_horizon="
+                f"{manifest['semantic_horizon']}")
+        if not bool(eff.get("tss_enabled", False)):
+            problems.append("bench ran with tss_enabled=false")
+    return GateResult(
+        gate="bench_identity", passed=not problems, hard=True,
+        detail="; ".join(problems) or "bench arm matches coverage arm",
+    )
+
 
 def _available_sets() -> list[str]:
     return [n for n in COVERAGE_SETS if (SETS_DIR / f"{n}.jsonl").exists()]
@@ -136,12 +187,21 @@ def run(args) -> int:
     # bench: every standard/full run (owner ruling), report-only adoption
     if args.tier in ("standard", "full") and not gates.fatal and not args.no_bench:
         out = archive.dir / "scorecard.json"
+        overlay = _bench_overlay({**TssBatchAdapter.DEFAULTS, **config})
         cmd = [BENCH_PYTHON, "scripts/tss_harness/bench.py", "--full",
-               "--config-json", json.dumps(config), "--out", str(out)]
+               "--config-json", json.dumps(overlay), "--out", str(out)]
         proc = subprocess.run(cmd, capture_output=True, text=True)
         report["bench_exit"] = proc.returncode
         if proc.returncode != 0:
             print(f"bench failed/refused:\n{proc.stdout[-2000:]}{proc.stderr[-2000:]}")
+            gates.add(GateResult(gate="bench_ran", passed=False, hard=True,
+                                 detail=f"bench exit {proc.returncode}"))
+        else:
+            scorecard = json.loads(out.read_text())
+            gates.add(gate_bench_identity(echoed, scorecard))
+            print(f"bench: {scorecard['moves_per_min']} moves/min, "
+                  f"{scorecard['decisions']} decisions, "
+                  f"vf={scorecard['verify_failed_total']}")
 
     archive.save_gates(gates.to_json())
     archive.save_report(report)

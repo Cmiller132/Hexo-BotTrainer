@@ -188,6 +188,42 @@ def build_canaries_v1() -> str:
     return _write_pinned("canaries_v1", rows)
 
 
+def build_canaries_v2() -> str:
+    """v2 = v1 rows + loss_pos fixtures for the loss_detection canary:
+    positions the V1 goal=loss arms proved LOSS (verified, deep_verify_failed
+    == 0) with BOTH loss arms agreeing — take the 3 cheapest by nodes. The
+    canary anchors the discovery (SOLVER_NOTES §5) that SolveGoal::Both under
+    the wide profile allocates zero budget to the loss attempt: an arm
+    claiming loss detection must actually produce these verdicts."""
+    v1 = SETS_DIR / "canaries_v1.jsonl"
+    rows = [json.loads(line) for line in open(v1)]
+
+    positions = _v1_positions()
+    by_arm: dict[tuple[str, str], dict] = {}
+    for line in open(RAWS / "soak_selfplay.jsonl"):
+        r = json.loads(line)
+        if r["arm"].endswith("_loss"):
+            by_arm[(r["pos_id"], r["arm"])] = r
+
+    losses = []
+    for pid, p in sorted(positions.items()):
+        a = by_arm.get((pid, "h16_flat_wide_loss"))
+        b = by_arm.get((pid, "unbounded_wide_loss"))
+        if not a or not b:
+            continue
+        if (a["status"] == b["status"] == "loss"
+                and a["deep_verify_failed"] == 0 and b["deep_verify_failed"] == 0):
+            losses.append((int(b["deep_nodes"]), pid, p))
+    if len(losses) < 3:
+        raise RuntimeError(f"only {len(losses)} agreed verified losses in V1 raws")
+    for nodes, pid, p in sorted(losses)[:3]:
+        rows.append({
+            "canary": "loss_pos", "pos_id": pid, "moves": p["moves"],
+            "meta": {"loss_nodes": nodes},
+        })
+    return _write_pinned("canaries_v2", rows)
+
+
 def main() -> None:
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     if which in ("all", "selfplay"):
@@ -196,6 +232,8 @@ def main() -> None:
         print("human_v1:", build_human_v1())
     if which in ("all", "canaries"):
         print("canaries_v1:", build_canaries_v1())
+    if which in ("all", "canaries_v2"):
+        print("canaries_v2:", build_canaries_v2())
 
 
 if __name__ == "__main__":

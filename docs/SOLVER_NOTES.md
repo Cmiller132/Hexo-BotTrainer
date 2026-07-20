@@ -116,6 +116,29 @@ Consequences:
   Known env gates: `TSS_SHARED_FRAGMENTS`, `TSS_INTERIOR_CENSUS_GATE`
   (overridden by leaf profile), `TSS_K_REPLY_CONSUME` (read per solve,
   tss_solver.rs:906).
+- **Harness instrument caveats (2026-07-20 shakedown, all now gated or
+  documented):**
+  - The batch sweep is SERIAL (one thread, one persistent solver,
+    `hexfield_eq_deep_solve_batch` plain loop) — the bench is fully
+    production-threaded, the coverage sweep is not. Deliberate for now
+    (verdicts don't need concurrency), but cap-raising campaigns will want
+    a rayon parallel batch with per-thread solvers. Queued cargo item.
+  - Verdicts are deterministic given *solver-cache state* (tree.rs
+    docstring), and the persistent solver carries TT across positions in a
+    batch — a verdict near the cap boundary can depend on batch
+    composition/order. Full-set runs always solve in pinned sorted order
+    (comparable); quick-tier SAMPLES may disagree with full runs on
+    boundary positions. Compare like with like.
+  - The bench builds config from the production toml whose defaults are NOT
+    the adapter's (engine default h16!) — the first baseline's bench
+    silently measured h16 under an unbounded-claiming manifest. Fixed:
+    runner passes the FULL translated arm config, the bench echoes its
+    resolved `effective_tss`, and `gate_bench_identity` (hard) compares
+    echo-to-echo. Never pass only the user's config delta to a subprocess
+    with different defaults.
+  - Canaries must PIN every config axis they don't test (goal=win for the
+    win-fixture canaries) — a goal=loss arm spuriously failed the horizon
+    canary before the pin.
 
 ## 6. Probe backlog (status; owner rulings 2026-07-20 inline)
 
@@ -137,10 +160,24 @@ Consequences:
   coverage metric: no gain at cap 500; production flip NOT justified. Wall
   deltas from this run are load-confounded (ran beside V2) — node counts are
   the causal signal. Reopen only as part of P1's value-vs-cap sweep.
-- **P4 Both-goal probing** — owner: WANTS win+loss detection. LOSS probes are
-  ~10³× cheaper than WIN grinds; design question is where mode 3 currently
-  asks the LOSS question vs where it could (every gated leaf?). Map the
-  production call sites first. OPEN-PROBE.
+- **P4 Both-goal probing — MEASURED 2026-07-20, prize quantified.** The
+  structure (tss_solver.rs solve_goal budget split, ~line 1113): under the
+  wide profile `SolveGoal::Both` gives the WIN attempt the FULL budget and
+  the dedicated loss attempt ZERO. Production mode 3 therefore detects only
+  the losses the primal win-side search proves incidentally (immediate /
+  forced, 1–41 nodes in the V1 fixtures). Measured on identical quick-tier
+  samples (harness, cap 500): human 338 positions — goal=both surfaces
+  **15 losses**, goal=loss (full budget) proves **42**; selfplay 343 —
+  both 0, loss-goal 7. **~64% of provable losses are budget-starved away.**
+  Also: `goal=win` FILTERS loss facts at the root
+  (solve_goal_filters_root_facts) — a win-goal sweep shows loss=0 by
+  construction. Candidate fixes to A/B in the harness: (a) two-pass
+  win-then-loss at leaves (costs a second budget only when win is Unknown —
+  and Unknowns are exactly the expensive class, so measure the wall hit);
+  (b) a nonzero dual split; (c) loss-probe-first (losses are cheap: V1
+  16–22µs) then win. Soundness: loss = opponent-win proof under restricted
+  width = pure strengthening, verifier-checked; only NO-results are
+  width-unsound. OPEN — first-class harness campaign arm.
 - **P5 Solver-internal efficiency** — move ordering / pruning inside wide-pn
   so the same 500 nodes prove more. No specific lever identified yet; the
   win-vs-grind contrast (hot 45.5% vs 6%, threats) suggests ordering signal
@@ -172,3 +209,13 @@ Consequences:
   0-decision readout = torch.compile eating the 20s window (0s warmup by
   design) — the full profile's 60s warmup absorbs it; smoke validates
   wiring, not throughput.
+- 2026-07-20 (shakedown, owner-directed): deliberate issue hunt over the
+  first baseline. FOUND+FIXED: bench arm-identity bug (h16 benched under an
+  unbounded manifest — now translated config + effective_tss echo +
+  gate_bench_identity, selftest 19/19); canary goal-pinning bug; harness
+  default flipped goal win→both (win FILTERS loss facts; both = production
+  parity). FOUND+MEASURED: mode-3 loss starvation (§6 P4: both surfaces
+  15/42 provable human losses; goal=loss full-budget proves 42; ~64%
+  starved). DOCUMENTED: serial sweep vs threaded bench; TT carryover order
+  dependence. loss canary live (canaries_v2, 3 agreed V1 losses).
+  Baseline re-run as baseline_production_v2 (both-goal, bench unbounded).
