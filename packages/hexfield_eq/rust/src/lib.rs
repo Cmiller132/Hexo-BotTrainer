@@ -188,6 +188,18 @@ pub fn _rust(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
         search::hexfield_eq_threat_analysis,
         module
     )?)?;
+    // V1 SOAK deep-solve measurement probe (PLAN §9): verified-path solve on a
+    // fresh solver, returns verdict + counters + cert geometry. Measures only.
+    module.add_function(wrap_pyfunction!(
+        search::hexfield_eq_deep_solve_probe,
+        module
+    )?)?;
+    // Persistent-solver warmth-sensitivity batch probe (bounds the cold-cache
+    // gap in the single-shot probe by warming the shared fragment cache).
+    module.add_function(wrap_pyfunction!(
+        search::hexfield_eq_deep_solve_batch,
+        module
+    )?)?;
     // Parallel serve-pack with zero-copy buffers (HEXFIELD_RUST_PACK path).
     module.add_function(wrap_pyfunction!(serve_pack::build_serve_groups, module)?)?;
     module.add_function(wrap_pyfunction!(serve_pack::debug_plan_groups, module)?)?;

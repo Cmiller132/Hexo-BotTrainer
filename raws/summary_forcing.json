@@ -1,0 +1,570 @@
+{
+  "arms": {
+    "h16_flat_narrow": {
+      "n": 19,
+      "win": 0,
+      "loss": 0,
+      "unknown": 19,
+      "win_rate": 0.0,
+      "loss_rate": 0.0,
+      "verdict_rate": 0.0,
+      "wall_us_p50": 58013.973,
+      "wall_us_p90": 197710.33039999998,
+      "wall_us_p99": 358451.84602000006,
+      "wall_us_p50_quiet": 77030.8525,
+      "wall_us_p90_quiet": 205394.318,
+      "wall_us_p50_hot": 13.71,
+      "wall_us_p90_hot": 66.66999999999999,
+      "nodes_mean": 249.3684210526316,
+      "nodes_p90": 500.0,
+      "cert_depth_mean": null,
+      "cert_depth_max": null,
+      "horizon_cut": 3,
+      "horizon_cut_rate": 0.15789473684210525,
+      "horizon_cut_tall": 0,
+      "tall_conversion_note": "see paired ladder-vs-flat in decision inputs",
+      "deep_kb_death": 0,
+      "zone_nodes_total": 0,
+      "zone_positions": 0,
+      "deep_verify_failed": 0,
+      "zone_verify_failed": 0,
+      "census_gate_evaluations": 0,
+      "census_gate_dismissals": 0,
+      "census_dismissal_rate": null,
+      "fragment_lookups": 0,
+      "fragment_hits": 0,
+      "fragment_hit_rate": null,
+      "tt_hits": 42,
+      "cert_depth_hist": {}
+    },
+    "h16_flat_wide": {
+      "n": 19,
+      "win": 2,
+      "loss": 0,
+      "unknown": 17,
+      "win_rate": 0.10526315789473684,
+      "loss_rate": 0.0,
+      "verdict_rate": 0.10526315789473684,
+      "wall_us_p50": 245653.435,
+      "wall_us_p90": 674024.3474,
+      "wall_us_p99": 904125.09768,
+      "wall_us_p50_quiet": 279202.695,
+      "wall_us_p90_quiet": 692849.6195,
+      "wall_us_p50_hot": 31.871,
+      "wall_us_p90_hot": 196529.1222,
+      "nodes_mean": 251.21052631578948,
+      "nodes_p90": 500.0,
+      "cert_depth_mean": 14,
+      "cert_depth_max": 14,
+      "horizon_cut": 0,
+      "horizon_cut_rate": 0.0,
+      "horizon_cut_tall": 0,
+      "tall_conversion_note": "see paired ladder-vs-flat in decision inputs",
+      "deep_kb_death": 0,
+      "zone_nodes_total": 0,
+      "zone_positions": 0,
+      "deep_verify_failed": 0,
+      "zone_verify_failed": 0,
+      "census_gate_evaluations": 968,
+      "census_gate_dismissals": 461,
+      "census_dismissal_rate": 0.4762396694214876,
+      "fragment_lookups": 0,
+      "fragment_hits": 0,
+      "fragment_hit_rate": null,
+      "tt_hits": 535,
+      "cert_depth_hist": {
+        "14": 2
+      }
+    },
+    "h16_flat_wide_loss": {
+      "n": 19,
+      "win": 0,
+      "loss": 2,
+      "unknown": 17,
+      "win_rate": 0.0,
+      "loss_rate": 0.10526315789473684,
+      "verdict_rate": 0.10526315789473684,
+      "wall_us_p50": 33.05,
+      "wall_us_p90": 77.699,
+      "wall_us_p99": 151.36002000000002,
+      "wall_us_p50_quiet": 30.814999999999998,
+      "wall_us_p90_quiet": 61.2655,
+      "wall_us_p50_hot": 75.87,
+      "wall_us_p90_hot": 148.2156,
+      "nodes_mean": 1.894736842105263,
+      "nodes_p90": 2.0,
+      "cert_depth_mean": 4,
+      "cert_depth_max": 4,
+      "horizon_cut": 0,
+      "horizon_cut_rate": 0.0,
+      "horizon_cut_tall": 0,
+      "tall_conversion_note": "see paired ladder-vs-flat in decision inputs",
+      "deep_kb_death": 0,
+      "zone_nodes_total": 0,
+      "zone_positions": 0,
+      "deep_verify_failed": 0,
+      "zone_verify_failed": 0,
+      "cert_depth_hist": {
+        "4": 2
+      }
+    },
+    "h16_flat_zone": {
+      "n": 19,
+      "win": 2,
+      "loss": 0,
+      "unknown": 17,
+      "win_rate": 0.10526315789473684,
+      "loss_rate": 0.0,
+      "verdict_rate": 0.10526315789473684,
+      "wall_us_p50": 219581.791,
+      "wall_us_p90": 747539.8936,
+      "wall_us_p99": 960893.0001800001,
+      "wall_us_p50_quiet": 238015.8065,
+      "wall_us_p90_quiet": 754138.9255,
+      "wall_us_p50_hot": 28.47,
+      "wall_us_p90_hot": 161747.22840000002,
+      "nodes_mean": 287.8421052631579,
+      "nodes_p90": 606.8,
+      "cert_depth_mean": 14,
+      "cert_depth_max": 14,
+      "horizon_cut": 0,
+      "horizon_cut_rate": 0.0,
+      "horizon_cut_tall": 0,
+      "tall_conversion_note": "see paired ladder-vs-flat in decision inputs",
+      "deep_kb_death": 0,
+      "zone_nodes_total": 0,
+      "zone_positions": 0,
+      "deep_verify_failed": 0,
+      "zone_verify_failed": 0,
+      "cert_depth_hist": {
+        "14": 2
+      }
+    },
+    "h16_ladder_wide": {
+      "n": 19,
+      "win": 2,
+      "loss": 0,
+      "unknown": 17,
+      "win_rate": 0.10526315789473684,
+      "loss_rate": 0.0,
+      "verdict_rate": 0.10526315789473684,
+      "wall_us_p50": 226341.053,
+      "wall_us_p90": 685896.0855999999,
+      "wall_us_p99": 961136.2737400001,
+      "wall_us_p50_quiet": 255394.1715,
+      "wall_us_p90_quiet": 733403.101,
+      "wall_us_p50_hot": 15.111,
+      "wall_us_p90_hot": 228073.09260000003,
+      "nodes_mean": 251.21052631578948,
+      "nodes_p90": 500.0,
+      "cert_depth_mean": 14,
+      "cert_depth_max": 14,
+      "horizon_cut": 0,
+      "horizon_cut_rate": 0.0,
+      "horizon_cut_tall": 0,
+      "tall_conversion_note": "see paired ladder-vs-flat in decision inputs",
+      "deep_kb_death": 0,
+      "zone_nodes_total": 0,
+      "zone_positions": 0,
+      "deep_verify_failed": 0,
+      "zone_verify_failed": 0,
+      "cert_depth_hist": {
+        "14": 2
+      }
+    },
+    "h16_ladder_zone": {
+      "n": 19,
+      "win": 2,
+      "loss": 0,
+      "unknown": 17,
+      "win_rate": 0.10526315789473684,
+      "loss_rate": 0.0,
+      "verdict_rate": 0.10526315789473684,
+      "wall_us_p50": 223015.922,
+      "wall_us_p90": 929564.2387999999,
+      "wall_us_p99": 1145942.19534,
+      "wall_us_p50_quiet": 237241.9755,
+      "wall_us_p90_quiet": 964968.6725000001,
+      "wall_us_p50_hot": 28.15,
+      "wall_us_p90_hot": 162669.6772,
+      "nodes_mean": 287.8421052631579,
+      "nodes_p90": 606.8,
+      "cert_depth_mean": 14,
+      "cert_depth_max": 14,
+      "horizon_cut": 0,
+      "horizon_cut_rate": 0.0,
+      "horizon_cut_tall": 0,
+      "tall_conversion_note": "see paired ladder-vs-flat in decision inputs",
+      "deep_kb_death": 0,
+      "zone_nodes_total": 0,
+      "zone_positions": 0,
+      "deep_verify_failed": 0,
+      "zone_verify_failed": 0,
+      "cert_depth_hist": {
+        "14": 2
+      }
+    },
+    "unbounded_narrow": {
+      "n": 19,
+      "win": 0,
+      "loss": 0,
+      "unknown": 19,
+      "win_rate": 0.0,
+      "loss_rate": 0.0,
+      "verdict_rate": 0.0,
+      "wall_us_p50": 58013.353,
+      "wall_us_p90": 310520.363,
+      "wall_us_p99": 606893.58366,
+      "wall_us_p50_quiet": 78956.809,
+      "wall_us_p90_quiet": 315452.615,
+      "wall_us_p50_hot": 11.011,
+      "wall_us_p90_hot": 49.155,
+      "nodes_mean": 249.3684210526316,
+      "nodes_p90": 500.0,
+      "cert_depth_mean": null,
+      "cert_depth_max": null,
+      "horizon_cut": 0,
+      "horizon_cut_rate": 0.0,
+      "horizon_cut_tall": 0,
+      "tall_conversion_note": "see paired ladder-vs-flat in decision inputs",
+      "deep_kb_death": 0,
+      "zone_nodes_total": 0,
+      "zone_positions": 0,
+      "deep_verify_failed": 0,
+      "zone_verify_failed": 0,
+      "census_gate_evaluations": 0,
+      "census_gate_dismissals": 0,
+      "census_dismissal_rate": null,
+      "fragment_lookups": 0,
+      "fragment_hits": 0,
+      "fragment_hit_rate": null,
+      "tt_hits": 45,
+      "cert_depth_hist": {}
+    },
+    "unbounded_wide": {
+      "n": 19,
+      "win": 3,
+      "loss": 0,
+      "unknown": 16,
+      "win_rate": 0.15789473684210525,
+      "loss_rate": 0.0,
+      "verdict_rate": 0.15789473684210525,
+      "wall_us_p50": 666673.02,
+      "wall_us_p90": 1084409.7832,
+      "wall_us_p99": 1183412.1767199999,
+      "wall_us_p50_quiet": 716754.1485,
+      "wall_us_p90_quiet": 1119990.187,
+      "wall_us_p50_hot": 28.021,
+      "wall_us_p90_hot": 543556.0338,
+      "nodes_mean": 382.36842105263156,
+      "nodes_p90": 500.0,
+      "cert_depth_mean": 16.666666666666668,
+      "cert_depth_max": 22,
+      "horizon_cut": 0,
+      "horizon_cut_rate": 0.0,
+      "horizon_cut_tall": 0,
+      "tall_conversion_note": "see paired ladder-vs-flat in decision inputs",
+      "deep_kb_death": 0,
+      "zone_nodes_total": 0,
+      "zone_positions": 0,
+      "deep_verify_failed": 0,
+      "zone_verify_failed": 0,
+      "census_gate_evaluations": 0,
+      "census_gate_dismissals": 0,
+      "census_dismissal_rate": null,
+      "fragment_lookups": 0,
+      "fragment_hits": 0,
+      "fragment_hit_rate": null,
+      "tt_hits": 378,
+      "cert_depth_hist": {
+        "14": 2,
+        "22": 1
+      }
+    },
+    "unbounded_wide_loss": {
+      "n": 19,
+      "win": 0,
+      "loss": 2,
+      "unknown": 17,
+      "win_rate": 0.0,
+      "loss_rate": 0.10526315789473684,
+      "verdict_rate": 0.10526315789473684,
+      "wall_us_p50": 16.55,
+      "wall_us_p90": 55.422799999999995,
+      "wall_us_p99": 116.00202000000002,
+      "wall_us_p50_quiet": 16.32,
+      "wall_us_p90_quiet": 50.32,
+      "wall_us_p50_hot": 65.03,
+      "wall_us_p90_hot": 114.75880000000001,
+      "nodes_mean": 1.894736842105263,
+      "nodes_p90": 2.0,
+      "cert_depth_mean": 4,
+      "cert_depth_max": 4,
+      "horizon_cut": 0,
+      "horizon_cut_rate": 0.0,
+      "horizon_cut_tall": 0,
+      "tall_conversion_note": "see paired ladder-vs-flat in decision inputs",
+      "deep_kb_death": 0,
+      "zone_nodes_total": 0,
+      "zone_positions": 0,
+      "deep_verify_failed": 0,
+      "zone_verify_failed": 0,
+      "cert_depth_hist": {
+        "4": 2
+      }
+    },
+    "unbounded_zone": {
+      "n": 19,
+      "win": 3,
+      "loss": 0,
+      "unknown": 16,
+      "win_rate": 0.15789473684210525,
+      "loss_rate": 0.0,
+      "verdict_rate": 0.15789473684210525,
+      "wall_us_p50": 669262.607,
+      "wall_us_p90": 980858.0525999999,
+      "wall_us_p99": 1252022.9940600002,
+      "wall_us_p50_quiet": 683393.5485,
+      "wall_us_p90_quiet": 993118.5449999999,
+      "wall_us_p50_hot": 41.211,
+      "wall_us_p90_hot": 542057.1974000001,
+      "nodes_mean": 419,
+      "nodes_p90": 606.8,
+      "cert_depth_mean": 16.666666666666668,
+      "cert_depth_max": 22,
+      "horizon_cut": 0,
+      "horizon_cut_rate": 0.0,
+      "horizon_cut_tall": 0,
+      "tall_conversion_note": "see paired ladder-vs-flat in decision inputs",
+      "deep_kb_death": 0,
+      "zone_nodes_total": 0,
+      "zone_positions": 0,
+      "deep_verify_failed": 0,
+      "zone_verify_failed": 0,
+      "cert_depth_hist": {
+        "14": 2,
+        "22": 1
+      }
+    }
+  },
+  "n_raw_rows": 190,
+  "band_yield": {
+    "h16_flat_wide": {
+      "0": {
+        "verdicts": 0,
+        "n": 1,
+        "rate": 0.0
+      },
+      "1": {
+        "verdicts": 1,
+        "n": 3,
+        "rate": 0.3333333333333333
+      },
+      "2": {
+        "verdicts": 0,
+        "n": 1,
+        "rate": 0.0
+      },
+      "3": {
+        "verdicts": 0,
+        "n": 4,
+        "rate": 0.0
+      },
+      "4": {
+        "verdicts": 0,
+        "n": 3,
+        "rate": 0.0
+      },
+      "5": {
+        "verdicts": 0,
+        "n": 1,
+        "rate": 0.0
+      },
+      "6": {
+        "verdicts": 0,
+        "n": 2,
+        "rate": 0.0
+      },
+      "9": {
+        "verdicts": 1,
+        "n": 1,
+        "rate": 1.0
+      },
+      "10": {
+        "verdicts": 0,
+        "n": 1,
+        "rate": 0.0
+      },
+      "13": {
+        "verdicts": 0,
+        "n": 1,
+        "rate": 0.0
+      },
+      "14": {
+        "verdicts": 0,
+        "n": 1,
+        "rate": 0.0
+      }
+    },
+    "unbounded_wide": {
+      "0": {
+        "verdicts": 0,
+        "n": 1,
+        "rate": 0.0
+      },
+      "1": {
+        "verdicts": 1,
+        "n": 3,
+        "rate": 0.3333333333333333
+      },
+      "2": {
+        "verdicts": 0,
+        "n": 1,
+        "rate": 0.0
+      },
+      "3": {
+        "verdicts": 0,
+        "n": 4,
+        "rate": 0.0
+      },
+      "4": {
+        "verdicts": 0,
+        "n": 3,
+        "rate": 0.0
+      },
+      "5": {
+        "verdicts": 0,
+        "n": 1,
+        "rate": 0.0
+      },
+      "6": {
+        "verdicts": 0,
+        "n": 2,
+        "rate": 0.0
+      },
+      "9": {
+        "verdicts": 1,
+        "n": 1,
+        "rate": 1.0
+      },
+      "10": {
+        "verdicts": 0,
+        "n": 1,
+        "rate": 0.0
+      },
+      "13": {
+        "verdicts": 0,
+        "n": 1,
+        "rate": 0.0
+      },
+      "14": {
+        "verdicts": 1,
+        "n": 1,
+        "rate": 1.0
+      }
+    }
+  },
+  "decision_inputs": {
+    "horizon_shape": {
+      "paired_positions": 19,
+      "flat_verdicts": 2,
+      "ladder_verdicts": 2,
+      "unbounded_verdicts": 3,
+      "ladder_gain_over_flat": 0,
+      "unbounded_gain_over_flat": 1,
+      "flat_cut_eligible": 0,
+      "tall_converted": 0,
+      "tall_conversion_rate_of_cut": null,
+      "unbounded_converted_of_cut": 0,
+      "kill_criterion_1pct": "ladder OFF if tall_conversion_rate_of_cut < ~0.01"
+    },
+    "affordability": {
+      "h16_flat_wall_us_p50": 245653.435,
+      "h16_flat_wall_us_p90": 674024.3474,
+      "h16_flat_wall_us_p99": 904125.09768,
+      "unbounded_wall_us_p50": 666673.02,
+      "unbounded_wall_us_p90": 1084409.7832,
+      "census_dismissal_rate_h16": 0.4762396694214876
+    },
+    "deep_kb_death": {
+      "h16_flat_narrow": 0,
+      "h16_flat_wide": 0,
+      "h16_flat_wide_loss": 0,
+      "h16_flat_zone": 0,
+      "h16_ladder_wide": 0,
+      "h16_ladder_zone": 0,
+      "unbounded_narrow": 0,
+      "unbounded_wide": 0,
+      "unbounded_wide_loss": 0,
+      "unbounded_zone": 0
+    },
+    "loss_side": {
+      "h16_flat_wide_loss": {
+        "n": 19,
+        "loss": 2,
+        "loss_rate": 0.10526315789473684,
+        "win": 0,
+        "unknown": 17,
+        "wall_us_p50": 33.05,
+        "wall_us_p90": 77.699,
+        "nodes_mean": 1.894736842105263
+      },
+      "unbounded_wide_loss": {
+        "n": 19,
+        "loss": 2,
+        "loss_rate": 0.10526315789473684,
+        "win": 0,
+        "unknown": 17,
+        "wall_us_p50": 16.55,
+        "wall_us_p90": 55.422799999999995,
+        "nodes_mean": 1.894736842105263
+      },
+      "note": "LOSS goal has no census early-out; compare wall/nodes to WIN arms"
+    },
+    "zone_delta": {
+      "paired_positions": 19,
+      "zone_off_verdicts": 2,
+      "zone_on_verdicts": 2,
+      "zone_on_zone_nodes_total": 0,
+      "zone_on_positions_with_zone_nodes": 0,
+      "flat_zone_nodes_total": 0,
+      "wall_us_p50_zone_off": 245653.435,
+      "wall_us_p90_zone_off": 674024.3474,
+      "wall_us_p50_zone_on": 219581.791,
+      "wall_us_p90_zone_on": 747539.8936,
+      "wall_delta_us_p50": 6283.684000000008,
+      "wall_delta_us_p90": 62406.93560000008,
+      "ladder_zone_positions": 0,
+      "ladder_zone_nodes_total": 0,
+      "note": "zone-on wall/verdict deltas CONFLATE zone AND-pruning with the production tight +8 half-budget fast-path inside tss_solve_verified (both fire only with zone on); zone_nodes isolates actual zone use."
+    },
+    "narrow_vs_wide": {
+      "paired_positions": 19,
+      "both": 0,
+      "wide_only": 2,
+      "narrow_only": 0,
+      "neither": 17,
+      "wide_verdicts": 2,
+      "narrow_verdicts": 0
+    },
+    "narrow_vs_wide_unbounded": {
+      "paired_positions": 19,
+      "both": 0,
+      "wide_only": 3,
+      "narrow_only": 0,
+      "neither": 16
+    },
+    "calibration": {
+      "proven_win_with_netval": 0,
+      "proven_loss_with_netval": 0,
+      "win_netval_mean": null,
+      "win_netval_p10": null,
+      "loss_netval_mean": null,
+      "loss_netval_p90": null,
+      "win_sign_disagreements": 0,
+      "loss_sign_disagreements": 0,
+      "sign_disagreement_rate": null,
+      "note": "SIGN-DISAGREEMENT PROXY, not a consumed-move flip simulation: counts proven-WIN roots whose net root value (side-to-move perspective) is <= 0 (and proven-LOSS with value >= 0). This is the tactical-headroom measure of \u00a79; an actual backup/root-move flip would require running consumption, which V1 does not."
+    }
+  }
+}

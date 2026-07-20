@@ -4713,6 +4713,303 @@ pub fn hexfield_eq_threat_analysis(
     Ok(threats::analysis_pydict(py, &s)?.into_any().unbind())
 }
 
+/// V1 SOAK harness probe (PLAN_TSS_MCTS_INTEGRATION.md §9): run ONE deep solve
+/// through the exact production verified path (`tss_solve_verified`, incl. the
+/// tight-zone fast-path, the §5 horizon ladder, and the certificate-horizon
+/// preflight) on a fresh solver of the requested width profile, and return a
+/// flat dict of the verdict, wall time, certificate geometry, and every
+/// `TssCounters` field. Consumes NOTHING — the caller measures, never backs up.
+/// When `with_stats` is set, an additional direct `solve_goal` on a fresh
+/// same-profile solver at the base horizon surfaces the raw `SolveStats`
+/// (census-gate dismissals, TT / fragment reuse, nodes) that the verified path
+/// folds away — these `stats_*` keys are diagnostics only.
+///
+/// `goal` ∈ {"win","loss","both"}; `horizon` is 0 (unbounded) or ≥16 (the owner
+/// floor — the 1..=15 band is rejected, matching the config seam); `wide=true`
+/// selects the leaf-decided profile (`configure_leaf_profile`: wide
+/// vcf_pair_complete + lazy frontier + interior census gate), `wide=false` the
+/// narrow default `WidthOptions` profile. This is measurement plumbing: it is
+/// NOT wired into any consumption path and cannot mint a training value.
+#[pyfunction]
+#[pyo3(signature = (state, node_cap, goal, horizon, ladder, zone, wide, with_stats=false))]
+#[allow(clippy::too_many_arguments)]
+pub fn hexfield_eq_deep_solve_probe(
+    py: Python<'_>,
+    state: &Bound<'_, PyAny>,
+    node_cap: u64,
+    goal: &str,
+    horizon: u32,
+    ladder: bool,
+    zone: bool,
+    wide: bool,
+    with_stats: bool,
+) -> PyResult<Py<PyAny>> {
+    let s = single_state_from_py(py, state)?;
+    if horizon != 0 && horizon < 16 {
+        return Err(PyValueError::new_err(
+            "horizon must be 0 (unbounded) or >= 16 (the owner floor)",
+        ));
+    }
+    if ladder && horizon == 0 {
+        return Err(PyValueError::new_err(
+            "the horizon ladder requires a bounded horizon (>= 16)",
+        ));
+    }
+    let goal_enum = match goal {
+        "win" => tss_core::SolveGoal::Win,
+        "loss" => tss_core::SolveGoal::Loss,
+        "both" => tss_core::SolveGoal::Both,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "goal must be win|loss|both, got {other:?}"
+            )))
+        }
+    };
+    let zone_caps = tss_core::ZoneSearchCaps {
+        enabled: zone,
+        stale_area_filter: false,
+        count2_threshold: false,
+        pair_commutation: false,
+    };
+    let placements = s.placements_made();
+
+    let mut solver = crate::tss_solver::TssSolver::default();
+    if wide {
+        solver.configure_leaf_profile();
+    }
+    let mut counters = TssCounters::default();
+    let start = Instant::now();
+    let solved = tss_solve_verified(
+        &s,
+        node_cap,
+        goal_enum,
+        zone_caps,
+        SolverHorizon { horizon, ladder },
+        &mut solver,
+        &mut counters,
+    );
+    let wall_nanos = start.elapsed().as_nanos() as u64;
+
+    // Certificate geometry: derived_t (the verifier's own max exact-leaf
+    // resolution ply) minus the root placement index = proof depth in plies.
+    let (cert_depth, cert_choice_nodes, cert_universal_nodes, cert_zone_nodes) = match &solved.cert {
+        Some(cert) => {
+            let mut derived_t = 0u32;
+            let (mut choice, mut univ, mut zn) = (0u32, 0u32, 0u32);
+            for node in &cert.nodes {
+                match node {
+                    CertNode::OrCompletion { completion_ply, .. } => {
+                        derived_t = derived_t.max(*completion_ply);
+                    }
+                    CertNode::Win { resolution_ply, .. }
+                    | CertNode::Loss { resolution_ply, .. } => {
+                        derived_t = derived_t.max(*resolution_ply);
+                    }
+                    CertNode::Choice { .. } => choice += 1,
+                    CertNode::Universal { zone, .. } => {
+                        univ += 1;
+                        zn += u32::from(zone.is_some());
+                    }
+                }
+            }
+            (
+                derived_t.saturating_sub(placements),
+                choice,
+                univ,
+                zn,
+            )
+        }
+        None => (0, 0, 0, 0),
+    };
+    // The certificate's designated root move (the OR-node winning continuation),
+    // for the §8 internalization baseline: prior mass + rank of THIS move at the
+    // proven root. Emitted only when the root node is a Choice (a proven WIN root
+    // guard shape); absent for defender-loss roots and for OrCompletion roots.
+    let cert_root_move: Option<(i32, i32)> = solved.cert.as_ref().and_then(|cert| {
+        match cert.nodes.get(cert.root_node as usize) {
+            Some(CertNode::Choice { mv, .. }) => Some((mv.q as i32, mv.r as i32)),
+            _ => None,
+        }
+    });
+    let status = match solved.status {
+        ProofStatus::Win => "win",
+        ProofStatus::Loss => "loss",
+        ProofStatus::Unknown => "unknown",
+    };
+
+    let d = PyDict::new(py);
+    d.set_item("status", status)?;
+    if let Some((q, r)) = cert_root_move {
+        d.set_item("cert_root_move_q", q)?;
+        d.set_item("cert_root_move_r", r)?;
+    }
+    d.set_item("wall_nanos", wall_nanos)?;
+    d.set_item("placements", placements)?;
+    d.set_item("has_cert", solved.cert.is_some())?;
+    d.set_item("cert_depth", cert_depth)?;
+    d.set_item("cert_choice_nodes", cert_choice_nodes)?;
+    d.set_item("cert_universal_nodes", cert_universal_nodes)?;
+    d.set_item("cert_zone_nodes", cert_zone_nodes)?;
+    d.set_item("cert_version", tss_core::TSS_CERT_VERSION)?;
+    // Every TssCounters field the verified path touched.
+    d.set_item("deep_calls", counters.deep_calls)?;
+    d.set_item("deep_win", counters.deep_win)?;
+    d.set_item("deep_loss", counters.deep_loss)?;
+    d.set_item("deep_unknown", counters.deep_unknown)?;
+    d.set_item("deep_nodes", counters.deep_nodes)?;
+    d.set_item("deep_verify_failed", counters.deep_verify_failed)?;
+    d.set_item("horizon_retry", counters.horizon_retry)?;
+    d.set_item("horizon_preflight_failed", counters.horizon_preflight_failed)?;
+    d.set_item("horizon_cut", counters.horizon_cut)?;
+    d.set_item("horizon_cut_tall", counters.horizon_cut_tall)?;
+    d.set_item("deep_kb_death", counters.deep_kb_death)?;
+    d.set_item("zone_nodes", counters.zone_nodes)?;
+    d.set_item("pair_omitted", counters.pair_omitted)?;
+    d.set_item("zone_verify_failed", counters.zone_verify_failed)?;
+
+    if with_stats {
+        let mut stats_solver = crate::tss_solver::TssSolver::default();
+        if wide {
+            stats_solver.configure_leaf_profile();
+        }
+        let base_horizon = if horizon == 0 {
+            u32::MAX
+        } else {
+            placements.saturating_add(horizon)
+        };
+        // 256 KiB per-solve cap: the trainer leaf/root/async byte budget
+        // (RustSearch::TSS_SOLVER_TT_BYTES, private to tree.rs — mirrored here
+        // so the diagnostic solve runs at the identical leaf memory profile).
+        let caps = tss_core::SolveCaps {
+            node_cap,
+            tt_bytes_cap: 256 << 10,
+            semantic_horizon: base_horizon,
+        };
+        stats_solver.set_zone_options(zone_caps);
+        let raw = stats_solver.solve_goal(&s, &caps, goal_enum);
+        let st = &raw.stats;
+        d.set_item("stats_nodes", st.nodes)?;
+        d.set_item("stats_expansions", st.expansions)?;
+        d.set_item("stats_tt_hits", st.tt_hits)?;
+        d.set_item("stats_tt_entries", st.tt_entries)?;
+        d.set_item("stats_peak_tt_bytes", st.peak_tt_bytes)?;
+        d.set_item("stats_horizon_cuts", st.horizon_cuts)?;
+        d.set_item("stats_kb_death_cuts", st.kb_death_cuts)?;
+        d.set_item("stats_fragment_lookups", st.fragment_lookups)?;
+        d.set_item("stats_fragment_hits", st.fragment_hits)?;
+        d.set_item("stats_fragment_imports", st.fragment_imports)?;
+        d.set_item("stats_interior_gate_evaluations", st.interior_gate_evaluations)?;
+        d.set_item("stats_interior_gate_dismissals", st.interior_gate_dismissals)?;
+        d.set_item("stats_interior_gate_nanos", st.interior_gate_nanos)?;
+    }
+
+    Ok(d.into_any().unbind())
+}
+
+/// V1 SOAK warmth-sensitivity probe: solve a SEQUENCE of states on ONE
+/// persistent solver (built once, `configure_leaf_profile` if `wide`), so the
+/// shared positive-proof-fragment cache warms across positions exactly as the
+/// production per-batch persistent leaf solver does across moves. Pass a game's
+/// positions in ply order to bound the cold-vs-warm gap in the single-shot
+/// probe. Returns a list of per-position dicts (verdict, wall, nodes, cert depth,
+/// the fatal verify counter, and the depth/zone counters). Measurement only.
+#[pyfunction]
+#[pyo3(signature = (states, node_cap, goal, horizon, ladder, zone, wide))]
+#[allow(clippy::too_many_arguments)]
+pub fn hexfield_eq_deep_solve_batch(
+    py: Python<'_>,
+    states: &Bound<'_, PyList>,
+    node_cap: u64,
+    goal: &str,
+    horizon: u32,
+    ladder: bool,
+    zone: bool,
+    wide: bool,
+) -> PyResult<Py<PyAny>> {
+    if horizon != 0 && horizon < 16 {
+        return Err(PyValueError::new_err(
+            "horizon must be 0 (unbounded) or >= 16 (the owner floor)",
+        ));
+    }
+    if ladder && horizon == 0 {
+        return Err(PyValueError::new_err(
+            "the horizon ladder requires a bounded horizon (>= 16)",
+        ));
+    }
+    let goal_enum = match goal {
+        "win" => tss_core::SolveGoal::Win,
+        "loss" => tss_core::SolveGoal::Loss,
+        "both" => tss_core::SolveGoal::Both,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "goal must be win|loss|both, got {other:?}"
+            )))
+        }
+    };
+    let zone_caps = tss_core::ZoneSearchCaps {
+        enabled: zone,
+        stale_area_filter: false,
+        count2_threshold: false,
+        pair_commutation: false,
+    };
+    let mut solver = crate::tss_solver::TssSolver::default();
+    if wide {
+        solver.configure_leaf_profile();
+    }
+    let out = PyList::empty(py);
+    for state_any in states.iter() {
+        let s = single_state_from_py(py, &state_any)?;
+        let placements = s.placements_made();
+        let mut counters = TssCounters::default();
+        let start = Instant::now();
+        let solved = tss_solve_verified(
+            &s,
+            node_cap,
+            goal_enum,
+            zone_caps,
+            SolverHorizon { horizon, ladder },
+            &mut solver,
+            &mut counters,
+        );
+        let wall_nanos = start.elapsed().as_nanos() as u64;
+        let mut derived_t = 0u32;
+        let mut zn = 0u32;
+        if let Some(cert) = &solved.cert {
+            for node in &cert.nodes {
+                match node {
+                    CertNode::OrCompletion { completion_ply, .. } => {
+                        derived_t = derived_t.max(*completion_ply);
+                    }
+                    CertNode::Win { resolution_ply, .. }
+                    | CertNode::Loss { resolution_ply, .. } => {
+                        derived_t = derived_t.max(*resolution_ply);
+                    }
+                    CertNode::Universal { zone, .. } => zn += u32::from(zone.is_some()),
+                    CertNode::Choice { .. } => {}
+                }
+            }
+        }
+        let status = match solved.status {
+            ProofStatus::Win => "win",
+            ProofStatus::Loss => "loss",
+            ProofStatus::Unknown => "unknown",
+        };
+        let d = PyDict::new(py);
+        d.set_item("status", status)?;
+        d.set_item("wall_nanos", wall_nanos)?;
+        d.set_item("has_cert", solved.cert.is_some())?;
+        d.set_item("cert_depth", derived_t.saturating_sub(placements))?;
+        d.set_item("deep_nodes", counters.deep_nodes)?;
+        d.set_item("deep_verify_failed", counters.deep_verify_failed)?;
+        d.set_item("horizon_cut", counters.horizon_cut)?;
+        d.set_item("horizon_cut_tall", counters.horizon_cut_tall)?;
+        d.set_item("deep_kb_death", counters.deep_kb_death)?;
+        d.set_item("zone_nodes", zn)?;
+        out.append(d)?;
+    }
+    Ok(out.into_any().unbind())
+}
+
 /// Action selection: temperature sampling when temperature > 0, and on greedy
 /// (T == 0) paths with `lcb_move_selection` on, LCB-of-Q selection among
 /// eligible children (fallback max-visits). The TSS guard has already zeroed
