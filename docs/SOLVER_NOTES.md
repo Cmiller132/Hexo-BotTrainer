@@ -8,6 +8,13 @@ decision goes through the usual battery + report + handoff.
 Status legend: MEASURED (verified data), CODE-FACT (read from source, cite
 line), HYPOTHESIS (unverified), RETRACTED, OPEN-PROBE.
 
+**Mission (owner ruling 2026-07-20):** maximize *verified* win/loss coverage
+at positions — find as many of the wins and losses that exist as possible, no
+shortcuts, every improvement proven correct. **Adoption metric = win/loss
+coverage on fixed position sets** (wall/yield are secondary diagnostics).
+Envelope (cap 500 / park 150 ms) is tunable if data supports. Adaptive
+budgets: PARKED (worth doing, not now).
+
 ---
 
 ## 1. Ground truth: the production profile (main_3 `_resume_config.toml`)
@@ -54,8 +61,17 @@ line), HYPOTHESIS (unverified), RETRACTED, OPEN-PROBE.
   structurally cold; the 3,255/3,255 agreement was cold-vs-cold. Correct
   statement: **warmth has never been evaluated, in the battery or in
   production.** → OPEN-PROBE P3.
+- **Instrumentation gap:** `hexfield_eq_deep_solve_batch` emits NO `stats_*`
+  keys at all (its record dict ends at `zone_nodes`, search.rs:4997-5008) —
+  only the single-shot probe's `with_stats` path emits them, and that path
+  re-solves on a SEPARATE fresh `stats_solver` (search.rs:4889), so its
+  fragment counters describe a cold solver BY CONSTRUCTION. Any
+  "fragment_lookups=0 in the warmth arm" reading was summing a missing key's
+  default. Two independent artifact layers on the same conclusion.
 - `interior_gate_evaluations=0` across all 37k solves is NOT "gate never
-  useful" — it is an applicability fact, see §4.
+  useful" — it is an applicability fact, see §4. (These counters come from
+  the cold `stats_solver` re-solve, per the gap above — applicability
+  analysis in §4 stands on the code, not on these counters.)
 - `horizon_cut=0` in wide arms does NOT mean depth never binds in h16 (h16
   found 39 fewer wins, so it binds). HYPOTHESIS: wide enforces depth via
   `max_depth_cap` → `WidePnNode::DepthCutoff` (tss_solver.rs:~5930) before
@@ -112,11 +128,15 @@ Consequences:
   source (board-fill, pattern reach) would have applied on the 248 grinds.
   Analysis can start from raws + a probe build. OPEN-PROBE (owner: worth
   quantifying, temper expectations).
-- **P3 Warmth, actually measured** — rerun warmth shards with
-  `TSS_SHARED_FRAGMENTS=1`; measure imports/hits, verdict delta, wall delta.
-  Cheap (CPU, existing driver + env var). If it pays at cap 500, it is a
-  production candidate (currently OFF in production); if not, deletion
-  candidate for real this time. OPEN-PROBE.
+- **P3 Warmth, actually measured** — MEASURED (smoke, 2026-07-20): with
+  `TSS_SHARED_FRAGMENTS=1` the store ENGAGES — sp_0_p55 (h16 arm) solved in
+  2 nodes vs 19 cold, same WIN verdict; 179/180 other positions
+  bit-identical. Mechanism works; effect rare at cap 500 in a 1/40 slice.
+  Full 2-shard rerun RUNNING (out: raws/soak_warmth_frag_s{0,1}.jsonl);
+  quantify node savings + any verdict upgrades vs the cold V1 baseline.
+  Detection is behavioral (deep_nodes/verdict deltas vs cold), since the
+  batch API emits no stats (§3). If coverage improves, warmth is a production
+  candidate (currently OFF in production).
 - **P4 Both-goal probing** — owner: WANTS win+loss detection. LOSS probes are
   ~10³× cheaper than WIN grinds; design question is where mode 3 currently
   asks the LOSS question vs where it could (every gated leaf?). Map the
@@ -136,3 +156,7 @@ Consequences:
   characterization added (6518acc6); warmth retraction + census-gate
   applicability analysis (§3, §4); horizon dropped by owner ruling; V2 h2h
   running (unbounded vs h16 under production consumption).
+- 2026-07-20 (later): Owner rulings folded in (mission = verified coverage on
+  fixed sets, no shortcuts; adaptive budgets parked; envelope tunable).
+  Batch-API stats gap found (§3). Warmth smoke: fragment store engages under
+  env (19→2 nodes on a repeated-structure WIN), full rerun launched.
