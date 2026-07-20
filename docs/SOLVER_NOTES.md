@@ -128,15 +128,15 @@ Consequences:
   source (board-fill, pattern reach) would have applied on the 248 grinds.
   Analysis can start from raws + a probe build. OPEN-PROBE (owner: worth
   quantifying, temper expectations).
-- **P3 Warmth, actually measured** — MEASURED (smoke, 2026-07-20): with
-  `TSS_SHARED_FRAGMENTS=1` the store ENGAGES — sp_0_p55 (h16 arm) solved in
-  2 nodes vs 19 cold, same WIN verdict; 179/180 other positions
-  bit-identical. Mechanism works; effect rare at cap 500 in a 1/40 slice.
-  Full 2-shard rerun RUNNING (out: raws/soak_warmth_frag_s{0,1}.jsonl);
-  quantify node savings + any verdict upgrades vs the cold V1 baseline.
-  Detection is behavioral (deep_nodes/verdict deltas vs cold), since the
-  batch API emits no stats (§3). If coverage improves, warmth is a production
-  candidate (currently OFF in production).
+- **P3 Warmth** — MEASURED + CLOSED at cap 500 (2026-07-20, full 6,510-solve
+  paired rerun, raws/soak_warmth_frag_s{0,1}.jsonl vs cold control):
+  mechanism WORKS (35 positions saved nodes; 1,281 nodes saved in the
+  unbounded arm, 0 added; best single save 339→134) but **zero verdict
+  flips** — savings concentrate in already-proven wins (fragments come from
+  wins, so they help re-prove neighbors, not crack Unknowns). Under the
+  coverage metric: no gain at cap 500; production flip NOT justified. Wall
+  deltas from this run are load-confounded (ran beside V2) — node counts are
+  the causal signal. Reopen only as part of P1's value-vs-cap sweep.
 - **P4 Both-goal probing** — owner: WANTS win+loss detection. LOSS probes are
   ~10³× cheaper than WIN grinds; design question is where mode 3 currently
   asks the LOSS question vs where it could (every gated leaf?). Map the
