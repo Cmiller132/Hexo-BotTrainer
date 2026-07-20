@@ -20,6 +20,8 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::cell::{Cell, RefCell};
 #[cfg(test)]
+use std::collections::BTreeMap;
+#[cfg(test)]
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -78,6 +80,160 @@ std::thread_local! {
 #[cfg(test)]
 pub(crate) fn begin_ordering_study_report() {
     ORDERING_STUDY_REPORT.with(|slot| slot.borrow_mut().records.clear());
+}
+
+#[cfg(test)]
+const ATTACKER_UNIVERSE_FIRST_GE3: u8 = 1;
+#[cfg(test)]
+const ATTACKER_UNIVERSE_FIRST_EQ2: u8 = 2;
+#[cfg(test)]
+const ATTACKER_UNIVERSE_FIRST_DEFENDER_BLOCK: u8 = 4;
+#[cfg(test)]
+const ATTACKER_UNIVERSE_SECOND_PROMOTED_GE2: u8 = 1;
+#[cfg(test)]
+const ATTACKER_UNIVERSE_SECOND_TURN_START: u8 = 2;
+#[cfg(test)]
+const ATTACKER_UNIVERSE_SECOND_PROMOTED_EQ1: u8 = 4;
+
+/// Default-off, observation-only accounting for the wide claimant universe.
+/// Histograms are exact (size -> occurrence count), while component counters
+/// report both overlapping set membership and the first component that admits
+/// a coordinate under `second_candidates`' deterministic union order.
+#[cfg(test)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AttackerUniverseShadowReport {
+    pub(crate) pair_or_nodes: u64,
+    pub(crate) single_or_nodes: u64,
+    pub(crate) first_candidate_size_hist: BTreeMap<usize, u64>,
+    pub(crate) second_candidate_size_hist: BTreeMap<usize, u64>,
+    pub(crate) retained_pair_size_hist: BTreeMap<usize, u64>,
+    pub(crate) retained_single_size_hist: BTreeMap<usize, u64>,
+    pub(crate) first_memberships: [u64; 3],
+    pub(crate) second_memberships: [u64; 3],
+    pub(crate) second_first_admission: [u64; 3],
+    pub(crate) winning_choice_edges: u64,
+    pub(crate) winning_pair_edges: u64,
+    pub(crate) winning_single_edges: u64,
+    pub(crate) winning_first_memberships: [u64; 3],
+    pub(crate) winning_second_memberships: [u64; 3],
+    pub(crate) winning_second_first_admission: [u64; 3],
+}
+
+#[cfg(test)]
+impl AttackerUniverseShadowReport {
+    pub(crate) fn merge(&mut self, other: &Self) {
+        self.pair_or_nodes = self.pair_or_nodes.saturating_add(other.pair_or_nodes);
+        self.single_or_nodes = self.single_or_nodes.saturating_add(other.single_or_nodes);
+        merge_size_hist(
+            &mut self.first_candidate_size_hist,
+            &other.first_candidate_size_hist,
+        );
+        merge_size_hist(
+            &mut self.second_candidate_size_hist,
+            &other.second_candidate_size_hist,
+        );
+        merge_size_hist(
+            &mut self.retained_pair_size_hist,
+            &other.retained_pair_size_hist,
+        );
+        merge_size_hist(
+            &mut self.retained_single_size_hist,
+            &other.retained_single_size_hist,
+        );
+        merge_fixed(&mut self.first_memberships, &other.first_memberships);
+        merge_fixed(&mut self.second_memberships, &other.second_memberships);
+        merge_fixed(
+            &mut self.second_first_admission,
+            &other.second_first_admission,
+        );
+        self.winning_choice_edges = self
+            .winning_choice_edges
+            .saturating_add(other.winning_choice_edges);
+        self.winning_pair_edges = self
+            .winning_pair_edges
+            .saturating_add(other.winning_pair_edges);
+        self.winning_single_edges = self
+            .winning_single_edges
+            .saturating_add(other.winning_single_edges);
+        merge_fixed(
+            &mut self.winning_first_memberships,
+            &other.winning_first_memberships,
+        );
+        merge_fixed(
+            &mut self.winning_second_memberships,
+            &other.winning_second_memberships,
+        );
+        merge_fixed(
+            &mut self.winning_second_first_admission,
+            &other.winning_second_first_admission,
+        );
+    }
+}
+
+#[cfg(test)]
+fn merge_size_hist(target: &mut BTreeMap<usize, u64>, source: &BTreeMap<usize, u64>) {
+    for (&size, &count) in source {
+        let slot = target.entry(size).or_default();
+        *slot = slot.saturating_add(count);
+    }
+}
+
+#[cfg(test)]
+fn merge_fixed(target: &mut [u64; 3], source: &[u64; 3]) {
+    for (target, source) in target.iter_mut().zip(source) {
+        *target = target.saturating_add(*source);
+    }
+}
+
+#[cfg(test)]
+fn observe_size(hist: &mut BTreeMap<usize, u64>, size: usize) {
+    let slot = hist.entry(size).or_default();
+    *slot = slot.saturating_add(1);
+}
+
+#[cfg(test)]
+fn observe_component_memberships(counts: &mut [u64; 3], mask: u8) {
+    for (index, bit) in [1u8, 2, 4].into_iter().enumerate() {
+        if mask & bit != 0 {
+            counts[index] = counts[index].saturating_add(1);
+        }
+    }
+}
+
+#[cfg(test)]
+fn observe_first_admission(counts: &mut [u64; 3], mask: u8) {
+    let index = if mask & 1 != 0 {
+        0
+    } else if mask & 2 != 0 {
+        1
+    } else {
+        debug_assert_ne!(mask & 4, 0);
+        2
+    };
+    counts[index] = counts[index].saturating_add(1);
+}
+
+#[cfg(test)]
+thread_local! {
+    static ATTACKER_UNIVERSE_SHADOW_REPORT: RefCell<AttackerUniverseShadowReport> =
+        RefCell::new(AttackerUniverseShadowReport::default());
+}
+
+#[cfg(test)]
+fn clear_attacker_universe_shadow_report() {
+    ATTACKER_UNIVERSE_SHADOW_REPORT.with(|slot| {
+        *slot.borrow_mut() = AttackerUniverseShadowReport::default();
+    });
+}
+
+#[cfg(test)]
+fn publish_attacker_universe_shadow_report(report: &AttackerUniverseShadowReport) {
+    ATTACKER_UNIVERSE_SHADOW_REPORT.with(|slot| slot.borrow_mut().merge(report));
+}
+
+#[cfg(test)]
+pub(crate) fn take_attacker_universe_shadow_report() -> AttackerUniverseShadowReport {
+    ATTACKER_UNIVERSE_SHADOW_REPORT.with(|slot| std::mem::take(&mut *slot.borrow_mut()))
 }
 
 #[cfg(test)]
@@ -870,6 +1026,7 @@ impl TssSolver {
             self.last_k_reply_shadow.clear();
             self.last_wide_root_numbers = None;
             clear_quotient_telemetry_report();
+            clear_attacker_universe_shadow_report();
         }
 
         // Sample the process environment exactly once per public solve. The
@@ -1288,6 +1445,10 @@ impl TssSolver {
         if let Some(telemetry) = search.quotient_telemetry.take() {
             let report = telemetry.finish(&search.entries, &search.by_position, search.tt_hits);
             LAST_QUOTIENT_REPORT.with(|slot| *slot.borrow_mut() = Some(report));
+        }
+        #[cfg(test)]
+        if search.attacker_universe_shadow {
+            publish_attacker_universe_shadow_report(&search.attacker_universe_report.borrow());
         }
         drop(search);
         // The solved attempt root was queued first; admit it last so a direct-
@@ -3616,6 +3777,18 @@ struct WidePnSearch<'store> {
     reveal_prefix_study: bool,
     #[cfg(test)]
     ordering_study: bool,
+    /// Read once per solve. This collector only observes generated edges and
+    /// proof closures; no recorded value is consulted by search.
+    #[cfg(test)]
+    attacker_universe_shadow: bool,
+    #[cfg(test)]
+    attacker_universe_report: RefCell<AttackerUniverseShadowReport>,
+    /// Per-choice child component masks, populated only after generation so
+    /// they cannot participate in ordering or proof-number initialization.
+    #[cfg(test)]
+    attacker_universe_choice_components: HashMap<(usize, usize), (u8, u8)>,
+    #[cfg(test)]
+    attacker_universe_last_choice_components: RefCell<Vec<(u8, u8)>>,
     #[cfg(test)]
     closure_stats: RefCell<ClosureDebtStats>,
     #[cfg(test)]
@@ -3884,6 +4057,17 @@ impl<'store> WidePnSearch<'store> {
                 == Some("1"),
             #[cfg(test)]
             ordering_study: std::env::var("TSS_ORDERING_STUDY").ok().as_deref() == Some("1"),
+            #[cfg(test)]
+            attacker_universe_shadow: std::env::var("TSS_ATTACKER_UNIVERSE_SHADOW")
+                .ok()
+                .as_deref()
+                == Some("1"),
+            #[cfg(test)]
+            attacker_universe_report: RefCell::new(AttackerUniverseShadowReport::default()),
+            #[cfg(test)]
+            attacker_universe_choice_components: HashMap::new(),
+            #[cfg(test)]
+            attacker_universe_last_choice_components: RefCell::new(Vec::new()),
             #[cfg(test)]
             closure_stats: RefCell::new(ClosureDebtStats::default()),
             #[cfg(test)]
@@ -5526,7 +5710,43 @@ impl<'store> WidePnSearch<'store> {
         if self.closure_counters && previous.0 != 0 && numbers.0 == 0 {
             self.record_closure_winning_rank(id);
         }
+        #[cfg(test)]
+        if self.attacker_universe_shadow && previous.0 != 0 && numbers.0 == 0 {
+            self.record_attacker_universe_winning_edge(id);
+        }
         previous != numbers
+    }
+
+    #[cfg(test)]
+    fn record_attacker_universe_winning_edge(&self, id: usize) {
+        let winning_index = match &self.entries[id].node {
+            WidePnNode::Branch {
+                kind: WidePnKind::Choice,
+                children,
+            } => children
+                .iter()
+                .position(|child| self.child_numbers(child).0 == 0),
+            _ => None,
+        };
+        let Some(winning_index) = winning_index else {
+            return;
+        };
+        let Some(&(first_mask, second_mask)) = self
+            .attacker_universe_choice_components
+            .get(&(id, winning_index))
+        else {
+            return;
+        };
+        let mut report = self.attacker_universe_report.borrow_mut();
+        report.winning_choice_edges = report.winning_choice_edges.saturating_add(1);
+        observe_component_memberships(&mut report.winning_first_memberships, first_mask);
+        if second_mask == 0 {
+            report.winning_single_edges = report.winning_single_edges.saturating_add(1);
+        } else {
+            report.winning_pair_edges = report.winning_pair_edges.saturating_add(1);
+            observe_component_memberships(&mut report.winning_second_memberships, second_mask);
+            observe_first_admission(&mut report.winning_second_first_admission, second_mask);
+        }
     }
 
     #[cfg(test)]
@@ -6007,6 +6227,15 @@ impl<'store> WidePnSearch<'store> {
         } else {
             None
         };
+        #[cfg(test)]
+        let attacker_universe_components =
+            if self.attacker_universe_shadow && kind == WidePnKind::Choice {
+                Some(std::mem::take(
+                    &mut *self.attacker_universe_last_choice_components.borrow_mut(),
+                ))
+            } else {
+                None
+            };
         children.shrink_to_fit();
         self.entries[id].node = if children.is_empty() {
             WidePnNode::Refuted
@@ -6024,6 +6253,21 @@ impl<'store> WidePnSearch<'store> {
         #[cfg(test)]
         if let Some(profile) = reveal_pair_profile {
             self.reveal_pair_nodes.insert(id, profile);
+        }
+        #[cfg(test)]
+        if let Some(components) = attacker_universe_components {
+            debug_assert_eq!(
+                components.len(),
+                match &self.entries[id].node {
+                    WidePnNode::Branch { children, .. } => children.len(),
+                    WidePnNode::Refuted => 0,
+                    _ => unreachable!("fresh choice expansion has branch or refuted node"),
+                }
+            );
+            for (child_index, masks) in components.into_iter().enumerate() {
+                self.attacker_universe_choice_components
+                    .insert((id, child_index), masks);
+            }
         }
         self.refresh(id);
         WidePnStepOutcome::Progress
@@ -6135,6 +6379,21 @@ impl<'store> WidePnSearch<'store> {
             self.claimant,
             WidthOptions::vcf_pair_complete(),
         );
+        #[cfg(test)]
+        if self.attacker_universe_shadow {
+            let mut report = self.attacker_universe_report.borrow_mut();
+            report.pair_or_nodes = report.pair_or_nodes.saturating_add(1);
+            observe_size(
+                &mut report.first_candidate_size_hist,
+                first_candidates.len(),
+            );
+            for candidate in &first_candidates {
+                observe_component_memberships(
+                    &mut report.first_memberships,
+                    attacker_universe_first_components(candidate),
+                );
+            }
+        }
         // Freeze urgency at the turn-start position. A block cell can disappear
         // from the second-stone candidate metadata after the other coordinate is
         // played, but the unordered pair still contains that original block.
@@ -6146,9 +6405,17 @@ impl<'store> WidePnSearch<'store> {
         // whole double loop is stateless — zero engine applies.
         let mut second_coords: Vec<HexCoord> = Vec::new();
         let mut second_seen: HashSet<HexCoord> = HashSet::new();
+        #[cfg(test)]
+        let mut attacker_universe_components = Vec::new();
         for first_candidate in &first_candidates {
             let first_width_tier = wide_candidate_width_tier(first_candidate);
             let first = first_candidate.coord;
+            #[cfg(test)]
+            let first_component_mask = if self.attacker_universe_shadow {
+                attacker_universe_first_components(first_candidate)
+            } else {
+                0
+            };
             #[cfg(test)]
             let mut reveal_second_elapsed = 0u64;
             {
@@ -6168,6 +6435,16 @@ impl<'store> WidePnSearch<'store> {
                     reveal_second_elapsed = elapsed;
                     pair_profile.second_candidate_nanos =
                         pair_profile.second_candidate_nanos.saturating_add(elapsed);
+                }
+            }
+            #[cfg(test)]
+            if self.attacker_universe_shadow {
+                let mut report = self.attacker_universe_report.borrow_mut();
+                observe_size(&mut report.second_candidate_size_hist, second_coords.len());
+                for &second in &second_coords {
+                    let mask = gate.second_candidate_components(first, second, &first_candidates);
+                    observe_component_memberships(&mut report.second_memberships, mask);
+                    observe_first_admission(&mut report.second_first_admission, mask);
                 }
             }
             #[cfg(test)]
@@ -6199,6 +6476,12 @@ impl<'store> WidePnSearch<'store> {
                 );
             }
             for (_second_index, &second) in second_coords.iter().enumerate() {
+                #[cfg(test)]
+                let second_component_mask = if self.attacker_universe_shadow {
+                    gate.second_candidate_components(first, second, &first_candidates)
+                } else {
+                    0
+                };
                 #[cfg(test)]
                 let reveal_zone_bound = if observe_reveal_prefix {
                     reveal_zone_keys[_second_index]
@@ -6335,8 +6618,25 @@ impl<'store> WidePnSearch<'store> {
                             })
                             .unwrap_or_default(),
                     });
+                    #[cfg(test)]
+                    if self.attacker_universe_shadow {
+                        attacker_universe_components
+                            .push((first_component_mask, second_component_mask));
+                    }
                 }
             }
+        }
+        #[cfg(test)]
+        if self.attacker_universe_shadow {
+            observe_size(
+                &mut self
+                    .attacker_universe_report
+                    .borrow_mut()
+                    .retained_pair_size_hist,
+                children.len(),
+            );
+            *self.attacker_universe_last_choice_components.borrow_mut() =
+                attacker_universe_components;
         }
         #[cfg(test)]
         if self.closure_counters {
@@ -6385,11 +6685,31 @@ impl<'store> WidePnSearch<'store> {
             WidthOptions::vcf_pair_complete(),
         );
         #[cfg(test)]
+        if self.attacker_universe_shadow {
+            let mut report = self.attacker_universe_report.borrow_mut();
+            report.single_or_nodes = report.single_or_nodes.saturating_add(1);
+            observe_size(&mut report.first_candidate_size_hist, candidates.len());
+            for candidate in &candidates {
+                observe_component_memberships(
+                    &mut report.first_memberships,
+                    attacker_universe_first_components(candidate),
+                );
+            }
+        }
+        #[cfg(test)]
         let ordering_context = self
             .ordering_study
             .then(|| OrderingFeatureContext::from_state(state, self.claimant, true));
         let mut children = Vec::new();
+        #[cfg(test)]
+        let mut attacker_universe_components = Vec::new();
         for candidate in candidates {
+            #[cfg(test)]
+            let first_component_mask = if self.attacker_universe_shadow {
+                attacker_universe_first_components(&candidate)
+            } else {
+                0
+            };
             #[cfg(test)]
             let ordering = ordering_context
                 .as_ref()
@@ -6461,7 +6781,23 @@ impl<'store> WidePnSearch<'store> {
                     #[cfg(test)]
                     ordering,
                 });
+                #[cfg(test)]
+                if self.attacker_universe_shadow {
+                    attacker_universe_components.push((first_component_mask, 0));
+                }
             }
+        }
+        #[cfg(test)]
+        if self.attacker_universe_shadow {
+            observe_size(
+                &mut self
+                    .attacker_universe_report
+                    .borrow_mut()
+                    .retained_single_size_hist,
+                children.len(),
+            );
+            *self.attacker_universe_last_choice_components.borrow_mut() =
+                attacker_universe_components;
         }
         children
     }
@@ -8257,6 +8593,24 @@ fn wide_candidate_width_tier(candidate: &Candidate) -> u8 {
     }
 }
 
+#[cfg(test)]
+fn attacker_universe_first_components(candidate: &Candidate) -> u8 {
+    let mut mask = 0;
+    if candidate.strength >= 3 {
+        mask |= ATTACKER_UNIVERSE_FIRST_GE3;
+    }
+    // `pair_start_degree` preserves count-two membership even when another
+    // window gives this coordinate a larger maximum strength.
+    if candidate.pair_start_degree != 0 {
+        mask |= ATTACKER_UNIVERSE_FIRST_EQ2;
+    }
+    if candidate.defender_block {
+        mask |= ATTACKER_UNIVERSE_FIRST_DEFENDER_BLOCK;
+    }
+    debug_assert_ne!(mask, 0);
+    mask
+}
+
 struct CandidateBatch {
     candidates: Vec<Candidate>,
     claimant_threats: Vec<Vec<HexCoord>>,
@@ -8616,6 +8970,39 @@ impl WideTurnGate {
                 }
             }
         }
+    }
+
+    #[cfg(test)]
+    fn second_candidate_components(
+        &self,
+        first: HexCoord,
+        second: HexCoord,
+        turn_start: &[Candidate],
+    ) -> u8 {
+        let mut mask = 0;
+        if self.windows_by_cell.get(&first).is_some_and(|windows| {
+            windows
+                .iter()
+                .any(|window| second != first && window.empties.contains(&second))
+        }) {
+            mask |= ATTACKER_UNIVERSE_SECOND_PROMOTED_GE2;
+        }
+        if turn_start.iter().any(|candidate| candidate.coord == second) {
+            mask |= ATTACKER_UNIVERSE_SECOND_TURN_START;
+        }
+        if self
+            .weak_windows_by_cell
+            .get(&first)
+            .is_some_and(|windows| {
+                windows
+                    .iter()
+                    .any(|window| second != first && window.empties.contains(&second))
+            })
+        {
+            mask |= ATTACKER_UNIVERSE_SECOND_PROMOTED_EQ1;
+        }
+        debug_assert_ne!(mask, 0);
+        mask
     }
 
     /// Classify the attacker turn (first, second) exactly as the reference

@@ -1,0 +1,12 @@
+﻿b3854adf332ad39a9a89915dbf0b810fd63f9502a5dc670edf1f293c37acc539  .codex-b1/phase-a-tip-gate.log
+82343502c50e3f8b4b90bb8a58165cd7849f8e9bcf687bd9df7f430c55fa9e72  .codex-b1/phase-a-tip-gate.signature
+dba2cc599903b7f42323e264767bbb35d19b345ec422f9779a4ab7e2ccd82109  .codex-b1/phase-a-tip-gate.utf8.log
+b681cda350f27162f9742283f74dcdfb086566bc56c2782c78b337e761a55085  .codex-b1/phase-b-identity-off.log
+82343502c50e3f8b4b90bb8a58165cd7849f8e9bcf687bd9df7f430c55fa9e72  .codex-b1/phase-b-identity-off.signature
+bef1e5bdd363ece3ceeff3d32feee6435f20fb678860d7f6d1497d6915e735a9  .codex-b1/phase-b-identity-off.utf8.log
+d8bb30e3a2220313fc10da049a01b920380217deb9f03494d1d652c11c690ade  .codex-b1/phase-b-identity-on.log
+82343502c50e3f8b4b90bb8a58165cd7849f8e9bcf687bd9df7f430c55fa9e72  .codex-b1/phase-b-identity-on.signature
+1cd2d033bc5437480f222354a489f1491a16da7a40408c2ff8e9d0c796ba04f2  .codex-b1/phase-b-identity-on.utf8.log
+40a1fd083ebc415b17b8554ce7c36970dbbdfdc81ae0b6c3f1874fb820c54bce  .codex-b1/probe-off.log
+e14de60f6697c5d9757210ca411da0f144b0c69d4170db14aebdba969255d231  .codex-b1/probe-on.log
+6217988c3f94ba00f5975ff6034ac4647eef3de8383e6a18419947353bd5022a  DESIGN_ATTACKER_UNIVERSE_EXACT.md

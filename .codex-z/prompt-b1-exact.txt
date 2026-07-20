@@ -1,0 +1,73 @@
+R-B1-EXACT — attacker-universe exactness + all-19 gate at tip (HIGH, cargo-enabled)
+
+You are gpt-5.6-sol in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width
+(branch claude/tss-vcf-width @ 62818b2a). Focused round with a clear
+definition of done.
+
+## Context
+
+The campaign engine's wide attacker universe (`vcf_pair_complete` /
+WidthOptions) is proven WIN-complete. The round-9b `second_candidates`
+component is known to be a WIN-sound SLIGHT SUPERSET of the reference
+generator — sound but possibly not tight. Standing-goal front B1
+(ORCHESTRATOR_HANDOFF): harden this toward an EXACT characterization of the
+attacker move universe — the attacker-side mirror of the defender-zone
+program. Also: the last all-19 forcing-corpus gate predates the current tip;
+a fresh gate at tip is REQUIRED before any paper quote of engine numbers.
+
+## Mission, two phases
+
+PHASE A — gate re-run (do this first, it also sanity-checks your build):
+- Re-run the all-19 forcing corpus gate at tip under the official 2 GiB
+  profile (docs/TSS_RUNBOOK.md at
+  E:\Hexo-BotTrainer-hexgt\.claude\worktrees\consolidate-main, READ-ONLY;
+  the same profile the shadow lane used: release, msvc, 2 GiB TT, one test
+  thread, WIN cap 20M / NO cap 1M). Expect exactly 14 WIN + 5 non-WIN,
+  verifier failures = 0. Record per-row walls + total; compare against the
+  historical marks (round-9b full-corpus 177 s; reference pdspn 264 s) and
+  state the deltas honestly (machine load differs; note the shadow soak on
+  WSL).
+
+PHASE B — exact-universe characterization (the bulk):
+- Locate and document the exact `second_candidates` generation rule in
+  packages/hexfield_eq/rust/src (tss_solver.rs and neighbors). Write the
+  precise set definition as implemented.
+- Deliverable DESIGN_ATTACKER_UNIVERSE_EXACT.md (worktree root):
+  1. The implemented universe U, stated exactly (math + code citation).
+  2. Completeness argument: why any attacker win implies a win using only
+     moves in U (cite the existing vcf_pair_complete proof obligations; be
+     precise about what is proven vs asserted).
+  3. Tightness analysis: for each structural component of U, either a
+     NECESSITY WITNESS (a position where removing that component loses a
+     win — concrete, replayable move lists) or a marked candidate for
+     removal with a proposed proof sketch that removal is safe. The
+     candidates-for-removal list is the payoff: each one is a sound
+     branching-factor reduction.
+  4. A measurement section: add SHADOW-ONLY counters (default-off env flag,
+     bit-identity mandatory flag on/off on the 19 corpus) measuring the
+     universe-size distribution at OR nodes and how often the move actually
+     used by a winning certificate lies in each component of U — i.e.,
+     which parts of the universe carry proofs vs only carry width.
+- Any actual TIGHTENING is NOT implemented this round beyond the shadow
+  counters: propose it, don't ship it.
+
+## Laws (binding)
+
+- tss_verify.rs byte-untouched. Search behavior byte-identical with the
+  measurement flag off AND on (shadow observes, never steers); any
+  verdict/node-count difference = bug in your code.
+- Cargo: ALWAYS --target x86_64-pc-windows-msvc, CARGO_TARGET_DIR=.target-b1.
+  RAM gate before any TT >= 512 MiB run: PowerShell
+  (Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory/1MB >= 10 (GB);
+  wait 120 s and retry (up to 2 h) if below.
+- No commits/pushes; no other worktrees (read-only exception:
+  consolidate-main docs); no spawned sessions.
+- Save raw gate logs + SHA-256 manifest under .codex-b1/. Honest stop with
+  exact residuals beats a rushed Phase B.
+
+## Definition of done
+
+Phase A gate table (19 rows, expected verdicts, walls, failures=0) + Phase B
+DESIGN_ATTACKER_UNIVERSE_EXACT.md with at least the exact U statement, the
+completeness accounting, a nonempty necessity-witness/removal-candidate
+analysis, and the shadow counter results with the identity proof.

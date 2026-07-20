@@ -24,9 +24,9 @@ use crate::tss_core::{
     CertVerify, ClosureDebtStats, DeepSolve, ProofStatus, SolveCaps, SolveGoal, ThresholdScaleStats,
 };
 use crate::tss_solver::{
-    begin_ordering_study_report, round3_shadow_certificate, take_ordering_study_report,
-    CapResumeError, CapResumeSession, OrderingStudyReport, TssSolver, WidthOptions,
-    ORDERING_STUDY_ORDERS,
+    begin_ordering_study_report, round3_shadow_certificate, take_attacker_universe_shadow_report,
+    take_ordering_study_report, AttackerUniverseShadowReport, CapResumeError, CapResumeSession,
+    OrderingStudyReport, TssSolver, WidthOptions, ORDERING_STUDY_ORDERS,
 };
 use crate::tss_verify::TssVerifier;
 
@@ -276,6 +276,10 @@ fn tss_corpus_check() {
     let closure_counters = std::env::var("TSS_CLOSURE_COUNTERS").ok().as_deref() == Some("1");
     let reveal_prefix_study = std::env::var("TSS_REVEAL_PREFIX_STUDY").ok().as_deref() == Some("1");
     let ordering_study = std::env::var("TSS_ORDERING_STUDY").ok().as_deref() == Some("1");
+    let attacker_universe_shadow = std::env::var("TSS_ATTACKER_UNIVERSE_SHADOW")
+        .ok()
+        .as_deref()
+        == Some("1");
     let (zone_order, zone_order_band) = crate::tss_solver::zone_order_config();
     assert!(
         !reveal_prefix_study || closure_counters,
@@ -357,6 +361,13 @@ fn tss_corpus_check() {
             "TSS_ORDERING_STUDY does not match gate expectation",
         );
     }
+    if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_ATTACKER_UNIVERSE_SHADOW") {
+        assert_eq!(
+            expected,
+            if attacker_universe_shadow { "1" } else { "0" },
+            "TSS_ATTACKER_UNIVERSE_SHADOW does not match gate expectation",
+        );
+    }
     if let Ok(expected) = std::env::var("TSS_CORPUS_EXPECT_THRESHOLD_DELTA") {
         assert_eq!(
             expected, threshold_delta,
@@ -364,7 +375,7 @@ fn tss_corpus_check() {
         );
     }
     println!(
-        "CORPUS_MODE shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={} cap_resume={} live_ge3_seed={} closure_counters={} reveal_prefix_study={} ordering_study={} zone_order={} zone_order_band={} threshold_counters={} threshold_delta={} tt_bytes_cap={tt_bytes_cap}",
+        "CORPUS_MODE shared_fragments={} lazy_frontier={} interior_gate={} k_reply_consume={} cap_resume={} live_ge3_seed={} closure_counters={} reveal_prefix_study={} ordering_study={} attacker_universe_shadow={} zone_order={} zone_order_band={} threshold_counters={} threshold_delta={} tt_bytes_cap={tt_bytes_cap}",
         if shared_fragments { "on" } else { "off" },
         if lazy_frontier { "on" } else { "off" },
         if interior_gate { "on" } else { "off" },
@@ -374,6 +385,7 @@ fn tss_corpus_check() {
         if closure_counters { "on" } else { "off" },
         if reveal_prefix_study { "on" } else { "off" },
         if ordering_study { "on" } else { "off" },
+        if attacker_universe_shadow { "on" } else { "off" },
         zone_order,
         zone_order_band,
         if threshold_counters { "on" } else { "off" },
@@ -420,6 +432,7 @@ fn tss_corpus_check() {
     let mut closure_total = ClosureDebtStats::default();
     let mut threshold_total = ThresholdScaleStats::default();
     let mut ordering_total = OrderingStudyReport::default();
+    let mut attacker_universe_total = AttackerUniverseShadowReport::default();
     let mut stage_refresh_total = 0u64;
     let mut live_ge3_seed_scans = 0u64;
     let mut live_ge3_seed_nanos = 0u64;
@@ -494,6 +507,7 @@ fn tss_corpus_check() {
             };
             let ms = t0.elapsed().as_secs_f64() * 1e3;
             let ordering_report = take_ordering_study_report();
+            let attacker_universe_report = take_attacker_universe_shadow_report();
             if cap_resume {
                 resume_root_ms += ms;
                 resume_total_ms += ms;
@@ -537,6 +551,28 @@ fn tss_corpus_check() {
                 result.stats.live_ge3_seed_scans,
                 result.stats.live_ge3_seed_nanos as f64 / 1_000_000.0,
             );
+            if attacker_universe_shadow {
+                println!(
+                    "ATTACKER_UNIVERSE_ROW id={} cap={cap} pair_or_nodes={} single_or_nodes={} first_size_hist={:?} second_size_hist={:?} retained_pair_hist={:?} retained_single_hist={:?} first_memberships_ge3_eq2_block={:?} second_memberships_promoted_turn_weak={:?} second_first_admission_promoted_turn_weak={:?} winning_choice_edges={} winning_pair_edges={} winning_single_edges={} winning_first_memberships_ge3_eq2_block={:?} winning_second_memberships_promoted_turn_weak={:?} winning_second_first_admission_promoted_turn_weak={:?}",
+                    pos.id,
+                    attacker_universe_report.pair_or_nodes,
+                    attacker_universe_report.single_or_nodes,
+                    attacker_universe_report.first_candidate_size_hist,
+                    attacker_universe_report.second_candidate_size_hist,
+                    attacker_universe_report.retained_pair_size_hist,
+                    attacker_universe_report.retained_single_size_hist,
+                    attacker_universe_report.first_memberships,
+                    attacker_universe_report.second_memberships,
+                    attacker_universe_report.second_first_admission,
+                    attacker_universe_report.winning_choice_edges,
+                    attacker_universe_report.winning_pair_edges,
+                    attacker_universe_report.winning_single_edges,
+                    attacker_universe_report.winning_first_memberships,
+                    attacker_universe_report.winning_second_memberships,
+                    attacker_universe_report.winning_second_first_admission,
+                );
+                attacker_universe_total.merge(&attacker_universe_report);
+            }
             if ordering_study {
                 print_ordering_summaries(&format!("{}@{cap}", pos.id), &ordering_report);
                 if result.status == ProofStatus::Win {
@@ -690,6 +726,26 @@ fn tss_corpus_check() {
     println!(
         "CORPUS_FRAGMENTS lookups={fragment_lookups} hits={fragment_hits} hit_rate_pct={fragment_hit_rate:.3} imports={fragment_imports} max_store_entries={max_fragment_store_entries} max_store_bytes={max_fragment_store_bytes}"
     );
+    if attacker_universe_shadow {
+        println!(
+            "ATTACKER_UNIVERSE_DONE pair_or_nodes={} single_or_nodes={} first_size_hist={:?} second_size_hist={:?} retained_pair_hist={:?} retained_single_hist={:?} first_memberships_ge3_eq2_block={:?} second_memberships_promoted_turn_weak={:?} second_first_admission_promoted_turn_weak={:?} winning_choice_edges={} winning_pair_edges={} winning_single_edges={} winning_first_memberships_ge3_eq2_block={:?} winning_second_memberships_promoted_turn_weak={:?} winning_second_first_admission_promoted_turn_weak={:?}",
+            attacker_universe_total.pair_or_nodes,
+            attacker_universe_total.single_or_nodes,
+            attacker_universe_total.first_candidate_size_hist,
+            attacker_universe_total.second_candidate_size_hist,
+            attacker_universe_total.retained_pair_size_hist,
+            attacker_universe_total.retained_single_size_hist,
+            attacker_universe_total.first_memberships,
+            attacker_universe_total.second_memberships,
+            attacker_universe_total.second_first_admission,
+            attacker_universe_total.winning_choice_edges,
+            attacker_universe_total.winning_pair_edges,
+            attacker_universe_total.winning_single_edges,
+            attacker_universe_total.winning_first_memberships,
+            attacker_universe_total.winning_second_memberships,
+            attacker_universe_total.winning_second_first_admission,
+        );
+    }
     println!(
         "CLOSURE_DONE evaluated={} accepted={} retained={} selected={} linked={} expanded={} winning_choices={} winning_rank_bins={:?} reveal_evaluated={} reveal_prefix={} pair_ms={:.3} gate_ms={:.3} second_ms={:.3} eval_ms={:.3} dedup_ms={:.3} avoid_second_ms={:.3} avoid_eval_ms={:.3} avoid_dedup_ms={:.3} stage_refreshes={} seed_scans={} seed_ms={:.3}",
         closure_total.pairs_evaluated,
