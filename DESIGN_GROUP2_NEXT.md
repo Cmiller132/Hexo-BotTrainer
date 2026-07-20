@@ -1,10 +1,46 @@
 # R-Z10 Phase 3: Group-2 `lambda^2` next-round design
 
+## R-Z11 repair record and per-bar disposition
+
+R-Z10-REV upheld G2-Z1 sound-on-success and native `lambda^2` soundness on
+the design class, but left the implementation bars at MAJOR REPAIR. R-Z11
+repairs the paper definitions below at input HEAD `ad606d0e` on branch
+`claude/tss-vcf-width`. No build or measurement was run, and no commit was
+made. The older provenance block below is retained as R-Z10 authoring history;
+its `UNLANDED` placeholder is not the current artifact identity.
+
+The controlling zone authority for this disposition is the required
+read-only file
+`E:\Hexo-BotTrainer-hexgt\.claude\worktrees\consolidate-main\docs\PROOF_TSS_DEFENDER_ZONES.md`,
+2011 lines, SHA-256
+`39197460D068CE5442BA0AFFC687F1408DF3F28EEEB26C4DD7192B87A202064B`.
+The local 899-line snapshot is not authoritative. Every refined certificate
+record must carry this authority digest plus the digest of
+`PROOF_TSS_ZONES_FHW.md`; a mismatch makes the lane `INELIGIBLE`.
+
+| reviewed bar / defect | R-Z11 disposition | binding resolution |
+|---|---|---|
+| FHW-T3 selector | **BUILD-READY** | Use repaired FHW-T3-R and `kappa_cut^*`; an all-empty direct fill pays one and requires `1+q<6`. |
+| finite matched FHW clock ratio | **BUILD-READY** | Use the canonical finite `I_FHW` index in section 6.5; old/new values share exactly the same keys. |
+| matched net-zone index `J` | **BUILD-READY** | Use `J_zone` in section 6.5, bound to one frozen certificate, node, role set, summary, and child-plan digest; any unmatched key fails the comparison. |
+| H1152 population prevalence | **DEAD** | H1152 is a deterministic regression/materiality benchmark only. No population prevalence or population-weighted aggregate may be inferred from it. |
+| H1152 benchmark bars | **BUILD-READY** | Its existing canonical lexicographic membership is retained as `H1152-B`; results describe only those fixed keys. |
+| radius-nine constant-substitution proof | **DEAD** | Replacing every visible 8 by 9 is stress telemetry, not an independent proof. |
+| radius-nine robustness replacement | **SPEC-FOR-CARGO** | Run the exhaustive bounded policy model checker specified in sections 6.3 and 6.7; no radius-substituted zone theorem is used. |
+| baseline/variant identities and native promotion measurements | **SPEC-FOR-CARGO** | The exact harness, profiles, horizons, repetitions, artifacts, and failure rules are frozen in section 6.7. |
+| Exact/FHW/SR materiality and economics | **SPEC-FOR-CARGO** | Use `J_zone`/`I_FHW` plus the explicit node/wall/peak gates in section 6.5. |
+
+`BUILD-READY` here means the paper contract is complete enough to implement;
+it is not evidence that code exists. `SPEC-FOR-CARGO` means the decision is
+empirical and remains DEFERRED-NEEDS-CARGO until the exact specified run
+passes. `DEAD` means the old interpretation must not be revived by a PASS in
+a related stress test.
+
 > **Provenance.** Worktree
 > `E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width`, branch
 > `claude/tss-vcf-width`, input HEAD
 > `7c2706c86a0362f8e9ddff35ddb1e3185fa0670c` (short `7c2706c8`). Written
-> 2026-07-18, America/New_York. Reading order: the checked-in zone corpus;
+> 2026-07-18, America/New_York. Original R-Z10 reading order: the checked-in zone corpus;
 > `docs/PLAN_TSS_SOLVER_UPGRADES.md` §§I.2/I.5 and cited Group-2 records;
 > `PROOF_TSS_ZONES_FHW.md`; then read-only engine/finder/verifier source. No
 > Cargo command was used, no commit was made or is authorized, and every
@@ -213,10 +249,11 @@ The new Phase-1/2 results refine condition 6 only on their proved classes:
 - **FHW-T2 (PROVEN-ON-ANNOTATED-CLASS):** a tight gate may map kernel replies
   through a frontier-covered representative while retaining the exact
   branch-paired `F+H_W` interpretation.
-- **FHW-T3 (PROVEN-ON-ANNOTATED-CLASS):** finite role/window danger cuts give
-  a separately named target-local cut clock; it is not relabelled as global
-  `F+H_W`. Both T2/T3 keep full scalar `B`, roles, LOSS clauses, and escape
-  horizons.
+- **FHW-T3-R (PROVEN-ON-ANNOTATED-CLASS):** finite role/window danger cuts
+  give a separately named target-local cut clock using the disjoint
+  `kappa_cut^*` decision tree. Every D-alive `d in W` pays one; an all-empty
+  direct edge also requires `1+q<6`. It is not relabelled as global `F+H_W`.
+  Both T2/T3-R keep full scalar `B`, roles, LOSS clauses, and escape horizons.
 - **FR-T1 (PROVEN-ON-CLASS):** at ordinary global-zone nodes whose descendants
   use ordinary or protected exact-copy gates, the scalar seed band may be
   replaced by the finite backward support-reach set `SR`.
@@ -561,6 +598,11 @@ subset of the applicable uniform set and must independently reverify when
 consumed. If a certificate does not satisfy a class gate, record
 `INELIGIBLE`, not zero savings and not a guessed debit.
 
+`FhwExactOrD22` must encode the FHW-T3-R decision-tree row selected for every
+`(edge,W)` and reject any all-empty direct edge with `1+q>=6`; it may not
+implement the withdrawn overlapping list with source-order precedence. Every
+N4 result also binds the two authority digests in the R-Z11 repair record.
+
 ### 5.1 Required telemetry schema
 
 Emit deterministic, machine-readable records keyed by position digest,
@@ -616,17 +658,17 @@ must report both raw sums and deduplicated union; otherwise the G2R3
 | P2 | frozen remote-block replay below | structurally different quiet positive | must first reverify on input semantics; then strict WIN historically below 10k |
 | C2 | `compact_urgent_spare`, `strongloss_a_backoff_7` | honest no-positive controls | UNKNOWN is expected; these are not LOSS oracles |
 | M | dynamic-pair fixture plus synthetic debt/closure fixtures | exact state-machine coverage | set equality and invariant assertions, not solve speed |
-| H1152 | deterministic human-corpus unforced-node sample | prevalence and zone distributions | 384 states in each `(b,k)=(2,0),(2,1),(1,0)` stratum |
+| H1152-B | deterministic human-corpus unforced-node benchmark | fixed-key regression and materiality distributions; **not prevalence** | first 384 canonical states in each `(b,k)=(2,0),(2,1),(1,0)` stratum |
 | A5 | first five opening-atlas families from plan §I.6 | capstone spot-check | descriptive; honest UNKNOWN allowed |
 
-The H1152 source is frozen as
+The H1152-B source is frozen as
 `E:/Hexo-BotTrainer-hexgt/data/hexo-bootstrap-corpus/hexo_human_corpus.jsonl`,
 3,696,030 bytes, SHA-256
 `54FAE7AEBCEF2A9D19D13C1946FAE36C0565E21BC726C25E2E4E230CFB42A5B7`
 (6,902 games). N0 rechecks this digest; a mismatch stops sampling rather than
 silently selecting from a new population.
 
-`H1152` selection is outcome-blind: replay every qualifying prefix,
+`H1152-B` membership is an outcome-blind deterministic benchmark rule: replay every qualifying prefix,
 D6-canonicalize, retain the least prefix per `(game,stratum)`, collapse equal
 canonical keys to the lexicographically least `(game_index,prefix_length)`,
 sort by the full canonical bytes with that tuple as tie-break, and take the
@@ -645,9 +687,9 @@ Integers use fixed-width big-endian two's-complement bytes after flipping the
 signed coordinate high bit for lexical numeric order. Membership/dedup uses
 these full bytes; SHA-256 of them is display telemetry only. If a
 stratum has fewer, take all,
-publish the shortfall, and make no population-distribution claim for that
-stratum unless it has at least 100 verifier-accepted unforced certificate
-nodes.
+publish the shortfall. No result from this selection estimates corpus or
+human-play prevalence, regardless of accepted-node count. The 100-node
+threshold below is only a fixed-benchmark materiality denominator.
 
 A prefix qualifies iff it is legal, nonterminal, non-Opening, the current
 player has no `own_win_now`, and its current attacker-threat family has
@@ -658,11 +700,11 @@ put in a `k=0/1` stratum.
 At every sampled root set `claimant=current_player.other()` and use the
 test-only fixed-claimant path (equivalently `SolveGoal::Loss` relative to the
 defender-to-move root), not public `Both`. Require strict verifier acceptance
-for every positive counted as a certificate node. The fixed H1152 solve
+for every positive counted as a certificate node. The fixed H1152-B solve
 profile is: semantic horizon `root_placements+10`, node cap `100,000`, TT cap
 1 GiB, `TSS_LAZY_FRONTIER=1`, one test thread, and every optional consuming
 refinement off except the single lane under comparison. Base native G2 quiet
-reveal and uniform-zone closure are always Consume for H1152; Exact, FHW, and
+reveal and uniform-zone closure are always Consume for H1152-B; Exact, FHW, and
 SR are compared one at a time, with the other two off. The first three newly
 discovered strict quiet wins in digest order may join the capstone; the
 denominator and all failed candidates remain reported.
@@ -721,7 +763,7 @@ Run in this order after the cargo slot is released:
 3. C2 at `10k -> 100k -> 1M`; UNKNOWN at 1M is an honest stop;
 4. F19 at the plan's `10k -> 100k -> 1M -> 20M` ladder, with existing NO
    rows stopping at 1M;
-5. H1152 shadow telemetry at the `root+10`, 100k-node, 1 GiB lazy-on
+5. H1152-B shadow telemetry at the `root+10`, 100k-node, 1 GiB lazy-on
    fixed-claimant profile frozen in §6.1, then only the digest-first discovery
    positives through the solve ladder;
 6. A5 using the plan's recommended 1 GiB lazy-on deep profile; repeat
@@ -746,13 +788,35 @@ R = 9,
 
 with the singleton-origin Opening unchanged. It bypasses only the production
 radius-eight admission check; ownership, placement cadence, window updates,
-and per-placement wins are unchanged. The independent robustness verifier
-replays the **same certificate** under `Legal_9` and rederives its proof zones
-with every legality-propagation constant changed coherently from 8 to 9
-(`9(r-1)` seed bands, radius-nine FC/cut balls, and radius-nine virgin
-inversion). It records PASS or the first newly mandatory/misreplayed edge.
-Failure blocks a capstone **outward-frontier robustness claim**, not soundness
-of the production radius-eight certificate and not native Consume promotion.
+and per-placement wins are unchanged.
+
+The old "replace every 8 by 9 and rederive the same zones" check is **DEAD as
+proof**. It may be retained only as labelled stress telemetry. The replacement
+robustness oracle is an exhaustive bounded policy model checker over the same
+materialized certificate:
+
+1. begin at the certificate root and enumerate **every** `Legal_9` defender
+   placement at every defender cadence state, including dynamically new
+   second placements;
+2. replay explicit certificate edges when present; for an omitted reply,
+   execute the certificate's declared coupling/filler/escape policy but do
+   not use any radius-substituted zone-containment lemma to dismiss it;
+3. recursively enumerate all later `Legal_9` defender replies through the
+   certificate's fixed absolute horizon, checking phase, ownership, legality,
+   and termination after every placement;
+4. at attacker nodes replay only the certificate's designated move or its
+   finite LOSS/gate-escape adaptive choice, and reject if that move is
+   illegal or the declared witness does not resolve; and
+5. PASS only if every enumerated defender branch avoids a defender win and
+   reaches a verifier-checked attacker win by the original horizon. Emit the
+   first failing full placement trace and counts of positions, legal replies,
+   and newly radius-nine-only replies.
+
+Finiteness follows from the fixed horizon and the finite legal halo of every
+finite position. Resource exhaustion is `INCONCLUSIVE`, never PASS. Failure
+or inconclusive blocks only a capstone **outward-frontier robustness claim**,
+not production radius-eight soundness or native Consume promotion. This
+model check is SPEC-FOR-CARGO in section 6.7.
 
 The owner-deferred cross-solver table fixes solver/version, claimant, position
 digest, horizon, rung, TT/memory allowance, status, verified-certificate
@@ -819,31 +883,87 @@ Native PN may replace the recursive compatibility route only if all are true:
 6. every materialized unforced node has `required subseteq explicit`, no
    commutations, a frozen-plan digest, and finder/verifier summary equality.
 
-Exact-zone consumption is a separate decision. On one fixed final certificate
-and node index `J`, deduplicate coordinates within each node and define
+Exact-zone consumption is a separate decision. Its comparison universe is
+the canonical finite index `J_zone`. Before evaluating any variant value,
+freeze one strict-verifier-accepted final certificate and create one key for
+each applicable ordinary zone node:
 
 ```text
-U       = sum_{j in J} |S_uniform(j)|,
-X       = sum_{j in J} |S_variant(j)|,
+J_zone key = (
+  certificate_digest, certificate_node_id, position_digest,
+  owner, phase, remaining_budget, child_plan_digest,
+  sorted_live_role_set_digest, B_and_horizon_digest,
+  finder_summary_digest
+).
+```
+
+The node ID is assigned by deterministic preorder of the frozen certificate
+with child edges sorted by canonical move key; a DAG node is keyed once and
+also records its incoming-path count. `S_uniform(j)` and `S_variant(j)` are
+the mandatory certificate sets (not heuristic supersets) recomputed from the
+same frozen children, roles, clocks, and horizon at exactly that key.
+Eligibility is decided solely from the frozen class tag and proof data before
+either set size is read. Publish eligible, ineligible, and unmatched counts;
+any missing key, changed child/role/summary digest, or nonidentical key set is
+a hard comparison failure, not an exclusion. Deduplicate coordinates within
+each node and define
+
+```text
+U       = sum_{j in J_zone} |S_uniform(j)|,
+X       = sum_{j in J_zone} |S_variant(j)|,
 G_total = 1 - X/U,                         with U>0.
 ```
 
 Component gains use the same ratio of sums on their explicitly named eligible
 index; they never substitute for `G_total`.
 
+For the FHW clock ratio, construct a second canonical finite index `I_FHW`
+from those same frozen certificates. Start uniform-verifier window queries at
+every node in `J_zone`: all D-alive touched windows, plus every all-empty
+window in the conservative finite virgin superset
+
+```text
+{ W : exists c in Legal(P_N), B(N)>=6,
+      d(c,W) <= 8(B(N)-6) }.
+```
+
+Propagate each queried `W` through the old D16 recurrence to every descendant
+gate until its ordinary stop. For every FHW-eligible gate reached, add
+
+```text
+I_FHW key = (certificate_digest, gate_node_id, owner,
+             window_direction, window_origin).
+```
+
+`window_direction` is one of the three unoriented axial line directions and
+`window_origin` is the lexicographically smaller endpoint, so each length-six
+mask has one name. Deduplicate on the full key and store a touched/virgin
+source bitmask rather than duplicating a key. Gate eligibility is the
+verifier's FHW-T1/T2/T3-R class verdict and is frozen before clock values are
+read. `E_old` and `Q_new` are then evaluated on **exactly `I_FHW`**; no
+implementation-emitted query subset, gain-dependent union/intersection, or
+post-result exclusion is allowed. Report gate count, key count, exclusions,
+and a positive finite old denominator.
+
+For FHW `G_total`, use the mechanically derived subset `J_zone^FHW` consisting
+of exactly those `J_zone` nodes whose propagated uniform query set reaches at
+least one key in `I_FHW`. Freeze that subset with the two indices before any
+size is read; do not substitute all nodes or only positive-gain nodes.
+
 - **Exact D15/D16:** require at least 100 accepted unforced nodes in each
-  populated H1152 stratum and `G_total>=0.10` versus the uniform wrapper.
+  populated H1152-B stratum and `G_total>=0.10` versus the uniform wrapper.
   Otherwise publish a NULL materiality result and keep it default-off.
-- **FHW:** require at least 30 eligible protected gates and at least a 10%
+- **FHW:** require at least 30 distinct eligible
+  `(certificate_digest,gate_node_id)` gates and at least a 10%
   clock reduction
 
   ```text
-  1 - sum_{(gate,W)} Q_new(gate,W)
-        / sum_{(gate,W)} E_old(gate,W) >= 0.10,
+  1 - sum_{i in I_FHW} Q_new(i)
+        / sum_{i in I_FHW} E_old(i) >= 0.10,
   ```
 
-  with a positive denominator, **and** `G_total>=0.10` on the corresponding
-  fixed annotated certificates. Ineligible gates are excluded with counts.
+  with a positive denominator, **and** `G_total>=0.10` recomputed on
+  `J_zone^FHW`. Ineligible gates are excluded with counts.
   The strict-debit worked fixture must reproduce `3/2=1.50x`.
 - **Support reach:** require at least 30 nodes with a nonempty scalar seed
   component,
@@ -854,6 +974,21 @@ index; they never substitute for `G_total`.
 
   and `G_total>=0.10` on those same nodes. P1's two `Z_seed=0` nodes contribute
   neither success nor failure to this bar.
+
+A refined lane that passes its semantic/materiality bar is not yet allowed to
+Consume. On the identical matched root/profile jobs used for that lane, with
+three clean repetitions and the same binary, horizon, TT cap, and frozen
+cohort membership, it must also satisfy
+
+```text
+sum jobs nodes_variant / sum jobs nodes_uniform <= 1.10,
+median_r(sum jobs wall_variant_r / sum jobs wall_uniform_r) <= 1.10,
+max_job(median_r peak_variant / median_r peak_uniform) <= 1.10.
+```
+
+Hard statuses and strict verification must match. Failure is a valid
+material-but-uneconomic result and keeps the lane in Shadow; it does not
+change `J_zone`, `I_FHW`, or the 10% semantic threshold.
 
 For every cohort, publish per-node and aggregate `|searched|/|Legal|`, median,
 p90, p95, maximum, component overlap, uniform/exact delta, and the λ-order
@@ -868,6 +1003,8 @@ The future run should create, without rewriting this preregistration:
 
 ```text
 .codex-group2-next/BASELINE.md
+.codex-group2-next/profiles-v1.json
+.codex-group2-next/radius9-v1.json
 .codex-group2-next/telemetry.jsonl
 .codex-group2-next/MUTATIONS.md
 .codex-group2-next/GATE.md
@@ -878,6 +1015,65 @@ The future run should create, without rewriting this preregistration:
 
 Every record names the exact commit and command. A failed bar is a first-class
 result; it is not repaired by deleting the cohort or changing the rung.
+
+### 6.7 Exact cargo/measurement spec
+
+This section is the executable specification for every item labelled
+SPEC-FOR-CARGO. The implementation must expose exactly two ignored test
+harnesses:
+
+```text
+tss_group2_next::group2_next_gate
+tss_group2_next::radius9_exhaustive_gate
+```
+
+Before any comparison result is inspected, write
+`.codex-group2-next/profiles-v1.json` containing the authority digests,
+implementation commit, compiler/version/target, position or corpus digest,
+claimant, semantic horizon, node rung, TT bytes, every feature flag, lane,
+and repetition number. Hash that manifest and copy its digest into every
+telemetry row. The only permitted measurement commands from the worktree root
+are:
+
+```powershell
+$env:CARGO_TARGET_DIR='.target-group2-next'
+$env:TSS_GROUP2_PROFILE_MANIFEST='.codex-group2-next/profiles-v1.json'
+cargo test --release -p hexfield_eq tss_group2_next::group2_next_gate -- --ignored --exact --test-threads=1 --nocapture
+
+$env:TSS_GROUP2_R9_MANIFEST='.codex-group2-next/radius9-v1.json'
+cargo test --release -p hexfield_eq tss_group2_next::radius9_exhaustive_gate -- --ignored --exact --test-threads=1 --nocapture
+```
+
+The first harness runs these frozen profiles, always matching baseline and
+variant within the same release binary and repetition:
+
+| profile | semantic horizon | node rungs | TT cap | repetitions / flags |
+|---|---:|---|---:|---|
+| P1 `double_fork_compact` | 45 | `10k,100k,1M` stop at first accepted WIN | 1 GiB | 3 clean; lazy on; recursive baseline versus native uniform; refined lanes one at a time |
+| P2 exact 36-move replay in section 6.2 | 66 | `10k,100k,1M` stop at first accepted WIN | 1 GiB | 3 clean after mandatory strict revalidation; same lane rules as P1 |
+| C2 two named rows | `placements_made+reference_plies` (both checked-in rows declare `reference_plies=2`) | `10k,100k,1M` | 1 GiB | 3 clean; UNKNOWN is retained; no unverified positive |
+| F19 checked-in forcing corpus | `u32::MAX`, matching the existing corpus harness | `10k,100k,1M,20M`, NO rows stop at 1M | 2 GiB | 3 clean; exact official row set; quiet/closure fires must be zero |
+| H1152-B | `root_placements+10` | 100k | 1 GiB | 3 clean; fixed claimant; lazy on; native uniform, Exact, FHW, SR one at a time |
+| A5/discovery capstone | manifest-fixed per root before first run | `10k,100k,1M,20M` | 1 GiB, plus one matched legacy 2 GiB repeat | 3 clean; descriptive tail retained |
+
+For all rows, one test thread is binding; process start is clean; no warm TT is
+shared between repetitions; node and certificate counts must agree across the
+three repetitions; wall is the median; peak is the median per job. Any
+profile field absent from the manifest, any environment variable not recorded
+there, any rung increase after a miss, or any baseline/variant manifest digest
+mismatch invalidates the bar. Off mode is separately compared byte-for-byte
+with input `ad606d0e` artifacts; performance comparisons use matched lanes in
+the post-implementation binary.
+
+The second harness consumes only strict-accepted capstone certificates listed
+in `radius9-v1.json`, with their original absolute horizons and certificate
+digests. It implements the exhaustive policy model check in section 6.3 with
+no node/branch truncation. It may use an exact-state memo table capped at
+2 GiB and a six-hour per-certificate watchdog, but either cap produces
+`INCONCLUSIVE`, never PASS. A valid PASS record contains the full enumerated
+position/reply counts and zero unchecked branches; a failure contains the
+first complete countertrace. This is the only run that can license the
+radius-nine robustness wording.
 
 ## 7. Hostile self-review of Phase 3
 
@@ -921,15 +1117,35 @@ result; it is not repaired by deleting the cohort or changing the rung.
     make agreement circular. Outcome: finder may use frozen certificate data,
     but the independent verifier retains its separate reconstruction.
 13. **Capstone cherry-picking.** The forcing corpus cannot exercise λ² and
-    discovered positives can bias distributions. Outcome: H1152 selection,
+    discovered positives can bias distributions. Outcome: H1152-B membership,
     strata, denominators, rungs, null bars, and tail statistics are fixed
-    before execution.
+    before execution. Its lexicographic prefix is explicitly a benchmark;
+    the old population-prevalence interpretation is DEAD.
 14. **Empirical leakage into proof.** Historical runs motivated bars but no
     current execution exists. Outcome: all build and measurement claims remain
     **DEFERRED-NEEDS-CARGO**.
 15. **Missing frontier robustness.** Production radius-eight acceptance does
-    not imply resilience to a larger legal halo. Outcome: §6.3 freezes a
-    radius-nine independent recheck; failure blocks only that capstone claim.
+    not imply resilience to a larger legal halo. Outcome: constant
+    substitution is DEAD as proof; sections 6.3/6.7 instead exhaust every
+    radius-nine defender reply to the fixed horizon. Failure or resource
+    exhaustion blocks only that capstone claim.
+16. **Infinite FHW sum.** Indexing all windows diverges. Outcome: `I_FHW`
+    starts from the uniform verifier's finite B-bounded target superset,
+    propagates those exact queries, canonically deduplicates masks, and uses
+    the identical key set for old/new values.
+17. **Certificate-switch materiality.** A variant could appear smaller by
+    choosing a different child proof. Outcome: `J_zone` binds certificate,
+    node, child plan, roles, clocks, horizon, and summary; unmatched keys fail.
+18. **Direct-fill selector regression.** A source-ordered implementation could
+    revive withdrawn FHW-T3. Outcome: N4 stores the FHW-T3-R decision-tree row
+    and rejects every empty direct edge with `1+q>=6`.
+19. **Underfixed A/B profile.** Recording flags after a favorable run permits
+    drift. Outcome: section 6.7 freezes one manifest digest, exact horizons,
+    commands, caps, lanes, and repetitions before results.
+20. **Semantic gain without economics.** A 10% set reduction can still slow
+    the solver or enlarge memory. Outcome: every refined Consume decision also
+    has matched node, wall, and peak caps; a material-but-slow lane stays
+    Shadow.
 
 ## 8. Caveat and open-question ledger
 
@@ -953,22 +1169,31 @@ result; it is not repaired by deleting the cohort or changing the rung.
    All named coordinates are small, while future enumerators must continue to
    use checked engine coordinate construction near the boundary.
 8. **Performance/materiality.** Native scheduling, closure-generation counts,
-   exact-zone prevalence, and all preregistered bars are unknown until the
-   cargo slot is available.
-9. **Robustness variant.** Radius-nine replay is a test-only capstone stress,
-   not the production rule and not a premise of the radius-eight theorem. A
-   failure forbids only the outward-frontier robustness claim.
+   exact-zone benchmark materiality, and all preregistered bars are unknown
+   until the cargo slot is available.
+9. **Robustness variant.** Radius-nine constant substitution is only stress
+   telemetry. Only section 6.7's exhaustive bounded policy check can support
+   the capstone robustness wording; failure or inconclusive forbids only that
+   outward-frontier claim.
+10. **Population inference.** H1152-B is not a probability sample. Its old
+    prevalence interpretation is DEAD; its fixed-key regression/materiality
+    use remains valid.
 
 ## 9. Design disposition
 
 **Theory now:** G2-Q1/Q2, G2-Z1, G2-PN-OR, G2-PN-AND, and G2-NATIVE are
-proved on their stated classes. Phase 1 licenses exact/FHW mixed-gate clocks;
+proved on their stated classes. Phase 1 licenses exact/FHW mixed-gate clocks,
+including repaired FHW-T3-R's disjoint direct-fill charge;
 Phase 2 licenses the branch-aware `SR` seed replacement on the exact-copy
 class. Slack unforced pressure gives no generic debit.
 
-**Build status:** **BUILD-READY / DEFERRED-NEEDS-CARGO.** The source seams,
-state, event ordering, materialization invariants, fixtures, rungs, bars, and
-kill criteria are fixed. No implementation or execution was attempted.
+**Build status:** **DESIGN BUILD-READY ON PAPER; EMPIRICAL PROMOTION
+SPEC-FOR-CARGO.** The native state machine, FHW selector, canonical comparison
+indices, fixtures, rungs, identities, economics gates, and kill criteria are
+fixed. H1152 population prevalence and radius-nine constant-substitution proof
+are DEAD. Native, materiality, performance, and exhaustive radius-nine
+outcomes remain DEFERRED-NEEDS-CARGO; no implementation or execution was
+attempted.
 
 **Most valuable theorem:** G2-Z1. It turns certificate-dependent zone
 circularity into a finite sound closure without assuming the zone function is

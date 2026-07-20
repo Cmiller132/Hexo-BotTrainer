@@ -1,5 +1,42 @@
 # R-Z10: sharpened defender-zone budgets (`F + H_W`)
 
+## REPAIR RECORD (R-Z11, 2026-07-20)
+
+This repair was performed at input HEAD `ad606d0e` on branch
+`claude/tss-vcf-width`; no commit was made. The older provenance block below
+is retained as R-Z10 authoring history, not current artifact identity.
+
+R-Z10-REV correctly withdrew FHW-T3.  The old displayed `kappa_cut`
+definition was not a function: on a non-FC transition into an all-empty
+target, both `d in W -> 1` and `q<6 -> 0` applied.  The prose selected zero,
+so the review's reachable trace cost `1+5=6` while the clock reported five.
+
+R-Z11 makes the cases disjoint and restores only the theorem that is proved:
+
+1. after the non-D-alive stop, classify the edge as exact/FC or non-FC;
+2. classify direct incidence `d in W` **before** touched/virgin cuts;
+3. every D-alive direct fill costs one, and an all-empty direct-fill edge is
+   admissible only if `1+q<6`;
+4. the `q<6` and `(WC)` zeroes are available only when `d notin W`; and
+5. the C2 proof now inducts on the first real-only fill of `W`, so a nested
+   coupling never assumes an unjustified common real/ghost pre-count.
+
+The repaired charge is written `kappa_cut^*` below.  It is sharp for this
+predicate language: the direct indicator cannot be reduced (R-Z10-REV and
+the new probes in R-Z11-SR), while every stated zero has a separate C1/C2/C3
+proof.  This is not a claim of global logical minimality; a stronger,
+independently verified certificate-specific cut may justify more zeroes.
+
+The controlling read-only normative source for this repair is
+`E:\Hexo-BotTrainer-hexgt\.claude\worktrees\consolidate-main\docs\PROOF_TSS_DEFENDER_ZONES.md`,
+2011 lines, SHA-256
+`39197460D068CE5442BA0AFFC687F1408DF3F28EEEB26C4DD7192B87A202064B`.
+The 899-line local `docs/PROOF_TSS_DEFENDER_ZONES.md` was neither used as
+authority nor edited. For R-Z11 this paragraph supersedes section 0's
+historical R-Z10 source-reconciliation narrative; every D14--D21/T3/T11
+reference in the repair means the pinned 2011-line authority. No source file
+was edited and no build/test command was run for R-Z11.
+
 > **Provenance.** Worktree
 > `E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width`, branch
 > `claude/tss-vcf-width`, input HEAD
@@ -62,7 +99,7 @@ under a new name; it is to delimit or enlarge that frontier and quantify it.
 | FHW-A | A branch-coherent per-window capacity must take its maximum over matched child pairs, not independent maxima. | **PROVEN** by FHW-L1 |
 | FHW-B | Protected exact-copy gates admit a sound `F + H_W` exposure clock. | **PROVEN-ON-CLASS** by landed-overlay T11/FHW-T1 |
 | FHW-C | An unconditional “forced hits cost zero” replacement is sound. | **PROVEN FALSE** by FHW-O1 |
-| FHW-D | A genuine substitution is sound without a transition charge whenever the FC/D22 annotation holds; target-local danger cuts permit further target-specific zeroes. | **PROVEN-ON-ANNOTATED-CLASS** by FHW-T2/T3; logical maximality remains OPEN |
+| FHW-D | A genuine substitution is sound without a transition charge whenever the FC/D22 annotation holds; target-local danger cuts permit further target-specific zeroes, but never erase a direct `d in W` fill. | **PROVEN-ON-ANNOTATED-CLASS** by FHW-T2 and FHW-T3-R; logical maximality remains OPEN |
 | FHW-E | The sharpening yields a material zone/budget reduction on the corpus worked examples. | **PARTIAL:** one exact example is `1.50x`; three are `1.00x`; no net-zone theorem |
 
 ### 1.2 Enumeration-before-completeness obligation
@@ -82,11 +119,15 @@ obligation role `rho`. The reverse-topological cases to enumerate are:
 6. a substitution transition `(d,s)`, with the following finite refinement:
    exact `d=s`; genuine `d!=s` with global FC pass/fail; on FC failure, each
    live role's finite (RC) pass/fail and each D-alive window split into
-   `d in W`, already touched with `d notin W`, all-empty with child `q<6`,
-   and all-empty `q>=6` with finite (WC) pass/fail. The residual case pays
-   a full transition unit. For each window also enumerate the four incidence
-   pairs `(1[d in W],1[s in W]) in {0,1}^2`, the non-D-alive case, and whether
-   the relevant touched/virgin completion inequality passes;
+   **first** `d in W` / `d notin W`, and only on the `d notin W` side into
+   already touched, all-empty with child `q<6`, and all-empty `q>=6` with
+   finite (WC) pass/fail. A D-alive `d in W` edge always pays one; when `W`
+   is all-empty it must also pass `1+q<6`. The residual non-FC case pays a
+   full transition unit and its D22-N test. For each window also enumerate
+   the four incidence pairs `(1[d in W],1[s in W]) in {0,1}^2`, the
+   non-D-alive case, exact/FC versus non-FC, and whether the relevant
+   touched/virgin completion inequality passes. These axes are evaluated in
+   that order; no later occupancy or cut row can overwrite direct incidence;
 7. a shared DAG node reached by each incoming path (handled by finite
    unfolding; histories remain path-local while node labels are fixed).
 
@@ -350,6 +391,16 @@ Condition 2 covers C1. For C2, (INC) proves that the only direct real-count
 increment is `1[d in W]`; condition 3 and the paired child clock exclude both
 touched and virgin completion.
 
+This C2 statement is path-inductive, not an assertion that nested real and
+ghost masks always have one common pre-count. Fix `W` and split at its first
+real-only fill. Before that event, (INC) gives real count at most ghost count
+(a ghost-only `s in W` is harmless). At and after that event, keep the
+envelope of its earliest ancestor: its child clock contains every later
+edge/child charge. A later nonincident transition is unnecessary to legalize
+the remaining real `W` empties, while every later incident transition still
+pays `1[d in W]`. Thus the earliest-fill guard, rather than a reset child
+pre-count, controls a nested completion.
+
 On a non-FC edge, D22-N supplies a separate transition-inclusive induction.
 If the current `d` were the last checked seed of a first later role occupation
 at `y`, at most `f_{C_s}(rho)` child opportunities give
@@ -391,22 +442,33 @@ with `d notin W` and `q=Q^cut_{C_s}(W)>=6`, define the finite window cut
 GI(G) intersect B_8(d) intersect B_{8(q-6)}(W) = empty.   (WC)
 ```
 
-Define target-local charges
+Define the role charge as before and the repaired window charge by a decision
+tree, not an overlapping list:
 
 ```text
 epsilon_cut(d,rho) = 0,  if d=s, global FC holds, or (RC) holds;
-                     1,  otherwise;
+                     1,  otherwise.
 
-kappa_cut(d,W) = 0,         if W is non-D-alive;
-                 1[d in W], if d=s or global FC holds;
-                 1,         if d in W on a non-FC edge;
-                 0,         if d notin W and W is already touched;
-                 0,         if W is all-empty and q<6;
-                 0,         if W is all-empty, q>=6, and (WC) holds;
-                 1,         otherwise.
+kappa_cut^*(d,W) =
+  0,  if W is non-D-alive;
+
+  // From here W is D-alive.
+  1[d in W],  if d=s or global FC holds;
+
+  // From here the edge is genuine non-FC.
+  1,  if d in W;
+  0,  if d notin W and W is already D-touched;
+  0,  if d notin W and W is all-empty and q<6;
+  0,  if d notin W and W is all-empty and q>=6 and (WC) holds;
+  1,  otherwise.
 ```
 
-Here `q=Q^cut_{C_phi(d)}(W)` for the current edge/window pair.
+Here `q=Q^cut_{C_phi(d)}(W)` for the current edge/window pair. "Touched" and
+"all-empty" are evaluated in the ghost parent `P_Q`; for a D-alive
+length-six window they are exhaustive (`cnt_D>0` or `cnt_D=0`). The `(WC)`
+predicate is not queried unless `d notin W`, `W` is all-empty, and `q>=6`.
+Thus `d in W` is a terminal decision-tree row: no later `q<6` or `(WC)` fact
+can overwrite its unit charge.
 
 At a cut-annotated gate use
 
@@ -416,55 +478,218 @@ f_Q^cut(rho) = max_{d in K(Q)}
 
 Q_Q^cut(W) = max { b,
     max_{d in K(Q)}
-      (kappa_cut(d,W) + Q_{C_phi(d)}^cut(W)) }.
+      (kappa_cut^*(d,W) + Q_{C_phi(d)}^cut(W)) }.
 ```
 
 All other clauses are the corresponding FHW-T2 clauses with cut child labels.
 
-**FHW-T3 (target-specific danger-cut extension).
-PROVEN-ON-ANNOTATED-CLASS.** D21 remains sound with `f^cut/Q^cut` on the
-preceding annotated class. This is a further C1/C2/C3 refinement; it must not
-be reported as the exact trace capacity `max(F+H_W)`.
+**FHW-T3-R (repaired target-specific danger-cut extension).
+PROVEN-ON-ANNOTATED-CLASS.** D21 remains sound with `f^cut/Q^cut` and
+`kappa_cut^*` on the preceding annotated class, provided every mapped edge
+passes the following mutually exclusive verifier table. This is a further
+C1/C2/C3 refinement; it must not be reported as the exact global trace
+capacity `max(F+H_W)`.
+
+Concretely, the repaired target budget at a gate is the displayed
+`max{b, max_d(kappa_cut^*(d,W)+Q_child^cut(W))}`; at an ordinary parent D21
+uses `cnt_D(W,P_N)+Q_N^cut(W)>=6` for touched protection and the corresponding
+`Q_N^cut>=6`, radius `8(Q_N^cut-6)` virgin term. The scalar `B`, LOSS bases,
+and escape horizons are unchanged.
 
 For a non-FC edge, the verifier applies the following target-specific
 alternative to D22-N:
 
 ```text
-role rho:       (RC) permits epsilon_cut=0; otherwise use the D22-N radius;
-touched W:      d notin W permits kappa_cut=0; d in W uses (N-touch);
-all-empty W:    q<6 or (WC) permits kappa_cut=0;
-                otherwise use (N-virgin) and kappa_cut=1.
+role rho:                         (RC) permits epsilon_cut=0;
+                                  otherwise use the D22-N radius;
+
+D-alive touched W, d notin W:     kappa_cut^*=0;
+D-alive touched W, d in W:        kappa_cut^*=1 and require (N-touch);
+
+D-alive all-empty W, d in W:      kappa_cut^*=1 and require 1+q<6;
+D-alive all-empty W, d notin W,
+  q<6:                            kappa_cut^*=0;
+D-alive all-empty W, d notin W,
+  q>=6 and (WC):                  kappa_cut^*=0;
+D-alive all-empty W, d notin W,
+  q>=6 and not (WC):              kappa_cut^*=1 and require (N-virgin).
 ```
 
 Every zero is target-local; another role/window on the same edge may still
-pay one.
+pay one. Exact and FC edges retain FHW-T2's direct touched/all-empty guards;
+in particular an exact/FC edge entering an all-empty `W` also requires
+`1+q<6`.
 
-*Proof.* If a role occupation were causally enabled by the transition, let
-`z` be the first post-`d` ghost-illegal real placement. Then
+*Proof.* Unfold a finite D18 DAG, and order its transition events
+chronologically on each unfolded path. We prove simultaneously that the role
+clock covers C1/C3 and the window clock covers C2. Terminals, ordinary
+OR/AND nodes, LOSS remainders, off-kernel escape floors, exact edges, and FC
+edges are FHW-T2. Only a genuine non-FC mapped edge needs new analysis.
+
+For a role occupation causally enabled by the transition, let `z` be the
+first post-`d` ghost-illegal real placement. Then
 `z in GI(G) intersect B_8(d)`. With at most `k` child opportunities including
-`z`, reaching `y` forces `dist(z,y)<=8(k-1)`, contradicting (RC). For a window
-which is all-empty in the ghost, first split on an earlier real-only `W` fill.
-If one exists, its earlier envelope remains active, and its in-window real
-stone already makes every remaining `W` cell real-legal; a nonincident `d`
-cannot become the new causal seed. If none exists, all six fills are future:
-at least six of the `q` hazards must enter `W`, and a first illegal seed
-causally inherited from `d` lies within `8(q-6)` of `W`, contradicting (WC).
-If `q<6`, six fills are impossible. If `W` is already touched, every empty of
-its length-six mask is
-within distance at most five of an existing stone and is already ghost-legal;
-only direct incidence can change the real count. If no cut applies, D22-N's
-full unit and explicit radius tests apply. Reverse induction with the paired
-edge/child recurrences proves the target-local clocks. ∎
+`z`, reaching carrier `y` forces `dist(z,y)<=8(k-1)`, contradicting (RC).
+If (RC) fails, the one transition unit and D22-N radius give the original
+transition-inclusive proof. This closes C1/C3.
+
+For C2, fix `W` and induct on the first real-only fill of `W` on the coupled
+path. This is the point omitted from the withdrawn exposition.
+
+- If an earlier real-only `W` fill exists, retain the envelope opened at its
+  earliest such ancestor. That stone makes every remaining `W` cell
+  real-legal. A later nonincident `d` is not needed as a causal seed for a
+  `W` fill, while a later incident `d` is still charged by the terminal
+  `d in W` row. The ancestor's branch-paired child clock includes all later
+  direct charges, ordinary opportunities, LOSS remainders, and escape floors.
+  No common real/ghost pre-count is assumed.
+- If no earlier real-only `W` fill exists, real count is at most ghost count
+  before the current edge; a ghost-only `s in W` can only make that inequality
+  safer. For a touched ghost `W`, every empty is already ghost-legal, so a
+  nonincident `d` changes neither count nor the needed legality. An incident
+  `d` changes the real count by exactly one and (N-touch) uses `1+q`.
+- If the ghost parent `W` is all-empty and `d in W`, the current placement is
+  the first real fill and costs exactly one. A completion would require five
+  more child fills, so the edge is admissible exactly on the safe side
+  `1+q<6`. When `q>=5`, the strict guard fails; equivalently N-virgin would
+  demand `dist(d,W)>8(1+q-6)` at distance zero and cannot pass.
+- If the ghost parent `W` is all-empty and `d notin W`, all six real fills
+  remain in the child. For `q<6` the child hazard bound makes completion
+  impossible. For `q>=6`, if the transition were the first causal source of
+  a ghost-illegal fill, its first such seed `z` lies in
+  `GI(G) intersect B_8(d)`; spending six of the `q` child hazards in `W`
+  leaves at most `q-6` radius-eight links before reaching `W`, hence
+  `z in B_{8(q-6)}(W)`, contradicting (WC). If (WC) fails, the one unit and
+  (N-virgin) restore D22-N's transition-inclusive envelope.
+
+These rows are mutually exclusive and exhaust every D-alive window because
+incidence is Boolean and the ghost window is touched or all-empty. The
+non-D-alive stop is permanent. Each edge charge is combined with its own
+child before the maximum, so no branches are spliced. Reverse induction
+proves the clocks on the unfolding, and D18/T10 folds fixed labels back into
+the DAG. ∎
 
 The verifier's new index is finite: `K(Q)` lies in the finite union of named
 threat empties; each pair tests the finite descendant-role union, 18 direct
 windows, and `B_8(d)` (217 axial cells). The danger intersections are bounded
 by the finite child clocks (`f^cut,Q^cut<=B`) and enumerate the same 217 offsets at
 their first factor. Consequently rows 1–7 of §1.2 are now all filled.
-FHW-T3 is the largest class **proved in this campaign**, not a claim of
+FHW-T3-R is the largest class **proved in this campaign**, not a claim of
 logical maximality: certificate-specific domination facts may prove further
 safe mappings. Outside these annotations, the ordinary D17 `+1` remains
 mandatory unless another independently proved C1/C2/C3 envelope is supplied.
+
+### 2.2a R-Z11 counterexample replay and new overlap probes
+
+The review's explicit reachable trace lands in exactly one repaired row:
+
+```text
+W={(10,r):0<=r<=5}, d=(10,0), s=(9,0),
+W D-alive and all-empty, genuine non-FC, d in W, q=5.
+```
+
+Therefore `kappa_cut^*=1`, the edge expression is `1+5=6`, and the mandatory
+direct guard asks `1+5<6`, which is false. The verifier rejects the mapping.
+The escape floor `b=2` is irrelevant (`max{2,6}=6`) and cannot hide the
+direct fill. This agrees with the review's actual six-fill continuation.
+
+The following three new adversarial verifier-level instances exercise the
+same formerly overlapping class. Each `q=t` child can be realized by a chain
+of `t` ordinary AND opportunities whose defender moves take the named
+remaining `W` cells, with attacker OR fillers on a disjoint supported chain.
+The displayed support stone makes those fills legal; before the sixth fill D
+has no completed `W`. As in the review, these local paths test the charge and
+guard and need not purport to annotate every alternate branch of a full D9
+certificate.
+
+1. **R11-A, exact edge at the unsafe boundary.** Let
+   `W_A={(20,r):0<=r<=5}`, `d=s=(20,0)`, and put a shared support stone at
+   `(21,0)`. Let the child hazard word fill `(20,1)..(20,5)`, so `q=5`.
+   The exact/FC row pays one and its retained all-empty guard rejects
+   `1+5=6`. Thus exact copying removes frontier divergence, not the direct
+   window fill.
+2. **R11-B, genuine FC edge at the unsafe boundary.** Let
+   `W_B={(30,r):0<=r<=5}`, `d=(30,0)`, `s=(29,0)`, and include the shared
+   stone `t=(31,0)`. The edge is genuine and FC because
+   `B_8(d) subseteq B_8(s) union B_8(t)`: for a relative axial cell `(a,b)`
+   with `max(|a|,|b|,|a+b|)<=8`, at least one of
+   `max(|a+1|,|b|,|a+b+1|)` and
+   `max(|a-1|,|b|,|a+b-1|)` is at most eight. Indeed, failure of the first
+   requires `a=8` or `a+b=8`, while failure of the second requires `a=-8`
+   or `a+b=-8`; every pairing is contradictory or forces `|b|=16`. With the
+   five-cell child word, `q=5`; the charge is again one and the direct guard
+   rejects six.
+3. **R11-C, genuine non-FC safe boundary.** Let
+   `W_C={(40,r):0<=r<=5}`, `d=(40,0)`, `s=(39,0)`, with shared support
+   `(40,-1)` and no other shared frontier cell covering `z=(48,0)`.
+   Then `z in B_8(d)` but `dist(z,s)=9` and `dist(z,(40,-1))=9`, so FC fails.
+   Give the child four ordinary `W` fills, `q=4`. The repaired row reports
+   the attained hazard `1+4=5` and accepts the sharp strict guard `5<6`.
+   The withdrawn zero would report four; it happened not to permit a win in
+   this boundary case, but it was still not the correct branch capacity.
+
+R11-A/B show that direct incidence dominates both exactness and FC. R11-C
+shows that the repaired unit is not merely a reject-all patch: the last safe
+integer boundary remains admissible.
+
+### 2.2b Hostile SELF-REVIEW of the repaired accounting
+
+**Enumeration architecture (stated before completeness).** For each edge,
+role, and target, enumerate in this order: (A) non-D-alive/D-alive; (B)
+exact-or-FC/non-FC; (C) `d in W`/`d notin W`; (D) touched/all-empty; (E), only
+for non-FC, nonincident, all-empty targets, `q<6`/`q>=6`; and (F), only on
+the latter side, `(WC)` pass/fail. Independently cross every role with `(RC)`
+pass/fail, and record all four `(d in W,s in W)` incidence pairs. Terminal,
+OR, ordinary AND, LOSS, off-kernel escape, and DAG-unfolding cases remain the
+seven outer grammar rows in section 1.2.
+
+The resulting window leaves are exactly:
+
+| edge/window leaf | charge | required check |
+|---|---:|---|
+| non-D-alive | 0 | permanence stop |
+| exact/FC, `d notin W` | 0 | retained FHW-T2 guards |
+| exact/FC, `d in W` | 1 | touched guard or, if empty, `1+q<6` |
+| non-FC, touched, `d notin W` | 0 | all remaining cells ghost-legal |
+| non-FC, touched, `d in W` | 1 | N-touch |
+| non-FC, empty, `d in W` | 1 | `1+q<6` |
+| non-FC, empty, `d notin W`, `q<6` | 0 | fewer than six child hazards |
+| same, `q>=6`, WC pass | 0 | finite danger intersection empty |
+| same, `q>=6`, WC fail | 1 | N-virgin |
+
+Only now is completeness claimed. D-alive windows have defender count zero
+or positive, incidence is Boolean, FC is Boolean after the exact case, the
+integer `q` is below six or not, and WC is Boolean where defined. Therefore
+the leaves are disjoint and exhaustive. `s in W` does not add a real stone;
+its two values are both covered by the real-at-most-ghost inequality before
+the first real-only fill. RC is an independent role axis and cannot change a
+window charge.
+
+Hostile attacks and outcomes:
+
+1. **Repeat the review's first-match attack.** No first-match convention is
+   needed: all-empty zero rows syntactically include `d notin W`; the direct
+   row is terminal. **PASS.**
+2. **Try `q=5` under every edge class.** The review trace, R11-A, and R11-B
+   all compute one plus five and fail the strict direct guard. **PASS.**
+3. **Try the safe neighboring integer.** R11-C computes one plus four and is
+   accepted, so the correction has not moved the threshold to `q<=3`.
+   **PASS; sharp boundary.**
+4. **Hide a prior real-only fill in a nested coupling.** The proof retains the
+   earliest-fill ancestor envelope; it never resets to a common child count.
+   Later incident edges remain charged. **PASS.**
+5. **Use `s in W,d notin W`.** This can only increase the ghost count; (INC)
+   remains conservative for real completion. **PASS.**
+6. **Use WC at `q=6`.** Its last ball is `B_0(W)`, so it explicitly checks
+   whether the first transition-enabled illegal seed can already lie in W;
+   WC is never queried on an incident edge. **PASS.**
+7. **Refuse a gate or terminate at LOSS.** The unchanged `b` escape floor and
+   full LOSS base remain in the same branch maximum. **PASS.**
+8. **Splice a cheap edge with another child's cheap clock.** Each
+   `kappa_cut^*+Q_child` pair is formed before the outer maximum. **PASS.**
+9. **Claim global minimality.** Rejected. The theorem is predicate-sharp for
+   the stated RC/WC/FC language, not logically maximal over arbitrary future
+   certificate facts. **SCOPE HELD.**
 
 ### 2.3 General flat debit obstruction with a reachable coupled trace
 
@@ -653,7 +878,7 @@ The review tried to falsify each proof hinge before Phase 2.
    virgin windows, LOSS remainders, and checkpoint roles were each deleted
    in turn. Outcome: every deletion recreates a corpus C1/C2 counterexample;
    D22 retains all of them. Only the C3 transition radius and nonincident
-   C2 unit are debited under FC. FHW-T3's further zeroes use a separately
+   C2 unit are debited under FC. FHW-T3-R's further zeroes use a separately
    defined target-local cut clock and are not relabelled as global `F+H_W`.
 7. **Silent scalar debit.** Replacing `Bhat=1+B(child)` by a debited clock
    breaks horizon and terminal accounting. Outcome: rejected; D22 keeps full
@@ -663,14 +888,14 @@ The review tried to falsify each proof hinge before Phase 2.
    node retains one fixed annotation and clock label. The theorem does not
    permit path-dependent labels on a shared node.
 9. **Maximality and net-size overclaim.** FC is sufficient, not necessary;
-   FHW-T3 weakens it only on finite target-specific danger cuts, and protected
+   FHW-T3-R weakens it only on finite target-specific danger cuts, and protected
    roles may outweigh local exposure savings. Outcome: claim downgraded to
    **PROVEN-ON-ANNOTATED-CLASS** and payoff to the four exact local budget
    ratios only. Further certificate-specific domination and monotone
    total-zone shrink remain OPEN.
 
 **Phase-1 disposition.** **PROVEN-ON-CLASS + PROVEN obstruction.** T11's
-exact `F+H_W` class extends to D22's frontier-covered mixed gates; FHW-T3 then
+exact `F+H_W` class extends to D22's frontier-covered mixed gates; FHW-T3-R then
 adds a separately named target-local danger-cut clock. The fully general flat
 `F + H_W` slogan is false unless its values are branch-paired and retain the
 off-kernel/LOSS floors. A target-independent scalar-`B` debit, unconditional
@@ -949,27 +1174,30 @@ mixed-history extension and empirical prevalence are OPEN.
    arithmetic from existing worked examples. No runtime, corpus frequency,
    or total-zone reduction was measured in this no-Cargo campaign.
 
-## Review erratum (R-Z10-REV, folded)
+## Review erratum and R-Z11 disposition
 
 **Reviewed artifact:** this document, landed unmodified at `ded361c1`
 (supplies the `UNLANDED` landed-hash placeholder). **Review:**
 `PROOF_TSS_ZONES_FHW_REVIEW.md` (committed this fold). **Verdict:**
-REFUTED IN PART / MAJOR REPAIR REQUIRED.
+REFUTED IN PART / MAJOR REPAIR REQUIRED at R-Z10.
 
-- **FHW-T3 REFUTED (most severe).** Its overlapping `κ_cut` cases permit an
+- **Historical FHW-T3 refutation (accepted).** Its overlapping `κ_cut` cases permit an
   unsound zero charge for a direct window fill: a reachable trace costs
-  `1 + 5 = 6` while the stated rule counts only `5`. Treat FHW-T3 as
-  WITHDRAWN pending a repaired non-overlapping cut charge; the undercount
-  must be closed before FHW-T3 is used.
+  `1 + 5 = 6` while the stated rule counts only `5`. The old theorem remains
+  withdrawn and must not be cited.
+- **R-Z11 repair: PROVEN-ON-ANNOTATED-CLASS.** FHW-T3-R uses the disjoint
+  `kappa_cut^*` decision tree, charges every direct fill, requires
+  `1+q<6` on an all-empty direct edge, and proves the nested first-real-only-
+  fill induction. Section 2.2a rejects the review trace and checks three new
+  overlap probes; section 2.2b gives the exhaustive hostile enumeration.
 - **G2-Z1 UPHELD — sound-on-success** (as originally labelled PROVEN-ON-CLASS;
   not a completeness claim).
 - **Flat-debit refutation UPHELD.** **FR-T1 UPHELD ON CLASS** (ordinary/
   exact-copy; mixed D17/D22 stays OPEN). **λ² UPHELD ON DESIGN CLASS.**
-- **Design bars (DESIGN_GROUP2_NEXT.md): MAJOR REPAIR / EMPIRICALLY DEFERRED**
-  — remain DEFERRED-NEEDS-CARGO; the reviewer's repair list (matched (gate,W)
-  index, net-zone node index, R=9 zone theorem vs exhaustive reply check,
-  H1152 relabel, baseline identities) is authoritative before implementation.
+- **Design bars:** their paper definitions are repaired in
+  `DESIGN_GROUP2_NEXT.md`; every empirical outcome remains
+  DEFERRED-NEEDS-CARGO.
 - Total searched-zone shrink and generic zero-cost D17 substitution remain OPEN.
 
-Repair/re-derivation of FHW-T3 and the design bars = direction call, deferred
-to owner (Opus interim-orchestrator does not make design calls). Paper deferred.
+**Current proof disposition:** repaired on the stated D22/RC/WC annotated
+class. No result extends to arbitrary D17/D22 histories or debits scalar `B`.
