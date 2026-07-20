@@ -217,6 +217,18 @@ pub struct Divergences {
     pub tss_zone_count2: bool,
     /// Enable P3 same-turn defender-pair canonicalization.
     pub tss_pair_commutation: bool,
+    /// Semantic-horizon deadline for deep solves (absolute placements added to
+    /// the current ply). `16` is the owner floor (PLAN_TSS_MCTS_INTEGRATION.md
+    /// §5); `0` means unbounded (`semantic_horizon = u32::MAX`, node cap the
+    /// only budget). Values `1..=15` are rejected at the Rust seam. Replaces
+    /// the historical hardcoded `+12` in `tss_solve_verified`.
+    pub tss_solver_horizon: u32,
+    /// Horizon-ladder escalation (default off): when the base solve is Unknown
+    /// with `horizon_cuts > 0`, re-solve ONCE at `2 * horizon` on the same
+    /// solver instance (the shared TT replays the proven prefix). Unbounded
+    /// base (`tss_solver_horizon = 0`) skips the ladder — there is nothing
+    /// taller to climb to.
+    pub tss_solver_horizon_ladder: bool,
 }
 
 impl Divergences {
@@ -272,6 +284,8 @@ impl Divergences {
             tss_zone_stale_filter: false,
             tss_zone_count2: false,
             tss_pair_commutation: false,
+            tss_solver_horizon: 16,
+            tss_solver_horizon_ladder: false,
         }
     }
 
@@ -450,11 +464,18 @@ pub struct TssCounters {
     /// A retry still produced a zone certificate at a different exact T;
     /// it was stopped before the minting verifier (non-fatal Unknown).
     pub horizon_preflight_failed: u32,
-    /// Unknown solves whose search had at least one still-live line refused
-    /// by the +12 semantic deadline (depth-bound Unknowns). The horizon-ladder
-    /// gate: structural Unknowns provably cannot convert at a deeper deadline;
-    /// these might.
+    /// Unknown solves whose base search had at least one still-live line
+    /// refused by the semantic deadline (depth-bound Unknowns). The
+    /// horizon-ladder gate: structural Unknowns provably cannot convert at a
+    /// deeper deadline; these might.
     pub horizon_cut: u32,
+    /// Horizon-ladder tall pass (2x horizon) that remained Unknown AND still
+    /// depth-cut (`horizon_cuts > 0`). Counts only when the ladder ran.
+    pub horizon_cut_tall: u32,
+    /// Horizon-ladder tall pass that died at a `k < B` defender node
+    /// (`kb_death_cuts > 0`) — the signal that Group-2 zone consumption would
+    /// matter. Do NOT build zones ahead of this number.
+    pub deep_kb_death: u32,
     /// Zoned AND nodes and P3-commuted replies in submitted certificates.
     pub zone_nodes: u32,
     pub pair_omitted: u32,
@@ -516,6 +537,8 @@ impl TssCounters {
         self.horizon_retry += other.horizon_retry;
         self.horizon_preflight_failed += other.horizon_preflight_failed;
         self.horizon_cut += other.horizon_cut;
+        self.horizon_cut_tall += other.horizon_cut_tall;
+        self.deep_kb_death += other.deep_kb_death;
         self.zone_nodes += other.zone_nodes;
         self.pair_omitted += other.pair_omitted;
         self.zone_verify_failed += other.zone_verify_failed;
@@ -553,12 +576,30 @@ pub enum TssMemoEntry {
 /// `Clone` — and a cloned search correctly starts COLD, because cache warmth
 /// is discovery state, never truth (O16). Deref-free by design: callers go
 /// through `.0`.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct TssSolverSlot(pub TssSolver);
+
+impl TssSolverSlot {
+    /// A fresh (cold-cache) solver pre-configured to the campaign leaf-decided
+    /// profile (§3): wide `vcf_pair_complete`, lazy frontier + interior census
+    /// gate ON. The persistent per-search leaf solver, the root guard, and the
+    /// async workers all run this profile.
+    fn leaf_configured() -> TssSolver {
+        let mut solver = TssSolver::default();
+        solver.configure_leaf_profile();
+        solver
+    }
+}
+
+impl Default for TssSolverSlot {
+    fn default() -> Self {
+        Self(Self::leaf_configured())
+    }
+}
 
 impl Clone for TssSolverSlot {
     fn clone(&self) -> Self {
-        Self(TssSolver::default())
+        Self(Self::leaf_configured())
     }
 }
 
@@ -572,41 +613,79 @@ pub struct VerifiedSolve {
     pub cert: Option<crate::tss_verify::TssCertificate>,
 }
 
+/// Semantic-horizon policy for a deep solve (PLAN_TSS_MCTS_INTEGRATION.md §5;
+/// owner ruling 2026-07-20). Replaces the historical hardcoded `+12`.
+#[derive(Clone, Copy, Debug)]
+pub struct SolverHorizon {
+    /// Absolute placements added to the current ply to form the deadline, or
+    /// `0` for UNBOUNDED (`semantic_horizon = u32::MAX`, node cap the only
+    /// budget). The Rust seam validates `0` or `>= 16` (the owner floor);
+    /// `1..=15` are rejected there.
+    pub horizon: u32,
+    /// When on and a bounded base solve is Unknown with `horizon_cuts > 0`,
+    /// re-solve ONCE at `2 * horizon` on the same solver instance. Unbounded
+    /// bases (`horizon == 0`) never ladder.
+    pub ladder: bool,
+}
+
+impl SolverHorizon {
+    /// Owner-floor default: h16, ladder off.
+    pub const DEFAULT: Self = Self {
+        horizon: 16,
+        ladder: false,
+    };
+}
+
+impl Default for SolverHorizon {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 /// One verified deep solve (the ONLY production path from solver claims to
 /// consumable results): solver → independent certificate verifier via the
 /// sole deep mint `tss_core::hard_value_from_verified`. Deterministic given
-/// (state, caps, goal, solver-cache state): node cap only, no wall clock.
-/// Shared by the per-search leaf hook (persistent solver) and the
+/// (state, caps, goal, horizon, solver-cache state): node cap only, no wall
+/// clock. Shared by the per-search leaf hook (persistent solver) and the
 /// payload-build root guard (per-move solver).
 pub fn tss_solve_verified(
     state: &RustHexoState,
     node_cap: u64,
     goal: SolveGoal,
     zone: crate::tss_core::ZoneSearchCaps,
+    horizon: SolverHorizon,
     solver: &mut TssSolver,
     counters: &mut TssCounters,
 ) -> VerifiedSolve {
     counters.deep_calls += 1;
-    let full_horizon = state.placements_made().saturating_add(12);
+    // The semantic deadline (owner ruling 07-20): h>=16 minimum, or unbounded
+    // (horizon == 0 => u32::MAX) with the node cap as the only budget. The
+    // Rust seam has already rejected the 1..=15 band; P2's preflight may
+    // diagnose the guess and P3's cache stamps bind it.
+    let base_horizon = if horizon.horizon == 0 {
+        u32::MAX
+    } else {
+        state.placements_made().saturating_add(horizon.horizon)
+    };
     let mut caps = SolveCaps {
         node_cap,
         tt_bytes_cap: RustSearch::TSS_SOLVER_TT_BYTES,
-        // Six complete turns is the deterministic semantic deadline.
-        // P2's preflight may diagnose this guess and P3's cache stamps bind it.
-        semantic_horizon: full_horizon,
+        semantic_horizon: base_horizon,
     };
     solver.set_zone_options(zone);
-    // Zone horizon ladder (Codex review, +12 neutralization): at +12 the
-    // root-level defender holds exactly 6 remaining placements, and the zone
-    // generator must take the FULL legal set at d >= 6 — so zones never
-    // reduce the first Universal's fanout, exactly where the node budget
-    // dies (ep32: zone_nodes = 0 across 33k decided solves). With zones on,
-    // first attempt a TIGHT +8 deadline (d = 4 at the first Universal =>
-    // zones prune from the very first fanout) on half the node budget; a
-    // decided tight result is a fully verified proof in its own right (a win
-    // by ply T wins, a dual proof by T is a forced loss outright), while
-    // Unknown falls through to the unchanged full +12 solve. Zone-off
-    // behavior is bit-identical to before.
+    // Zone tight-ladder (Codex review, wide-deadline neutralization): at a
+    // slack defender budget the zone generator must take the FULL legal set,
+    // so zones never reduce the first Universal's fanout, exactly where the
+    // node budget dies (ep32: zone_nodes = 0 across 33k decided solves). With
+    // zones on, first attempt a TIGHT +8 deadline (d = 4 at the first
+    // Universal => zones prune from the very first fanout) on half the node
+    // budget; a decided tight result is a fully verified proof in its own
+    // right (a win by ply T wins, a dual proof by T is a forced loss
+    // outright), while Unknown falls through to the full base-horizon solve
+    // (the §5 knob). This tight pass is an internal fast-path, orthogonal to
+    // the owner horizon floor: a decided +8 result is a genuine <=+8 proof,
+    // and an Unknown one loses nothing (it re-solves at the full deadline).
+    // Zone-off behavior is bit-identical to before.
     let mut result = if zone.enabled {
         let tight = SolveCaps {
             node_cap: (node_cap / 2).max(1),
@@ -628,6 +707,41 @@ pub fn tss_solve_verified(
         counters.deep_nodes += full_result.stats.nodes;
         full_result
     };
+    // Horizon ladder (§5, owner ruling 07-20; default off). A BOUNDED base
+    // solve that returned Unknown while still refusing live lines at the
+    // deadline (`horizon_cuts > 0`) is exactly the depth-bound case that a
+    // taller deadline might convert; structural Unknowns cannot. Re-solve ONCE
+    // at 2x horizon on the SAME solver instance so the shared TT replays the
+    // proven prefix and the budget goes to the new plies. Unbounded bases skip
+    // the ladder. Soundness needs no new theory: a completed production
+    // certificate is a forced chain (implicit dispatch at k==B),
+    // depth-independent; an Unknown tall pass just bails to a plain eval. The
+    // tall pass feeds the depth-frontier gate counters.
+    if horizon.ladder
+        && horizon.horizon != 0
+        && result.status == ProofStatus::Unknown
+        && result.stats.horizon_cuts > 0
+    {
+        let tall = SolveCaps {
+            node_cap,
+            tt_bytes_cap: caps.tt_bytes_cap,
+            semantic_horizon: state
+                .placements_made()
+                .saturating_add(horizon.horizon.saturating_mul(2)),
+        };
+        let tall_result = solver.solve_goal(state, &tall, goal);
+        counters.deep_nodes += tall_result.stats.nodes;
+        if tall_result.status == ProofStatus::Unknown {
+            if tall_result.stats.horizon_cuts > 0 {
+                counters.horizon_cut_tall += 1;
+            }
+            if tall_result.stats.kb_death_cuts > 0 {
+                counters.deep_kb_death += 1;
+            }
+        }
+        caps.semantic_horizon = tall.semantic_horizon;
+        result = tall_result;
+    }
     // A zoned proof is built against a guessed semantic deadline. Derive the
     // certificate's actual maximum leaf resolution before verification and,
     // only when the zone theorem was used, retry once at that exact deadline.
@@ -1278,6 +1392,10 @@ impl RustSearch {
                                 count2_threshold: self.divergences.tss_zone_count2,
                                 pair_commutation: self.divergences.tss_pair_commutation,
                             },
+                            horizon: SolverHorizon {
+                                horizon: self.divergences.tss_solver_horizon,
+                                ladder: self.divergences.tss_solver_horizon_ladder,
+                            },
                         })
                     })
                     .flatten();
@@ -1394,6 +1512,10 @@ impl RustSearch {
                                         count2_threshold: self.divergences.tss_zone_count2,
                                         pair_commutation: self.divergences.tss_pair_commutation,
                                     },
+                                    horizon: SolverHorizon {
+                                        horizon: self.divergences.tss_solver_horizon,
+                                        ladder: self.divergences.tss_solver_horizon_ladder,
+                                    },
                                 })
                             })
                             .flatten();
@@ -1428,6 +1550,10 @@ impl RustSearch {
                         stale_area_filter: self.divergences.tss_zone_stale_filter,
                         count2_threshold: self.divergences.tss_zone_count2,
                         pair_commutation: self.divergences.tss_pair_commutation,
+                    },
+                    SolverHorizon {
+                        horizon: self.divergences.tss_solver_horizon,
+                        ladder: self.divergences.tss_solver_horizon_ladder,
                     },
                     &mut self.tss_solver.0,
                     &mut self.tss,
@@ -1534,6 +1660,8 @@ impl RustSearch {
         self.tss.horizon_retry += response.counters.horizon_retry;
         self.tss.horizon_preflight_failed += response.counters.horizon_preflight_failed;
         self.tss.horizon_cut += response.counters.horizon_cut;
+        self.tss.horizon_cut_tall += response.counters.horizon_cut_tall;
+        self.tss.deep_kb_death += response.counters.deep_kb_death;
         self.tss.zone_verify_failed += response.counters.zone_verify_failed;
         if self.divergences.tss_solver_async {
             self.tss_async_memo_write(response, true);
@@ -3507,6 +3635,7 @@ mod tests {
             2000,
             SolveGoal::Both,
             crate::tss_core::ZoneSearchCaps::default(),
+            SolverHorizon::DEFAULT,
             &mut TssSolver::default(),
             &mut counters,
         );

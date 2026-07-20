@@ -584,7 +584,7 @@ fn tss_bench_report() {
 // feature: run with the PYO3_PYTHON + RUSTFLAGS link recipe from the runbook.
 #[cfg(feature = "python")]
 fn tss_bench_zone_ab() {
-    use crate::tree::{tss_solve_verified, TssCounters};
+    use crate::tree::{tss_solve_verified, SolverHorizon, TssCounters};
 
     let buckets = build_buckets();
     for cap in [500u64, 2_000, 8_000] {
@@ -610,6 +610,7 @@ fn tss_bench_zone_ab() {
                         cap,
                         crate::tss_core::SolveGoal::Both,
                         zone,
+                        SolverHorizon::DEFAULT,
                         &mut solver,
                         &mut counters,
                     );

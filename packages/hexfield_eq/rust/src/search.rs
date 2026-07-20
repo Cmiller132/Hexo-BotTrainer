@@ -38,7 +38,7 @@ use crate::tss_core::{self, ProofStatus};
 use crate::tree::{
     gumbel_completed_q, gumbel_sigma, gumbel_softmax, random_unit, terminal_value,
     tss_solve_verified, Divergences, RootDirichletNoise, RustEdge, RustLeaf, RustNode,
-    RustSearch, TssCounters, TssLeafRoute, TssParkResolution, Widening,
+    RustSearch, SolverHorizon, TssCounters, TssLeafRoute, TssParkResolution, Widening,
 };
 use crate::tss_verify::CertNode;
 
@@ -3443,6 +3443,8 @@ const KNOWN_DIVERGENCE_KEYS: &[&str] = &[
     "tss_zone_stale_filter",
     "tss_zone_count2",
     "tss_pair_commutation",
+    "tss_solver_horizon",
+    "tss_solver_horizon_ladder",
     // Fast-class Gumbel levers (main_8: PUCT Full / Gumbel Fast). These name the
     // Fast view's values; the driver's Python side folds them into the SECOND
     // (fast) override map whose base keys resolve_divergences reads. They are
@@ -3619,6 +3621,12 @@ fn resolve_divergences(
         if let Some(v) = overrides.get_item("tss_pair_commutation")? {
             dv.tss_pair_commutation = v.extract()?;
         }
+        if let Some(v) = overrides.get_item("tss_solver_horizon")? {
+            dv.tss_solver_horizon = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("tss_solver_horizon_ladder")? {
+            dv.tss_solver_horizon_ladder = v.extract()?;
+        }
         // Gumbel AlphaZero flags (default-OFF).
         if let Some(v) = overrides.get_item("gumbel_target")? {
             dv.gumbel_target = v.extract()?;
@@ -3695,6 +3703,22 @@ fn resolve_divergences(
             "tss_solver_park_timeout_ms must be 1..=5000, got {}",
             dv.tss_solver_park_timeout_ms
         )));
+    }
+    // Horizon (owner ruling 2026-07-20, PLAN_TSS_MCTS_INTEGRATION.md §5): the
+    // floor is h16, or 0 for unbounded (node cap the only budget). The
+    // 1..=15 band is rejected loudly — a below-floor deadline silently loses
+    // bounded-horizon WINs (the R-FIX1 class of defect).
+    if dv.tss_solver_horizon != 0 && dv.tss_solver_horizon < 16 {
+        return Err(PyValueError::new_err(format!(
+            "tss_solver_horizon must be 0 (unbounded) or >= 16 (the owner floor), got {}",
+            dv.tss_solver_horizon
+        )));
+    }
+    if dv.tss_solver_horizon_ladder && dv.tss_solver_horizon == 0 {
+        return Err(PyValueError::new_err(
+            "tss_solver_horizon_ladder requires a bounded tss_solver_horizon (>= 16); \
+             an unbounded base has nothing taller to climb to",
+        ));
     }
     if dv.tss_solver_park && !dv.tss_solver_async {
         return Err(PyValueError::new_err(
@@ -3874,6 +3898,10 @@ impl PayloadNative {
             self.tss_counters.horizon_preflight_failed,
         )?;
         tss.set_item("horizon_cut", self.tss_counters.horizon_cut)?;
+        tss.set_item("horizon_cut_tall", self.tss_counters.horizon_cut_tall)?;
+        tss.set_item("deep_kb_death", self.tss_counters.deep_kb_death)?;
+        // Engine attribution for minted certificates (V0 wholesale adoption).
+        tss.set_item("cert_version", crate::tss_core::TSS_CERT_VERSION)?;
         tss.set_item("zone_nodes", self.tss_counters.zone_nodes)?;
         tss.set_item("pair_omitted", self.tss_counters.pair_omitted)?;
         tss.set_item("zone_verify_failed", self.tss_counters.zone_verify_failed)?;
@@ -4082,6 +4110,7 @@ fn build_search_result_payload_native(
             // (off-GIL parallel build), so the root guard can't share the
             // per-search persistent cache; one root solve per move is cheap.
             let mut root_solver = crate::tss_solver::TssSolver::default();
+            root_solver.configure_leaf_profile();
             let solved = tss_solve_verified(
                 &search.root_state,
                 div.tss_solver_node_cap as u64,
@@ -4091,6 +4120,10 @@ fn build_search_result_payload_native(
                     stale_area_filter: div.tss_zone_stale_filter,
                     count2_threshold: div.tss_zone_count2,
                     pair_commutation: div.tss_pair_commutation,
+                },
+                SolverHorizon {
+                    horizon: div.tss_solver_horizon,
+                    ladder: div.tss_solver_horizon_ladder,
                 },
                 &mut root_solver,
                 &mut deep_counters,
@@ -5259,6 +5292,7 @@ mod fallback_tests {
             2000,
             tss_core::SolveGoal::Both,
             tss_core::ZoneSearchCaps::default(),
+            SolverHorizon::DEFAULT,
             &mut crate::tss_solver::TssSolver::default(),
             &mut solve_counters,
         );

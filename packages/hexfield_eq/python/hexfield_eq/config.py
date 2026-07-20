@@ -134,6 +134,15 @@ class SelfplayConfig:
     tss_zone_stale_filter: bool = False
     tss_zone_count2: bool = False
     tss_pair_commutation: bool = False
+    # Deep-solve semantic horizon (owner ruling 2026-07-20, PLAN §5): 16 is the
+    # floor; 0 means unbounded (semantic_horizon = u32::MAX, the node cap the
+    # only budget). The 1..=15 band is rejected loudly at the Rust seam.
+    # Replaces the historical hardcoded +12 in tss_solve_verified.
+    tss_solver_horizon: int = 16
+    # Horizon ladder (default off): a bounded base solve that came back Unknown
+    # while still depth-cut (horizon_cuts > 0) is re-solved once at 2x horizon
+    # on the same solver instance. Unbounded bases skip it.
+    tss_solver_horizon_ladder: bool = False
     search_parity_mode: bool = False
     # Moves-left utility. Defaults: enabled, two-sided, with the final-move
     # tie-break. Passed to Rust as divergence_overrides. moves_left_utility=False
@@ -621,6 +630,10 @@ def build_divergence_overrides(
         "tss_zone_stale_filter": bool(sp.tss_zone_stale_filter),
         "tss_zone_count2": bool(sp.tss_zone_count2),
         "tss_pair_commutation": bool(sp.tss_pair_commutation),
+        # TSS deep-solve semantic horizon (owner floor h16, or 0 = unbounded;
+        # the 1..=15 band is rejected at the Rust seam) and the horizon ladder.
+        "tss_solver_horizon": int(sp.tss_solver_horizon),
+        "tss_solver_horizon_ladder": bool(sp.tss_solver_horizon_ladder),
         # Gumbel AlphaZero levers (default OFF).
         "gumbel_target": bool(sp.gumbel_target_enabled),
         "gumbel_root": bool(sp.gumbel_root_enabled),

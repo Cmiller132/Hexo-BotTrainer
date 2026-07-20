@@ -34,7 +34,7 @@ use std::thread::JoinHandle;
 use hexo_engine::HexoState as RustHexoState;
 use hexo_utils::StateHash;
 
-use crate::tree::{tss_solve_verified, TssCounters};
+use crate::tree::{tss_solve_verified, SolverHorizon, TssCounters};
 use crate::tss_core::{HardValue, ProofStatus, SolveGoal, ZoneSearchCaps};
 use crate::tss_solver::TssSolver;
 use crate::tss_verify::RootBinding;
@@ -221,6 +221,7 @@ pub struct SolveRequest {
     pub node_cap: u64,
     pub goal: SolveGoal,
     pub zone: ZoneSearchCaps,
+    pub horizon: SolverHorizon,
 }
 
 /// A completed, already-verified solve. `hard` is `Some` only when the
@@ -550,8 +551,10 @@ fn worker_loop(
 ) {
     // One persistent solver per worker: its shared positive-proof-fragment TT
     // warms across solves (O16); byte caps are enforced per solve inside
-    // `tss_solve_verified` exactly as on the inline path.
+    // `tss_solve_verified` exactly as on the inline path. Configured to the
+    // campaign leaf-decided profile (§3), identical to the inline/root paths.
     let mut solver = TssSolver::default();
+    solver.configure_leaf_profile();
     loop {
         if shutdown.load(Ordering::Relaxed) {
             return; // pool dropping
@@ -577,6 +580,7 @@ fn worker_loop(
                 request.node_cap,
                 request.goal,
                 request.zone,
+                request.horizon,
                 &mut solver,
                 &mut counters,
             );
@@ -587,6 +591,7 @@ fn worker_loop(
             Err(_) => {
                 alarms.worker_panics.fetch_add(1, Ordering::Relaxed);
                 solver = TssSolver::default();
+                solver.configure_leaf_profile();
                 rx.finish_one();
                 continue;
             }
@@ -679,6 +684,7 @@ mod tests {
             node_cap: 1,
             goal: SolveGoal::Both,
             zone: ZoneSearchCaps::default(),
+            horizon: SolverHorizon::DEFAULT,
         }
     }
 
@@ -795,6 +801,7 @@ mod tests {
             2000,
             SolveGoal::Both,
             ZoneSearchCaps::default(),
+            SolverHorizon::DEFAULT,
             &mut TssSolver::default(),
             &mut inline_counters,
         );
@@ -817,6 +824,7 @@ mod tests {
             node_cap: 2000,
             goal: SolveGoal::Both,
             zone: ZoneSearchCaps::default(),
+            horizon: SolverHorizon::DEFAULT,
         }));
         let response = drain_one(&pool);
         assert_eq!(response.slot, 7);
