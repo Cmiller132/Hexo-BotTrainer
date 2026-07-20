@@ -1,5 +1,11 @@
 # Plan — Forced-Tree Search & Learn-from-Search for hexfield_eq (TSS v2)
 
+> **SUPERSEDED (2026-07-17).** This v2 plan is superseded as plan-of-record by
+> **`docs/PLAN_TSS_MCTS_INTEGRATION.md` (v3)** — the primary and normative
+> integration doc. The §2 soundness contract is carried into v3 verbatim and
+> remains binding; this file is kept as the design history of the built
+> Stage 0–4 stack (`claude/tss-v2-build`). Do not plan new work from this doc.
+
 > **Provenance.** v2, 2026-07-13. Supersedes the v1 plan (27-agent design workflow +
 > Codex ultra, reconciled). This revision follows: (a) a line-by-line source
 > re-verification of v1 (~20 file:line claims checked, **all accurate**); (b) an
