@@ -1,0 +1,63 @@
+R-G2-EXT-DESIGN — verifier-contract extension DESIGN (DOC-ONLY, HIGH)
+
+You are gpt-5.6-sol in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width
+(branch claude/tss-vcf-width @ 9f589c80). DOC-ONLY design round: you write
+exactly ONE new file. No source edits, no cargo, no builds, no commits, no
+other worktrees (read-only exception below), no spawned sessions.
+
+## Problem
+
+The strict verifier (packages/hexfield_eq/rust/src/tss_verify.rs — READ it
+carefully; it is the normative trusted base) requires every uniform-zone
+(defender/universal) node of a WIN certificate to explicitly cover the full
+legal reply set. The review-confirmed theorem FHW-T3-R
+(PROOF_TSS_ZONES_FHW.md, charge partition section 2.2b; review
+PROOF_TSS_ZONES_FHW_REVIEW2.md) licenses restricting defender enumeration
+to a computed zone on the D22/RC/WC annotated class — but the certificate
+grammar has no evidence fields for the annotations, so zone-restricted
+certificates are currently unrepresentable and unverifiable. R-G2-IMPL's
+OBSTRUCTIONS analysis is at
+E:\Hexo-BotTrainer-hexgt\.claude\worktrees\group2-zones\.codex-group2-next\OBSTRUCTIONS.md
+(read-only). Precedent: the P0-P3 zone contract extension (docs/
+PLAN_TSS_SOLVER_UPGRADES.md history) — that extension required
+re-verification of pre-extension certificates.
+
+## Deliverable: DESIGN_VERIFIER_FHW_EXTENSION.md (worktree root, new file)
+
+A build-ready design for extending the verifier contract, containing:
+
+1. **Grammar extension:** exact new certificate fields for D22/RC/WC
+   evidence (annotations, zone description or its recomputation seed,
+   digests binding evidence to the node), cert version bump (v2 -> v3),
+   backward compatibility (v2 certs verify unchanged).
+2. **Acceptance rule, stated precisely:** at an annotated universal node,
+   coverage of the computed zone + verifier-side validation of ALL FIVE
+   mandatory guards (touched guard, N-touch, direct 1+q<6, WC, N-virgin)
+   + annotation validity ==> full-coverage acceptance, justified by
+   FHW-T3-R. FAIL-CLOSED everywhere: any guard/annotation failure means
+   the node must revert to explicit full coverage or the cert is rejected.
+   The verifier RECOMPUTES the zone and guards itself — it never trusts
+   finder-supplied sets beyond using them as hints.
+3. **Soundness argument:** reduce the rule to FHW-T3-R + G2-Z1 with exact
+   theorem-statement citations; enumerate every new trust assumption; show
+   the extension cannot weaken verification of any v2/v1 certificate.
+4. **Threat model:** how a buggy or adversarial finder could try to abuse
+   the extension; why each attempt is caught (fail-closed analysis);
+   mutation-test plan (deliberately broken certs that MUST be rejected —
+   include the R-Z10 counterexample trace as a mandatory rejection test).
+5. **Re-verification protocol:** how existing minted certificates get
+   re-verified under the extended contract (P0-P3 precedent), and the
+   consistency argument for mixed v2/v3 stores.
+6. **Implementation plan:** files, structs, test list, estimated scope;
+   what the shadow lane's recorded evidence provides directly.
+7. **PRE-REGISTERED PROMOTION BAR (propose, owner-adjustable):** explicit
+   thresholds the shadow measurements must clear before ANY verifier code
+   is written — e.g. wall-weighted coverage of unforced AND nodes AND a
+   counterfactual-savings floor as % of official-profile solve wall, plus
+   kill criteria. Justify your proposed numbers from the design's costs
+   (implementation + re-verification + permanent trusted-base surface).
+
+Owner rulings that bind this design: the strict verifier is never weakened;
+this document does NOT authorize implementation — verifier code is written
+only after the owner accepts the design AND the shadow numbers clear the
+registered bar.
