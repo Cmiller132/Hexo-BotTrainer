@@ -20,7 +20,7 @@ record must carry this authority digest plus the digest of
 
 | reviewed bar / defect | R-Z11 disposition | binding resolution |
 |---|---|---|
-| FHW-T3 selector | **BUILD-READY** | Use repaired FHW-T3-R and `kappa_cut^*`; an all-empty direct fill pays one and requires `1+q<6`. Authority pin now repository-portable (R-Z11-REV erratum 3): `docs/PROOF_TSS_DEFENDER_ZONES.md` @ claude/consolidate-main `148536cd`, SHA-256 `39197460...064B`. |
+| FHW-T3 selector | **BUILD-READY** | Use repaired FHW-T3-R and `kappa_cut^*`; an all-empty direct fill pays one and requires `1+q<6`. Authority pin now repository-portable (R-Z11-REV erratum 3): `docs/PROOF_TSS_DEFENDER_ZONES.md` @ claude/consolidate-main `6dc08d7a`, SHA-256 `39197460...064B`. |
 | finite matched FHW clock ratio | **BUILD-READY** | Use the canonical finite `I_FHW` index in section 6.5; old/new values share exactly the same keys. |
 | matched net-zone index `J` | **BUILD-READY** | Use `J_zone` in section 6.5, bound to one frozen certificate, node, role set, summary, and child-plan digest; any unmatched key fails the comparison. |
 | H1152 population prevalence | **DEAD** | H1152 is a deterministic regression/materiality benchmark only. No population prevalence or population-weighted aggregate may be inferred from it. |

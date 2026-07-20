@@ -33,7 +33,7 @@ The controlling read-only normative source for this repair is
 `39197460D068CE5442BA0AFFC687F1408DF3F28EEEB26C4DD7192B87A202064B`.
 This authority is repository-committed (R-Z11-REV erratum 3, portable
 pin): path `docs/PROOF_TSS_DEFENDER_ZONES.md` on branch
-`claude/consolidate-main`, commit `148536cd`, pushed to origin; the SHA-256
+`claude/consolidate-main`, commit `6dc08d7a`, pushed to origin; the SHA-256
 above binds that exact blob on any machine.
 The 899-line local `docs/PROOF_TSS_DEFENDER_ZONES.md` was neither used as
 authority nor edited. For R-Z11 this paragraph supersedes section 0's
