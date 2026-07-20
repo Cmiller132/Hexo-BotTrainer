@@ -310,10 +310,35 @@ biases where compute goes — soundness-neutral by contract rule 7.
 - **V0 — engine port** (§3 scope decision first). Acceptance: the frozen
   compact-h16 regression certificate verifies (R-FIX1 check); cargo +
   pytest suites green; flag-off golden digest bit-identical.
-- **V1 — offline soak at ep90.** Solve + verify + log ungated on a
-  measured slice, consume nothing: per-solve wall distributions per
-  horizon arm (h16-flat / h16→h32 ladder / unbounded+cap), §6 features
-  and flip outcomes, §8 baselines, shadow-absorption.
+- **V1 — enriched offline soak at ep90** (owner 07-20: maximum useful
+  information). Solve + verify + log ungated on a measured slice,
+  consume nothing. Arms: h16-flat / h16→h32 ladder / unbounded+cap,
+  each ± `tss_zone`. Collect:
+  - **Yield & polarity:** WIN-goal at every leaf; dual-seat
+    (defender-goal LOSS) on a 1-in-N paired subsample — WIN and LOSS
+    counts per arm, plus LOSS-side cost (no census early-out; feeds
+    §10.4). Paired narrow-vs-wide on identical leaf sets → verdict
+    superiority table (wide-only / narrow-only / both / neither).
+  - **Depth:** certificate-depth and forced-chain histograms per arm;
+    `horizon_cut` / `horizon_cut_tall` / tall-pass conversion rate;
+    `deep_kb_death`; deepest verified win; yields by game-phase
+    (stone-count band).
+  - **MCTS impact:** would-it-flip rate (backup sign vs ep90 net eval;
+    root-move changes); net-vs-proof calibration (net value
+    distribution on proven-WIN/proven-LOSS leaves — sign-disagreement
+    = tactical-headroom measure); §8 internalization BASELINE (prior
+    mass + rank of certificate move at proven roots); eval-elision
+    refund count + shadow absorption (select-phase wall) + pos/s
+    delta.
+  - **Engine economics:** per-solve wall p50/p90/p99 quiet-vs-hot per
+    arm; nodes/solve; census-gate interior dismissal rate; TT/memo/
+    fragment reuse; park/async health under soak load.
+  - **Tactical anchors:** MCTS+solver plays the 19-position forcing
+    corpus + spare corpus at move-time budgets (finds the certified
+    win? time-to-verdict) — ties trainer strength to the campaign's
+    puzzle gate. `zone_nodes` must go nonzero under the ladder
+    (zones were inert only at flat +12) — measure the zone delta.
+  - Raws + SHA manifest; `deep_verify_failed==0` MUST throughout.
 - **V2 — fixed-budget h2h at ep90:** new engine + chosen horizon config
   vs the current narrow engine, matched budget, pentanomial driver;
   plus a `tss_zone=true` arm (the horizon ladder makes zones live where
