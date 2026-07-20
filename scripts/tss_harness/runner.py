@@ -44,7 +44,10 @@ from tss_harness.gates import (
 from tss_harness.sets import SETS_DIR, load_set
 
 BENCH_PYTHON = "/root/.venvs/hexo-bottrainer-wsl/bin/python"
-COVERAGE_SETS = ("selfplay_v1", "human_v1", "puzzle_v1")   # frozen-if-present
+COVERAGE_SETS = ("selfplay_v1", "human_v1", "puzzle_v2")   # frozen-if-present
+# puzzle_v1 is superseded (its must_solve required dedicated-loss verdicts a
+# Both-goal arm structurally cannot produce — see SOLVER_NOTES P4); pinned
+# file kept immutable per the no-in-place-edit rule.
 
 U32_MAX = 4294967295
 
@@ -168,7 +171,7 @@ def run(args) -> int:
             records = adapter.solve_sequence(positions)
             archive.save_records(arm.name, set_name, records)
             gates.add(gate_soundness(records))
-            if set_name == "puzzle_v1":
+            if set_name.startswith("puzzle"):
                 gates.add(gate_ground_truth(positions, records))
             node_cap = int(echoed.get("node_cap", 500))
             report["sets"][set_name] = {

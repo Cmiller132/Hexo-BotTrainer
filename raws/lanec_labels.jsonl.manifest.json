@@ -1,0 +1,31 @@
+{
+  "atlas_sample_seed": 20260720,
+  "atlas_source": "/mnt/e/Hexo-BotTrainer-hexgt/.claude/worktrees/opening-atlas/atlas-web/data/atlas.json",
+  "caps": {
+    "base": 20000,
+    "grind": 50000
+  },
+  "engine_manifest": {
+    "cert_version": 2,
+    "env": {
+      "TSS_INTERIOR_CENSUS_GATE": null,
+      "TSS_K_REPLY_CONSUME": null,
+      "TSS_K_REPLY_SHADOW": null,
+      "TSS_SHARED_FRAGMENTS": null
+    },
+    "fragment_store_cap_bytes": 0,
+    "interior_census_gate": true,
+    "k_reply_consume": false,
+    "lazy_frontier": true,
+    "node_cap": 20000,
+    "quiet_turn_or_edges": "off",
+    "ranked_unforced_defender_zone": "off",
+    "semantic_horizon": 4294967295,
+    "shared_fragments_enabled": false,
+    "tt_bytes_cap": 262144,
+    "tt_enabled": true,
+    "vcf_pair_complete": true
+  },
+  "git_rev": "",
+  "protocol": "two_pass_win_then_loss_full_budget"
+}

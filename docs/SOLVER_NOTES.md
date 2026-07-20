@@ -146,11 +146,18 @@ Consequences:
   per-solve wall. Owner caution: must not weaken deep/critical solves — so
   run the A/B at cap 500 AND at a raised cap to measure TT value as f(cap)
   before touching anything. Needs cargo lane. OPEN-PROBE.
-- **P2 Fail-fast / deadline design** — precondition for any A5-style cut in
-  the unbounded profile (§4). Quantify first: instrument which deadline
-  source (board-fill, pattern reach) would have applied on the 248 grinds.
-  Analysis can start from raws + a probe build. OPEN-PROBE (owner: worth
-  quantifying, temper expectations).
+- **P2 Fail-fast / deadline design — grind anatomy MEASURED (Lane C
+  2026-07-20, 50k-node two-pass on all 248 grinds, 151s wall):** the grind
+  class splits three ways — **57 (23%) are provable WINS** (p50 1,721
+  nodes, p90 10,852: most need only ~4x the production cap), **96 (39%)
+  width-exhaust** (the wide proof space empties at p50 1,963 nodes — they
+  self-terminate just past cap 500, so the fail-fast prize for them is the
+  gap between 500 and their exhaustion point, not the full park window),
+  and **95 (38%) still cap-bound at 50k** (TT-saturation suspect at the
+  256KiB harness TT — big-TT cargo lane revisits). Implication: a cap-2000
+  production raise would convert roughly half the crackable grinds;
+  deadline-style cuts only pay on the 95 deep tail. OPEN-PROBE, now
+  data-driven.
 - **P3 Warmth** — MEASURED + CLOSED at cap 500 (2026-07-20, full 6,510-solve
   paired rerun, raws/soak_warmth_frag_s{0,1}.jsonl vs cold control):
   mechanism WORKS (35 positions saved nodes; 1,281 nodes saved in the
@@ -178,6 +185,18 @@ Consequences:
   16–22µs) then win. Soundness: loss = opponent-win proof under restricted
   width = pure strengthening, verifier-checked; only NO-results are
   width-unsound. OPEN — first-class harness campaign arm.
+  **First campaign ran 2026-07-20 (quick tiers, human sample n=338, paired
+  vs anchor):** cap ladder under Both — 1000/2000/4000 give W 50/54/54,
+  L stuck at 15 at EVERY cap (dual starved regardless of budget, as
+  predicted); two_pass@500 = 48W+42L (p=1.5e-08), two_pass@2000 =
+  54W+44L (p=5.8e-11, +56% decided vs anchor). Economics (nodes/decided):
+  **two_pass@500 = 215, BETTER than the anchor's 243** — loss passes on
+  unknowns are cheap and yield; cap raises cost 315-611 nodes/decision.
+  Ranking: two_pass@500 strictly dominates every both-cap arm; cap 2000 is
+  a second-order add-on. Production adoption of two_pass = a leaf-hook
+  protocol change (Rust; the P4 build item). Ground-truth scale of the
+  miss: the production-parity arm failed **70 cheap certified atlas
+  losses** (113–387 dedicated-loss nodes) in the puzzle dev split.
 - **P5 Solver-internal efficiency** — move ordering / pruning inside wide-pn
   so the same 500 nodes prove more. No specific lever identified yet; the
   win-vs-grind contrast (hot 45.5% vs 6%, threats) suggests ordering signal

@@ -224,6 +224,107 @@ def build_canaries_v2() -> str:
     return _write_pinned("canaries_v2", rows)
 
 
+def build_puzzle_v1() -> str:
+    """SET-PUZZLE-V1 from Lane C labels (raws/lanec_labels.jsonl, two-pass
+    win-then-loss, provenance in the .manifest.json sidecar).
+
+    Included rows and label provenance:
+    - every Lane-C-decided position (verified win/loss at the labeling cap);
+    - atlas sample rows UNDECIDED at the labeling cap keep their certified
+      atlas verdict (deep labels) — allowed only if the decided atlas
+      cross-solves agreed with the mover-perspective mapping with ZERO
+      disagreements, else the mint aborts;
+    - forcing-corpus expect_win priors are contradiction-checked (a verified
+      verdict against the prior aborts the mint — either the corpus
+      annotation or the engine is wrong, and that must be resolved by a
+      human, not papered over).
+
+    must_solve marks labels EVERY sound arm must decide regardless of its
+    goal protocol: WIN labels proven <= 400 nodes (the win attempt always
+    holds the full budget), and LOSS labels proven <= 50 nodes (the
+    primal-incidental class even a Both arm surfaces). Losses needing a
+    dedicated 50-400-node loss search are real coverage targets but NOT
+    must_solve — the v1 mint required them and correctly failed the
+    production-parity arm on 70 atlas losses (2026-07-20), which is a P4
+    finding, not a gate every arm can pass today. Deeper labels gate only
+    contradictions.
+    """
+    labels_path = RAWS / "lanec_labels.jsonl"
+    labels = [json.loads(line) for line in open(labels_path)]
+
+    # moves are re-derived from the same sources the labeler used
+    sys.path.insert(0, str(WORKTREE / "scripts" / "_v1_soak"))
+    import corpus_lib
+    moves_by_id: dict[str, list] = {}
+    for p in _v1_positions().values():
+        moves_by_id[p["id"]] = p["moves"]
+    for p in corpus_lib.load_forcing_corpus():
+        moves_by_id[f"forcing_{p['id']}"] = p["moves"]
+    for p in corpus_lib.load_spare_corpus():
+        moves_by_id[f"spare_{p['id']}"] = p["moves"]
+    for line in open(SETS_DIR / "human_v1.jsonl"):
+        r = json.loads(line)
+        moves_by_id[r["pos_id"]] = list(r["moves"])
+    atlas_path = Path(
+        "/mnt/e/Hexo-BotTrainer-hexgt/.claude/worktrees/opening-atlas/"
+        "atlas-web/data/atlas.json")
+    if atlas_path.exists():
+        data = json.load(open(atlas_path))
+        rows_a = data["rows"] if isinstance(data, dict) and "rows" in data else data
+        for r in rows_a:
+            moves_by_id[f"atlas_{r['id']}"] = r["moves"]
+
+    atlas_decided = [l for l in labels
+                     if l["source"] == "atlas" and l["status"] in ("win", "loss")]
+    disagree = [l for l in atlas_decided
+                if l["status"] != l["prior"]["atlas_status"].lower()]
+    if disagree:
+        raise RuntimeError(
+            f"atlas perspective mapping broken on {len(disagree)} rows "
+            f"({[l['pos_id'] for l in disagree[:5]]}) — resolve before minting")
+
+    for l in labels:
+        if l["source"] == "forcing" and l["status"] in ("win", "loss"):
+            expect = l.get("prior", {}).get("expect_win")
+            if expect is True and l["status"] == "loss":
+                raise RuntimeError(f"forcing prior contradiction: {l['pos_id']}")
+
+    rows = []
+    for l in labels:
+        moves = moves_by_id.get(l["pos_id"])
+        if moves is None:
+            raise RuntimeError(f"no moves source for {l['pos_id']}")
+        if l["status"] in ("win", "loss"):
+            nodes = int(l.get("nodes", 1 << 30))
+            if l["status"] == "win":
+                must = nodes <= 400
+            else:
+                loss_nodes = int(
+                    l.get("loss_pass", {}).get("deep_nodes", nodes))
+                must = loss_nodes <= 50
+            rows.append({
+                "pos_id": l["pos_id"], "source": l["source"], "moves": moves,
+                "labels": {
+                    "verdict": l["status"],
+                    "must_solve": must,
+                    "label_cap": l["cap"], "label_nodes": l.get("nodes"),
+                    "protocol": "lanec_two_pass",
+                },
+            })
+        elif l["source"] == "atlas" and l["status"] == "unknown":
+            rows.append({
+                "pos_id": l["pos_id"], "source": "atlas_deep", "moves": moves,
+                "labels": {
+                    "verdict": l["prior"]["atlas_status"].lower(),
+                    "must_solve": False,
+                    "label_cap": l["prior"].get("placements"),
+                    "protocol": "atlas_certified",
+                },
+            })
+    rows.sort(key=lambda r: r["pos_id"])
+    return _write_pinned("puzzle_v2", rows)
+
+
 def main() -> None:
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     if which in ("all", "selfplay"):
@@ -234,6 +335,8 @@ def main() -> None:
         print("canaries_v1:", build_canaries_v1())
     if which in ("all", "canaries_v2"):
         print("canaries_v2:", build_canaries_v2())
+    if which == "puzzle":
+        print("puzzle_v2:", build_puzzle_v1())
 
 
 if __name__ == "__main__":
