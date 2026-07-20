@@ -241,6 +241,16 @@ Consequences:
   Implication: some fraction of the 96 width-exhausted grinds may be
   true wins too — the width-completeness study (owner passed earlier)
   now has hard evidence instead of a hypothesis.
+- **Promotion package COMPLETE (same-binary paired benches, order .so):**
+  cap500+dual_pass = 416.5 moves/min, 19% park bail, window shows
+  4,714 W + **5,337 L** (losses OUTNUMBER wins at production — the loss
+  stream the engine never had). cap2000+dual_pass = 346.25 (−16.9%),
+  park bail **97.6%** (max wait 5.1s): at cap 2000 the solver stops
+  steering play in the 150ms window and becomes a background labeler.
+  **RECOMMENDATION: production flip = cap 500 + tss_solver_dual_pass=true
+  (free, +288 dev losses, live loss stream); cap 2000 = OFFLINE/labeling
+  operating point only. The in-game deep-solve lever is now the park
+  envelope (150ms window sweep), not the cap.**
 - **Batch-order dependence: MEASURED ZERO** (human dev n=2,185, forward
   vs reversed batch at cap 500: 0 verdict changes, 0 contradictions).
   The documented TT-carryover caveat affects node counts at most, not
