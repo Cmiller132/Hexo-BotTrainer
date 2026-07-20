@@ -63,11 +63,16 @@ def _write_pinned(name: str, rows: list[dict]) -> str:
         raise RuntimeError(
             f"{path} exists — sets are never edited in place; bump the version"
         )
-    with open(path, "w") as fh:
+    # newline="\n" always: the pin hashes bytes, so line endings must be
+    # platform-independent (a CRLF-written file breaks the pin after git's
+    # LF normalization — caught at first mint, 2026-07-20).
+    with open(path, "w", newline="\n") as fh:
         for row in rows:
             fh.write(json.dumps(row, sort_keys=True) + "\n")
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    (SETS_DIR / f"{name}.sha256").write_text(f"{digest}  {name}.jsonl\n")
+    (SETS_DIR / f"{name}.sha256").write_text(
+        f"{digest}  {name}.jsonl\n", newline="\n"
+    )
     return digest
 
 
