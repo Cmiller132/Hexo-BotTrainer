@@ -42,10 +42,12 @@ import json
 import os
 import random
 import re
+import stat as stat_module
 import statistics
 import tempfile
 import zlib
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import formatdate
 from http import HTTPStatus
@@ -130,44 +132,93 @@ GZIP_MIN_BYTES = 600
 # serves index.html with no-store and app.js/styles.css with no-cache (see the
 # cache-policy comment there), so this constant no longer feeds any header.
 STATIC_MAX_AGE_SECONDS = 300
-# The training-run/list scans walk the run tree and open many .hxr files. The
-# history screen re-polls every 15s, so memoize the built payload briefly to bound
-# that work to at most once per interval regardless of poll/client count.
+# The history screen re-polls every 15s. This short cache is only a stat
+# throttle; parsed files and immutable histories are keyed by individual FILE
+# stats below, so expiry does not imply a full re-read.
 TRAINING_CACHE_TTL_SECONDS = 3.0
 # /api/training/live is the History screen's fast poll tier (~2.5s per client).
 # Its payload is only a handful of json/stat reads, but multiple open tabs would
 # multiply them; a ~1s micro-cache bounds the disk work to once per second per
 # run while staying far fresher than the 3s full-payload cache.
 TRAINING_LIVE_CACHE_TTL_SECONDS = 1.0
-# /api/training/epochs scans the run's diagnostics dir (a few hundred small
-# json files) once per request and merges the selfplay/select/training/eval
-# telemetry into one row per epoch. The game-history epoch strip re-polls with
-# the 15s screen refresh; cache the built payload by the diagnostics dir's
-# newest mtime so an unchanged run costs one dict lookup and a churning run
-# (a fresh epoch file just landed) rebuilds immediately.
+# /api/training/epochs merges selfplay/select/training/eval telemetry into one
+# row per epoch. Its short TTL likewise throttles file-stat checks; directory
+# mtimes are not trusted (notably unreliable on WSL drvfs).
 TRAINING_EPOCHS_CACHE_TTL_SECONDS = 3.0
 
 _static_lock = Lock()
 # name -> (mtime, (raw_bytes, gzipped_bytes, etag, last_modified, content_type))
 _static_cache: dict[str, tuple[float, tuple[bytes, bytes, str, str, str]]] = {}
-_training_cache_lock = Lock()
+_training_cache_lock = RLock()
 _training_run_cache: dict[str, tuple[float, dict[str, object]]] = {}
 _training_runs_cache: list[tuple[float, dict[str, object]]] = []
 # run name -> (monotonic, payload) for /api/training/live (micro-cache, ~1s TTL)
 _training_live_cache: dict[str, tuple[float, dict[str, object]]] = {}
-# run name -> (diagnostics-dir mtime, payload) for /api/training/epochs. Keyed on
-# the directory mtime (not a clock TTL) so it invalidates the instant a new
-# per-epoch file lands and is otherwise a free rescan-skip.
+# run name -> (monotonic, payload) for /api/training/epochs. The short TTL only
+# throttles stat calls; _training_epochs itself uses file-stat keyed parsed data.
 _training_epochs_cache: dict[str, tuple[float, dict[str, object]]] = {}
 _hxr_history_cache: dict[str, tuple[int, int, list[dict[str, object]]]] = {}
 _hxr_count_cache: dict[str, tuple[int, int, int]] = {}
-# samples/epoch_NNNNNN dir -> (dir mtime_ns, {game_key: {"seeded": True, "seed_ply": N}})
+# samples/epoch_NNNNNN dir -> (last scan monotonic, sidecar scandir fingerprint,
+# frozen, {game_key: {"seeded": True, "seed_ply": N}})
 # for the blunder-seeded-game sidecar join (see _seed_provenance_by_game_key).
-_seed_sidecar_cache: dict[str, tuple[int, dict[str, dict[str, object]]]] = {}
+_seed_sidecar_cache: dict[
+    str,
+    tuple[float, tuple[tuple[str, int, int], ...], bool, dict[str, dict[str, object]]],
+] = {}
+# JSON path + encoding -> (mtime_ns, size, parsed payload). Per-epoch files are
+# immutable after their atomic rename; mutable live/manifest files invalidate on
+# their own file stat. Directory mtimes are deliberately never part of a key.
+_json_file_cache: dict[tuple[str, str], tuple[int, int, object]] = {}
+# JSONL path -> (mtime_ns, size, guarded head bytes, parsed records, pending
+# incomplete/corrupt suffix). Growing files are resumed from the prior byte
+# offset; truncation/replacement falls back to a complete parse.
+_jsonl_file_cache: dict[str, tuple[int, int, bytes, list[object], bytes]] = {}
+# Binary tail path + byte limit -> (mtime_ns, size, bytes). Used by supervisor.log.
+_file_tail_cache: dict[tuple[str, int], tuple[int, int, bytes]] = {}
+# Atomically published per-epoch JSON is frozen on its first successful parse.
+# Entries are keyed by path alone and never statted again; the stat tuple
+# preserves exact `modified` output fields.
+_frozen_json_file_cache: dict[tuple[str, str], tuple[object, int, int]] = {}
+_frozen_file_stat_cache: dict[str, os.stat_result] = {}
+# Mutable enumerated artifacts (principally the newest epoch's growing HXR)
+# share the same short stat window across history and artifact-page scans.
+# Completed/write-once files graduate to _frozen_file_stat_cache and are never
+# statted again for the lifetime of the process.
+_live_artifact_stat_cache: dict[str, tuple[float, os.stat_result]] = {}
+# (absolute run path, history root name) -> (last scan, files). Keeping this per
+# root lets an ``all`` history scan and the run-status ``selfplay`` scan reuse
+# one directory walk and, for the live epoch, one set of metadata calls.
+_history_artifact_scan_cache: dict[
+    tuple[str, str], tuple[float, list[tuple[Path, os.stat_result]]]
+] = {}
+# (aggregate kind, absolute run path) -> (constant-stat composite fingerprint,
+# derived value). The name-set portion comes from one throttled scandir pass.
+_training_derived_cache: dict[tuple[str, str], tuple[object, object]] = {}
+# Absolute run path -> (monotonic timestamp, one-pass diagnostics/checkpoint
+# inventory). This is also the stat throttle for direct /training/epoch calls.
+_epoch_inventory_cache: dict[str, tuple[float, "_EpochInventory"]] = {}
+# Per-key rebuild locks provide double-checked, bounded serialization without
+# holding _training_cache_lock while builders call back into the file caches.
+_training_build_locks: dict[str, Lock] = {}
+
+
+@dataclass(frozen=True)
+class _EpochInventory:
+    diagnostic_names: tuple[str, ...]
+    diagnostic_stats: dict[str, tuple[int, int]]
+    checkpoint_names: tuple[str, ...]
+    checkpoint_stats: dict[str, tuple[int, int]]
+    max_epoch: int | None
 
 
 def _strong_etag(data: bytes) -> str:
     return '"' + hashlib.sha1(data).hexdigest()[:20] + '"'
+
+
+def _training_build_lock(key: str) -> Lock:
+    with _training_cache_lock:
+        return _training_build_locks.setdefault(key, Lock())
 
 
 def _static_entry(name: str) -> tuple[bytes, bytes, str, str, str] | None:
@@ -214,10 +265,16 @@ def _training_run_cached(name: str) -> dict[str, object]:
         hit = _training_run_cache.get(name)
         if hit is not None and now - hit[0] < TRAINING_CACHE_TTL_SECONDS:
             return hit[1]
-    payload = _training_run(name)  # heavy scan, kept outside the lock
-    with _training_cache_lock:
-        _training_run_cache[name] = (monotonic(), payload)
-    return payload
+    with _training_build_lock(f"run:{name}"):
+        now = monotonic()
+        with _training_cache_lock:
+            hit = _training_run_cache.get(name)
+            if hit is not None and now - hit[0] < TRAINING_CACHE_TTL_SECONDS:
+                return hit[1]
+        payload = _training_run(name)
+        with _training_cache_lock:
+            _training_run_cache[name] = (monotonic(), payload)
+        return payload
 
 
 def _training_runs_cached() -> dict[str, object]:
@@ -225,10 +282,15 @@ def _training_runs_cached() -> dict[str, object]:
     with _training_cache_lock:
         if _training_runs_cache and now - _training_runs_cache[0][0] < TRAINING_CACHE_TTL_SECONDS:
             return _training_runs_cache[0][1]
-    payload = _training_runs()
-    with _training_cache_lock:
-        _training_runs_cache[:] = [(monotonic(), payload)]
-    return payload
+    with _training_build_lock("runs"):
+        now = monotonic()
+        with _training_cache_lock:
+            if _training_runs_cache and now - _training_runs_cache[0][0] < TRAINING_CACHE_TTL_SECONDS:
+                return _training_runs_cache[0][1]
+        payload = _training_runs()
+        with _training_cache_lock:
+            _training_runs_cache[:] = [(monotonic(), payload)]
+        return payload
 
 
 def _training_live_cached(name: str) -> dict[str, object]:
@@ -249,41 +311,52 @@ def _training_live_cached(name: str) -> dict[str, object]:
         hit = _training_live_cache.get(name)
         if hit is not None and now - hit[0] < TRAINING_LIVE_CACHE_TTL_SECONDS:
             return hit[1]
-    run_dir = _resolve_run_dir(name)
-    if run_dir is None:
-        raise ValueError("Unknown training run")
-    payload: dict[str, object] = {
-        "run": run_dir.name,
-        "status": _training_live_status(run_dir),
-        "ts": wall_clock(),
-    }
-    with _training_cache_lock:
-        _training_live_cache[name] = (monotonic(), payload)
-    return payload
+    with _training_build_lock(f"live:{name}"):
+        now = monotonic()
+        with _training_cache_lock:
+            hit = _training_live_cache.get(name)
+            if hit is not None and now - hit[0] < TRAINING_LIVE_CACHE_TTL_SECONDS:
+                return hit[1]
+        run_dir = _resolve_run_dir(name)
+        if run_dir is None:
+            raise ValueError("Unknown training run")
+        payload: dict[str, object] = {
+            "run": run_dir.name,
+            "status": _training_live_status(run_dir),
+            "ts": wall_clock(),
+        }
+        with _training_cache_lock:
+            _training_live_cache[name] = (monotonic(), payload)
+        return payload
 
 
 def _training_epochs_cached(name: str) -> dict[str, object]:
     """Per-epoch telemetry payload for ``GET /api/training/epochs?run=`` (the
     game-history epoch strip / inspector detail).
 
-    Cached by the diagnostics dir's newest mtime rather than a clock TTL: an
-    unchanged run replays the built payload without touching disk, and a run
-    that just wrote a new epoch file rebuilds on the very next request. Unknown
-    runs raise ValueError (-> 400 ``{"error": ...}``) and are never cached."""
+    A 3s clock TTL avoids even stat calls between polls. On expiry, parsed inputs
+    invalidate by their own ``(mtime_ns, size)`` keys; directory mtimes are not
+    used. Unknown runs raise ValueError (-> 400 ``{"error": ...}``) and are
+    never cached."""
 
     run_dir = _resolve_run_dir(name)
     if run_dir is None:
         raise ValueError("Unknown training run")
-    stat = _safe_stat(run_dir / "diagnostics")
-    mtime = stat.st_mtime if stat is not None else 0.0
+    now = monotonic()
     with _training_cache_lock:
         hit = _training_epochs_cache.get(run_dir.name)
-        if hit is not None and hit[0] == mtime:
+        if hit is not None and now - hit[0] < TRAINING_EPOCHS_CACHE_TTL_SECONDS:
             return hit[1]
-    payload = _training_epochs(run_dir)  # heavy scan, kept outside the lock
-    with _training_cache_lock:
-        _training_epochs_cache[run_dir.name] = (mtime, payload)
-    return payload
+    with _training_build_lock(f"epochs:{run_dir}"):
+        now = monotonic()
+        with _training_cache_lock:
+            hit = _training_epochs_cache.get(run_dir.name)
+            if hit is not None and now - hit[0] < TRAINING_EPOCHS_CACHE_TTL_SECONDS:
+                return hit[1]
+        payload = _training_epochs(run_dir)
+        with _training_cache_lock:
+            _training_epochs_cache[run_dir.name] = (monotonic(), payload)
+        return payload
 
 
 # ---------------------------------------------------------------------------
@@ -1569,8 +1642,8 @@ class HexoPlayHandler(BaseHTTPRequestHandler):
 
 
 # ---------------------------------------------------------------------------
-# History screen: training-run discovery + run overview (the slow scan tier,
-# memoized for TRAINING_CACHE_TTL_SECONDS by the *_cached wrappers up top).
+# History screen: training-run discovery + run overview (incremental file-stat
+# caches behind the short stat-throttle wrappers up top).
 # Everything reads run dirs under cwd/runs (production cwd = the run mount);
 # the file formats are produced by hexo_train + the model packages.
 # ---------------------------------------------------------------------------
@@ -1616,32 +1689,41 @@ def _training_runs() -> dict[str, object]:
 
     runs_by_name: dict[str, dict[str, object]] = {}
     for root in _training_roots():
-        if not root.exists():
+        try:
+            entries = os.scandir(root)
+        except OSError:
             continue
-        for path in sorted(
-            root.iterdir(),
-            key=lambda item: (lambda s: s.st_mtime if s is not None else 0)(_safe_stat(item)),
-            reverse=True,
-        ):
-            if not path.is_dir():
+        candidates: list[tuple[Path, os.stat_result]] = []
+        with entries:
+            for entry in entries:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        candidates.append((Path(entry.path), entry.stat(follow_symlinks=False)))
+                except OSError:
+                    continue
+        for path, stat in sorted(candidates, key=lambda item: item[1].st_mtime, reverse=True):
+            try:
+                child_entries = os.scandir(path)
+            except OSError:
                 continue
+            with child_entries:
+                children = {entry.name for entry in child_entries}
             # Explicit opt-out: a run dir containing a `.dashboard_hidden` marker
             # file is skipped from the run list. Used to hide a stopped/erroneous
             # run that is kept on disk for its checkpoints/anchors but should not
             # appear in the UI (reversible: delete the marker to unhide).
-            if (path / ".dashboard_hidden").exists():
+            if ".dashboard_hidden" in children:
                 continue
             diagnostics = path / "diagnostics"
             selfplay = path / "selfplay"
-            if not diagnostics.exists() and not selfplay.exists():
+            if "diagnostics" not in children and "selfplay" not in children:
                 continue
-            stat = _safe_stat(path)
             current = {
                 "name": path.name,
                 "path": str(path),
                 "diagnostics": str(diagnostics),
                 "selfplay": str(selfplay),
-                "modified": stat.st_mtime if stat is not None else 0,
+                "modified": stat.st_mtime,
             }
             existing = runs_by_name.get(path.name)
             if existing is None or float(current["modified"]) > float(existing["modified"]):
@@ -1719,11 +1801,9 @@ def _training_run(name: str) -> dict[str, object]:
 def _training_epoch(name: str, epoch: int | None) -> dict[str, object]:
     """Single-epoch detail payload for the History screen's epoch inspector.
 
-    Deliberately uncached: the client fetches once per inspector open and caches
-    per (run, epoch), and the expensive part (_epoch_history's .hxr backfill) is
-    already memoized by mtime/size via _hxr_base_rows. Do not wire this into a
-    polling loop. A known run with no data at ``epoch`` is NOT an error -- the
-    envelope comes back with all data fields None."""
+    The envelope is assembled per request, while its parsed files and immutable
+    history aggregates are stat-keyed. A known run with no data at ``epoch`` is
+    NOT an error -- the envelope comes back with all data fields None."""
 
     if epoch is None:
         raise ValueError("epoch is required")
@@ -1731,6 +1811,7 @@ def _training_epoch(name: str, epoch: int | None) -> dict[str, object]:
     if run_dir is None:
         raise ValueError("Unknown training run")
     epoch = int(epoch)
+    inventory = _epoch_inventory(run_dir)
     history_row: dict[str, object] | None = None
     prev_row: dict[str, object] | None = None
     for row in _epoch_history(run_dir):  # ascending by epoch
@@ -1758,7 +1839,7 @@ def _training_epoch(name: str, epoch: int | None) -> dict[str, object]:
             None,
         ),
         "diagnostics": _diagnostics_by_epoch(run_dir).get(str(epoch)),
-        "selfplay_extras": _selfplay_epoch_extras(run_dir, epoch),
+        "selfplay_extras": _selfplay_epoch_extras(run_dir, epoch, inventory),
         "manifest": _manifest_model_summary(run_dir),
         "checkpoint": _epoch_checkpoint_stat(run_dir, history_row, epoch),
     }
@@ -2023,47 +2104,46 @@ def _training_epochs(run_dir: Path) -> dict[str, object]:
     empty ``epochs`` list."""
 
     prefix = _diag_prefix(run_dir)
+    inventory = _epoch_inventory(run_dir)
+    segment_names = [
+        name
+        for name in inventory.diagnostic_names
+        if name.endswith(".json")
+        and any(name.startswith(f"{prefix}.{kind}.epoch_") for kind in ("selfplay", "select", "training"))
+    ]
+    eval_names = [
+        name
+        for name in inventory.diagnostic_names
+        if name.startswith("hexfield.multistage_eval.epoch_") and name.endswith(".json")
+    ]
+    # The immutable strip invalidates on segment/eval additions or removals and
+    # on the newest two epochs' DirEntry stats. Live events/selfplay are overlaid
+    # below and have their own single-file stat caches, so they do not rebuild
+    # history.
+    fingerprint = _inventory_fingerprint(
+        run_dir,
+        inventory,
+        label="training_epochs_base",
+        diagnostic_names=segment_names + eval_names,
+    )
+    value = _cached_training_derived(
+        "training_epochs_base",
+        run_dir,
+        fingerprint,
+        lambda: _build_training_epochs_base(run_dir, inventory, prefix, segment_names),
+    )
+    base_records = value if isinstance(value, list) else []
+    records = [dict(record) for record in base_records if isinstance(record, dict)]
     diagnostics_dir = run_dir / "diagnostics"
-    selfplay: dict[int, object] = {}
-    select: dict[int, object] = {}
-    training: dict[int, object] = {}
-    if diagnostics_dir.is_dir():
-        for kind, sink in (("selfplay", selfplay), ("select", select), ("training", training)):
-            for path in sorted(diagnostics_dir.glob(f"{prefix}.{kind}.epoch_*.json")):
-                payload = _read_json_file(path)
-                epoch = _coerce_epoch(_tget(payload, "epoch"), path.name)
-                if epoch is not None:
-                    sink[epoch] = payload
-    eval_by_epoch = {
-        row.get("epoch"): row
-        for row in _multistage_eval_history(run_dir)
-        if isinstance(row.get("epoch"), int)
-    }
-
-    epochs = sorted(set(selfplay) | set(select) | set(training))
-    records: list[dict[str, object]] = []
-    for epoch in epochs:
-        records.append(
-            {
-                "epoch": epoch,
-                "selfplay": _epoch_selfplay_record(selfplay.get(epoch)),
-                "select": _epoch_select_record(select.get(epoch)),
-                "training": _epoch_training_record(training.get(epoch)),
-                "eval": _epoch_eval_record(eval_by_epoch.get(epoch)),
-            }
-        )
 
     # Provisional in-flight record: the currently-running epoch (events.jsonl)
     # has no segment files during self-play, and only some of them afterwards.
-    # Mark it (and synthesize it when wholly absent, all sub-blocks all-None)
-    # so the strip/inspector can label the epoch "in progress" instead of
-    # omitting it until the first segment lands.
     events = _stage_status_from_events(diagnostics_dir / "events.jsonl")
     current = events.get("epoch")
     if (
         isinstance(current, int)
         and str(events.get("status") or "") == "running"
-        and not (diagnostics_dir / f"epoch_{current:06d}.json").is_file()
+        and f"epoch_{current:06d}.json" not in inventory.diagnostic_names
     ):
         record = next((rec for rec in records if rec["epoch"] == current), None)
         if record is None:
@@ -2083,7 +2163,55 @@ def _training_epochs(run_dir: Path) -> dict[str, object]:
     return {"run": run_dir.name, "epochs": records}
 
 
-def _selfplay_epoch_extras(run_dir: Path, epoch: int) -> dict[str, object] | None:
+def _build_training_epochs_base(
+    run_dir: Path,
+    inventory: "_EpochInventory",
+    prefix: str,
+    segment_names: list[str],
+) -> list[dict[str, object]]:
+    """Build the frozen per-epoch strip without mutable live overlays."""
+
+    diagnostics_dir = run_dir / "diagnostics"
+    selfplay: dict[int, object] = {}
+    select: dict[int, object] = {}
+    training: dict[int, object] = {}
+    sinks = {"selfplay": selfplay, "select": select, "training": training}
+    for name in segment_names:
+        kind = next((candidate for candidate in sinks if name.startswith(f"{prefix}.{candidate}.epoch_")), None)
+        if kind is None:
+            continue
+        path = diagnostics_dir / name
+        payload = _read_epoch_json_file(path, run_dir, inventory)
+        epoch = _coerce_epoch(_tget(payload, "epoch"), path.name)
+        if epoch is not None:
+            sinks[kind][epoch] = payload
+    eval_by_epoch = {
+        row.get("epoch"): row
+        for row in _multistage_eval_history(run_dir)
+        if isinstance(row.get("epoch"), int)
+    }
+
+    epochs = sorted(set(selfplay) | set(select) | set(training))
+    records: list[dict[str, object]] = []
+    for epoch in epochs:
+        records.append(
+            {
+                "epoch": epoch,
+                "selfplay": _epoch_selfplay_record(selfplay.get(epoch)),
+                "select": _epoch_select_record(select.get(epoch)),
+                "training": _epoch_training_record(training.get(epoch)),
+                "eval": _epoch_eval_record(eval_by_epoch.get(epoch)),
+            }
+        )
+
+    return records
+
+
+def _selfplay_epoch_extras(
+    run_dir: Path,
+    epoch: int,
+    inventory: "_EpochInventory | None" = None,
+) -> dict[str, object] | None:
     """Curated subset of ``diagnostics/dense_cnn.selfplay.epoch_*.json`` for the
     epoch inspector. Curation IS the size cap: the raw file is ~120KB and carries
     memory-internals (``mcts_diagnostics``, ``scheduler_diagnostics``, the
@@ -2091,7 +2219,12 @@ def _selfplay_epoch_extras(run_dir: Path, epoch: int) -> dict[str, object] | Non
     never pass through. hexgt/hexgnn runs do not produce this file -> None."""
 
     prefix = _diag_prefix(run_dir)
-    payload = _read_json_file(run_dir / "diagnostics" / f"{prefix}.selfplay.epoch_{epoch:06d}.json")
+    path = run_dir / "diagnostics" / f"{prefix}.selfplay.epoch_{epoch:06d}.json"
+    payload = (
+        _read_epoch_json_file(path, run_dir, inventory)
+        if inventory is not None
+        else _read_json_file(path)
+    )
     if not isinstance(payload, dict):
         return None
     passthrough = (
@@ -2145,11 +2278,8 @@ def _manifest_model_summary(run_dir: Path) -> dict[str, object] | None:
     omitted -- never KeyError."""
 
     manifest_path = run_dir / "manifest.json"
-    if not manifest_path.is_file():
-        return None
-    try:
-        data = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):
+    data = _read_json_file(manifest_path, encoding="utf-8-sig")
+    if not isinstance(data, dict):
         return None
     model = data.get("model") if isinstance(data, dict) else None
     if not isinstance(model, dict):
@@ -2253,7 +2383,12 @@ def _training_history(run_name: str, artifact_path: str, record_index: int = 0) 
     # the selfplay game_id. {} for unseeded games, eval games, foreign runs,
     # and games whose sidecar is gone — the payload then omits the keys.
     run_dir = _resolve_run_dir(run_name)
-    seed_info = _seed_provenance_for_game(run_dir, record.game_id) if run_dir else {}
+    seed_by_game_id = (
+        _seed_provenance_for_game_ids(run_dir, (item.game_id for item in records))
+        if run_dir
+        else {}
+    )
+    seed_info = seed_by_game_id.get(str(record.game_id), {})
 
     payload = dashboard_state(engine.to_python_state(state))
     payload.update(
@@ -2293,7 +2428,7 @@ def _training_history(run_name: str, artifact_path: str, record_index: int = 0) 
                     "status": item.status,
                     "actions": len(item.action_ids),
                     "winner": item.winner,
-                    **(_seed_provenance_for_game(run_dir, item.game_id) if run_dir else {}),
+                    **seed_by_game_id.get(str(item.game_id), {}),
                 }
                 for index, item in enumerate(records)
             ],
@@ -2409,11 +2544,8 @@ def _debug_run_lineage(run_dir: Path) -> str | None:
     checkpoint's ``meta`` once a position is analyzed)."""
 
     manifest = run_dir / "manifest.json"
-    if not manifest.is_file():
-        return None
-    try:
-        data = json.loads(manifest.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):
+    data = _read_json_file(manifest, encoding="utf-8-sig")
+    if not isinstance(data, dict):
         return None
     name = data.get("model", {}).get("name")
     return str(name) if name else None
@@ -2453,11 +2585,11 @@ def _debug_detect_radius(run_dir: Path) -> int | None:
     if not diag.is_dir():
         return None
     try:
-        names = sorted(
+        entries = sorted(
             (
-                e.name
+                (e.name, e.stat(follow_symlinks=False))
                 for e in os.scandir(diag)
-                if e.is_file()
+                if e.is_file(follow_symlinks=False)
                 and e.name.startswith("hexfield.multistage_eval.epoch_")
                 and e.name.endswith(".json")
             ),
@@ -2465,10 +2597,14 @@ def _debug_detect_radius(run_dir: Path) -> int | None:
         )
     except OSError:
         return None
-    for name in names:
-        try:
-            data = json.loads((diag / name).read_text(encoding="utf-8-sig"))
-        except (OSError, ValueError):
+    for name, stat in entries:
+        data = _read_json_file_known_stat(
+            diag / name,
+            stat.st_mtime_ns,
+            stat.st_size,
+            encoding="utf-8-sig",
+        )
+        if not isinstance(data, dict):
             continue
         fit = data.get("ratings", {}).get("fit", {})
         if isinstance(fit, dict) and "featurize_radius" in fit:
@@ -2519,8 +2655,11 @@ def _debug_checkpoints(run_name: str) -> dict[str, object]:
                 continue
             match = _DEBUG_CKPT_EPOCH_RE.search(entry.name)
             epoch = int(match.group(1)) if match else None
-            stat = _safe_stat(Path(entry.path))
-            size = int(stat.st_size) if stat else 0
+            try:
+                stat = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            size = int(stat.st_size)
             graft: str | None = None
             if is_hexgt:
                 if epoch is not None:
@@ -2532,7 +2671,7 @@ def _debug_checkpoints(run_name: str) -> dict[str, object]:
                     "name": entry.name,
                     "epoch": epoch,
                     "size": size,
-                    "mtime": int(stat.st_mtime) if stat else 0,
+                    "mtime": int(stat.st_mtime),
                     "latest": entry.name.endswith("latest.pt"),
                     "graft": graft,
                 }
@@ -2558,20 +2697,20 @@ def _debug_games(run_name: str, source: str) -> dict[str, object]:
     def rel(p: Path) -> str:
         return p.relative_to(run_dir).as_posix()
 
-    def hxr_in(directory: Path, recurse: bool) -> list[Path]:
-        found: list[Path] = []
+    def hxr_in(directory: Path, recurse: bool) -> list[tuple[Path, os.stat_result]]:
+        found: list[tuple[Path, os.stat_result]] = []
         if not directory.is_dir():
             return found
         for entry in os.scandir(directory):
             if entry.is_file() and entry.name.endswith(".hxr"):
-                found.append(Path(entry.path))
+                found.append((Path(entry.path), entry.stat(follow_symlinks=False)))
             elif recurse and entry.is_dir():
                 for sub in os.scandir(entry.path):
                     if sub.is_file() and sub.name.endswith(".hxr"):
-                        found.append(Path(sub.path))
+                        found.append((Path(sub.path), sub.stat(follow_symlinks=False)))
         return found
 
-    files: list[Path] = []
+    files: list[tuple[Path, os.stat_result]] = []
     if source in ("selfplay", "all"):
         files += hxr_in(run_dir / "selfplay", recurse=False)
     if source in ("evaluation", "all"):
@@ -2579,14 +2718,13 @@ def _debug_games(run_name: str, source: str) -> dict[str, object]:
         files += hxr_in(run_dir / "eval", recurse=True)
 
     items = []
-    for path in files:
-        stat = _safe_stat(path)
+    for path, stat in files:
         items.append(
             {
                 "path": rel(path),
                 "name": path.name,
-                "size": int(stat.st_size) if stat else 0,
-                "mtime": int(stat.st_mtime) if stat else 0,
+                "size": int(stat.st_size),
+                "mtime": int(stat.st_mtime),
             }
         )
     items.sort(key=lambda x: str(x["path"]), reverse=True)
@@ -2934,9 +3072,8 @@ def _debug_resolve_record_npz(run_name: str, artifact_path: str, game_id: object
     for shard in candidates:
         sidecar = shard.with_suffix(".json")
         if sidecar.is_file():
-            try:
-                data = json.loads(sidecar.read_text(encoding="utf-8-sig"))
-            except (OSError, ValueError):
+            data = _read_json_file(sidecar, encoding="utf-8-sig")
+            if not isinstance(data, dict):
                 continue
             if str(data.get("game_id")) == str(game_id):
                 return shard
@@ -3158,7 +3295,8 @@ def _training_artifacts_page(
 
 
 def _training_artifacts_overview_page(run_dir: Path, *, limit: int) -> dict[str, object]:
-    paths: list[Path] = []
+    files: list[tuple[Path, os.stat_result]] = []
+    inventory = _epoch_inventory(run_dir)
 
     def add_direct(root: Path, suffixes: set[str] | frozenset[str] = ARTIFACT_SUFFIXES) -> None:
         try:
@@ -3166,8 +3304,14 @@ def _training_artifacts_overview_page(run_dir: Path, *, limit: int) -> dict[str,
         except OSError:
             return
         for entry in entries:
-            if entry.is_file() and Path(entry.name).suffix.lower() in suffixes:
-                paths.append(Path(entry.path))
+            try:
+                if entry.is_file(follow_symlinks=False) and Path(entry.name).suffix.lower() in suffixes:
+                    path = Path(entry.path)
+                    stat = _enumerated_artifact_stat(run_dir, path, entry, inventory)
+                    if stat is not None:
+                        files.append((path, stat))
+            except OSError:
+                continue
 
     def add_recent_child_dirs(
         root: Path,
@@ -3179,16 +3323,18 @@ def _training_artifacts_overview_page(run_dir: Path, *, limit: int) -> dict[str,
             entries = list(os.scandir(root))
         except OSError:
             return
-        dirs: list[tuple[float, Path]] = []
+        dirs: list[tuple[tuple[int, ...], str, Path]] = []
         for entry in entries:
             if entry.is_file() and Path(entry.name).suffix.lower() in suffixes:
-                paths.append(Path(entry.path))
+                path = Path(entry.path)
+                stat = _enumerated_artifact_stat(run_dir, path, entry, inventory)
+                if stat is not None:
+                    files.append((path, stat))
             elif entry.is_dir():
-                try:
-                    dirs.append((entry.stat().st_mtime, Path(entry.path)))
-                except OSError:
-                    continue
-        for _, directory in sorted(dirs, reverse=True)[:max_dirs]:
+                # Evaluation directory names carry epoch/game indices. Natural
+                # name order is the chronology and avoids a directory stat.
+                dirs.append((_natural_name_numbers(entry.name), entry.name, Path(entry.path)))
+        for _, _, directory in sorted(dirs, reverse=True)[:max_dirs]:
             add_direct(directory, suffixes)
 
     def add_recursive_limited(
@@ -3197,13 +3343,26 @@ def _training_artifacts_overview_page(run_dir: Path, *, limit: int) -> dict[str,
         *,
         max_files: int = 100,
     ) -> None:
-        if not root.is_dir():
-            return
-        for path in _iter_training_files(root, suffix=None):
-            if path.is_file() and path.suffix.lower() in suffixes:
-                paths.append(path)
-                if len(paths) >= max_files:
-                    return
+        stack = [root]
+        while stack and len(files) < max_files:
+            current = stack.pop()
+            try:
+                entries = list(os.scandir(current))
+            except OSError:
+                continue
+            for entry in entries:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(Path(entry.path))
+                    elif entry.is_file(follow_symlinks=False) and Path(entry.name).suffix.lower() in suffixes:
+                        path = Path(entry.path)
+                        stat = _enumerated_artifact_stat(run_dir, path, entry, inventory)
+                        if stat is not None:
+                            files.append((path, stat))
+                            if len(files) >= max_files:
+                                return
+                except OSError:
+                    continue
 
     add_direct(run_dir)
     add_direct(run_dir / "diagnostics")
@@ -3212,16 +3371,18 @@ def _training_artifacts_overview_page(run_dir: Path, *, limit: int) -> dict[str,
     add_direct(run_dir / "checkpoints")
     add_recursive_limited(run_dir / "bootstrap")
 
-    unique = {str(path.resolve()): path for path in paths}
-    paths = list(unique.values())
-    paths.sort(key=lambda item: (lambda s: s.st_mtime if s is not None else 0)(_safe_stat(item)), reverse=True)
-    selected = paths[: limit + 1]
+    # These paths all originate from absolute scandir roots. Avoid resolve(),
+    # which performs a filesystem round-trip per artifact on Windows/drvfs.
+    unique = {os.path.normcase(os.path.abspath(path)): (path, stat) for path, stat in files}
+    files = list(unique.values())
+    files.sort(key=lambda item: item[1].st_mtime, reverse=True)
+    selected = files[: limit + 1]
     return {
         "run": run_dir.name,
-        "items": [_artifact_payload(run_dir, path) for path in selected[:limit]],
+        "items": [_artifact_payload(run_dir, path, stat) for path, stat in selected[:limit]],
         "next_cursor": str(limit) if len(selected) > limit else None,
         "complete": len(selected) <= limit,
-        "scanned_files": len(paths),
+        "scanned_files": len(files),
     }
 
 
@@ -3234,29 +3395,32 @@ def _training_artifacts_page_for_run(
 ) -> dict[str, object]:
     offset = max(0, _query_int(cursor) or 0)
     wanted_kind = str(kind or "all").lower()
-    paths = [
-        path
-        for path in _iter_training_files(run_dir)
-        if path.is_file()
-        and path.suffix.lower() in ARTIFACT_SUFFIXES
+    files = [
+        (path, stat)
+        for path, stat in _iter_training_file_entries(run_dir, suffixes=ARTIFACT_SUFFIXES)
+        if path.suffix.lower() in ARTIFACT_SUFFIXES
         and (wanted_kind == "all" or path.suffix.lower().lstrip(".") == wanted_kind)
     ]
-    paths.sort(key=lambda item: (lambda s: s.st_mtime if s is not None else 0)(_safe_stat(item)), reverse=True)
-    selected = paths[offset : offset + limit + 1]
-    items = [_artifact_payload(run_dir, path) for path in selected[:limit]]
+    files.sort(key=lambda item: item[1].st_mtime, reverse=True)
+    selected = files[offset : offset + limit + 1]
+    items = [_artifact_payload(run_dir, path, stat) for path, stat in selected[:limit]]
     next_offset = offset + limit
     return {
         "run": run_dir.name,
         "items": items,
         "next_cursor": str(next_offset) if len(selected) > limit else None,
         "complete": len(selected) <= limit,
-        "scanned_files": len(paths),
+        "scanned_files": len(files),
     }
 
 
-def _artifact_payload(run_dir: Path, path: Path) -> dict[str, object]:
+def _artifact_payload(
+    run_dir: Path,
+    path: Path,
+    known_stat: os.stat_result | None = None,
+) -> dict[str, object]:
     rel = path.relative_to(run_dir).as_posix()
-    stat = _safe_stat(path)
+    stat = known_stat or _safe_stat(path)
     suffix = path.suffix.lower()
     artifact: dict[str, object] = {
         "path": rel,
@@ -3268,10 +3432,14 @@ def _artifact_payload(run_dir: Path, path: Path) -> dict[str, object]:
         "history_count": 0,
     }
     if suffix == ".json":
-        payload = _read_json_file(path)
+        payload = (
+            _read_json_file_known_stat(path, stat.st_mtime_ns, stat.st_size)
+            if stat is not None
+            else None
+        )
         artifact["summary"] = _artifact_summary(payload)
     elif suffix == ".hxr" and _is_loadable_history_path(rel) and stat is not None and stat.st_size > 0:
-        rows = _hxr_base_rows(path, run_dir)
+        rows = _hxr_base_rows(path, run_dir, stat, include_seed_provenance=False)
         history_count = len(rows)
         artifact["loadable_history"] = history_count > 0
         artifact["history_count"] = history_count
@@ -3359,10 +3527,10 @@ def _training_history_count_for_runs(
             for run_name, run_dir in run_infos
         }
 
-    for run_name, run_dir, path, _stat in _history_files_for_runs(run_infos, source=source, reverse=True):
+    for run_name, run_dir, path, stat in _history_files_for_runs(run_infos, source=source, reverse=True):
         scanned_files += 1
         if can_count_without_rows:
-            record_count = _hxr_record_count(path, run_dir)
+            record_count = _hxr_record_count(path, run_dir, stat)
             total_matches += record_count
             scanned_games += record_count
             continue
@@ -3370,6 +3538,7 @@ def _training_history_count_for_runs(
             run_name,
             run_dir,
             path,
+            known_stat=stat,
             diagnostics_cache=diagnostics_cache,
             live_status_cache=live_status_cache,
             reverse_records=False,
@@ -3466,10 +3635,10 @@ def _training_history_streaming_page(
     scanned_files = 0
     scanned_games = 0
 
-    for run_name, run_dir, path, _stat in _history_files_for_runs(run_infos, source=source, reverse=reverse):
+    for run_name, run_dir, path, stat in _history_files_for_runs(run_infos, source=source, reverse=reverse):
         scanned_files += 1
         if can_count_without_rows and has_more:
-            record_count = _hxr_record_count(path, run_dir)
+            record_count = _hxr_record_count(path, run_dir, stat)
             total_matches = (total_matches or 0) + record_count
             scanned_games += record_count
             continue
@@ -3477,6 +3646,7 @@ def _training_history_streaming_page(
             run_name,
             run_dir,
             path,
+            known_stat=stat,
             diagnostics_cache=diagnostics_cache,
             live_status_cache=live_status_cache,
             reverse_records=reverse,
@@ -3539,12 +3709,13 @@ def _collect_history_rows(
     rows: list[dict[str, object]] = []
     scanned_files = 0
     scanned_games = 0
-    for run_name, run_dir, path, _stat in _history_files_for_runs(run_infos, source=source, reverse=True):
+    for run_name, run_dir, path, stat in _history_files_for_runs(run_infos, source=source, reverse=True):
         scanned_files += 1
         file_rows = _history_rows_for_file(
             run_name,
             run_dir,
             path,
+            known_stat=stat,
             diagnostics_cache=diagnostics_cache,
             live_status_cache=live_status_cache,
             reverse_records=False,
@@ -3571,8 +3742,8 @@ def _history_files_for_runs(
             files.append((run_name, run_dir, path, stat))
     files.sort(
         key=lambda item: (
-            _epoch_from_artifact_path(item[2].relative_to(item[1]).as_posix()) or 0,
-            item[3].st_mtime,
+            _enumerated_artifact_epoch(item[2].relative_to(item[1]).as_posix()) or 0,
+            _natural_name_numbers(item[2].relative_to(item[1]).as_posix()),
             str(item[0]),
             item[2].relative_to(item[1]).as_posix(),
         ),
@@ -3595,8 +3766,17 @@ def _iter_history_artifact_files(
 
     files: list[tuple[Path, os.stat_result]] = []
     for root in roots:
-        if not root.is_dir():
-            continue
+        root_name = root.name
+        scan_key = (str(run_dir), root_name)
+        now = monotonic()
+        with _training_cache_lock:
+            hit = _history_artifact_scan_cache.get(scan_key)
+            if hit is not None and now - hit[0] < TRAINING_CACHE_TTL_SECONDS:
+                files.extend(hit[1])
+                continue
+
+        inventory = _epoch_inventory(run_dir)
+        root_files: list[tuple[Path, os.stat_result]] = []
         stack = [root]
         while stack:
             current = stack.pop()
@@ -3612,9 +3792,15 @@ def _iter_history_artifact_files(
                     if entry.is_dir(follow_symlinks=False):
                         stack.append(Path(entry.path))
                     elif entry.is_file(follow_symlinks=False) and name.endswith(".hxr"):
-                        files.append((Path(entry.path), entry.stat(follow_symlinks=False)))
+                        path = Path(entry.path)
+                        stat = _enumerated_artifact_stat(run_dir, path, entry, inventory)
+                        if stat is not None:
+                            root_files.append((path, stat))
                 except OSError:
                     continue
+        with _training_cache_lock:
+            _history_artifact_scan_cache[scan_key] = (monotonic(), root_files)
+        files.extend(root_files)
     return files
 
 
@@ -3623,12 +3809,13 @@ def _history_rows_for_file(
     run_dir: Path,
     path: Path,
     *,
+    known_stat: os.stat_result | None = None,
     diagnostics_cache: dict[str, dict[str, object]] | None,
     live_status_cache: dict[str, dict[str, object]] | None,
     reverse_records: bool,
 ) -> list[dict[str, object]]:
     rel = path.relative_to(run_dir).as_posix()
-    base_rows = _hxr_base_rows(path, run_dir)
+    base_rows = _hxr_base_rows(path, run_dir, known_stat)
     if reverse_records:
         base_rows = list(reversed(base_rows))
     epoch = _epoch_from_artifact_path(rel)
@@ -3698,34 +3885,72 @@ def _candidate_seat_from_game_id(game_id: object) -> str | None:
 _SELFPLAY_GAME_ID_RE = re.compile(r"^epoch-(\d+)-game-(\d+)$")
 
 
-def _seed_provenance_by_game_key(samples_dir: Path) -> dict[str, dict[str, object]]:
+def _seed_provenance_by_game_key(
+    samples_dir: Path,
+    *,
+    frozen: bool = False,
+) -> dict[str, dict[str, object]]:
     """Map game key -> ``{"seeded": True, "seed_ply": N}`` for one epoch's
     samples directory, reading every ``game_*.json`` sidecar once and keeping
-    only the seeded entries. Memoized by the directory's mtime_ns so the 15s
-    history re-polls cost one stat; a missing directory (pre-seeding epochs,
-    pruned samples, dense_cnn runs) returns {} without caching (its later
-    appearance must not be masked)."""
+    only the seeded entries. Frozen epochs are keyed by directory path alone.
+    Sidecars are atomically published and write-once, including in the live
+    epoch, so the directory's sorted name set is its fingerprint and no file
+    metadata is needed. Live directories are rescanned at most once per training
+    cache TTL. A missing directory is not cached because it may appear.
+    """
 
-    stat = _safe_stat(samples_dir)
-    if stat is None:
-        return {}
     cache_key = str(samples_dir)
+    now = monotonic()
     with _training_cache_lock:
         hit = _seed_sidecar_cache.get(cache_key)
-        if hit is not None and hit[0] == stat.st_mtime_ns:
-            return hit[1]
-    mapping: dict[str, dict[str, object]] = {}
+        if hit is not None and (hit[2] or frozen or now - hit[0] < TRAINING_CACHE_TTL_SECONDS):
+            return hit[3]
     try:
         entries = list(os.scandir(samples_dir))
     except OSError:
         return {}
+    sidecars: list[tuple[Path, str]] = []
+    fingerprint_entries: list[tuple[str, int, int]] = []
     for entry in entries:
-        name = entry.name
-        if not (name.startswith("game_") and name.endswith(".json")):
-            continue
         try:
-            data = json.loads(Path(entry.path).read_text(encoding="utf-8-sig"))
-        except (OSError, ValueError):
+            if not (
+                entry.is_file(follow_symlinks=False)
+                and entry.name.startswith("game_")
+                and entry.name.endswith(".json")
+            ):
+                continue
+            # Preserve the cache tuple's existing fingerprint shape while
+            # deriving it wholly from the write-once name set.
+            fingerprint_entries.append((entry.name, 0, 0))
+            sidecars.append((Path(entry.path), entry.name))
+        except OSError:
+            continue
+    fingerprint = tuple(sorted(fingerprint_entries))
+    with _training_cache_lock:
+        hit = _seed_sidecar_cache.get(cache_key)
+        if hit is not None and hit[1] == fingerprint:
+            _seed_sidecar_cache[cache_key] = (monotonic(), hit[1], hit[2] or frozen, hit[3])
+            return hit[3]
+    mapping: dict[str, dict[str, object]] = {}
+    for sidecar, name in sidecars:
+        frozen_key = (str(sidecar), "utf-8-sig")
+        with _training_cache_lock:
+            frozen_hit = _frozen_json_file_cache.get(frozen_key)
+        if frozen_hit is not None:
+            data = frozen_hit[0]
+        else:
+            try:
+                with sidecar.open("rb") as handle:
+                    raw = handle.read()
+                data = json.loads(raw.decode("utf-8-sig"))
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                data = None
+            if data is not None:
+                with _training_cache_lock:
+                    # Sidecar payloads expose no metadata and are write-once,
+                    # so path-only parse freezing is exact even for live epochs.
+                    _frozen_json_file_cache[frozen_key] = (data, 0, len(raw))
+        if not isinstance(data, dict):
             continue
         if isinstance(data, dict) and data.get("seeded"):
             seed_ply = data.get("seed_ply")
@@ -3734,7 +3959,7 @@ def _seed_provenance_by_game_key(samples_dir: Path) -> dict[str, dict[str, objec
                 "seed_ply": int(seed_ply) if isinstance(seed_ply, (int, float)) else None,
             }
     with _training_cache_lock:
-        _seed_sidecar_cache[cache_key] = (stat.st_mtime_ns, mapping)
+        _seed_sidecar_cache[cache_key] = (monotonic(), fingerprint, frozen, mapping)
     return mapping
 
 
@@ -3744,30 +3969,111 @@ def _seed_provenance_for_game(run_dir: Path, game_id: object) -> dict[str, objec
     the game_id itself (not the .hxr filename) so resume files
     (epoch_NNNNNN_resumeMMM.hxr) join against the right samples directory."""
 
-    match = _SELFPLAY_GAME_ID_RE.match(str(game_id or ""))
-    if not match:
+    return _seed_provenance_for_game_ids(run_dir, (game_id,)).get(str(game_id), {})
+
+
+def _seed_provenance_for_game_ids(
+    run_dir: Path,
+    game_ids: Iterable[object],
+) -> dict[str, dict[str, object]]:
+    """Bulk sidecar join, scanning each represented samples epoch at most once.
+
+    The replay endpoint exposes every record in an HXR file. Joining one game at
+    a time was harmless after a successful cache fill, but a missing samples
+    directory could otherwise cause one failed drvfs scandir per record.
+    """
+
+    matches_by_epoch: dict[int, list[tuple[str, str]]] = {}
+    for game_id in game_ids:
+        text = str(game_id or "")
+        match = _SELFPLAY_GAME_ID_RE.match(text)
+        if match:
+            matches_by_epoch.setdefault(int(match.group(1)), []).append((text, match.group(2)))
+    if not matches_by_epoch:
         return {}
-    samples_dir = run_dir / "samples" / f"epoch_{int(match.group(1)):06d}"
-    return _seed_provenance_by_game_key(samples_dir).get(match.group(2), {})
+
+    inventory = _epoch_inventory(run_dir)
+    joined: dict[str, dict[str, object]] = {}
+    for epoch, matches in matches_by_epoch.items():
+        seed_by_key = _seed_provenance_by_game_key(
+            run_dir / "samples" / f"epoch_{epoch:06d}",
+            frozen=_epoch_is_frozen(run_dir, epoch, inventory),
+        )
+        for game_id, game_key in matches:
+            provenance = seed_by_key.get(game_key)
+            if provenance:
+                joined[game_id] = provenance
+    return joined
 
 
-def _hxr_base_rows(path: Path, run_dir: Path) -> list[dict[str, object]]:
+def _apply_seed_provenance(
+    rows: list[dict[str, object]],
+    run_dir: Path,
+    epoch: int | None,
+    source: str,
+) -> list[dict[str, object]]:
+    """Overlay one epoch's sidecar join in bulk onto already-decoded HXR rows."""
+
+    if source != "selfplay" or epoch is None or not rows:
+        return rows
+    seed_by_game_key = _seed_provenance_by_game_key(
+        run_dir / "samples" / f"epoch_{epoch:06d}",
+        frozen=_epoch_is_frozen(run_dir, epoch),
+    )
+    if not seed_by_game_key:
+        return rows
+    for row in rows:
+        match = _SELFPLAY_GAME_ID_RE.match(str(row.get("game_id") or ""))
+        if match:
+            row.update(seed_by_game_key.get(match.group(2), {}))
+    return rows
+
+
+def _hxr_base_rows(
+    path: Path,
+    run_dir: Path,
+    known_stat: os.stat_result | None = None,
+    *,
+    include_seed_provenance: bool = True,
+) -> list[dict[str, object]]:
     """Decode one .hxr file into per-game summary rows (game_id, winner,
     length, players, abort, candidate_seat, ...), memoized by (mtime_ns, size)
     in _hxr_history_cache. Returns row COPIES so callers can annotate freely.
     This cache is what makes history paging and the .hxr stat backfills
-    (_selfplay_game_stats_from_records) cheap on re-poll."""
+    (_selfplay_game_stats_from_records) cheap on re-poll. The cached rows exclude
+    sidecar provenance; callers that display games receive one bulk overlay,
+    while aggregate-only callers skip the samples directory entirely."""
 
-    stat = _safe_stat(path)
+    rel = path.relative_to(run_dir).as_posix()
+    epoch = _epoch_from_artifact_path(rel)
+    source = _history_source(rel)
+    inventory = _epoch_inventory(run_dir)
+    frozen = _epoch_is_frozen(run_dir, epoch, inventory)
+    cache_key = os.path.normcase(os.path.abspath(path))
+    if frozen:
+        with _training_cache_lock:
+            hit = _hxr_history_cache.get(cache_key)
+            if hit is not None:
+                rows = [dict(row) for row in hit[2]]
+                return (
+                    _apply_seed_provenance(rows, run_dir, epoch, source)
+                    if include_seed_provenance
+                    else rows
+                )
+
+    stat = known_stat or _safe_stat(path)
     if stat is None or stat.st_size <= 0:
         return []
-    cache_key = str(path.resolve())
     with _training_cache_lock:
         hit = _hxr_history_cache.get(cache_key)
         if hit is not None and hit[0] == stat.st_mtime_ns and hit[1] == stat.st_size:
-            return [dict(row) for row in hit[2]]
+            rows = [dict(row) for row in hit[2]]
+            return (
+                _apply_seed_provenance(rows, run_dir, epoch, source)
+                if include_seed_provenance
+                else rows
+            )
 
-    rel = path.relative_to(run_dir).as_posix()
     try:
         with HexoRecordFile.open(path) as record_file:
             players = [_record_player_payload(player) for player in record_file.players]
@@ -3776,25 +4082,14 @@ def _hxr_base_rows(path: Path, run_dir: Path) -> list[dict[str, object]]:
         return []
 
     rows: list[dict[str, object]] = []
-    epoch = _epoch_from_artifact_path(rel)
-    source = _history_source(rel)
     players_by_role = _players_by_role(players)
     for index, record in enumerate(records):
         length = int(record.placements or len(record.action_ids))
-        # Blunder-seed provenance join (selfplay rows only): adds
-        # "seeded"/"seed_ply" keys ONLY for games whose npz sidecar marks them
-        # seeded, so unseeded rows keep their pre-feature shape exactly.
-        seed_info = (
-            _seed_provenance_for_game(run_dir, record.game_id)
-            if source == "selfplay"
-            else {}
-        )
         rows.append(
             {
                 "path": rel,
                 "record_index": index,
                 "game_id": record.game_id,
-                **seed_info,
                 "status": record.status,
                 "winner": record.winner,
                 "winner_label": _winner_label(record.winner),
@@ -3813,14 +4108,33 @@ def _hxr_base_rows(path: Path, run_dir: Path) -> list[dict[str, object]]:
         )
     with _training_cache_lock:
         _hxr_history_cache[cache_key] = (stat.st_mtime_ns, stat.st_size, [dict(row) for row in rows])
-    return rows
+    return (
+        _apply_seed_provenance(rows, run_dir, epoch, source)
+        if include_seed_provenance
+        else rows
+    )
 
 
-def _hxr_record_count(path: Path, run_dir: Path) -> int:
-    stat = _safe_stat(path)
+def _hxr_record_count(
+    path: Path,
+    run_dir: Path,
+    known_stat: os.stat_result | None = None,
+) -> int:
+    rel = path.relative_to(run_dir).as_posix()
+    epoch = _epoch_from_artifact_path(rel)
+    frozen = _epoch_is_frozen(run_dir, epoch)
+    cache_key = os.path.normcase(os.path.abspath(path))
+    if frozen:
+        with _training_cache_lock:
+            history_hit = _hxr_history_cache.get(cache_key)
+            if history_hit is not None:
+                return len(history_hit[2])
+            count_hit = _hxr_count_cache.get(cache_key)
+            if count_hit is not None:
+                return count_hit[2]
+    stat = known_stat or _safe_stat(path)
     if stat is None or stat.st_size <= 0:
         return 0
-    cache_key = str(path.resolve())
     with _training_cache_lock:
         hit = _hxr_history_cache.get(cache_key)
         if hit is not None and hit[0] == stat.st_mtime_ns and hit[1] == stat.st_size:
@@ -4027,31 +4341,82 @@ def _history_diagnostics_brief(diagnostics: dict[str, object]) -> dict[str, obje
 # ---------------------------------------------------------------------------
 
 
-def _iter_training_files(run_dir: Path, *, suffix: str | None = None) -> list[Path]:
-    files: list[Path] = []
-    for root, dirs, names in os.walk(run_dir):
-        dirs[:] = [
-            name
-            for name in dirs
-            if name not in TRAINING_SCAN_EXCLUDED_DIRS and not name.startswith(".")
-        ]
-        root_path = Path(root)
-        for name in names:
-            if suffix is not None and not name.endswith(suffix):
-                continue
-            files.append(root_path / name)
+def _iter_training_file_entries(
+    run_dir: Path,
+    *,
+    suffix: str | None = None,
+    suffixes: frozenset[str] | None = None,
+) -> list[tuple[Path, os.stat_result]]:
+    """Recursively enumerate files with metadata from each directory's scandir."""
+
+    files: list[tuple[Path, os.stat_result]] = []
+    inventory = _epoch_inventory(run_dir)
+    stack = [run_dir]
+    while stack:
+        root = stack.pop()
+        try:
+            entries = os.scandir(root)
+        except OSError:
+            continue
+        with entries:
+            for entry in entries:
+                if entry.name.startswith(".") or entry.name in TRAINING_SCAN_EXCLUDED_DIRS:
+                    continue
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(Path(entry.path))
+                    elif entry.is_file(follow_symlinks=False) and (
+                        suffix is None or entry.name.endswith(suffix)
+                    ) and (
+                        suffixes is None or Path(entry.name).suffix.lower() in suffixes
+                    ):
+                        path = Path(entry.path)
+                        stat = _enumerated_artifact_stat(run_dir, path, entry, inventory)
+                        if stat is not None:
+                            files.append((path, stat))
+                except OSError:
+                    continue
     return files
 
 
+def _iter_training_files(run_dir: Path, *, suffix: str | None = None) -> list[Path]:
+    return [path for path, _stat in _iter_training_file_entries(run_dir, suffix=suffix)]
+
+
 def _diagnostics_by_epoch(run_dir: Path) -> dict[str, object]:
+    inventory = _epoch_inventory(run_dir)
+    names = [name for name in inventory.diagnostic_names if name.endswith(".json")]
+    paths = [run_dir / "diagnostics" / name for name in names]
+    # Invalidates on the JSON name set and stats of the newest two epochs plus
+    # mutable live/eval-pool JSON. Historical epoch JSON is write-once/frozen.
+    fingerprint = _inventory_fingerprint(
+        run_dir,
+        inventory,
+        label="diagnostics_by_epoch",
+        diagnostic_names=names,
+    )
+    value = _cached_training_derived(
+        "diagnostics_by_epoch",
+        run_dir,
+        fingerprint,
+        lambda: _build_diagnostics_by_epoch(paths, run_dir, inventory),
+    )
+    return value if isinstance(value, dict) else {}
+
+
+def _build_diagnostics_by_epoch(
+    paths: list[Path],
+    run_dir: Path | None = None,
+    inventory: _EpochInventory | None = None,
+) -> dict[str, object]:
     by_epoch: dict[str, dict[str, object]] = {}
-    diagnostics_dir = run_dir / "diagnostics"
-    if not diagnostics_dir.exists():
-        return by_epoch
-    for path in sorted(diagnostics_dir.glob("*.json")):
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+    for path in paths:
+        payload = (
+            _read_epoch_json_file(path, run_dir, inventory)
+            if run_dir is not None and inventory is not None and _epoch_from_artifact_path(path.name) is not None
+            else _read_json_file(path)
+        )
+        if payload is None:
             continue
         epoch = _epoch_from_artifact_path(path.name)
         if epoch is None and isinstance(payload, dict) and payload.get("epoch") is not None:
@@ -4074,16 +4439,42 @@ def _diagnostics_by_epoch(run_dir: Path) -> dict[str, object]:
 
 
 def _evaluation_history(run_dir: Path) -> list[dict[str, object]]:
-    diagnostics_dir = run_dir / "diagnostics"
-    if not diagnostics_dir.exists():
-        return []
-    rows: list[dict[str, object]] = []
     prefix = _diag_prefix(run_dir)
-    for path in sorted(diagnostics_dir.glob(f"{prefix}.evaluation.epoch_*.json")):
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-            continue
+    inventory = _epoch_inventory(run_dir)
+    names = [
+        name
+        for name in inventory.diagnostic_names
+        if name.startswith(f"{prefix}.evaluation.epoch_") and name.endswith(".json")
+    ]
+    paths = [run_dir / "diagnostics" / name for name in names]
+    # Invalidates on additions and only the newest two reports' DirEntry stats.
+    fingerprint = _inventory_fingerprint(
+        run_dir,
+        inventory,
+        label="evaluation_history",
+        diagnostic_names=names,
+    )
+    value = _cached_training_derived(
+        "evaluation_history",
+        run_dir,
+        fingerprint,
+        lambda: _build_evaluation_history(paths, run_dir, inventory),
+    )
+    return value if isinstance(value, list) else []
+
+
+def _build_evaluation_history(
+    paths: list[Path],
+    run_dir: Path | None = None,
+    inventory: _EpochInventory | None = None,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for path in paths:
+        payload = (
+            _read_epoch_json_file(path, run_dir, inventory)
+            if run_dir is not None and inventory is not None
+            else _read_json_file(path)
+        )
         if not isinstance(payload, dict):
             continue
         epoch = _epoch_from_artifact_path(path.name)
@@ -4092,7 +4483,6 @@ def _evaluation_history(run_dir: Path) -> list[dict[str, object]]:
                 epoch = int(payload["epoch"])
             except (TypeError, ValueError):
                 epoch = None
-        stat = _safe_stat(path)
         rows.append(
             {
                 "epoch": epoch,
@@ -4110,7 +4500,7 @@ def _evaluation_history(run_dir: Path) -> list[dict[str, object]]:
                 if payload.get("mean_turns") is not None
                 else payload.get("mean_game_length"),
                 "path": f"diagnostics/{path.name}",
-                "modified": stat.st_mtime if stat is not None else 0,
+                "modified": _epoch_json_modified(path),
             }
         )
     rows.sort(key=lambda item: int(item.get("epoch") or 0))
@@ -4151,12 +4541,41 @@ def _multistage_eval_history(run_dir: Path) -> list[dict[str, object]]:
 
     if _diag_prefix(run_dir) != "hexfield":
         return []
-    diagnostics_dir = run_dir / "diagnostics"
-    if not diagnostics_dir.exists():
-        return []
+    inventory = _epoch_inventory(run_dir)
+    names = [
+        name
+        for name in inventory.diagnostic_names
+        if name.startswith("hexfield.multistage_eval.epoch_") and name.endswith(".json")
+    ]
+    paths = [run_dir / "diagnostics" / name for name in names]
+    # Invalidates on report additions and newest-two report stats only.
+    fingerprint = _inventory_fingerprint(
+        run_dir,
+        inventory,
+        label="multistage_eval_history",
+        diagnostic_names=names,
+    )
+    value = _cached_training_derived(
+        "multistage_eval_history",
+        run_dir,
+        fingerprint,
+        lambda: _build_multistage_eval_history(paths, run_dir, inventory),
+    )
+    return value if isinstance(value, list) else []
+
+
+def _build_multistage_eval_history(
+    paths: list[Path],
+    run_dir: Path | None = None,
+    inventory: _EpochInventory | None = None,
+) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
-    for path in sorted(diagnostics_dir.glob("hexfield.multistage_eval.epoch_*.json")):
-        payload = _read_json_file(path)
+    for path in paths:
+        payload = (
+            _read_epoch_json_file(path, run_dir, inventory)
+            if run_dir is not None and inventory is not None
+            else _read_json_file(path)
+        )
         if not isinstance(payload, dict):
             continue
         meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
@@ -4290,7 +4709,6 @@ def _multistage_eval_history(run_dir: Path) -> list[dict[str, object]]:
             if role and not q.get("role"):
                 q["role"] = role
             players_enriched.append(q)
-        stat = _safe_stat(path)
         rows.append(
             {
                 "epoch": epoch,
@@ -4331,7 +4749,7 @@ def _multistage_eval_history(run_dir: Path) -> list[dict[str, object]]:
                     "permanent_anchors": permanent_anchors,
                 },
                 "path": f"diagnostics/{path.name}",
-                "modified": stat.st_mtime if stat is not None else 0,
+                "modified": _epoch_json_modified(path),
             }
         )
     rows.sort(key=lambda item: int(item.get("epoch") or 0))
@@ -4352,7 +4770,27 @@ def _eval_pool_summary(run_dir: Path) -> dict[str, object] | None:
 
     if _diag_prefix(run_dir) != "hexfield":
         return None
-    payload = _read_json_file(run_dir / "diagnostics" / "eval_pool.json")
+    inventory = _epoch_inventory(run_dir)
+    pool_path = run_dir / "diagnostics" / "eval_pool.json"
+    # Invalidates on eval_pool's DirEntry stat and manifest's single file stat.
+    fingerprint = _inventory_fingerprint(
+        run_dir,
+        inventory,
+        label="eval_pool_summary",
+        diagnostic_names=["eval_pool.json"] if "eval_pool.json" in inventory.diagnostic_names else [],
+        extra_paths=[run_dir / "manifest.json"],
+    )
+    value = _cached_training_derived(
+        "eval_pool_summary",
+        run_dir,
+        fingerprint,
+        lambda: _build_eval_pool_summary(pool_path),
+    )
+    return value if isinstance(value, dict) else None
+
+
+def _build_eval_pool_summary(pool_path: Path) -> dict[str, object] | None:
+    payload = _read_json_file(pool_path)
     if not isinstance(payload, dict):
         return None
     raw_edges = payload.get("edges") if isinstance(payload.get("edges"), list) else []
@@ -4398,27 +4836,89 @@ def _epoch_history(
     run_dir: Path,
     live_status: dict[str, object] | None = None,
 ) -> list[dict[str, object]]:
+    inventory = _epoch_inventory(run_dir)
+    prefix = _diag_prefix(run_dir)
+
+    def relevant_diagnostic(name: str) -> bool:
+        return (
+            (name.startswith("epoch_") and name.endswith(".json"))
+            or (name.startswith(f"{prefix}.selfplay.epoch_") and name.endswith(".json"))
+            or (name.startswith(f"{prefix}.evaluation.epoch_") and name.endswith(".json"))
+            or (name.startswith("dense_cnn.policy_targets.epoch_") and name.endswith(".json"))
+            or (name.startswith("dense_cnn.training_progress.epoch_") and name.endswith(".json"))
+        )
+
+    diagnostic_names = [name for name in inventory.diagnostic_names if relevant_diagnostic(name)]
+    checkpoint_names = [name for name in inventory.checkpoint_names if name.endswith(".pt")]
+    # Invalidates on the relevant diagnostic/checkpoint name sets, newest-two
+    # DirEntry stats, and manifest. Completed HXR backfills are frozen per epoch;
+    # a current HXR cannot contribute until its selfplay diagnostic is published.
+    fingerprint = _inventory_fingerprint(
+        run_dir,
+        inventory,
+        label="epoch_history_base",
+        diagnostic_names=diagnostic_names,
+        checkpoint_names=checkpoint_names,
+        extra_paths=[run_dir / "manifest.json"],
+    )
+    value = _cached_training_derived(
+        "epoch_history_base",
+        run_dir,
+        fingerprint,
+        lambda: _build_epoch_history(run_dir, inventory),
+    )
+    base = value if isinstance(value, list) else []
+    if not isinstance(live_status, dict):
+        return base
+
+    rows = {
+        int(row["epoch"]): row
+        for row in base
+        if isinstance(row, dict) and isinstance(row.get("epoch"), int)
+    }
+    current = live_status.get("current_epoch")
+    if isinstance(current, int) and current in rows:
+        current_row = dict(rows[current])
+        # _build_epoch_history marks file-partial rows only after its immutable
+        # pass. Restore the pre-finalization shape for the one live epoch so
+        # _mark_in_flight_epoch behaves exactly like the former single pass.
+        if (
+            current_row.get("status") == "partial"
+            and f"epoch_{current:06d}.json" not in inventory.diagnostic_names
+        ):
+            current_row.pop("status", None)
+        rows[current] = current_row
+    _mark_in_flight_epoch(rows, live_status)
+    return [rows[key] for key in sorted(rows)]
+
+
+def _build_epoch_history(
+    run_dir: Path,
+    inventory: _EpochInventory | None = None,
+) -> list[dict[str, object]]:
     """One merged row per epoch (ascending) for the trends charts + epoch
     table: pipeline results from ``diagnostics/epoch_*.json``, self-play and
     evaluation summaries from the ``dense_cnn.*.epoch_*.json`` files (with
     .hxr-derived game-stat backfill), optional policy-target/progress
     overlays, and checkpoint file stats. Rows without a finished pipeline
-    result get ``status: "partial"``.
-
-    When ``live_status`` (a ``_training_live_status`` block) reports an
-    actively-running epoch whose merged ``epoch_N.json`` has not landed yet,
-    that epoch gets a provisional row: ``status: "in_progress"`` plus an
-    ``in_progress`` block carrying the live phase/detail (and, during
-    self-play, the live games/pos-s counters), so the epoch table can show the
-    in-flight epoch instead of nothing for the first ~30 minutes of an epoch."""
+    result get ``status: "partial"``. The caller memoizes this immutable base by
+    its input FILE stats, then overlays the one in-flight row cheaply."""
 
     rows: dict[int, dict[str, object]] = {}
     diagnostics_dir = run_dir / "diagnostics"
     prefix = _diag_prefix(run_dir)
+    inventory = inventory or _epoch_inventory(run_dir)
 
-    if diagnostics_dir.exists():
-        for path in sorted(diagnostics_dir.glob("epoch_*.json")):
-            payload = _read_json_file(path)
+    def diagnostic_paths(startswith: str) -> list[Path]:
+        return [
+            diagnostics_dir / name
+            for name in inventory.diagnostic_names
+            if name.startswith(startswith) and name.endswith(".json")
+        ]
+
+    if inventory.diagnostic_names:
+        for path in diagnostic_paths("epoch_"):
+            payload = _read_epoch_json_file(path, run_dir, inventory)
             if not isinstance(payload, dict):
                 continue
             result = payload.get("metadata", {}).get("result") if isinstance(payload.get("metadata"), dict) else None
@@ -4432,8 +4932,8 @@ def _epoch_history(
             row["elapsed_seconds"] = payload.get("elapsed_seconds")
             _merge_epoch_result(row, result)
 
-        for path in sorted(diagnostics_dir.glob(f"{prefix}.selfplay.epoch_*.json")):
-            payload = _read_json_file(path)
+        for path in diagnostic_paths(f"{prefix}.selfplay.epoch_"):
+            payload = _read_epoch_json_file(path, run_dir, inventory)
             if not isinstance(payload, dict):
                 continue
             epoch = _coerce_epoch(payload.get("epoch"), path.name)
@@ -4446,8 +4946,8 @@ def _epoch_history(
             _backfill_selfplay_game_stats(run_dir, epoch, selfplay_summary)
             row["selfplay"] = selfplay_summary
 
-        for path in sorted(diagnostics_dir.glob(f"{prefix}.evaluation.epoch_*.json")):
-            payload = _read_json_file(path)
+        for path in diagnostic_paths(f"{prefix}.evaluation.epoch_"):
+            payload = _read_epoch_json_file(path, run_dir, inventory)
             if not isinstance(payload, dict):
                 continue
             epoch = _coerce_epoch(payload.get("epoch"), path.name)
@@ -4457,8 +4957,8 @@ def _epoch_history(
             row["evaluation"] = _evaluation_epoch_summary(payload)
 
         # NOTE: no current producer emits this file; see dense_cnn/selfplay.py (kept for forward-compat / manual drops).
-        for path in sorted(diagnostics_dir.glob("dense_cnn.policy_targets.epoch_*.json")):
-            payload = _read_json_file(path)
+        for path in diagnostic_paths("dense_cnn.policy_targets.epoch_"):
+            payload = _read_epoch_json_file(path, run_dir, inventory)
             if not isinstance(payload, dict):
                 continue
             epoch = _coerce_epoch(payload.get("epoch"), path.name)
@@ -4485,8 +4985,8 @@ def _epoch_history(
                     training["policy_imitation"] = payload["policy_imitation"]
 
         # NOTE: no current producer emits this file; see dense_cnn/selfplay.py (kept for forward-compat / manual drops).
-        for path in sorted(diagnostics_dir.glob("dense_cnn.training_progress.epoch_*.json")):
-            payload = _read_json_file(path)
+        for path in diagnostic_paths("dense_cnn.training_progress.epoch_"):
+            payload = _read_epoch_json_file(path, run_dir, inventory)
             if not isinstance(payload, dict):
                 continue
             epoch = _coerce_epoch(payload.get("epoch"), path.name)
@@ -4498,20 +4998,21 @@ def _epoch_history(
                 training["progress"] = _training_progress_summary(payload)
 
     checkpoints_dir = run_dir / "checkpoints"
-    if checkpoints_dir.exists():
-        for path in sorted(checkpoints_dir.glob("epoch_*.pt")):
+    if inventory.checkpoint_names:
+        for name in inventory.checkpoint_names:
+            if not name.endswith(".pt"):
+                continue
+            path = checkpoints_dir / name
             epoch = _coerce_epoch(None, path.name)
             if epoch is None:
                 continue
             row = rows.setdefault(epoch, {"epoch": epoch})
-            stat = _safe_stat(path)
+            stat = _enumerated_artifact_stat(run_dir, path, None, inventory)
             row["checkpoint"] = {
                 "path": path.relative_to(run_dir).as_posix(),
                 "bytes": stat.st_size if stat is not None else 0,
                 "modified": stat.st_mtime if stat is not None else 0,
             }
-
-    _mark_in_flight_epoch(rows, live_status)
 
     for row in rows.values():
         if "status" not in row:
@@ -5039,9 +5540,7 @@ def _selfplay_game_stats_from_records(run_dir: Path, epoch: int) -> dict[str, ob
     stats (mean_abs_value) need self-play internals/NPZ shards and stay absent."""
 
     path = run_dir / "selfplay" / f"epoch_{epoch:06d}.hxr"
-    if not path.is_file():
-        return {}
-    rows = _hxr_base_rows(path, run_dir)
+    rows = _hxr_base_rows(path, run_dir, include_seed_provenance=False)
     completed = [row for row in rows if str(row.get("status")) == "completed"]
     if not completed:
         return {}
@@ -5279,7 +5778,7 @@ def _abort_payload(abort: object | None) -> object | None:
 # ---------------------------------------------------------------------------
 # History screen: live status (the fast ~2.5s poll tier behind
 # /api/training/live). Cheap reads only: the events.jsonl tail, the watchdog
-# jsonl tail, two small JSON files, and a few stat/glob probes.
+# jsonl tail, two small JSON files, and bounded single-scandir probes.
 # ---------------------------------------------------------------------------
 
 
@@ -5499,17 +5998,21 @@ def _shuffle_dir_age_seconds(run_dir: Path, epoch: int) -> float | None:
     suffix = f"epoch_{epoch:06d}"
     newest_mtime: float | None = None
     try:
-        candidates = (run_dir / "shuffleddata").glob(f"*{suffix}")
+        entries = os.scandir(run_dir / "shuffleddata")
     except OSError:
         return None
-    for candidate in candidates:
-        if not candidate.is_dir():
-            continue
-        stat = _safe_stat(candidate)
-        if stat is None:
-            continue
-        if newest_mtime is None or stat.st_mtime > newest_mtime:
-            newest_mtime = stat.st_mtime
+    with entries:
+        for entry in entries:
+            if not entry.name.endswith(suffix):
+                continue
+            try:
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+                stat = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if newest_mtime is None or stat.st_mtime > newest_mtime:
+                newest_mtime = stat.st_mtime
     if newest_mtime is None:
         return None
     return max(0.0, wall_clock() - newest_mtime)
@@ -5543,17 +6046,19 @@ def _training_run_status(run_dir: Path, histories: list[dict[str, object]], live
         "latest_modified": latest_history.get("modified") if latest_history else None,
         "latest_path": latest_history.get("path") if latest_history else None,
     }
+    # One scandir supplies both names and metadata; never Path.stat every HXR on
+    # drvfs merely to find the latest file.
     latest_selfplay = max(
-        (path for path in (run_dir / "selfplay").glob("*.hxr") if path.is_file()),
-        key=lambda item: (lambda s: s.st_mtime if s is not None else 0)(_safe_stat(item)),
+        _iter_history_artifact_files(run_dir, source="selfplay"),
+        key=lambda item: item[1].st_mtime,
         default=None,
     )
     if latest_selfplay is not None:
-        stat = _safe_stat(latest_selfplay)
+        path, stat = latest_selfplay
         status["latest_selfplay_record"] = {
-            "path": latest_selfplay.relative_to(run_dir).as_posix(),
-            "bytes": stat.st_size if stat is not None else 0,
-            "modified": stat.st_mtime if stat is not None else 0,
+            "path": path.relative_to(run_dir).as_posix(),
+            "bytes": stat.st_size,
+            "modified": stat.st_mtime,
         }
     return status
 
@@ -5578,32 +6083,66 @@ def _live_history_diagnostic_summary(live_status: dict[str, object]) -> dict[str
 
 def _latest_training_progress(diagnostics_dir: Path) -> dict[str, object] | None:
     # NOTE: no current producer emits this file; see dense_cnn/selfplay.py (kept for forward-compat / manual drops).
-    latest = max(
-        diagnostics_dir.glob("dense_cnn.training_progress.epoch_*.json"),
-        key=lambda item: (lambda s: s.st_mtime if s is not None else 0)(_safe_stat(item)),
-        default=None,
-    )
+    candidates: list[tuple[Path, os.stat_result]] = []
+    try:
+        entries = os.scandir(diagnostics_dir)
+    except OSError:
+        return None
+    with entries:
+        for entry in entries:
+            try:
+                if (
+                    entry.is_file(follow_symlinks=False)
+                    and entry.name.startswith("dense_cnn.training_progress.epoch_")
+                    and entry.name.endswith(".json")
+                ):
+                    candidates.append((Path(entry.path), entry.stat(follow_symlinks=False)))
+            except OSError:
+                continue
+    latest = max(candidates, key=lambda item: item[1].st_mtime, default=None)
     if latest is None:
         return None
-    payload = _read_json_file(latest)
+    path, stat = latest
+    payload = _read_json_file_known_stat(path, stat.st_mtime_ns, stat.st_size)
     return payload if isinstance(payload, dict) else None
 
 
 def _latest_bootstrap_training_progress(run_dir: Path) -> dict[str, object] | None:
     # NOTE: no current producer emits this file; see dense_cnn/selfplay.py (kept for forward-compat / manual drops).
-    latest = max(
-        (run_dir / "bootstrap").glob("*/diagnostics/dense_cnn.training_progress.epoch_*.json"),
-        key=lambda item: (lambda s: s.st_mtime if s is not None else 0)(_safe_stat(item)),
-        default=None,
-    )
+    candidates: list[tuple[Path, os.stat_result]] = []
+    try:
+        roots = os.scandir(run_dir / "bootstrap")
+    except OSError:
+        return None
+    with roots:
+        for root in roots:
+            try:
+                if not root.is_dir(follow_symlinks=False):
+                    continue
+                entries = os.scandir(Path(root.path) / "diagnostics")
+            except OSError:
+                continue
+            with entries:
+                for entry in entries:
+                    try:
+                        if (
+                            entry.is_file(follow_symlinks=False)
+                            and entry.name.startswith("dense_cnn.training_progress.epoch_")
+                            and entry.name.endswith(".json")
+                        ):
+                            candidates.append((Path(entry.path), entry.stat(follow_symlinks=False)))
+                    except OSError:
+                        continue
+    latest = max(candidates, key=lambda item: item[1].st_mtime, default=None)
     if latest is None:
         return None
-    payload = _read_json_file(latest)
+    path, stat = latest
+    payload = _read_json_file_known_stat(path, stat.st_mtime_ns, stat.st_size)
     if not isinstance(payload, dict):
         return None
     payload = dict(payload)
-    payload["path"] = latest.relative_to(run_dir).as_posix()
-    payload["output_dir"] = latest.parents[1].relative_to(run_dir).as_posix()
+    payload["path"] = path.relative_to(run_dir).as_posix()
+    payload["output_dir"] = path.parents[1].relative_to(run_dir).as_posix()
     return payload
 
 
@@ -5757,13 +6296,10 @@ def _supervisor_summary(run_dir: Path) -> dict[str, object] | None:
     stat = _safe_stat(log_path)
     if stat is None:
         return None
-    try:
-        with log_path.open("rb") as handle:
-            if stat.st_size > _SUPERVISOR_LOG_TAIL_BYTES:
-                handle.seek(-_SUPERVISOR_LOG_TAIL_BYTES, os.SEEK_END)
-            tail = handle.read().decode("utf-8", errors="replace")
-    except OSError:
+    tail_bytes = _read_file_tail(log_path, _SUPERVISOR_LOG_TAIL_BYTES)
+    if tail_bytes is None:
         return None
+    tail = tail_bytes.decode("utf-8", errors="replace")
 
     now = wall_clock()
     last_launch_ts: float | None = None
@@ -5817,16 +6353,17 @@ def _latest_checkpoint_summary(run_dir: Path) -> dict[str, object] | None:
     run it never exceeds roughly one epoch's wall time."""
 
     checkpoints_dir = run_dir / "checkpoints"
+    inventory = _epoch_inventory(run_dir)
     newest_path: Path | None = None
     newest_mtime = 0.0
-    try:
-        for path in checkpoints_dir.glob("*.pt"):
-            stat = _safe_stat(path)
-            if stat is not None and stat.st_mtime > newest_mtime:
-                newest_mtime = stat.st_mtime
-                newest_path = path
-    except OSError:
-        return None
+    for name in inventory.checkpoint_names:
+        if not name.endswith(".pt"):
+            continue
+        path = checkpoints_dir / name
+        stat = _enumerated_artifact_stat(run_dir, path, None, inventory)
+        if stat is not None and stat.st_mtime > newest_mtime:
+            newest_mtime = stat.st_mtime
+            newest_path = path
     if newest_path is None:
         return None
     return {
@@ -5844,19 +6381,77 @@ def _latest_checkpoint_summary(run_dir: Path) -> dict[str, object] | None:
 # ---------------------------------------------------------------------------
 
 
+_JSONL_HEAD_GUARD_BYTES = 4096
+
+
+def _parse_jsonl_bytes(data: bytes, records: list[object]) -> tuple[list[object], bytes]:
+    """Parse complete JSONL records and retain the first bad/incomplete suffix."""
+
+    lines = data.splitlines(keepends=True)
+    for index, raw in enumerate(lines):
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            records.append(json.loads(line.decode("utf-8-sig")))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return records, b"".join(lines[index:])
+    return records, b""
+
+
 def _iter_jsonl(path: Path) -> list[object]:
-    if not path.is_file():
+    """Read JSONL with stat-keyed append resumption and replacement guards."""
+
+    stat = _safe_stat(path)
+    if stat is None or not stat_module.S_ISREG(stat.st_mode):
         return []
-    records: list[object] = []
-    try:
-        for line in path.read_text(encoding="utf-8-sig").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            records.append(json.loads(line))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+    cache_key = str(path)
+    with _training_cache_lock:
+        hit = _jsonl_file_cache.get(cache_key)
+        if hit is not None and hit[0] == stat.st_mtime_ns and hit[1] == stat.st_size:
+            return list(hit[3])
+
+    with _training_build_lock(f"jsonl:{cache_key}"):
+        stat = _safe_stat(path)
+        if stat is None or not stat_module.S_ISREG(stat.st_mode):
+            return []
+        with _training_cache_lock:
+            hit = _jsonl_file_cache.get(cache_key)
+            if hit is not None and hit[0] == stat.st_mtime_ns and hit[1] == stat.st_size:
+                return list(hit[3])
+
+        records: list[object] = []
+        pending = b""
+        head = b""
+        try:
+            with path.open("rb") as handle:
+                append = False
+                if hit is not None and stat.st_size > hit[1]:
+                    prior_head = hit[2]
+                    compare_head = handle.read(len(prior_head))
+                    append = compare_head == prior_head
+                if append and hit is not None:
+                    handle.seek(hit[1])
+                    tail = handle.read(stat.st_size - hit[1])
+                    records, pending = _parse_jsonl_bytes(hit[4] + tail, list(hit[3]))
+                else:
+                    handle.seek(0)
+                    data = handle.read(stat.st_size)
+                    records, pending = _parse_jsonl_bytes(data, [])
+                handle.seek(0)
+                head = handle.read(min(_JSONL_HEAD_GUARD_BYTES, stat.st_size))
+        except OSError:
+            return records
+
+        with _training_cache_lock:
+            _jsonl_file_cache[cache_key] = (
+                stat.st_mtime_ns,
+                stat.st_size,
+                head,
+                list(records),
+                pending,
+            )
         return records
-    return records
 
 
 def _read_last_jsonl(path: Path) -> object | None:
@@ -5871,19 +6466,387 @@ def _safe_stat(path: Path) -> os.stat_result | None:
         return None
 
 
-def _read_json_file(path: Path, *, retries: int = 1) -> object | None:
-    for attempt in range(retries + 1):
-        if not path.is_file():
-            return None
+def _natural_name_numbers(name: str) -> tuple[int, ...]:
+    """Numeric components used for stat-free chronology of artifact names."""
+
+    return tuple(int(value) for value in re.findall(r"\d+", name))
+
+
+def _enumerated_artifact_epoch(path: str) -> int | None:
+    """Epoch encoded by selfplay or evaluation artifact naming conventions."""
+
+    epoch = _epoch_from_artifact_path(path)
+    if epoch is not None:
+        return epoch
+    match = re.search(r"(?:^|[/_.-])(?:cand_)?ep(\d+)(?:$|[/_.-])", path, re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
+def _enumerated_artifact_is_frozen(
+    run_dir: Path,
+    path: Path,
+    inventory: _EpochInventory,
+) -> bool:
+    """Whether an enumerated artifact's first metadata snapshot is final."""
+
+    name = path.name.lower()
+    if (
+        name.endswith(".jsonl")
+        or name.endswith(".live.json")
+        or name in {"eval_pool.json", "latest.pt"}
+    ):
+        return False
+    rel = path.relative_to(run_dir).as_posix()
+    epoch = _enumerated_artifact_epoch(rel)
+    # HXR is the only enumerated artifact format that may grow in place. Once
+    # its epoch completes, the first cached stat becomes permanent. JSON/PNG/PT
+    # producers publish atomically and are write-once even in the newest epoch.
+    if path.suffix.lower() == ".hxr" and epoch is not None:
+        return _epoch_is_frozen(run_dir, epoch, inventory)
+    return True
+
+
+def _enumerated_artifact_stat(
+    run_dir: Path,
+    path: Path,
+    entry: os.DirEntry[str] | None,
+    inventory: _EpochInventory,
+) -> os.stat_result | None:
+    """Metadata for a discovered artifact, frozen or TTL-throttled by path.
+
+    The cache stores the complete stat result (an exact superset of the
+    ``mtime_ns, size`` payload contract) because callers also emit float mtime.
+    """
+
+    cache_key = os.path.normcase(os.path.abspath(path))
+    frozen = _enumerated_artifact_is_frozen(run_dir, path, inventory)
+    now = monotonic()
+    with _training_cache_lock:
+        frozen_hit = _frozen_file_stat_cache.get(cache_key)
+        if frozen_hit is not None:
+            return frozen_hit
+        live_hit = _live_artifact_stat_cache.get(cache_key)
+        if not frozen and live_hit is not None and now - live_hit[0] < TRAINING_CACHE_TTL_SECONDS:
+            return live_hit[1]
+    try:
+        stat = entry.stat(follow_symlinks=False) if entry is not None else path.stat()
+    except OSError:
+        return None
+    with _training_cache_lock:
+        if frozen:
+            _frozen_file_stat_cache[cache_key] = stat
+            _live_artifact_stat_cache.pop(cache_key, None)
+        else:
+            _live_artifact_stat_cache[cache_key] = (monotonic(), stat)
+    return stat
+
+
+def _epoch_inventory(run_dir: Path) -> _EpochInventory:
+    """Return a throttled, name-based run inventory built with one scandir per dir.
+
+    Invalidation contract: diagnostic/checkpoint additions or removals change the
+    name-set signature. Only explicitly mutable live files receive freshness
+    stats, obtained from their existing DirEntry; per-epoch diagnostics and
+    checkpoints are write-once and freeze on first use. No directory mtime
+    participates in change detection.
+    """
+
+    cache_key = str(run_dir)
+    now = monotonic()
+    with _training_cache_lock:
+        hit = _epoch_inventory_cache.get(cache_key)
+        if hit is not None and now - hit[0] < TRAINING_CACHE_TTL_SECONDS:
+            return hit[1]
+
+    with _training_build_lock(f"epoch-inventory:{cache_key}"):
+        now = monotonic()
+        with _training_cache_lock:
+            hit = _epoch_inventory_cache.get(cache_key)
+            if hit is not None and now - hit[0] < TRAINING_CACHE_TTL_SECONDS:
+                return hit[1]
+
+        diagnostic_entries: dict[str, os.DirEntry[str]] = {}
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            for entry in os.scandir(run_dir / "diagnostics"):
+                try:
+                    if entry.is_file(follow_symlinks=False):
+                        diagnostic_entries[entry.name] = entry
+                except OSError:
+                    continue
+        except OSError:
+            pass
+
+        checkpoint_entries: dict[str, os.DirEntry[str]] = {}
+        try:
+            for entry in os.scandir(run_dir / "checkpoints"):
+                try:
+                    if entry.is_file(follow_symlinks=False) and entry.name.endswith(".pt"):
+                        checkpoint_entries[entry.name] = entry
+                except OSError:
+                    continue
+        except OSError:
+            pass
+
+        all_names = tuple(sorted((*diagnostic_entries, *checkpoint_entries)))
+        epochs = [
+            epoch
+            for name in all_names
+            if (epoch := _epoch_from_artifact_path(name)) is not None
+        ]
+        max_epoch = max(epochs) if epochs else None
+        live_diag_names = {
+            "events.jsonl",
+            "eval_pool.json",
+            "watchdog.jsonl",
+        }
+
+        def should_stat_diagnostic(name: str) -> bool:
+            return name in live_diag_names or name.endswith(".live.json")
+
+        diagnostic_stats: dict[str, tuple[int, int]] = {}
+        for name, entry in diagnostic_entries.items():
+            if not should_stat_diagnostic(name):
+                continue
+            try:
+                stat = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            diagnostic_stats[name] = (stat.st_mtime_ns, stat.st_size)
+            stat_cache_key = os.path.normcase(os.path.abspath(run_dir / "diagnostics" / name))
+            with _training_cache_lock:
+                _live_artifact_stat_cache[stat_cache_key] = (monotonic(), stat)
+
+        # Checkpoints are atomically published and write-once. Their name set
+        # invalidates aggregates; callers snapshot each file once on demand.
+        checkpoint_stats: dict[str, tuple[int, int]] = {}
+
+        inventory = _EpochInventory(
+            diagnostic_names=tuple(sorted(diagnostic_entries)),
+            diagnostic_stats=diagnostic_stats,
+            checkpoint_names=tuple(sorted(checkpoint_entries)),
+            checkpoint_stats=checkpoint_stats,
+            max_epoch=max_epoch,
+        )
+        with _training_cache_lock:
+            _epoch_inventory_cache[cache_key] = (monotonic(), inventory)
+        return inventory
+
+
+def _epoch_is_frozen(run_dir: Path, epoch: int | None, inventory: _EpochInventory | None = None) -> bool:
+    """Whether write-once artifacts for ``epoch`` can be trusted by path alone."""
+
+    if epoch is None:
+        return False
+    inventory = inventory or _epoch_inventory(run_dir)
+    return (
+        (inventory.max_epoch is not None and epoch < inventory.max_epoch)
+        or f"epoch_{epoch:06d}.json" in inventory.diagnostic_names
+    )
+
+
+def _name_set_fingerprint(label: str, names: list[str] | tuple[str, ...]) -> tuple[str, int, int]:
+    """Compact signature for names discovered by scandir; performs no stats."""
+
+    ordered = tuple(sorted(names))
+    digest = hashlib.sha1("\0".join(ordered).encode()).hexdigest()
+    epochs = [
+        epoch
+        for name in ordered
+        if (epoch := _epoch_from_artifact_path(name)) is not None
+    ]
+    return (f"@names:{label}:{digest}", len(ordered), max(epochs) if epochs else -1)
+
+
+def _inventory_fingerprint(
+    run_dir: Path,
+    inventory: _EpochInventory,
+    *,
+    label: str,
+    diagnostic_names: list[str],
+    checkpoint_names: list[str] | None = None,
+    extra_paths: list[Path] | None = None,
+) -> tuple[tuple[str, int, int], ...]:
+    """Composite aggregate key with O(1) Path stats and scandir-cached live stats."""
+
+    entries = [_name_set_fingerprint(f"{label}:diagnostics", diagnostic_names)]
+    wanted_diag = set(diagnostic_names)
+    entries.extend(
+        (str(run_dir / "diagnostics" / name), mtime_ns, size)
+        for name, (mtime_ns, size) in inventory.diagnostic_stats.items()
+        if name in wanted_diag
+    )
+    if checkpoint_names is not None:
+        entries.append(_name_set_fingerprint(f"{label}:checkpoints", checkpoint_names))
+        wanted_checkpoints = set(checkpoint_names)
+        entries.extend(
+            (str(run_dir / "checkpoints" / name), mtime_ns, size)
+            for name, (mtime_ns, size) in inventory.checkpoint_stats.items()
+            if name in wanted_checkpoints
+        )
+    if extra_paths:
+        entries.extend(_file_fingerprint(extra_paths))
+    return tuple(sorted(entries))
+
+
+def _read_json_file_known_stat(
+    path: Path,
+    mtime_ns: int,
+    size: int,
+    *,
+    encoding: str = "utf-8",
+) -> object | None:
+    """Stat-keyed JSON read when metadata already came from a DirEntry."""
+
+    cache_key = (str(path), encoding)
+    with _training_cache_lock:
+        hit = _json_file_cache.get(cache_key)
+        if hit is not None and hit[0] == mtime_ns and hit[1] == size:
+            return hit[2]
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(size)
+        payload = json.loads(raw.decode(encoding))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    with _training_cache_lock:
+        _json_file_cache[cache_key] = (mtime_ns, size, payload)
+    return payload
+
+
+def _read_epoch_json_file(
+    path: Path,
+    run_dir: Path,
+    inventory: _EpochInventory,
+    *,
+    encoding: str = "utf-8",
+) -> object | None:
+    """Read a per-epoch JSON, freezing immutable history after its first parse."""
+
+    epoch = _epoch_from_artifact_path(path.name)
+    # Per-epoch diagnostics are atomically published and never modified. This
+    # also freezes segment files from the newest/in-progress epoch immediately;
+    # only ``*.live.json`` (which has no encoded epoch) remains stat-keyed.
+    frozen = epoch is not None
+    frozen_key = (str(path), encoding)
+    if frozen:
+        with _training_cache_lock:
+            hit = _frozen_json_file_cache.get(frozen_key)
+            if hit is not None:
+                return hit[0]
+
+    known = inventory.diagnostic_stats.get(path.name)
+    if known is not None:
+        payload = _read_json_file_known_stat(path, known[0], known[1], encoding=encoding)
+    else:
+        payload = _read_json_file(path, encoding=encoding)
+    if frozen and payload is not None:
+        with _training_cache_lock:
+            stat_hit = _json_file_cache.get(frozen_key)
+            if stat_hit is not None:
+                _frozen_json_file_cache[frozen_key] = (payload, stat_hit[0], stat_hit[1])
+    return payload
+
+
+def _epoch_json_modified(path: Path, *, encoding: str = "utf-8") -> float:
+    """Return cached JSON mtime without another filesystem round trip."""
+
+    key = (str(path), encoding)
+    with _training_cache_lock:
+        frozen = _frozen_json_file_cache.get(key)
+        if frozen is not None:
+            return frozen[1] / 1_000_000_000.0
+        hit = _json_file_cache.get(key)
+        return hit[0] / 1_000_000_000.0 if hit is not None else 0.0
+
+
+def _read_json_file(
+    path: Path,
+    *,
+    retries: int = 1,
+    encoding: str = "utf-8",
+) -> object | None:
+    """Parse one JSON file at most once per ``(path, mtime_ns, size)``."""
+
+    cache_key = (str(path), encoding)
+    for attempt in range(retries + 1):
+        stat = _safe_stat(path)
+        if stat is None or not stat_module.S_ISREG(stat.st_mode):
+            return None
+        with _training_cache_lock:
+            hit = _json_file_cache.get(cache_key)
+            if hit is not None and hit[0] == stat.st_mtime_ns and hit[1] == stat.st_size:
+                return hit[2]
+        try:
+            with path.open("rb") as handle:
+                raw = handle.read(stat.st_size)
+            payload = json.loads(raw.decode(encoding))
         except (json.JSONDecodeError, UnicodeDecodeError):
             if attempt < retries:
                 continue
             return None
         except OSError:
             return None
+        with _training_cache_lock:
+            _json_file_cache[cache_key] = (stat.st_mtime_ns, stat.st_size, payload)
+        return payload
     return None
+
+
+def _read_file_tail(path: Path, limit: int) -> bytes | None:
+    """Return a binary file tail, re-reading only when that file's stat changes."""
+
+    stat = _safe_stat(path)
+    if stat is None or not stat_module.S_ISREG(stat.st_mode):
+        return None
+    cache_key = (str(path), int(limit))
+    with _training_cache_lock:
+        hit = _file_tail_cache.get(cache_key)
+        if hit is not None and hit[0] == stat.st_mtime_ns and hit[1] == stat.st_size:
+            return hit[2]
+    try:
+        with path.open("rb") as handle:
+            read_size = min(stat.st_size, limit)
+            if read_size < stat.st_size:
+                handle.seek(stat.st_size - read_size)
+            data = handle.read(read_size)
+    except OSError:
+        return None
+    with _training_cache_lock:
+        _file_tail_cache[cache_key] = (stat.st_mtime_ns, stat.st_size, data)
+    return data
+
+
+def _file_fingerprint(paths: list[Path]) -> tuple[tuple[str, int, int], ...]:
+    """Stable FILE-stat fingerprint; intentionally never consults directory mtimes."""
+
+    entries: list[tuple[str, int, int]] = []
+    for path_text, path in sorted({str(path): path for path in paths}.items()):
+        stat = _safe_stat(path)
+        if stat is not None and stat_module.S_ISREG(stat.st_mode):
+            entries.append((path_text, stat.st_mtime_ns, stat.st_size))
+    return tuple(entries)
+
+
+def _cached_training_derived(
+    kind: str,
+    run_dir: Path,
+    fingerprint: object,
+    builder: Callable[[], object],
+) -> object:
+    key = (kind, str(run_dir))
+    with _training_cache_lock:
+        hit = _training_derived_cache.get(key)
+        if hit is not None and hit[0] == fingerprint:
+            return hit[1]
+    with _training_build_lock(f"derived:{kind}:{run_dir}"):
+        with _training_cache_lock:
+            hit = _training_derived_cache.get(key)
+            if hit is not None and hit[0] == fingerprint:
+                return hit[1]
+        value = builder()
+        with _training_cache_lock:
+            _training_derived_cache[key] = (fingerprint, value)
+        return value
 
 
 def _artifact_summary(payload: object) -> object:
