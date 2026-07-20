@@ -1,0 +1,89 @@
+R-CLOSURE-1 — impossibility ledger + residue-map spec (DOC-ONLY, HIGH, side project)
+
+You are gpt-5.6-sol in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width
+(branch claude/tss-vcf-width @ 6ee9ecfb). DOC-ONLY round: you write exactly
+TWO new files at the worktree root. No source edits, no cargo, no builds, no
+commits, no spawned sessions, no other worktrees except the read-only paths
+listed below.
+
+## Goal (owner standing goal, 07-20)
+
+The campaign's end state is a CLOSED design-space map: every region of the
+TSS solver's optimization space is either (a) an implemented + verified
+optimization, (b) a proven impossibility, or (c) explicitly open with a
+measured value estimate. "Few feasible routes left" must become a MEASURED,
+AUDITABLE claim. You build the two artifacts that make it auditable.
+
+## Deliverable 1: IMPOSSIBILITY_LEDGER.md
+
+One entry per proven-dead optimization route, each with:
+(a) exact statement of what is dead (tight scope — overclaiming a death is
+    as bad as re-litigating one);
+(b) the killing counterexample or theorem, with a doc + section pointer a
+    reviewer can follow;
+(c) the scope boundary: what nearby variant remains OPEN (not killed);
+(d) whether the counterexample is machine-checkable, and where a regression
+    test exists or should exist (file/test name if present).
+
+Seed list — VERIFY each against the actual documents before including
+(anything you cannot verify goes in an "Unverified claims" appendix, never
+in the ledger proper):
+- r=2 zone trim unsound (G1/G3 counterexamples);
+- defender pairing-strategy impossibility (a k=7 pairing EXISTS at index 12
+  — check the exact statement of what this kills);
+- ES potential-layer greedy refutation;
+- radius-nine constant substitution is not a proof;
+- population-prevalence inference (DESIGN_GROUP2_NEXT.md DEAD items);
+- original kappa_cut charge rule (double-count 1+5=6) — record as
+  REPAIRED-BY kappa_cut^*, i.e. superseded, not a dead route;
+- the four fast stealing conversions (dead);
+- tempo P_3/P_4/P_5 (lost; P_0-P_2 safe, k*=3 exact).
+
+Sources (read-only where outside this worktree):
+- PROOF_TSS_ZONES_FHW.md + PROOF_TSS_ZONES_FHW_REVIEW2.md +
+  DESIGN_GROUP2_NEXT.md + DESIGN_VERIFIER_FHW_EXTENSION.md (this worktree);
+- docs/PROOF_TSS_DEFENDER_ZONES.md + docs/PLAN_TSS_SOLVER_UPGRADES.md +
+  docs/PLAN_TSS_MCTS_INTEGRATION.md at
+  E:\Hexo-BotTrainer-hexgt\.claude\worktrees\consolidate-main (READ-ONLY);
+- E:\Hexo-BotTrainer-hexgt\.claude\worktrees\group2-zones\GROUP2_IMPL_REPORT.md
+  and .codex-group2-next\OBSTRUCTIONS.md (READ-ONLY);
+- E:\tss-lean\ (paper + LEDGER + proofs, READ-ONLY) for the
+  tempo/stealing/pairing/ES results.
+
+## Deliverable 2: RESIDUE_MAP_SPEC.md
+
+An implementation-ready SPEC (no code this round) for attributing
+official-profile solve wall time to reducible categories, so the closure
+claim "the largest remaining reducible category is X% of wall; any future
+optimization is bounded by X" can be stated from data. Contents:
+
+1. Category partition — proposed: defender enumeration (forced vs unforced;
+   unforced further split FHW-eligible vs not, per the shadow selector's
+   class), attacker-side OR expansion (winner-first vs ordering-miss wall),
+   TT probe/store, certificate verification, horizon-ladder re-solves,
+   cap-resume overhead, census-gate, other/unattributed. Refine this
+   partition where the code says otherwise — you must state a non-overlap +
+   completeness invariant (categories partition wall; sum matches total
+   within a stated tolerance) and "other" must be MEASURED, never inferred
+   by subtraction alone without a cross-check.
+2. Exact counter definitions and where each hook lives in
+   packages/hexfield_eq/rust/src (read the solver; cite functions/lines).
+   Reuse existing telemetry where it exists (DESIGN_GROUP2_NEXT.md sections
+   5.1/6.5 fields; horizon_cut_tall; deep_kb_death; existing solve
+   summaries) — say explicitly what is already available vs new.
+3. Measurement protocol: the 19-corpus + spare corpus under the official
+   profiles (docs/TSS_RUNBOOK.md), repetitions/medians, overhead budget for
+   the instrumentation itself (target: negligible; state how verified).
+4. Report format: per-row + aggregate tables, and the closure-criterion
+   paragraph template.
+5. Estimated implementation scope (lines, files, test list) for a future
+   cargo-enabled lane.
+
+## Laws
+
+- DOC-ONLY: zero edits to tracked files, exactly two new files
+  (IMPOSSIBILITY_LEDGER.md, RESIDUE_MAP_SPEC.md) at the worktree root.
+- Every ledger pointer must be verifiable by a reviewer following it;
+  honest "Unverified" beats a confident wrong citation.
+- No cargo/builds (a measurement lane holds the Windows cargo slot).
+- Honest stop with residuals beats padded completeness.
