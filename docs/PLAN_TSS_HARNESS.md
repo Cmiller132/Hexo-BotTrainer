@@ -9,11 +9,38 @@ forcing anchors, VCF fixtures, offline deep-solved labels, atlas certified
 rows, human tactical picks. Hard to cheat; the harness itself is tested.
 Multiple cargo lanes authorized (parallel work, Codex HIGH on build-out).
 
+Second-round rulings (2026-07-20, generality stress-test): cross-architecture
+fairness anchor = **matched wall-time tiers on a quiet machine + Pareto
+curves** (within-architecture keeps deterministic cost counts primary);
+**the strict verifier is the fixed point** — a verdict counts for coverage
+only if the independent verifier replays its cert, cert-format changes are
+campaign-level events; **held-out splits** protect against overfitting the
+sets; NO external reference solver.
+
 ## 1. Architecture
+
+**The harness core depends on a minimal solver CONTRACT, nothing else** — so
+dramatic solver refactors (different config surface, different architecture)
+plug in via a new adapter without touching the instrument:
+
+- `solve_sequence(positions, budget) -> [{status, verified, wall, cost,
+  counters: {open dict}}]` (sequence-based so warmth-like semantics are
+  expressible);
+- `manifest() -> dict` (free-form effective-config self-description);
+- `declared_features() -> [names]`.
+
+Core (sets, gates, verified-coverage metric, determinism gate, archive,
+diff, reports) is solver-agnostic and frozen. Everything solver-specific —
+config vocabulary, canary definitions, counter semantics — lives in a
+per-solver **adapter plugin** (~50–100 lines). Today's solver gets the first
+adapter; comparison history survives refactors because archives store
+contract fields uniformly. The verifier is the fixed point: `verified: true`
+(independent cert replay, pinned verifier version) is what makes a verdict
+count, for ANY adapter.
 
 Three layers:
 
-1. **Rust support** (additive, verifier untouched):
+1. **Rust support** (additive, verifier untouched — consumed by adapter #1):
    - `hexfield_eq_solver_manifest(...)` — effective-config echo derived from
      the SAME construction path real solves use (never re-hardcoded
      constants): width flags, tt_enabled + tt_bytes_cap, fragment store
@@ -33,6 +60,13 @@ Three layers:
 
 ## 2. Position sets (versioned, SHA-pinned; new version = new hash, never
    edit in place)
+
+Every set carries a **held-out split** (owner ruling): a development portion
+visible for iteration and a held-out portion consumed ONLY at adoption
+gates; a change that gains on visible but not held-out is flagged OVERFIT.
+**Set refresh protocol** for saturation: when coverage ceilings out, mint a
+new set version (new samples, new offline labels) — old versions are kept
+frozen for historical comparability, never edited.
 
 - `SET-SELFPLAY-V1` — the 3,255 frozen V1 selfplay positions.
 - `SET-HUMAN-V1` — the 2,720 frozen V1 human-game positions.
@@ -59,7 +93,12 @@ Three layers:
    canary (a win at depth > h that unbounded finds and bounded must not).
    Canary not firing under a config that claims the feature = run FAILURE.
    Inverted canaries too: feature OFF must make the canary NOT fire (guards
-   against always-on bleed).
+   against always-on bleed). Canaries are FEATURE-KEYED PLUGINS shipped by
+   the adapter, and the binding rule is: **an arm may not declare a feature
+   that has no canary** — you cannot claim what cannot be checked. Manifest
+   assertion is subset-match ("every declared key echoed with matching
+   effective value"), not a fixed schema — a refactored config vocabulary
+   passes through with extra keys archived opaquely.
 3. **Ground-truth hard gates**: on SET-PUZZLE, losing a known win/loss or
    claiming a verdict contradicting a label FAILS the run. Everywhere:
    `deep_verify_failed == 0` (fatal), cert_version pinned.
@@ -96,6 +135,14 @@ Three layers:
   coverage tables, gate status. Cross-build comparisons are first-class.
 - **In-process A/B**: two arms, same build, interleaved over the same
   shards (same-process load symmetry) for config-flag changes.
+- **Cross-architecture runs** (different adapters): verified coverage at
+  matched wall-time tiers on a QUIET machine (harness refuses the
+  cross-arch mode if the load fingerprint shows contention), reported as a
+  coverage-vs-cost Pareto curve over several budget tiers — never a single
+  point. Cost counters are compared only within an architecture.
+- **Significance**: paired verdict-flip tables get a McNemar-style readout
+  in every diff so small coverage deltas are not over-read; the report
+  labels deltas inside the noise band as such.
 
 ## 6. Report contents (per run and per diff)
 
