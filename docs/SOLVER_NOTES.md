@@ -160,3 +160,15 @@ Consequences:
   fixed sets, no shortcuts; adaptive budgets parked; envelope tunable).
   Batch-API stats gap found (§3). Warmth smoke: fragment store engages under
   env (19→2 nodes on a repeated-structure WIN), full rerun launched.
+- 2026-07-20 (evening): **V2 h2h LANDED — unbounded beats h16 at strength**:
+  150–106 over 256 paired production games at ep90, 58.6% decided
+  [52.5, 64.5], seat-balanced, pentanomial p≈0.002 (docs/V2_H2H_REPORT.md).
+  Horizon question closed on both axes (V1 coverage + V2 strength);
+  horizon=0 normative. Harness: SET-HUMAN-V1 frozen (2,720 positions,
+  pin 5784defe; V1 raws = 320 positions × 10 arms, NOT 2,720 positions —
+  anchor subset asserted at mint). Bench venv wiring fixed (GPU venv .pth
+  points at a stale checkout; bench now self-resolves hexfield_eq from the
+  worktree + infrastructure packages from the main checkout). Smoke-tier
+  0-decision readout = torch.compile eating the 20s window (0s warmup by
+  design) — the full profile's 60s warmup absorbs it; smoke validates
+  wiring, not throughput.

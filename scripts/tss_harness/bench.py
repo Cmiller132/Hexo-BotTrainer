@@ -581,6 +581,19 @@ def run_benchmark(
     if str(soak_dir) not in sys.path:
         sys.path.insert(0, str(soak_dir))
     import arch_env  # noqa: F401
+    # The GPU venv's .pth entries point at a stale checkout. The solver under
+    # test (hexfield_eq, compiled .so in-tree) must come from THIS worktree;
+    # the infrastructure packages need their compiled _rust extensions, which
+    # only the main checkout carries — worktrees hold source only.
+    worktree_pkgs = Path(__file__).resolve().parents[2] / "packages"
+    main_pkgs = Path("/mnt/e/Hexo-BotTrainer-hexgt/packages")
+    paths = [worktree_pkgs / "hexfield_eq" / "python"]
+    paths += [main_pkgs / pkg / "python"
+              for pkg in ("hexo_engine", "hexo_utils", "hexo_models",
+                          "hexo_runner", "hexo_train")]
+    for p in reversed([str(p) for p in paths]):
+        if p not in sys.path:
+            sys.path.insert(0, p)
     from hexfield_eq.serve_env import prime_serve_env
 
     prime_serve_env()
