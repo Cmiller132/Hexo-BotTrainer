@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import math
 import os
@@ -435,6 +436,20 @@ def _production_config(arm_config: dict[str, Any]):
     return parse_hexfield_config(model_config)
 
 
+def _engine_binary_fingerprint() -> dict[str, Any]:
+    """Identity of the actual _rust extension in use. Cross-run moves/min is
+    comparable ONLY at matching binary identity — caught live 2026-07-20:
+    a release .so benched 3.1x faster than the editable debug .so, which
+    silently dominated every solver-vs-solver comparison."""
+    try:
+        from hexfield_eq import _rust
+        p = Path(_rust.__file__)
+        h = hashlib.sha256(p.read_bytes()).hexdigest()
+        return {"so_path": str(p), "so_sha256": h, "so_bytes": p.stat().st_size}
+    except Exception as exc:  # pragma: no cover - diagnostic only
+        return {"so_error": str(exc)}
+
+
 def _load_fingerprint(initial_gpu: GpuState) -> dict[str, Any]:
     try:
         loadavg: list[float] | None = list(os.getloadavg())
@@ -447,6 +462,7 @@ def _load_fingerprint(initial_gpu: GpuState) -> dict[str, Any]:
             {process.pid for process in initial_gpu.processes if process.pid != current_pid}
         ),
         "loadavg": loadavg,
+        "engine_binary": _engine_binary_fingerprint(),
     }
 
 

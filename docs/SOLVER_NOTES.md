@@ -205,6 +205,23 @@ Consequences:
   Consequence for ground truth: loss labels can never be must_solve for
   arbitrary-goal arms (v3 mint: must_solve = wins ≤400 only; the loss-side
   obligation lives in the loss_detection canary for claiming arms).
+- 2026-07-20 (late): **R-TWOPASS-IMPL GATED — engine unused-budget dual
+  pass (owner-approved), commit 6f044e2d.** Codex build, line-reviewed;
+  190/190 serialized tests (parallel flake = pre-existing
+  TSS_SHARED_FRAGMENTS env race between test files — test-hygiene item).
+  Full dev-split coverage at cap 500, dual_pass on: wins IDENTICAL
+  (150/317/92 — primal untouched), **+288 verified losses** (selfplay
+  10→51, human 105→269, puzzle 9→92 = half the puzzle set decided; 58/116
+  atlas loss labels proven at production cap). 211 nodes/decision =
+  cheapest arm measured; max nodes = cap (never exceeded).
+- 2026-07-20 (late): **INSTRUMENT LESSON — build profile dominates
+  moves/min.** The twopass release .so benched 427.5 moves/min vs the
+  anchor's 136.25, a 3.1x gap that is debug-vs-release, not solver:
+  the v1-soak editable .so (all prior benches, and both V2 h2h arms —
+  internally fair, absolutely slow) is a DEBUG build. Bench fingerprint
+  now records the .so sha256/size (engine_binary); cross-run moves/min
+  comparisons are valid ONLY at matching binary identity. Same-worktree
+  same-.so control run (dual_pass off) is the honest throughput A/B.
 - **P5 Solver-internal efficiency** — move ordering / pruning inside wide-pn
   so the same 500 nodes prove more. No specific lever identified yet; the
   win-vs-grind contrast (hot 45.5% vs 6%, threats) suggests ordering signal
