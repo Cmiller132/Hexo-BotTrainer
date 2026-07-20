@@ -1,0 +1,118 @@
+{
+  "adoption": {
+    "baseline_moves_per_min": null,
+    "classification": "baseline_not_supplied",
+    "delta_percent": null,
+    "hard_gate": false,
+    "tolerance_percent": 5.0
+  },
+  "arm_config": {
+    "tss_solver_dual_pass": false,
+    "tss_solver_horizon": 0,
+    "tss_solver_horizon_ladder": false,
+    "tss_solver_node_cap": 500,
+    "tss_zone": false
+  },
+  "checkpoint": "/mnt/e/Hexo-BotTrainer/runs/hexfield_eq_main_3/checkpoints/epoch_000090.pt",
+  "decisions": 1688,
+  "effective_tss": {
+    "tss_enabled": true,
+    "tss_solver_dual_pass": false,
+    "tss_solver_horizon": 0,
+    "tss_solver_horizon_ladder": false,
+    "tss_solver_mode": 3,
+    "tss_solver_node_cap": 500,
+    "tss_zone": false
+  },
+  "games_active": 256,
+  "games_finished": 19,
+  "games_seeded": 275,
+  "gpu_util": {
+    "mean": 48.70403587443946,
+    "p10": 0.0,
+    "p90": 94.0
+  },
+  "load_fingerprint": {
+    "cpu_count": 32,
+    "engine_binary": {
+      "so_error": "name 'hashlib' is not defined"
+    },
+    "loadavg": [
+      8.9013671875,
+      6.595703125,
+      4.5263671875
+    ],
+    "other_gpu_procs": 0
+  },
+  "moves_per_min": 422.0,
+  "per_move_latency": {
+    "p50": 36641242043,
+    "p90": 42622861237,
+    "p99": 49339850889
+  },
+  "schema": 1,
+  "seed_plies_summary": {
+    "count": 275,
+    "max": 69,
+    "mean": 48.912727272727274,
+    "min": 30,
+    "p50": 49.0,
+    "p90": 65.6
+  },
+  "set_hash": "356c93b718214d80799f334e6554a513cd6a527c53f28deaa7c4044d25e8af9e",
+  "tss": {
+    "async_dropped": 0,
+    "async_enqueued": 85578,
+    "async_pending_hits": 0,
+    "async_stale": 2850,
+    "async_workers_spawned": 4,
+    "backups": 432128,
+    "class_rows": 545,
+    "deep_calls": 84317,
+    "deep_hard_backups": 26631,
+    "deep_loss": 0,
+    "deep_memo_hits": 94428,
+    "deep_nodes": 4762485,
+    "deep_unknown": 77686,
+    "deep_verify_failed": 0,
+    "deep_win": 6631,
+    "depth_sum": 1628664,
+    "forced_defense_fraction": 0.16528436018957346,
+    "forced_defense_moves": 279,
+    "gumbel_win_retained_mass_mean": 0.5828498243743062,
+    "horizon_cut": 0,
+    "horizon_preflight_failed": 0,
+    "horizon_retry": 0,
+    "injection_fire_rate": 0.015402843601895734,
+    "injection_fired_moves": 26,
+    "leaf_verdict_hits_total": 44302,
+    "loss_only_rows": 148,
+    "moves": 1688,
+    "pair_omitted": 57727,
+    "park_bailed": 12195,
+    "park_hard": 5586,
+    "park_parked": 85578,
+    "park_released": 67797,
+    "park_wait_ms_max": 4378,
+    "park_wait_ms_sum": 192912154,
+    "proof_disagreements": 0,
+    "proof_rows": 0,
+    "prune_dropped_total": 30394475,
+    "prune_eligible_total": 45856,
+    "root_injected_total": 33,
+    "search_depth_max": 13,
+    "search_depth_mean": 3.768938832938389,
+    "sharpened_rows": 269,
+    "threat_move_fraction": 0.24822274881516587,
+    "threat_moves": 419,
+    "win_retained_mass_mean": 0.21790406050955413,
+    "win_retained_mass_p10": 0.015625,
+    "win_rows": 157,
+    "zone_nodes": 0,
+    "zone_verify_failed": 0
+  },
+  "verify_failed_total": 0,
+  "visits": 256,
+  "warmup_seconds": 60.0,
+  "window_seconds": 240.0
+}
