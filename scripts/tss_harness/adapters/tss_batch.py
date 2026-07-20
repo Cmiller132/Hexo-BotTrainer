@@ -6,8 +6,12 @@ resolver, never re-derived here):
 
     node_cap: int          horizon: int (0 = unbounded, else >= 16)
     ladder: bool           zone: bool
-    wide: bool             goal: "win" | "loss" | "both"
+    wide: bool             goal: "win" | "loss" | "both" | "two_pass"
     shared_fragments: bool (drives the TSS_SHARED_FRAGMENTS env gate)
+
+"two_pass" = win pass + full-budget loss pass on the unknowns (adapter-side
+protocol; the engine sees two plain goal calls, so verification is
+untouched). Cost per re-solved position = sum of both passes.
 
 The env-gated flags are SET by this adapter around every engine call —
 the incident rule (SOLVER_NOTES §5) is that arms must not depend on ambient
@@ -61,6 +65,8 @@ class TssBatchAdapter:
         unknown = set(cfg) - set(self.DEFAULTS)
         if unknown:
             raise ValueError(f"unknown config keys for {self.name}: {unknown}")
+        if cfg["goal"] not in ("win", "loss", "both", "two_pass"):
+            raise ValueError(f"goal must be win|loss|both|two_pass: {cfg['goal']!r}")
         self.config = cfg
 
     # -- env ownership ---------------------------------------------------- #
@@ -92,15 +98,42 @@ class TssBatchAdapter:
         from hexfield_eq import _rust
 
         states = [corpus_lib.build_state(list(p.moves)) for p in positions]
-        raw = _rust.hexfield_eq_deep_solve_batch(
-            states,
-            int(self.config["node_cap"]),
-            str(self.config["goal"]),
-            int(self.config["horizon"]),
-            bool(self.config["ladder"]),
-            bool(self.config["zone"]),
-            bool(self.config["wide"]),
-        )
+
+        def batch(goal: str, idx: list[int]) -> list[dict]:
+            return _rust.hexfield_eq_deep_solve_batch(
+                [states[i] for i in idx],
+                int(self.config["node_cap"]),
+                goal,
+                int(self.config["horizon"]),
+                bool(self.config["ladder"]),
+                bool(self.config["zone"]),
+                bool(self.config["wide"]),
+            )
+
+        everyone = list(range(len(states)))
+        if self.config["goal"] == "two_pass":
+            # Win pass then loss pass on the unknowns, each with the FULL
+            # budget — the wide profile's Both gives the dedicated loss
+            # attempt zero budget (SOLVER_NOTES §6 P4), so a both arm only
+            # surfaces primal-incidental losses; two_pass buys the rest for
+            # a second budget spent ONLY where the win pass failed. Costs
+            # are summed per position (nodes stay the honest currency).
+            raw = batch("win", everyone)
+            retry = [i for i, r in zip(everyone, raw) if r["status"] != "win"]
+            for i, r in zip(retry, batch("loss", retry)):
+                first = raw[i]
+                merged = dict(r)
+                merged["deep_nodes"] = (
+                    int(first["deep_nodes"]) + int(r["deep_nodes"]))
+                merged["wall_nanos"] = (
+                    int(first["wall_nanos"]) + int(r["wall_nanos"]))
+                merged["deep_verify_failed"] = (
+                    int(first["deep_verify_failed"])
+                    + int(r["deep_verify_failed"]))
+                merged["win_pass_status"] = first["status"]
+                raw[i] = merged
+        else:
+            raw = batch(str(self.config["goal"]), everyone)
         out: list[SolveRecord] = []
         for p, r in zip(positions, raw):
             status = r["status"]
@@ -135,7 +168,7 @@ def declared_features(config: dict[str, Any]) -> tuple[str, ...]:
         feats.append("warmth")
     if int(config.get("horizon", 0)) == 0:
         feats.append("unbounded_horizon")
-    if config.get("goal", "win") in ("loss", "both"):
+    if config.get("goal", "win") in ("loss", "both", "two_pass"):
         # goal=both under the wide profile currently gives the loss attempt
         # zero budget (SOLVER_NOTES §5) — such an arm will FAIL this canary,
         # which is the honest outcome until the budget split is fixed.
