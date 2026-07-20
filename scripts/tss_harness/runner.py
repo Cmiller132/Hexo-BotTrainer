@@ -44,7 +44,7 @@ from tss_harness.gates import (
 from tss_harness.sets import SETS_DIR, load_set
 
 BENCH_PYTHON = "/root/.venvs/hexo-bottrainer-wsl/bin/python"
-COVERAGE_SETS = ("selfplay_v1", "human_v1", "puzzle_v2")   # frozen-if-present
+COVERAGE_SETS = ("selfplay_v1", "human_v1", "puzzle_v3")   # frozen-if-present
 # puzzle_v1 is superseded (its must_solve required dedicated-loss verdicts a
 # Both-goal arm structurally cannot produce — see SOLVER_NOTES P4); pinned
 # file kept immutable per the no-in-place-edit rule.

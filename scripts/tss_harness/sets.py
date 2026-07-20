@@ -240,13 +240,15 @@ def build_puzzle_v1() -> str:
       human, not papered over).
 
     must_solve marks labels EVERY sound arm must decide regardless of its
-    goal protocol: WIN labels proven <= 400 nodes (the win attempt always
-    holds the full budget), and LOSS labels proven <= 50 nodes (the
-    primal-incidental class even a Both arm surfaces). Losses needing a
-    dedicated 50-400-node loss search are real coverage targets but NOT
-    must_solve — the v1 mint required them and correctly failed the
-    production-parity arm on 70 atlas losses (2026-07-20), which is a P4
-    finding, not a gate every arm can pass today. Deeper labels gate only
+    goal protocol — which after two mint iterations (2026-07-20) means WIN
+    labels proven <= 400 nodes ONLY. Loss labels can never be must_solve
+    for arbitrary-goal arms: v1 required dedicated-loss verdicts (70 atlas
+    fails), v2 tried "cheap losses <= 50 nodes" and STILL failed 15 human
+    positions — mechanism: when the primal win search width-exhausts (at 2
+    nodes on those), Both returns Unknown with the whole remaining budget
+    unused; it never asks the loss question at any price. The loss-side
+    requirement lives in the loss_detection canary, which every arm
+    CLAIMING loss coverage must pass. Deeper labels gate only
     contradictions.
     """
     labels_path = RAWS / "lanec_labels.jsonl"
@@ -296,12 +298,7 @@ def build_puzzle_v1() -> str:
             raise RuntimeError(f"no moves source for {l['pos_id']}")
         if l["status"] in ("win", "loss"):
             nodes = int(l.get("nodes", 1 << 30))
-            if l["status"] == "win":
-                must = nodes <= 400
-            else:
-                loss_nodes = int(
-                    l.get("loss_pass", {}).get("deep_nodes", nodes))
-                must = loss_nodes <= 50
+            must = l["status"] == "win" and nodes <= 400
             rows.append({
                 "pos_id": l["pos_id"], "source": l["source"], "moves": moves,
                 "labels": {
@@ -322,7 +319,7 @@ def build_puzzle_v1() -> str:
                 },
             })
     rows.sort(key=lambda r: r["pos_id"])
-    return _write_pinned("puzzle_v2", rows)
+    return _write_pinned("puzzle_v3", rows)
 
 
 def main() -> None:
@@ -336,7 +333,7 @@ def main() -> None:
     if which in ("all", "canaries_v2"):
         print("canaries_v2:", build_canaries_v2())
     if which == "puzzle":
-        print("puzzle_v2:", build_puzzle_v1())
+        print("puzzle_v3:", build_puzzle_v1())
 
 
 if __name__ == "__main__":

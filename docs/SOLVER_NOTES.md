@@ -197,6 +197,14 @@ Consequences:
   protocol change (Rust; the P4 build item). Ground-truth scale of the
   miss: the production-parity arm failed **70 cheap certified atlas
   losses** (113–387 dedicated-loss nodes) in the puzzle dev split.
+  **Mechanism sharpened by the puzzle_v2 gate iteration:** when the primal
+  win search width-exhausts, Both returns Unknown with the ENTIRE
+  remaining budget unused — 15 human positions whose win pass died at 2
+  nodes and whose loss proof costs 5–44 nodes came back unknown-at-cost-2.
+  The two-pass fix is nearly FREE exactly there (498/500 budget idle).
+  Consequence for ground truth: loss labels can never be must_solve for
+  arbitrary-goal arms (v3 mint: must_solve = wins ≤400 only; the loss-side
+  obligation lives in the loss_detection canary for claiming arms).
 - **P5 Solver-internal efficiency** — move ordering / pruning inside wide-pn
   so the same 500 nodes prove more. No specific lever identified yet; the
   win-vs-grind contrast (hot 45.5% vs 6%, threats) suggests ordering signal
