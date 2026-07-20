@@ -156,7 +156,11 @@ pub(crate) fn analyze(state: &RustHexoState) -> ThreatAnalysis {
     let me = state.current_player();
     let mut own_win_now = false;
     let mut opp_empties: Vec<Vec<HexCoord>> = Vec::new();
-    for (player, entry) in state.board().windows().threats() {
+    // Every output below is order-insensitive (booleans, counts, a minimum
+    // hitting-set SIZE), so the O(active-threats) live index replaces the
+    // O(all-windows) `threats()` scan with identical results. Order-sensitive
+    // consumers (`tactical_cells`) keep the full scan.
+    for (player, entry) in state.board().windows().live_threat_entries() {
         if player == me {
             // own win-now: count-5 (1 placement) any B; count-4 only at B==2.
             match entry.count(me) {

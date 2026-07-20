@@ -25,6 +25,8 @@ mod threats_shared;
 // docs/PLAN_TSS_DEEPENING.md §2).
 mod tss_core;
 mod tss_reference;
+#[cfg(test)]
+mod tss_reference_fast;
 mod tss_solver;
 mod tss_verify;
 
@@ -35,6 +37,27 @@ mod tss_async;
 
 #[cfg(test)]
 mod tss_bench;
+
+#[cfg(test)]
+mod tss_corpus;
+
+#[cfg(test)]
+mod tss_cap_resume;
+
+#[cfg(test)]
+mod tss_spare_corpus;
+
+#[cfg(test)]
+mod tss_k_reply_shadow;
+
+#[cfg(test)]
+mod tss_turn_quotient_hunt;
+
+#[cfg(test)]
+mod tss_pn_init_hunt;
+
+#[cfg(test)]
+mod tss_leaf_surface_hunt;
 
 #[cfg(feature = "python")]
 mod cache;
@@ -161,7 +184,10 @@ pub fn _rust(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<search::HexfieldMctsSession>()?;
     // λ¹ threat-analysis diagnostic probe (shared analysis_pydict builder);
     // drives the Python-side TSS regression fixtures.
-    module.add_function(wrap_pyfunction!(search::hexfield_eq_threat_analysis, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        search::hexfield_eq_threat_analysis,
+        module
+    )?)?;
     // Parallel serve-pack with zero-copy buffers (HEXFIELD_RUST_PACK path).
     module.add_function(wrap_pyfunction!(serve_pack::build_serve_groups, module)?)?;
     module.add_function(wrap_pyfunction!(serve_pack::debug_plan_groups, module)?)?;
