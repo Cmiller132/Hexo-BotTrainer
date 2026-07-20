@@ -101,6 +101,41 @@ def build_selfplay_v1() -> str:
     return _write_pinned("selfplay_v1", rows)
 
 
+def build_human_v1() -> str:
+    """SET-HUMAN-V1: 2,720 human OOD positions from
+    corpus_lib.load_human_positions(340, 8) (seed 1234, first-340-games
+    slice — file-order bias documented in corpus_lib). V1 itself soaked a
+    320-position subslice (40x8) across 10 arms; the builder hard-asserts
+    those 320 observed pos_ids are all CONTAINED here, so V1 anchors remain
+    comparable while the frozen set carries 8.5x the coverage. Any drift
+    (corpus edit, sampler change) fails the mint."""
+    sys.path.insert(0, str(WORKTREE / "scripts" / "_v1_soak"))
+    import corpus_lib
+
+    observed = set()
+    for line in open(RAWS / "soak_human.jsonl"):
+        observed.add(json.loads(line)["pos_id"])
+
+    generated = corpus_lib.load_human_positions(340, 8)
+    gen_ids = {p["id"] for p in generated}
+    if not observed <= gen_ids:
+        raise RuntimeError(
+            f"human slice drift: {len(observed - gen_ids)} V1-observed "
+            f"pos_ids missing from the regenerated slice "
+            f"(generated {len(gen_ids)}, observed {len(observed)})"
+        )
+
+    rows = [
+        {
+            "pos_id": p["id"], "source": "human", "moves": p["moves"],
+            "meta": {k: p[k] for k in ("placements", "elo") if k in p},
+        }
+        for p in generated
+    ]
+    rows.sort(key=lambda r: r["pos_id"])
+    return _write_pinned("human_v1", rows)
+
+
 def build_canaries_v1() -> str:
     """Canary fixtures, selected from observed V1 behavior:
 
@@ -157,6 +192,8 @@ def main() -> None:
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     if which in ("all", "selfplay"):
         print("selfplay_v1:", build_selfplay_v1())
+    if which in ("all", "human"):
+        print("human_v1:", build_human_v1())
     if which in ("all", "canaries"):
         print("canaries_v1:", build_canaries_v1())
 
