@@ -188,6 +188,10 @@ pub fn _rust(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
         search::hexfield_eq_threat_analysis,
         module
     )?)?;
+    module.add_function(wrap_pyfunction!(
+        search::hexfield_eq_solver_manifest,
+        module
+    )?)?;
     // V1 SOAK deep-solve measurement probe (PLAN §9): verified-path solve on a
     // fresh solver, returns verdict + counters + cert geometry. Measures only.
     module.add_function(wrap_pyfunction!(

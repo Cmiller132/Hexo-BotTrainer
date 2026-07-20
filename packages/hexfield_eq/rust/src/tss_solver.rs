@@ -609,6 +609,16 @@ enum Round3Flag {
     Consume,
 }
 
+impl Round3Flag {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Shadow => "shadow",
+            Self::Consume => "consume",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct WidthOptions {
     vcf_pair_complete: bool,
@@ -695,6 +705,35 @@ impl WidthOptions {
     }
 }
 
+/// Process-environment switches sampled once at the public solve boundary.
+/// Keeping the sample separate makes effective-configuration resolution a
+/// pure operation that can also back the harness manifest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SolveRuntimeFlags {
+    lazy_frontier: bool,
+    interior_census_gate: bool,
+    k_reply_consume: bool,
+}
+
+/// Fully resolved flags and memory caps used by one `solve_goal` invocation.
+/// This is telemetry/configuration data only; the search never mutates it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EffectiveSolveConfig {
+    pub(crate) vcf_pair_complete: bool,
+    pub(crate) quiet_turn_or_edges: &'static str,
+    pub(crate) ranked_unforced_defender_zone: &'static str,
+    pub(crate) tt_enabled: bool,
+    pub(crate) tt_bytes_cap: usize,
+    pub(crate) shared_fragments_enabled: bool,
+    pub(crate) fragment_store_cap_bytes: usize,
+    pub(crate) lazy_frontier: bool,
+    pub(crate) interior_census_gate: bool,
+    pub(crate) k_reply_consume: bool,
+    uses_wide_pn: bool,
+    local_tt_cap: usize,
+    shared_tt_cap: usize,
+}
+
 /// Reusable proof-carrying solver.  Its shared TT retains only complete,
 /// self-contained positive proof fragments; solve-local arena IDs never cross
 /// an attempt boundary.
@@ -728,6 +767,8 @@ pub(crate) struct TssSolver {
     /// builds neither retain nor expose unfinished proof numbers.
     #[cfg(test)]
     last_wide_root_numbers: Option<(u32, u32)>,
+    #[cfg(test)]
+    last_effective_config: Option<EffectiveSolveConfig>,
 }
 
 impl Default for TssSolver {
@@ -754,6 +795,8 @@ impl Default for TssSolver {
             leaf_surface_fragment_reconfigurations: 0,
             #[cfg(test)]
             last_wide_root_numbers: None,
+            #[cfg(test)]
+            last_effective_config: None,
         }
     }
 }
@@ -780,6 +823,11 @@ impl TssSolver {
     #[cfg(test)]
     pub(crate) fn last_wide_root_numbers(&self) -> Option<(u32, u32)> {
         self.last_wide_root_numbers
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_effective_config(&self) -> Option<EffectiveSolveConfig> {
+        self.last_effective_config
     }
 
     #[cfg(test)]
@@ -836,6 +884,71 @@ impl TssSolver {
         self.force_interior_census_gate = Some(true);
     }
 
+    /// Sample process-global runtime switches once. The returned value is an
+    /// explicit input to `effective_solve_config`, keeping resolution itself
+    /// deterministic and side-effect free.
+    pub(crate) fn sample_runtime_flags(&self) -> SolveRuntimeFlags {
+        SolveRuntimeFlags {
+            lazy_frontier: std::env::var("TSS_LAZY_FRONTIER").ok().as_deref() == Some("1"),
+            interior_census_gate: std::env::var_os("TSS_INTERIOR_CENSUS_GATE")
+                .is_some_and(|value| value == "1"),
+            k_reply_consume: matches!(std::env::var("TSS_K_REPLY_CONSUME").as_deref(), Ok("1")),
+        }
+    }
+
+    /// Pure effective-configuration resolver shared by real solves and the
+    /// harness manifest. `fragment_store.current_bytes` is projected through
+    /// the same reconfiguration rule the solve applies immediately afterward.
+    pub(crate) fn effective_solve_config(
+        &self,
+        caps: &SolveCaps,
+        runtime: SolveRuntimeFlags,
+    ) -> EffectiveSolveConfig {
+        let tt_bytes_cap = if self.tt_enabled {
+            caps.tt_bytes_cap
+        } else {
+            0
+        };
+        let uses_wide_pn = self.width.vcf_pair_complete
+            && !(self.width.consumes_quiet_turns() && self.width.consumes_ranked_zone());
+        let fragment_store_cap_bytes = if uses_wide_pn && self.shared_fragments_enabled {
+            tt_bytes_cap / WIDE_FRAGMENT_CAP_DIVISOR
+        } else {
+            0
+        };
+        let fragment_store_bytes = if self.fragment_store.cap == fragment_store_cap_bytes
+            && self.fragment_store.hash_mask == self.hash_mask
+        {
+            self.fragment_store.current_bytes
+        } else {
+            0
+        };
+        let (local_tt_cap, shared_tt_cap) = if uses_wide_pn && self.shared_fragments_enabled {
+            (tt_bytes_cap.saturating_sub(fragment_store_bytes), 0)
+        } else if self.width.vcf_pair_complete {
+            (tt_bytes_cap, 0)
+        } else {
+            split_tt_cap(tt_bytes_cap)
+        };
+        EffectiveSolveConfig {
+            vcf_pair_complete: self.width.vcf_pair_complete,
+            quiet_turn_or_edges: self.width.quiet_turn_or_edges.name(),
+            ranked_unforced_defender_zone: self.width.ranked_unforced_defender_zone.name(),
+            tt_enabled: self.tt_enabled,
+            tt_bytes_cap,
+            shared_fragments_enabled: self.shared_fragments_enabled,
+            fragment_store_cap_bytes,
+            lazy_frontier: self.force_lazy_frontier.unwrap_or(runtime.lazy_frontier),
+            interior_census_gate: self
+                .force_interior_census_gate
+                .unwrap_or(runtime.interior_census_gate),
+            k_reply_consume: runtime.k_reply_consume,
+            uses_wide_pn,
+            local_tt_cap,
+            shared_tt_cap,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn k_reply_shadow(&self) -> &[KReplyShadowRecord] {
         &self.last_k_reply_shadow
@@ -858,6 +971,7 @@ impl TssSolver {
             leaf_surface_shared_reconfigurations: 0,
             leaf_surface_fragment_reconfigurations: 0,
             last_wide_root_numbers: None,
+            last_effective_config: None,
         }
     }
 
@@ -880,6 +994,7 @@ impl TssSolver {
             leaf_surface_shared_reconfigurations: 0,
             leaf_surface_fragment_reconfigurations: 0,
             last_wide_root_numbers: None,
+            last_effective_config: None,
         }
     }
 
@@ -897,35 +1012,18 @@ impl TssSolver {
             self.last_narrow_signatures.clear();
             self.last_k_reply_shadow.clear();
             self.last_wide_root_numbers = None;
+            self.last_effective_config = None;
             clear_quotient_telemetry_report();
         }
 
-        // Sample the process environment exactly once per public solve. The
-        // immutable result is threaded through every attempt and recursive
-        // fallback node in this solve.
-        let k_reply_consume = matches!(std::env::var("TSS_K_REPLY_CONSUME").as_deref(), Ok("1"));
-
-        // Read once per solve. Search hot paths receive only this boolean.
-        // The leaf-profile override wins over the environment so the trainer
-        // path is deterministic (env stays the mechanism for offline harnesses).
-        let interior_census_gate = self.force_interior_census_gate.unwrap_or_else(|| {
-            std::env::var_os("TSS_INTERIOR_CENSUS_GATE").is_some_and(|value| value == "1")
-        });
-
-        let effective_tt_cap = if self.tt_enabled {
-            caps.tt_bytes_cap
-        } else {
-            0
-        };
-        let uses_wide_pn = self.width.vcf_pair_complete
-            && !(self.width.consumes_quiet_turns() && self.width.consumes_ranked_zone());
-        let fragment_store_cap = if uses_wide_pn && self.shared_fragments_enabled {
-            effective_tt_cap / WIDE_FRAGMENT_CAP_DIVISOR
-        } else {
-            0
-        };
+        let runtime = self.sample_runtime_flags();
+        let effective = self.effective_solve_config(caps, runtime);
         #[cfg(test)]
-        if self.fragment_store.cap != fragment_store_cap
+        {
+            self.last_effective_config = Some(effective);
+        }
+        #[cfg(test)]
+        if self.fragment_store.cap != effective.fragment_store_cap_bytes
             || self.fragment_store.hash_mask != self.hash_mask
         {
             self.leaf_surface_fragment_reconfigurations = self
@@ -933,23 +1031,28 @@ impl TssSolver {
                 .saturating_add(1);
         }
         self.fragment_store
-            .reconfigure(fragment_store_cap, self.hash_mask);
-        let (local_tt_cap, shared_tt_cap) = if uses_wide_pn && self.shared_fragments_enabled {
-            (
-                effective_tt_cap.saturating_sub(self.fragment_store.current_bytes),
-                0,
-            )
-        } else if self.width.vcf_pair_complete {
-            (effective_tt_cap, 0)
-        } else {
-            split_tt_cap(effective_tt_cap)
-        };
+            .reconfigure(effective.fragment_store_cap_bytes, self.hash_mask);
+        debug_assert_eq!(
+            effective.local_tt_cap,
+            if effective.uses_wide_pn && effective.shared_fragments_enabled {
+                effective
+                    .tt_bytes_cap
+                    .saturating_sub(self.fragment_store.current_bytes)
+            } else if effective.vcf_pair_complete {
+                effective.tt_bytes_cap
+            } else {
+                split_tt_cap(effective.tt_bytes_cap).0
+            }
+        );
         #[cfg(test)]
-        if self.shared_tt.cap != shared_tt_cap || self.shared_tt.hash_mask != self.hash_mask {
+        if self.shared_tt.cap != effective.shared_tt_cap
+            || self.shared_tt.hash_mask != self.hash_mask
+        {
             self.leaf_surface_shared_reconfigurations =
                 self.leaf_surface_shared_reconfigurations.saturating_add(1);
         }
-        self.shared_tt.reconfigure(shared_tt_cap, self.hash_mask);
+        self.shared_tt
+            .reconfigure(effective.shared_tt_cap, self.hash_mask);
 
         let initial_stats = SolveStats {
             peak_tt_bytes: self
@@ -1017,18 +1120,19 @@ impl TssSolver {
                 state,
                 root_player,
                 primal_cap,
-                local_tt_cap,
+                effective.local_tt_cap,
                 caps.semantic_horizon,
                 self.zone,
                 self.width,
-                k_reply_consume,
-                interior_census_gate,
+                effective.k_reply_consume,
+                effective.interior_census_gate,
+                effective.lazy_frontier,
             );
             #[cfg(test)]
             if let Some(signature) = attempt.tt_signature.as_ref() {
                 self.last_narrow_signatures.push(signature.clone());
             }
-            merge_stats(&mut stats, attempt.stats);
+            stats.merge(attempt.stats);
             if let Some(cert) = attempt.cert {
                 return DeepResult {
                     status: ProofStatus::Win,
@@ -1043,18 +1147,19 @@ impl TssSolver {
                 state,
                 root_player.other(),
                 dual_cap,
-                local_tt_cap,
+                effective.local_tt_cap,
                 caps.semantic_horizon,
                 self.zone,
                 self.width,
-                k_reply_consume,
-                interior_census_gate,
+                effective.k_reply_consume,
+                effective.interior_census_gate,
+                effective.lazy_frontier,
             );
             #[cfg(test)]
             if let Some(signature) = attempt.tt_signature.as_ref() {
                 self.last_narrow_signatures.push(signature.clone());
             }
-            merge_stats(&mut stats, attempt.stats);
+            stats.merge(attempt.stats);
             if let Some(cert) = attempt.cert {
                 return DeepResult {
                     status: ProofStatus::Loss,
@@ -1077,6 +1182,7 @@ impl DeepSolve for TssSolver {
 }
 
 impl TssSolver {
+    #[allow(clippy::too_many_arguments)]
     fn prove_for(
         &mut self,
         state: &RustHexoState,
@@ -1088,6 +1194,7 @@ impl TssSolver {
         width: WidthOptions,
         k_reply_consume: bool,
         interior_census_gate: bool,
+        lazy_frontier: bool,
     ) -> AttemptResult {
         if !width.vcf_pair_complete
             || (width.consumes_quiet_turns() && width.consumes_ranked_zone())
@@ -1122,7 +1229,7 @@ impl TssSolver {
         }
         let depth_cap = wide_search_final_depth(state.placements_made(), semantic_horizon);
 
-        self.prove_for_wide_pn(
+        self.prove_for_wide_pn_with_lazy_frontier(
             state,
             claimant,
             node_cap,
@@ -1131,9 +1238,12 @@ impl TssSolver {
             depth_cap,
             width,
             interior_census_gate,
+            lazy_frontier,
         )
     }
 
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
     fn prove_for_wide_pn(
         &mut self,
         state: &RustHexoState,
@@ -1144,6 +1254,34 @@ impl TssSolver {
         depth_cap: usize,
         width: WidthOptions,
         interior_census_gate: bool,
+    ) -> AttemptResult {
+        let runtime = self.sample_runtime_flags();
+        let lazy_frontier = self.force_lazy_frontier.unwrap_or(runtime.lazy_frontier);
+        self.prove_for_wide_pn_with_lazy_frontier(
+            state,
+            claimant,
+            node_cap,
+            local_tt_cap,
+            semantic_horizon,
+            depth_cap,
+            width,
+            interior_census_gate,
+            lazy_frontier,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prove_for_wide_pn_with_lazy_frontier(
+        &mut self,
+        state: &RustHexoState,
+        claimant: Player,
+        node_cap: u64,
+        local_tt_cap: usize,
+        semantic_horizon: u32,
+        depth_cap: usize,
+        width: WidthOptions,
+        interior_census_gate: bool,
+        lazy_frontier: bool,
     ) -> AttemptResult {
         let fragments_enabled = self.shared_fragments_enabled;
         let shared_bytes = self
@@ -1162,12 +1300,7 @@ impl TssSolver {
             fragment_store,
         );
         search.interior_census_gate = interior_census_gate;
-        // Leaf-profile lazy-frontier override (see `configure_leaf_profile`):
-        // replaces the constructor's env read so the trainer path is
-        // env-independent. `None` keeps the env-derived value.
-        if let Some(lazy) = self.force_lazy_frontier {
-            search.lazy_frontier = lazy;
-        }
+        search.lazy_frontier = lazy_frontier;
         let root = search.insert_root(state);
         search.run(state, root);
         #[cfg(test)]
@@ -1810,46 +1943,6 @@ fn unknown<C>(stats: SolveStats) -> DeepResult<C> {
         status: ProofStatus::Unknown,
         cert: None,
         stats,
-    }
-}
-
-fn merge_stats(total: &mut SolveStats, part: SolveStats) {
-    total.nodes = total.nodes.saturating_add(part.nodes);
-    total.expansions = total.expansions.saturating_add(part.expansions);
-    total.tt_hits = total.tt_hits.saturating_add(part.tt_hits);
-    total.tt_entries = total.tt_entries.max(part.tt_entries);
-    total.peak_tt_bytes = total.peak_tt_bytes.max(part.peak_tt_bytes);
-    total.horizon_cuts = total.horizon_cuts.saturating_add(part.horizon_cuts);
-    total.kb_death_cuts = total.kb_death_cuts.saturating_add(part.kb_death_cuts);
-    total.tt_evictions = total.tt_evictions.saturating_add(part.tt_evictions);
-    total.tt_admission_rejections = total
-        .tt_admission_rejections
-        .saturating_add(part.tt_admission_rejections);
-    total.fragment_lookups = total.fragment_lookups.saturating_add(part.fragment_lookups);
-    total.fragment_hits = total.fragment_hits.saturating_add(part.fragment_hits);
-    total.fragment_imports = total.fragment_imports.saturating_add(part.fragment_imports);
-    total.fragment_store_entries = part.fragment_store_entries;
-    total.fragment_store_bytes = part.fragment_store_bytes;
-    total.interior_gate_evaluations = total
-        .interior_gate_evaluations
-        .saturating_add(part.interior_gate_evaluations);
-    total.interior_gate_dismissals = total
-        .interior_gate_dismissals
-        .saturating_add(part.interior_gate_dismissals);
-    total.interior_gate_nanos = total
-        .interior_gate_nanos
-        .saturating_add(part.interior_gate_nanos);
-    #[cfg(test)]
-    {
-        total.stage_refreshes = total.stage_refreshes.saturating_add(part.stage_refreshes);
-        total.live_ge3_seed_scans = total
-            .live_ge3_seed_scans
-            .saturating_add(part.live_ge3_seed_scans);
-        total.live_ge3_seed_nanos = total
-            .live_ge3_seed_nanos
-            .saturating_add(part.live_ge3_seed_nanos);
-        total.closure_debt.merge(part.closure_debt);
-        total.threshold_scale.merge(part.threshold_scale);
     }
 }
 

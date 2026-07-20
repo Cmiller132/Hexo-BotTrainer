@@ -27,7 +27,7 @@ use crate::cache::{state_hash, RustEvaluation};
 use crate::state::move_error;
 use crate::threats_shared as threats;
 use crate::tss_async::{SolveRequest, SolveResponse, TssAsyncHandle};
-use crate::tss_core::{self, HardValue, ProofStatus, SolveCaps, SolveGoal};
+use crate::tss_core::{self, HardValue, ProofStatus, SolveCaps, SolveGoal, SolveStats};
 use crate::tss_solver::TssSolver;
 use crate::tss_verify::{RootBinding, TssVerifier};
 
@@ -642,6 +642,32 @@ impl Default for SolverHorizon {
     }
 }
 
+/// Build the production solve caps used by every verified attempt. Keeping
+/// this constructor shared prevents diagnostic APIs from mirroring the leaf
+/// TT budget or semantic-horizon resolution.
+pub(crate) fn tss_verified_solve_caps(
+    placements: u32,
+    node_cap: u64,
+    horizon: SolverHorizon,
+) -> SolveCaps {
+    SolveCaps {
+        node_cap,
+        tt_bytes_cap: RustSearch::TSS_SOLVER_TT_BYTES,
+        semantic_horizon: if horizon.horizon == 0 {
+            u32::MAX
+        } else {
+            placements.saturating_add(horizon.horizon)
+        },
+    }
+}
+
+/// A verified solve plus diagnostics aggregated across every tight, base,
+/// ladder, and certificate-horizon retry attempt that actually ran.
+pub struct VerifiedSolveWithStats {
+    pub solve: VerifiedSolve,
+    pub stats: SolveStats,
+}
+
 /// One verified deep solve (the ONLY production path from solver claims to
 /// consumable results): solver → independent certificate verifier via the
 /// sole deep mint `tss_core::hard_value_from_verified`. Deterministic given
@@ -657,21 +683,51 @@ pub fn tss_solve_verified(
     solver: &mut TssSolver,
     counters: &mut TssCounters,
 ) -> VerifiedSolve {
+    tss_solve_verified_impl(state, node_cap, goal, zone, horizon, solver, counters, None)
+}
+
+/// Stats-bearing additive variant of `tss_solve_verified`. The verdict and
+/// certificate path are identical; only attempt telemetry is accumulated.
+pub fn tss_solve_verified_with_stats(
+    state: &RustHexoState,
+    node_cap: u64,
+    goal: SolveGoal,
+    zone: crate::tss_core::ZoneSearchCaps,
+    horizon: SolverHorizon,
+    solver: &mut TssSolver,
+    counters: &mut TssCounters,
+) -> VerifiedSolveWithStats {
+    let mut stats = SolveStats::default();
+    let solve = tss_solve_verified_impl(
+        state,
+        node_cap,
+        goal,
+        zone,
+        horizon,
+        solver,
+        counters,
+        Some(&mut stats),
+    );
+    VerifiedSolveWithStats { solve, stats }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tss_solve_verified_impl(
+    state: &RustHexoState,
+    node_cap: u64,
+    goal: SolveGoal,
+    zone: crate::tss_core::ZoneSearchCaps,
+    horizon: SolverHorizon,
+    solver: &mut TssSolver,
+    counters: &mut TssCounters,
+    mut aggregate_stats: Option<&mut SolveStats>,
+) -> VerifiedSolve {
     counters.deep_calls += 1;
     // The semantic deadline (owner ruling 07-20): h>=16 minimum, or unbounded
     // (horizon == 0 => u32::MAX) with the node cap as the only budget. The
     // Rust seam has already rejected the 1..=15 band; P2's preflight may
     // diagnose the guess and P3's cache stamps bind it.
-    let base_horizon = if horizon.horizon == 0 {
-        u32::MAX
-    } else {
-        state.placements_made().saturating_add(horizon.horizon)
-    };
-    let mut caps = SolveCaps {
-        node_cap,
-        tt_bytes_cap: RustSearch::TSS_SOLVER_TT_BYTES,
-        semantic_horizon: base_horizon,
-    };
+    let mut caps = tss_verified_solve_caps(state.placements_made(), node_cap, horizon);
     solver.set_zone_options(zone);
     // Zone tight-ladder (Codex review, wide-deadline neutralization): at a
     // slack defender budget the zone generator must take the FULL legal set,
@@ -694,17 +750,26 @@ pub fn tss_solve_verified(
         };
         let tight_result = solver.solve_goal(state, &tight, goal);
         counters.deep_nodes += tight_result.stats.nodes;
+        if let Some(total) = aggregate_stats.as_mut() {
+            total.merge(tight_result.stats);
+        }
         if tight_result.status != ProofStatus::Unknown {
             caps.semantic_horizon = tight.semantic_horizon;
             tight_result
         } else {
             let full_result = solver.solve_goal(state, &caps, goal);
             counters.deep_nodes += full_result.stats.nodes;
+            if let Some(total) = aggregate_stats.as_mut() {
+                total.merge(full_result.stats);
+            }
             full_result
         }
     } else {
         let full_result = solver.solve_goal(state, &caps, goal);
         counters.deep_nodes += full_result.stats.nodes;
+        if let Some(total) = aggregate_stats.as_mut() {
+            total.merge(full_result.stats);
+        }
         full_result
     };
     // Horizon ladder (§5, owner ruling 07-20; default off). A BOUNDED base
@@ -731,6 +796,9 @@ pub fn tss_solve_verified(
         };
         let tall_result = solver.solve_goal(state, &tall, goal);
         counters.deep_nodes += tall_result.stats.nodes;
+        if let Some(total) = aggregate_stats.as_mut() {
+            total.merge(tall_result.stats);
+        }
         if tall_result.status == ProofStatus::Unknown {
             if tall_result.stats.horizon_cuts > 0 {
                 counters.horizon_cut_tall += 1;
@@ -753,6 +821,9 @@ pub fn tss_solve_verified(
                 caps.semantic_horizon = derived_t;
                 result = solver.solve_goal(state, &caps, goal);
                 counters.deep_nodes += result.stats.nodes;
+                if let Some(total) = aggregate_stats.as_mut() {
+                    total.merge(result.stats);
+                }
             }
         }
     }

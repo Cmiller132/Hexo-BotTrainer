@@ -34,11 +34,13 @@ use crate::payload::{
 use crate::state::states_from_py_states;
 use crate::threats_shared as threats;
 use crate::tss_async::TssAsyncPool;
-use crate::tss_core::{self, ProofStatus};
+use crate::tss_core::{self, ProofStatus, SolveCaps, SolveStats, ZoneSearchCaps};
+use crate::tss_solver::{EffectiveSolveConfig, TssSolver};
 use crate::tree::{
     gumbel_completed_q, gumbel_sigma, gumbel_softmax, random_unit, terminal_value,
-    tss_solve_verified, Divergences, RootDirichletNoise, RustEdge, RustLeaf, RustNode,
-    RustSearch, SolverHorizon, TssCounters, TssLeafRoute, TssParkResolution, Widening,
+    tss_solve_verified, tss_solve_verified_with_stats, tss_verified_solve_caps, Divergences,
+    RootDirichletNoise, RustEdge, RustLeaf, RustNode, RustSearch, SolverHorizon, TssCounters,
+    TssLeafRoute, TssParkResolution, Widening,
 };
 use crate::tss_verify::CertNode;
 
@@ -4700,6 +4702,153 @@ fn tactical_guard_weights(
     tactical_guard_weights_from(&classes, action_ids, weights)
 }
 
+fn validate_harness_horizon(horizon: u32, ladder: bool) -> PyResult<()> {
+    if horizon != 0 && horizon < 16 {
+        return Err(PyValueError::new_err(
+            "horizon must be 0 (unbounded) or >= 16 (the owner floor)",
+        ));
+    }
+    if ladder && horizon == 0 {
+        return Err(PyValueError::new_err(
+            "the horizon ladder requires a bounded horizon (>= 16)",
+        ));
+    }
+    Ok(())
+}
+
+fn harness_zone_caps(zone: bool) -> ZoneSearchCaps {
+    ZoneSearchCaps {
+        enabled: zone,
+        stale_area_filter: false,
+        count2_threshold: false,
+        pair_commutation: false,
+    }
+}
+
+fn harness_solver(wide: bool, zone: ZoneSearchCaps) -> TssSolver {
+    let mut solver = TssSolver::default();
+    if wide {
+        solver.configure_leaf_profile();
+    }
+    solver.set_zone_options(zone);
+    solver
+}
+
+#[derive(Debug)]
+struct HarnessManifestEnv {
+    shared_fragments: Option<String>,
+    interior_census_gate: Option<String>,
+    k_reply_consume: Option<String>,
+    k_reply_shadow: Option<String>,
+}
+
+#[derive(Debug)]
+struct HarnessSolverManifest {
+    effective: EffectiveSolveConfig,
+    caps: SolveCaps,
+    env: HarnessManifestEnv,
+}
+
+fn harness_solver_manifest(
+    node_cap: u64,
+    horizon: SolverHorizon,
+    zone: bool,
+    wide: bool,
+) -> HarnessSolverManifest {
+    let solver = harness_solver(wide, harness_zone_caps(zone));
+    let caps = tss_verified_solve_caps(0, node_cap, horizon);
+    let effective = solver.effective_solve_config(&caps, solver.sample_runtime_flags());
+    HarnessSolverManifest {
+        effective,
+        caps,
+        env: HarnessManifestEnv {
+            shared_fragments: std::env::var("TSS_SHARED_FRAGMENTS").ok(),
+            interior_census_gate: std::env::var("TSS_INTERIOR_CENSUS_GATE").ok(),
+            k_reply_consume: std::env::var("TSS_K_REPLY_CONSUME").ok(),
+            k_reply_shadow: std::env::var("TSS_K_REPLY_SHADOW").ok(),
+        },
+    }
+}
+
+fn set_solve_stats(d: &Bound<'_, PyDict>, stats: &SolveStats) -> PyResult<()> {
+    d.set_item("stats_nodes", stats.nodes)?;
+    d.set_item("stats_expansions", stats.expansions)?;
+    d.set_item("stats_tt_hits", stats.tt_hits)?;
+    d.set_item("stats_tt_entries", stats.tt_entries)?;
+    d.set_item("stats_peak_tt_bytes", stats.peak_tt_bytes)?;
+    d.set_item("stats_horizon_cuts", stats.horizon_cuts)?;
+    d.set_item("stats_kb_death_cuts", stats.kb_death_cuts)?;
+    d.set_item("stats_fragment_lookups", stats.fragment_lookups)?;
+    d.set_item("stats_fragment_hits", stats.fragment_hits)?;
+    d.set_item("stats_fragment_imports", stats.fragment_imports)?;
+    d.set_item(
+        "stats_interior_gate_evaluations",
+        stats.interior_gate_evaluations,
+    )?;
+    d.set_item(
+        "stats_interior_gate_dismissals",
+        stats.interior_gate_dismissals,
+    )?;
+    d.set_item("stats_interior_gate_nanos", stats.interior_gate_nanos)?;
+    Ok(())
+}
+
+/// Effective configuration echo for the persistent TSS harness solver. The
+/// values come from the same pure resolver consumed by `solve_goal`, with the
+/// production verified caps resolved for a placements=0 root.
+#[pyfunction]
+#[pyo3(signature = (node_cap, horizon, ladder, zone, wide))]
+pub fn hexfield_eq_solver_manifest(
+    py: Python<'_>,
+    node_cap: u64,
+    horizon: u32,
+    ladder: bool,
+    zone: bool,
+    wide: bool,
+) -> PyResult<Py<PyAny>> {
+    validate_harness_horizon(horizon, ladder)?;
+    let manifest = harness_solver_manifest(
+        node_cap,
+        SolverHorizon { horizon, ladder },
+        zone,
+        wide,
+    );
+    let effective = manifest.effective;
+    let d = PyDict::new(py);
+    d.set_item("vcf_pair_complete", effective.vcf_pair_complete)?;
+    d.set_item("quiet_turn_or_edges", effective.quiet_turn_or_edges)?;
+    d.set_item(
+        "ranked_unforced_defender_zone",
+        effective.ranked_unforced_defender_zone,
+    )?;
+    d.set_item("tt_enabled", effective.tt_enabled)?;
+    d.set_item("tt_bytes_cap", effective.tt_bytes_cap)?;
+    d.set_item(
+        "shared_fragments_enabled",
+        effective.shared_fragments_enabled,
+    )?;
+    d.set_item(
+        "fragment_store_cap_bytes",
+        effective.fragment_store_cap_bytes,
+    )?;
+    d.set_item("lazy_frontier", effective.lazy_frontier)?;
+    d.set_item("interior_census_gate", effective.interior_census_gate)?;
+    d.set_item("k_reply_consume", effective.k_reply_consume)?;
+    d.set_item("semantic_horizon", manifest.caps.semantic_horizon)?;
+    d.set_item("node_cap", manifest.caps.node_cap)?;
+    d.set_item("cert_version", tss_core::TSS_CERT_VERSION)?;
+    let env = PyDict::new(py);
+    env.set_item("TSS_SHARED_FRAGMENTS", manifest.env.shared_fragments)?;
+    env.set_item(
+        "TSS_INTERIOR_CENSUS_GATE",
+        manifest.env.interior_census_gate,
+    )?;
+    env.set_item("TSS_K_REPLY_CONSUME", manifest.env.k_reply_consume)?;
+    env.set_item("TSS_K_REPLY_SHADOW", manifest.env.k_reply_shadow)?;
+    d.set_item("env", env)?;
+    Ok(d.into_any().unbind())
+}
+
 /// λ¹ threat-analysis diagnostic for a live engine state, via the shared
 /// `analysis_pydict` builder (identical diagnostic surface across lineages by
 /// construction). Drives the hexfield_eq TSS regression fixtures
@@ -4722,7 +4871,7 @@ pub fn hexfield_eq_threat_analysis(
 /// When `with_stats` is set, an additional direct `solve_goal` on a fresh
 /// same-profile solver at the base horizon surfaces the raw `SolveStats`
 /// (census-gate dismissals, TT / fragment reuse, nodes) that the verified path
-/// folds away — these `stats_*` keys are diagnostics only.
+/// folds away. Those stats are cold-by-construction and diagnostics only.
 ///
 /// `goal` ∈ {"win","loss","both"}; `horizon` is 0 (unbounded) or ≥16 (the owner
 /// floor — the 1..=15 band is rejected, matching the config seam); `wide=true`
@@ -4745,16 +4894,7 @@ pub fn hexfield_eq_deep_solve_probe(
     with_stats: bool,
 ) -> PyResult<Py<PyAny>> {
     let s = single_state_from_py(py, state)?;
-    if horizon != 0 && horizon < 16 {
-        return Err(PyValueError::new_err(
-            "horizon must be 0 (unbounded) or >= 16 (the owner floor)",
-        ));
-    }
-    if ladder && horizon == 0 {
-        return Err(PyValueError::new_err(
-            "the horizon ladder requires a bounded horizon (>= 16)",
-        ));
-    }
+    validate_harness_horizon(horizon, ladder)?;
     let goal_enum = match goal {
         "win" => tss_core::SolveGoal::Win,
         "loss" => tss_core::SolveGoal::Loss,
@@ -4765,18 +4905,10 @@ pub fn hexfield_eq_deep_solve_probe(
             )))
         }
     };
-    let zone_caps = tss_core::ZoneSearchCaps {
-        enabled: zone,
-        stale_area_filter: false,
-        count2_threshold: false,
-        pair_commutation: false,
-    };
+    let zone_caps = harness_zone_caps(zone);
     let placements = s.placements_made();
 
-    let mut solver = crate::tss_solver::TssSolver::default();
-    if wide {
-        solver.configure_leaf_profile();
-    }
+    let mut solver = harness_solver(wide, zone_caps);
     let mut counters = TssCounters::default();
     let start = Instant::now();
     let solved = tss_solve_verified(
@@ -4868,39 +5000,19 @@ pub fn hexfield_eq_deep_solve_probe(
     d.set_item("zone_verify_failed", counters.zone_verify_failed)?;
 
     if with_stats {
-        let mut stats_solver = crate::tss_solver::TssSolver::default();
-        if wide {
-            stats_solver.configure_leaf_profile();
-        }
-        let base_horizon = if horizon == 0 {
-            u32::MAX
-        } else {
-            placements.saturating_add(horizon)
-        };
-        // 256 KiB per-solve cap: the trainer leaf/root/async byte budget
-        // (RustSearch::TSS_SOLVER_TT_BYTES, private to tree.rs — mirrored here
-        // so the diagnostic solve runs at the identical leaf memory profile).
-        let caps = tss_core::SolveCaps {
+        let mut stats_solver = harness_solver(wide, zone_caps);
+        // Shared production-cap constructor keeps this cold diagnostic at the
+        // trainer leaf/root/async memory profile.
+        let caps = tss_verified_solve_caps(
+            placements,
             node_cap,
-            tt_bytes_cap: 256 << 10,
-            semantic_horizon: base_horizon,
-        };
-        stats_solver.set_zone_options(zone_caps);
+            SolverHorizon {
+                horizon,
+                ladder: false,
+            },
+        );
         let raw = stats_solver.solve_goal(&s, &caps, goal_enum);
-        let st = &raw.stats;
-        d.set_item("stats_nodes", st.nodes)?;
-        d.set_item("stats_expansions", st.expansions)?;
-        d.set_item("stats_tt_hits", st.tt_hits)?;
-        d.set_item("stats_tt_entries", st.tt_entries)?;
-        d.set_item("stats_peak_tt_bytes", st.peak_tt_bytes)?;
-        d.set_item("stats_horizon_cuts", st.horizon_cuts)?;
-        d.set_item("stats_kb_death_cuts", st.kb_death_cuts)?;
-        d.set_item("stats_fragment_lookups", st.fragment_lookups)?;
-        d.set_item("stats_fragment_hits", st.fragment_hits)?;
-        d.set_item("stats_fragment_imports", st.fragment_imports)?;
-        d.set_item("stats_interior_gate_evaluations", st.interior_gate_evaluations)?;
-        d.set_item("stats_interior_gate_dismissals", st.interior_gate_dismissals)?;
-        d.set_item("stats_interior_gate_nanos", st.interior_gate_nanos)?;
+        set_solve_stats(&d, &raw.stats)?;
     }
 
     Ok(d.into_any().unbind())
@@ -4911,8 +5023,9 @@ pub fn hexfield_eq_deep_solve_probe(
 /// shared positive-proof-fragment cache warms across positions exactly as the
 /// production per-batch persistent leaf solver does across moves. Pass a game's
 /// positions in ply order to bound the cold-vs-warm gap in the single-shot
-/// probe. Returns a list of per-position dicts (verdict, wall, nodes, cert depth,
-/// the fatal verify counter, and the depth/zone counters). Measurement only.
+/// probe. Returns a list of per-position dicts with verdict/certificate data,
+/// verified-path counters, and actual aggregate `stats_*` telemetry from this
+/// persistent solver. Measurement only.
 #[pyfunction]
 #[pyo3(signature = (states, node_cap, goal, horizon, ladder, zone, wide))]
 #[allow(clippy::too_many_arguments)]
@@ -4926,16 +5039,7 @@ pub fn hexfield_eq_deep_solve_batch(
     zone: bool,
     wide: bool,
 ) -> PyResult<Py<PyAny>> {
-    if horizon != 0 && horizon < 16 {
-        return Err(PyValueError::new_err(
-            "horizon must be 0 (unbounded) or >= 16 (the owner floor)",
-        ));
-    }
-    if ladder && horizon == 0 {
-        return Err(PyValueError::new_err(
-            "the horizon ladder requires a bounded horizon (>= 16)",
-        ));
-    }
+    validate_harness_horizon(horizon, ladder)?;
     let goal_enum = match goal {
         "win" => tss_core::SolveGoal::Win,
         "loss" => tss_core::SolveGoal::Loss,
@@ -4946,23 +5050,15 @@ pub fn hexfield_eq_deep_solve_batch(
             )))
         }
     };
-    let zone_caps = tss_core::ZoneSearchCaps {
-        enabled: zone,
-        stale_area_filter: false,
-        count2_threshold: false,
-        pair_commutation: false,
-    };
-    let mut solver = crate::tss_solver::TssSolver::default();
-    if wide {
-        solver.configure_leaf_profile();
-    }
+    let zone_caps = harness_zone_caps(zone);
+    let mut solver = harness_solver(wide, zone_caps);
     let out = PyList::empty(py);
     for state_any in states.iter() {
         let s = single_state_from_py(py, &state_any)?;
         let placements = s.placements_made();
         let mut counters = TssCounters::default();
         let start = Instant::now();
-        let solved = tss_solve_verified(
+        let verified = tss_solve_verified_with_stats(
             &s,
             node_cap,
             goal_enum,
@@ -4971,6 +5067,7 @@ pub fn hexfield_eq_deep_solve_batch(
             &mut solver,
             &mut counters,
         );
+        let solved = &verified.solve;
         let wall_nanos = start.elapsed().as_nanos() as u64;
         let mut derived_t = 0u32;
         let mut zn = 0u32;
@@ -5005,6 +5102,7 @@ pub fn hexfield_eq_deep_solve_batch(
         d.set_item("horizon_cut_tall", counters.horizon_cut_tall)?;
         d.set_item("deep_kb_death", counters.deep_kb_death)?;
         d.set_item("zone_nodes", zn)?;
+        set_solve_stats(&d, &verified.stats)?;
         out.append(d)?;
     }
     Ok(out.into_any().unbind())
@@ -5280,6 +5378,199 @@ mod fallback_tests {
     use crate::tree::{NodePriors, RustPriorCandidate};
     use hexo_engine::Player;
     use hexo_utils::StateHash;
+    use std::ffi::OsString;
+    use std::sync::Mutex;
+
+    static TSS_HARNESS_ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        name: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn new(name: &'static str) -> Self {
+            Self {
+                name,
+                previous: std::env::var_os(name),
+            }
+        }
+
+        fn set(&self, value: Option<&str>) {
+            if let Some(value) = value {
+                std::env::set_var(self.name, value);
+            } else {
+                std::env::remove_var(self.name);
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = self.previous.take() {
+                std::env::set_var(self.name, value);
+            } else {
+                std::env::remove_var(self.name);
+            }
+        }
+    }
+
+    #[test]
+    fn solver_manifest_reflects_shared_fragments_env() {
+        let _lock = TSS_HARNESS_ENV_MUTEX.lock().unwrap();
+        let env = EnvVarGuard::new("TSS_SHARED_FRAGMENTS");
+        env.set(None);
+        let off = harness_solver_manifest(
+            500,
+            SolverHorizon {
+                horizon: 0,
+                ladder: false,
+            },
+            false,
+            true,
+        );
+        assert_eq!(off.env.shared_fragments, None);
+        assert!(!off.effective.shared_fragments_enabled);
+        assert_eq!(off.effective.fragment_store_cap_bytes, 0);
+
+        env.set(Some("1"));
+        let on = harness_solver_manifest(
+            500,
+            SolverHorizon {
+                horizon: 0,
+                ladder: false,
+            },
+            false,
+            true,
+        );
+        assert_eq!(on.env.shared_fragments.as_deref(), Some("1"));
+        assert!(on.effective.shared_fragments_enabled);
+        assert!(on.effective.fragment_store_cap_bytes > 0);
+        assert_eq!(on.caps.tt_bytes_cap, on.effective.tt_bytes_cap);
+    }
+
+    #[test]
+    fn solver_manifest_matches_real_solve_effective_config() {
+        let _lock = TSS_HARNESS_ENV_MUTEX.lock().unwrap();
+        let env = EnvVarGuard::new("TSS_SHARED_FRAGMENTS");
+        env.set(Some("1"));
+        let horizon = SolverHorizon {
+            horizon: 0,
+            ladder: false,
+        };
+        let manifest = harness_solver_manifest(500, horizon, false, true);
+        let state = RustHexoState::new();
+        let zone = harness_zone_caps(false);
+        let mut solver = harness_solver(true, zone);
+        let mut counters = TssCounters::default();
+        let _ = tss_solve_verified(
+            &state,
+            500,
+            tss_core::SolveGoal::Both,
+            zone,
+            horizon,
+            &mut solver,
+            &mut counters,
+        );
+        assert_eq!(solver.last_effective_config(), Some(manifest.effective));
+        let real_caps = tss_verified_solve_caps(state.placements_made(), 500, horizon);
+        assert_eq!(real_caps.node_cap, manifest.caps.node_cap);
+        assert_eq!(real_caps.tt_bytes_cap, manifest.caps.tt_bytes_cap);
+        assert_eq!(real_caps.semantic_horizon, manifest.caps.semantic_horizon);
+    }
+
+    fn shared_fragment_batch_fixture() -> RustHexoState {
+        let mut state = scheduler_replay(&[
+            (0, 0),
+            (-1, 0),
+            (1, -2),
+            (-2, 0),
+            (1, 0),
+            (0, -2),
+            (1, -3),
+            (0, -3),
+            (2, -5),
+            (2, -4),
+            (1, -4),
+            (3, -4),
+            (3, -2),
+        ]);
+        for coord in [
+            hexo_engine::HexCoord::new(-1, -1),
+            hexo_engine::HexCoord::new(1, -5),
+        ] {
+            apply_placement(&mut state, Placement { coord }).unwrap();
+        }
+        state
+    }
+
+    #[test]
+    fn persistent_batch_stats_report_warm_fragment_imports_only_when_enabled() {
+        let _lock = TSS_HARNESS_ENV_MUTEX.lock().unwrap();
+        let env = EnvVarGuard::new("TSS_SHARED_FRAGMENTS");
+        let state = shared_fragment_batch_fixture();
+        let zone = harness_zone_caps(false);
+        let horizon = SolverHorizon {
+            horizon: 0,
+            ladder: false,
+        };
+
+        env.set(Some("1"));
+        let mut warm_solver = harness_solver(true, zone);
+        let mut first_counters = TssCounters::default();
+        let first = tss_solve_verified_with_stats(
+            &state,
+            10_000,
+            tss_core::SolveGoal::Loss,
+            zone,
+            horizon,
+            &mut warm_solver,
+            &mut first_counters,
+        );
+        let mut second_counters = TssCounters::default();
+        let second = tss_solve_verified_with_stats(
+            &state,
+            10_000,
+            tss_core::SolveGoal::Loss,
+            zone,
+            horizon,
+            &mut warm_solver,
+            &mut second_counters,
+        );
+        assert_eq!(first.solve.status, ProofStatus::Loss);
+        assert_eq!(second.solve.status, first.solve.status);
+        assert!(second.stats.fragment_lookups > 0);
+        assert!(second.stats.fragment_hits > 0);
+        assert!(second.stats.fragment_imports > 0);
+        assert_eq!(second.stats.nodes, second_counters.deep_nodes);
+
+        env.set(None);
+        let mut cold_solver = harness_solver(true, zone);
+        let mut cold_first_counters = TssCounters::default();
+        let _ = tss_solve_verified_with_stats(
+            &state,
+            10_000,
+            tss_core::SolveGoal::Loss,
+            zone,
+            horizon,
+            &mut cold_solver,
+            &mut cold_first_counters,
+        );
+        let mut cold_second_counters = TssCounters::default();
+        let cold_second = tss_solve_verified_with_stats(
+            &state,
+            10_000,
+            tss_core::SolveGoal::Loss,
+            zone,
+            horizon,
+            &mut cold_solver,
+            &mut cold_second_counters,
+        );
+        assert_eq!(cold_second.stats.fragment_lookups, 0);
+        assert_eq!(cold_second.stats.fragment_hits, 0);
+        assert_eq!(cold_second.stats.fragment_imports, 0);
+        assert_eq!(cold_second.stats.nodes, cold_second_counters.deep_nodes);
+    }
 
     fn edge(action_id: PackedCoord, prior: f32, visits: u32, value_sum: f32) -> RustEdge {
         RustEdge {
