@@ -205,10 +205,19 @@ Consequences:
   Consequence for ground truth: loss labels can never be must_solve for
   arbitrary-goal arms (v3 mint: must_solve = wins ≤400 only; the loss-side
   obligation lives in the loss_detection canary for claiming arms).
-- **P5 Solver-internal efficiency** — move ordering / pruning inside wide-pn
-  so the same 500 nodes prove more. No specific lever identified yet; the
-  win-vs-grind contrast (hot 45.5% vs 6%, threats) suggests ordering signal
-  exists. OPEN-PROBE.
+- **P5 Solver-internal efficiency — ordering MECHANISM BUILT, first hint
+  source REJECTED (2026-07-20 late, R-ORDER-PRIOR `5cff787c`).** Stable
+  reorder-only hints (candidate-set invariant, cold-isolated, verifier
+  untouched) are now a permanent engine capability. Measured with the ep90
+  net's own root priors on 2,631 selfplay dev positions: **cap 500 = 12 up
+  / 26 down; cap 2000 = 3 up / 39 down — raw game-policy priors MISDIRECT
+  df-pn** (they down-weight the forcing/sacrificial lines proofs ride;
+  harm grows with depth). Nodes-to-proof DID improve on the shared decided
+  set (5.2k saved vs 1.4k added at cap 500) — ordering signal is real, the
+  policy is the wrong oracle. Next hint-source candidates, in order:
+  proof-participation statistics (residue map, in flight), threat-
+  proximity statics, refutation-first defender ordering (strongest reply
+  first at AND nodes). OPEN — mechanism ready, oracle wanted.
 - ~~Verdict injection (Lever-2)~~ — OWNER RULING: production consumption
   already improves search/policy/value (steered visits + outcomes are the
   training targets); direct target-swapping is NOT a solver lane. Dropped
