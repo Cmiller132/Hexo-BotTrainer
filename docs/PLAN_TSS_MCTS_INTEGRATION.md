@@ -340,8 +340,9 @@ target-semantics change.
 
 ## 10. Open decisions (owner)
 
-1. **Port scope** (§3): wholesale campaign-engine adoption
-   (recommended) vs backporting the three levers. Blocks V0.
+1. **Port scope: DECIDED (owner 2026-07-20) — WHOLESALE adoption** of the
+   campaign engine as the single mint (C1 one-engine principle);
+   `tss_cert_version` tracks it through the schema. V0 unblocked.
 2. **Affordability bar for 100% leaf coverage:** pre-register the pos/s
    regression ceiling + absorption threshold before V1.
 3. **Exact leaf horizon shape** (§5): h16-flat vs h16→h32 ladder vs
