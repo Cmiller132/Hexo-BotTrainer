@@ -1,5 +1,10 @@
 # Soundness of defender move-set restriction in Hexo threat search — formal proofs
 
+> **NORMATIVE copy** (rounds 1–6 review-hardened, 07-14 tightenings; rescued
+> 07-20 from the main-review worktree, commit 7885a71c). Solver-branch
+> copies (e.g. claude/tss-vcf-width) are STALE 899-line snapshots. Do not
+> edit proof content without a hostile-review round.
+
 > **Provenance.** 2026-07-13. The proof-layer companion to
 > `PLAN_TSS_MOVESET_ZONES.md` (results survey) and the intended normative
 > reference for the Stage-3 solver/verifier build (`PLAN_TSS_DEEPENING.md` §6).

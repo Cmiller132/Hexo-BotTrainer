@@ -1,5 +1,10 @@
 # PLAN: TSS Solver Upgrades from the Defender-Zone Proof Program
 
+> Solver-campaign lever register U1–U18 — campaign CLOSED 07-18/19 (see
+> RESULTS_LOG). This 968-line copy is the latest (07-14 extension).
+> Reference only; the integration plan-of-record is
+> PLAN_TSS_MCTS_INTEGRATION.md.
+
 > **SUPERSEDED (2026-07-16).** This plan's anchor engine — the narrow DFS
 > prover of branch `claude/tss-v2-build` — is no longer the normative
 > solver. The normative solver is `WidePnSearch` (round-9b, gate-verified),

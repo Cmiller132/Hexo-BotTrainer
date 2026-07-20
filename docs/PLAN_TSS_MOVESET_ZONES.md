@@ -1,5 +1,8 @@
 # TSS solver move-set trimming — locality theorems, the r=2 question, and relevance zones
 
+> Zone-campaign design history (P0–P3 implemented; campaign closed).
+> Reference only — the normative proof is PROOF_TSS_DEFENDER_ZONES.md.
+
 > **Provenance.** 2026-07-13. Companion to `PLAN_TSS_DEEPENING.md` §6 (Lever 3,
 > the df-pn solver's AND-node move sets). Owner question: the solver's defender
 > enumeration at `k < B` nodes is "every legal move" (= every empty within hex
