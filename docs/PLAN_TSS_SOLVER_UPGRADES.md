@@ -1,5 +1,17 @@
 # PLAN: TSS Solver Upgrades from the Defender-Zone Proof Program
 
+> **SUPERSEDED (2026-07-16).** This plan's anchor engine — the narrow DFS
+> prover of branch `claude/tss-v2-build` — is no longer the normative
+> solver. The normative solver is `WidePnSearch` (round-9b, gate-verified),
+> and the living unified master plan is now
+> **`docs/PLAN_TSS_SOLVER_UPGRADES.md` on branch `claude/tss-vcf-width`**
+> (worktree `.claude/worktrees/tss-vcf-width`). That rewrite dispositions
+> every U-item below (U1–U18) in its Part III status ledger and carries
+> forward the soundness classes, design invariants, and every per-item
+> soundness analysis that survives the engine change. This copy is retained
+> unchanged below as the historical record those carried-forward analyses
+> cite.
+
 Status: **FINAL (R3 PASS)** — hostile Codex review R1 (ultra) → repairs →
 confirmation R2 (FAIL, nine residual defects) → repairs → narrow
 confirmation R3 (**PASS**, all nine ruled APPLIED-CORRECTLY, numbering and
@@ -149,6 +161,8 @@ pairs.
 optional theorem-permitted refinement and why it's deferred). No count caps
 (invariant 2). Opening excluded (invariant 4).
 
+**Amended by §7:** U12 supersedes this zone formula with T4's ranked `Z_dir ∪ Z_seed ∪ Z_touch ∪ Z_virgin`; hitting becomes ordering-only.
+
 #### U2. Zone-carrying certificates + full D9 verification [S — the keystone, and the hardest item]
 
 **Proof basis.** T3's R4-ruled caveat verbatim: *proven for valid
@@ -244,6 +258,8 @@ needs `SharedProofCache` admission re-measurement before fragment promotion
 re-enables for zone certificates (see U4 interaction — promotion of
 zone-bearing fragments stays **disabled** until U4's composition rule
 lands).
+
+**Amended by §7:** U12 replaces the Z1/band/core checklist rows with compressed live roles and ranked (Z2)/(Z4)/(Z5′) verification.
 
 #### U3. Staple-by-theorem at dispatch nodes — delete the per-omitted-move replay [S — ruled SOUND in R1]
 
@@ -345,6 +361,8 @@ L7. Two R1 corrections are normative here:
   the enclosing T — are future work (§5); the two-stamp rule is the
   minimal sound gate. Non-zone (dispatch-only) fragments are unaffected:
   they carry no D-dependent omissions.
+
+**Amended by §7:** U13 replaces unprincipled fragment-local deadlines with D14/L11 hereditary local budgets and narrows the cache restriction accordingly.
 
 ### Tier B — medium impact
 
@@ -639,3 +657,312 @@ the shadow → consume ladder; U1 omissions are non-consumable before U2
   certificate mutations; one-sided differential; [UNPROVEN] labelling;
   P1 substitute branch), plus obligation numbering (1–12) and review-log
   consistency confirmed. The document is final.
+
+---
+
+## 7. Round-5/6 ranked-zone extension (U12–U18)
+
+**Provenance.** Round-5/6 revision, 2026-07-14: normative mathematics and
+adoption history are in `docs/PROOF_TSS_DEFENDER_ZONES.md` §13; repair
+rationale is in `docs/_T3_TIGHTENINGS_REVIEW_ROUND1.md`; confirmation is in
+`docs/_T3PLUS_ROUND6_CONFIRMATION.md`. This section controls the three
+amendment lines above where the earlier U1/U2/U4 plan text differs.
+
+### Tier A — revised verifier core
+
+#### U12. Ranked zone generator and verifier zone [S — revised T3/T4, round-6 confirmed]
+
+**Proof basis.** D10–D16, L9′, L11–L12, T3/T4/T7. The ordinary certified
+zone at an internal AND node is now exactly
+
+  `Z_dir ∪ Z_seed ∪ Z_touch ∪ Z_virgin`,
+
+under the live verifier labels (Z2), (Z4), and (Z5′). `S(N)` must still be
+independently nonempty; if the union is empty, one arbitrary legal fallback
+edge is mandatory. The former Z1 hitting requirement is gone. Current
+hitting cells may be generated and ordered first, but are a search heuristic
+and never a reason for verifier rejection outside the separate U15 kernel.
+
+**Where in code.** Generator: `tss_solver.rs::prove_universal` and its
+WindowStore candidate helpers. Certificate data and bottom-up role/exposure
+pass: `tss_verify.rs::{CertNode, TssCertificate}`. Authority check:
+`tss_verify.rs::verify_universal`. Extend `d6_remap_certificate` for every
+new coordinate-bearing role/window label.
+
+**Change (builder).** Replace U1's `hitting ∪ 𝒜 ∪ ℬ ∪ core ∪ band`
+formula with the four ranked components:
+
+1. `Z_dir = Prot(N) ∩ Legal(P_N)`;
+2. `Z_seed`: for every protected nonlegal, nonstone cell `y` with a live
+   role rank `r_N(y) ≥ 1`, legal seeds within radius `8(r_N(y)−1)`;
+3. `Z_touch`: every empty of a D-alive window already containing a D-stone
+   when `cnt_D(W) + E_N^D(W) ≥ 6`;
+4. `Z_virgin`: legal cells within distance `8(E_N^D(W)−6)` of an
+   all-empty window with `E_N^D(W) ≥ 6`.
+
+The first implementation uses U13's uniform `B(N)` fallback for all live
+role ranks and window exposures. Exact clocks are U16. The old `D ≥ 6 ⇒
+full legal` verifier fallback is superseded: the finite `Z_virgin` test is
+performed by inverting from each legal candidate, at every admissible local
+budget. Search may retain hitting, `𝒜`, and `r3` as over-generation and
+ordering terms; none belongs to `R_cert`.
+
+**Change (U2 verifier checklist, exact row replacements).**
+
+- Delete the Z1 row. Retain only the independent `S(N) ≠ ∅` fallback.
+- Replace the old horizon-scaled Prot band by (Z5′): per live role, use
+  radius `8(r−1)`, take the maximum rank when several roles share a cell,
+  form bands only at internal AND nodes with `r ≥ 1`, and discharge a role
+  only after its deadline check. Uniform `r = B(N)` is valid.
+- Replace full-window `core`/Prot construction with D10's compressed roles:
+  every future designated certificate attacker placement (including
+  OR-COMPLETION), plus `(leaf, witness window, empty cell)` roles for every
+  WIN/LOSS witness empty at leaf entry. Full witness-window cells are not
+  protected merely because they lie in a named window.
+- Split the former completion/core row into `Z_dir`, `Z_touch`, and
+  `Z_virgin`, re-derived from the replayed node position and checked window
+  exposure. Keep (Z4) for every designated attacker placement and every
+  leaf-contract continuation.
+- Remove the old `D ≥ 6` full-legal checklist row; high-budget virgin
+  danger is checked by `Z_virgin`, while touched danger is checked by
+  `Z_touch`.
+
+Per node the verifier enumerates all reachable live roles, validates their
+deadlines and takes cellwise maximum ranks; enumerates D-alive touched
+windows and their exposures; and, for each legal candidate, enumerates
+nearby all-empty windows admitted by the exposure radius. It then recomputes
+all four components rather than trusting serialized zone membership.
+
+**Testing traps.** Mutations must cover an empty ranked union without a
+fallback child; a dropped direct role; a shared cell whose shorter role is
+used instead of the maximum; an `r = 0` negative-radius band; a missing
+OR-COMPLETION role; a touched completion cell; the sharp virgin `E = 7`,
+radius-8 seed; and a certificate that omits a current hitting cell but is
+otherwise valid (it must be accepted). Retain late-descendant-role and
+(Z4) continuation fixtures. Differential tests remain one-sided at matched
+resolution: restricted-search Unknown is not a failure.
+
+#### U13. Local budget labelling [S core; cache representation needs-derivation]
+
+**Proof basis.** D14 and L11. Every certificate node carries a nonnegative
+defender-placement budget `B(N)`. Exact labels satisfy `B = 0` at
+OR-COMPLETION/WIN, `B = b` at LOSS, copy the child at OR, and use
+`1 + max(child)` at AND. The verifier may accept conservative labels if it
+checks `B(LOSS) ≥ b`, `B(parent) ≥ B(child)` on OR edges, and
+`B(parent) ≥ 1 + B(child)` on AND edges. These inequalities cover every
+selected path and LOSS remainder and imply hereditary decrease.
+
+**Where in code.** Store labels on the `CertNode`/zone schema in
+`tss_verify.rs`; compute exact or conservative labels during
+`tss_solver.rs::compact_certificate`; check them in the verifier's
+post-order certificate pass. Carry the reuse metadata through
+`tss_solver.rs::{BoundedTt, SharedProofCache}` and its fragment-import path.
+
+**Change.** Certificates carry and the verifier checks local `B` labels;
+zone generation uses those labels rather than deriving one flattened global
+`D_N` from the slowest sibling's `T`. U4's R1 counterexample does not show
+that local budgets are unsound: it refutes *unprincipled* local fragment
+deadlines whose omitted cells were later judged under a larger flattened
+global horizon. D14 labels plus L11 edge inequalities are the sound
+replacement because a sibling cannot increase a verified descendant
+label.
+
+**Cache interaction.** The two cache stamps may now be understood as
+`resolution_T` plus a verified local-budget/zone-build admissibility stamp.
+At a reuse site, recheck every connecting D14 inequality and require the
+budget needed by each reused zone component to be no larger than the budget
+under which that component was built. The comparison direction is
+mandatory: `required_B_at_reuse ≤ zone_build_B`; reversing it recreates the
+omitted-fragment defect. Composite fragments retain the maximum resolution
+stamp and the most restrictive zone-build admissibility across their
+components.
+
+L11 directly licenses the hereditary budget reasoning, but not a particular
+scalar stamp aggregation, coordinate remap, fragment sealing scheme, or
+incremental-import algorithm. Replacing U4's final assembled-certificate
+preflight solely with an online cache lookup is therefore
+**[needs-derivation]**. Until that derivation and mutation suite land, final
+assembly must recheck all D14 inequalities, all zone coverage, and the stamp
+direction; a failed check is Unknown.
+
+**Testing traps.** Re-run U4's quick-fragment/slow-sibling case: the locally
+labelled fragment is accepted only when all connecting inequalities and
+zone-build comparisons hold. Add reverse-inequality, omitted LOSS-remainder,
+AND-edge off-by-one, conservative-overlabel, and composite-minimum-stamp
+mutations. An exact local label and a conservative larger label must verify
+to the same value, with only zone size allowed to differ.
+
+#### U14. Sparse LOSS witnesses [S — L13 constructive bound]
+
+**Proof basis.** L13. A rank-two threat-empty family with transversal number
+greater than one has a witnessing subfamily of at most three sets; one with
+transversal number greater than two has one of at most six. The bounds count
+windows in the named family and `b` counts defender placements.
+
+**Where in code.** Add the constructive selector to LOSS-leaf creation in
+`tss_solver.rs`; enforce caps, window replay, and the named-family mhs check
+in `tss_verify.rs`'s typed LOSS-leaf arm. Witness keys continue through
+`compact_certificate`, cache import, and `d6_remap_certificate`.
+
+**Change.** When constructing a LOSS leaf, choose L13's constructive
+subfamily and emit at most three witness windows for `b = 1` or six for
+`b = 2`. The verifier rejects an over-cap family, replays every named
+window, derives its one- or two-cell empty set, and exhaustively re-derives
+`τ(named family) > b`; it never trusts the builder's choice and never uses
+unnamed threats to rescue a bad witness.
+
+**Payoff.** LOSS leaves and their D10 witness-empty roles become bounded.
+That cuts certificate bytes and, downstream of U12, bounds the leaf-derived
+contribution to `Prot`, `Z_dir`, and seed-band work. It does not bound future
+designated attacker-move roles elsewhere in the subtree.
+
+**Testing traps.** Include sharp triangle (`b = 1`) and six-edge `K₄`
+(`b = 2`) fixtures, duplicate window keys, a family valid only when an
+unnamed threat is included, an oversized but otherwise valid family, and a
+family whose replayed empty set changed. Compute τ on the named family after
+deduplication; count placements, not turns.
+
+#### U15. Kernel T6 at forced nodes [S — T6, round-6 confirmed]
+
+**Proof basis.** T6's extendable-hit kernel. For current attacker-threat
+empty-set family `ℱ_N`, define
+
+  `K_b(N) = { d ∈ Legal(P_N) : τ(ℱ_N ∖ d) ≤ b−1 }`.
+
+**Where in code.** Build `K_b` beside `implicit_dispatch` in
+`tss_solver.rs::prove_universal`, using the exact `b ≤ 2` threat/mhs
+machinery in `threats_shared.rs`. Re-derive the boundary and exact kernel in
+`tss_verify.rs::verify_universal`; keep the existing U3 dispatch arm as the
+non-kernel path.
+
+A kernel region starts only where real and certificate positions are equal.
+At every governed internal AND node the verifier re-derives
+`mhs(P_N) ≤ b`, explicitly checks `¬own_win_now`, and requires the searched
+set to be exactly `K_b`. If `mhs < b`, `K_b` is all legal moves and performs
+no pruning; if `mhs = b`, it weakly refines the hitting set and may be
+strictly smaller. No original core/Prot term is required.
+
+**Hard guard.** If `mhs > b`, `K_b` is empty. Such a node must be a valid
+LOSS leaf or retain/handoff to its existing nonempty sound searched subtree;
+it cannot remain kernel-governed. A later kernel region needs a fresh
+equal-position entry.
+
+**Interaction with U3.** Inside a valid kernel region, T6 replaces U3's
+per-omitted-move staple obligation: the verifier re-derives the current
+threat family, `mhs`, and exact `K_b` once at the node, and the residual
+transversal argument dismisses every legal move outside the kernel without
+child replay or original-core obligations. Outside that region, including
+the `mhs > b` handoff subtree, U3's existing dispatch theorem and its
+premises remain unchanged.
+
+**Testing traps.** Exercise `mhs < b` (kernel must equal full Legal),
+`mhs = b` with equality and strict reduction, and `mhs > b` (kernel empty,
+so internal-kernel form must reject). Mutate `¬own_win_now`, enter a region
+after a non-equal substitution, omit one true kernel member, add a
+non-kernel member, and attempt a core-based rescue of an invalid kernel.
+Pair node-level kernel verification against the old U3 per-move staple on
+the exhaustive `b ≤ 2` corpus.
+
+### Tier C — backlog and note
+
+#### U16 (backlog). Exact ranks and exposures [S when D15/D16 checks pass]
+
+**Where in code.** Extend the same `CertNode` labels and verifier post-order
+pass introduced by U12/U13; compute optional exact labels during
+`tss_solver.rs::compact_certificate`. The generator consumes them only in
+`prove_universal`, behind a dedicated flag.
+
+The default U12 rollout uses uniform `B(N)` for every live role and relevant
+window. A later flag may compute exact per-role `r_N(ρ)` by the D15
+recurrence, collapse roles sharing cell `y` with `max`, and compute exact
+per-window `E_N^D(W)` by D16, stopping when the attacker first enters that
+specific window.
+
+The cost is bottom-up per-node bookkeeping over every reachable live role
+and every relevant overlapping window, plus larger certificate labels and
+more verifier work. The payoff is smaller `8(r−1)` seed bands, fewer
+`cnt_D + E^D ≥ 6` touched guards, and smaller `8(E^D−6)` virgin guards.
+Recommended default: ship uniform `B` first; put exact clocks behind a flag
+and retain uniform-B recomputation as a differential oracle.
+
+**Testing traps.** Multiple roles on one cell require the maximum live rank;
+LOSS roles end at leaf entry; OR-COMPLETION is a role; `r = 0` forms no
+band; attacker entry stops only that window's exposure; overlapping windows
+keep separate clocks; every AND edge contributes one and every ordinary OR
+edge zero.
+
+#### U17 (backlog). Branch-indexed substitution envelopes [S theorem; highest verifier complexity]
+
+**Proof basis.** D17/T9. A dismissal may name a searched substitute child
+and validate obligations, ranks, and exposures over all descendants of that
+child, with an independently nonempty fallback `F(N)`. This can shrink a
+whole-subtree union to the selected branch envelope, but it adds per-dismissal
+annotations, nested-envelope reasoning, A2/A3-specific transition rules,
+and the largest verifier surface in this catalog.
+
+**Where in code.** Add dismissal-to-substitute annotations to the Universal
+node schema in `tss_verify.rs`; generate them in
+`tss_solver.rs::prove_universal`; validate transition-inclusive envelopes in
+`tss_verify.rs::verify_universal`. Include annotations in compaction, D6
+remapping, reachability/acyclicity, and certificate memory accounting.
+
+Both transition-inclusive `+1` charges are mandatory. The C3
+counterexample has child rank one and a dismissed cell distance 8 from a
+future ghost-illegal obligation: radius `8(r−1) = 0` admits it, while the
+parent-inclusive radius `8r = 8` rejects it. The C2 counterexample starts a
+D-alive window at count two with `B(child) = 3`: child-only `2+3 = 5`
+misses the real current fill, while `2+1+3 = 6` catches completion. Use
+`Ê = 1 + E_child` for exact exposures for the same reason.
+
+Gate U17 default-off after U12/U13 stabilize. Build it only if profiles show
+that whole-subtree `Prot`/completion unions dominate verified zone width and
+that repeated candidate substitutes usually select substantially smaller
+descendant envelopes. Required evidence is a shadow verifier with zero
+disagreement against ordinary U12 coverage, both `+1` mutation fixtures,
+non-circular fallback tests, bounded certificate growth, and a material
+fixed-cap yield or verification-time win. The non-circular fallback is
+`F(N) ⊆ S(N)` chosen independently; `S(N)` may not be defined as only the
+replies lacking a safe substitute.
+
+#### U18 (note). Certificate DAGs [S — D18/T10 unfolding]
+
+**Where in code.** The sharing boundary is the `TssCertificate` arena and
+its acyclicity/reachability checks in `tss_verify.rs`; emission and reuse
+touch `tss_solver.rs::{compact_certificate, BoundedTt, SharedProofCache}`.
+`d6_remap_certificate` must preserve shared identities rather than clone
+inconsistently labelled copies.
+
+A finite acyclic certificate may share a node only when every incoming path
+agrees on its exact position, mover/budget, action or searched-successor map,
+leaf witness data, and path clock. Local budget/rank/exposure inequalities
+must hold on every outgoing edge; obligations are unions over reachable
+descendants, while coupling histories remain path-local. Verification may
+unfold conceptually as in T10 rather than materializing the tree.
+
+DAG sharing lets the transposition/cache layer store and verify one repeated
+subproof instead of duplicating it, reducing certificate bytes and improving
+cache admission. Its cost is exact-label and consistent-clock checking at
+every merge, plus reachable-descendant unions that cannot depend on which
+incoming path happened to arrive. The current tree-shaped builder loses no
+soundness and no proof expressiveness today: it only gives up this sharing,
+so repeated subtrees cost memory and verification work. DAG emission is an
+optimization note, not a prerequisite for U12–U17.
+
+**Testing traps.** Reject cycles, unreachable shared nodes, unequal clocks,
+same position with different witness/action labels, and a merge whose local
+edge inequalities hold on one parent path but not another. Compare the DAG
+and a fully unfolded tree for identical verified value and resolution.
+
+### Recommended extension phasing
+
+Treat the already-implemented P0–P3 flags as the compatibility baseline; do
+not reinterpret their stored zone certificates in place. Land U14 first
+(small bounded schema/verifier change that immediately shrinks LOSS data),
+then U13 (the D14/L11 budget foundation and cache mutations). Land U12 next
+with uniform `B`, replacing U1/U2 consumption only after the complete ranked
+mutation suite passes. Land U15 after that boundary is stable so kernel and
+ordinary-zone nodes have an explicit, testable handoff. Keep U16 and U17
+default-off backlog flags, and treat U18 as an independent representation
+optimization. Every new consuming flag repeats the shadow → verify → consume
+ladder; cached pre-extension zone certificates are not promoted across the
+new verifier contract without re-verification.
