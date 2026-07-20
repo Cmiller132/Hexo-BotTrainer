@@ -219,3 +219,12 @@ Consequences:
   starved). DOCUMENTED: serial sweep vs threaded bench; TT carryover order
   dependence. loss canary live (canaries_v2, 3 agreed V1 losses).
   Baseline re-run as baseline_production_v2 (both-goal, bench unbounded).
+- 2026-07-20 (anchor): **baseline_production_v2 = the standing baseline**
+  (harness_runs/20260720_211755_baseline_production_v2, ALL GATES PASS incl.
+  bench_identity echo-to-echo). Coverage dev-split: selfplay 150 W + 10 L /
+  2,631; human 317 W + 105 L / 2,185 (loss coverage now measured — was
+  structurally 0 before the goal flip). Bench: 136.0 moves/min, 544
+  decisions, vf=0 — genuinely-unbounded costs ~2% throughput vs the flawed
+  h16 bench (139.0), the +60 Elo side of the V2 trade. Bench-window note:
+  unbounded deep_calls 11,950 vs h16's 20,712 at similar moves/min —
+  unbounded spends more budget per call (grind class), park absorbs it.
