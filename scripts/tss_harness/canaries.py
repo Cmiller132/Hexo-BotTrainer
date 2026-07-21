@@ -106,6 +106,36 @@ def wide_canary(make_adapter) -> tuple[bool, str]:
     return True, f"manifest wide + {len(wins)}/{len(fx)} fixture wins"
 
 
+@register_canary("j2near")
+def j2near_canary(make_adapter) -> tuple[bool, str]:
+    """The atlas witness must lift only with the free-tempo tier enabled."""
+    fx = [Position(
+        pos_id="oa-0153903c5a863630",
+        source="atlas",
+        moves=("0,0", "-6,1", "-7,2", "0,1", "0,2", "-7,1", "-8,2"),
+    )]
+    common = {"node_cap": 100_000, "goal": "win"}
+    on_adapter = make_adapter({**common, "free_tempo_j2near": True})
+    off_adapter = make_adapter({**common, "free_tempo_j2near": False})
+    if on_adapter.manifest().get("free_tempo_j2near") is not True:
+        return False, "J2near ON is absent from the engine manifest"
+    if off_adapter.manifest().get("free_tempo_j2near") is not False:
+        return False, "J2near OFF leaked into the engine manifest"
+    on = on_adapter.solve_sequence(fx)[0]
+    off = off_adapter.solve_sequence(fx)[0]
+    fired = on.status == WIN and on.verified and on.verify_failed == 0
+    isolated = off.status == UNKNOWN and off.verify_failed == 0
+    if not fired or not isolated:
+        return False, (
+            f"witness on={on.status}/{on.verified}/vf{on.verify_failed} "
+            f"off={off.status}/{off.verified}/vf{off.verify_failed}"
+        )
+    return True, (
+        f"witness UNKNOWN->WIN, nodes {off.cost}->{on.cost}, "
+        "zero verifier failures"
+    )
+
+
 @register_canary("group2")
 def group2_canary(make_adapter) -> tuple[bool, str]:
     """The manifest must echo group2 truthfully in both directions, and the

@@ -60,6 +60,9 @@ mod tss_turn_quotient_hunt;
 mod tss_pn_init_hunt;
 
 #[cfg(test)]
+mod tss_j2near_ab;
+
+#[cfg(test)]
 mod tss_leaf_surface_hunt;
 
 #[cfg(feature = "python")]
