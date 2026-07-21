@@ -1,0 +1,28 @@
+{
+  "git_rev": "07bd492cbcdccde4a055c6606f1b3475a14f14fc",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "python": "3.14.0",
+  "schema": 1,
+  "set_hashes": {
+    "canaries_v1": "fc88fa40e3062929b052d3c07bdfe9c04e750f8b381b524bc792d7e2eddaaab2",
+    "canaries_v2": "390013733e8bb770a5e68ee21d004fa4cf24049d2be64fd79355c9aa9d1f846f",
+    "human_v1": "5784defe2531db55360e9860ddddc9b89b148547b16a0c970ff7d83f407c66b6",
+    "puzzle_v1": "6a0702a79667ecf4688f8fdef5c917ab3a6c816fc7ba8e870c918e6353370fcd",
+    "puzzle_v2": "8122f6c038c7b9a4e664ab741b72e6668ed1916ca6f32c10fd57eba6f66e70e3",
+    "puzzle_v3": "12b79c6ea132b8d0caa3c2a9108d5830039cd407b2e774670b59a144ea3495e7",
+    "selfplay_v1": "d8b4256408dfdabf71a90d3653962160bcc05ec66bba580dd6379149d998b708"
+  },
+  "tss_env": {
+    "HEXFIELD_EQ_ATTENTION_HEADS": "3",
+    "HEXFIELD_EQ_CHANNELS": "192",
+    "HEXFIELD_EQ_C_ORBIT": "16",
+    "HEXFIELD_EQ_FEATURE_VERSION": "2",
+    "HEXFIELD_EQ_GROUP_ORDER": "12",
+    "HEXFIELD_EQ_RAYTAP": "both",
+    "HEXFIELD_EQ_RAYTAP_LUT": "additive",
+    "HEXFIELD_EQ_RAY_BLOCKERS": "1",
+    "HEXFIELD_EQ_REG_LANE": "1",
+    "HEXFIELD_EQ_TRUNK": "CCACCACA"
+  },
+  "utc": "2026-07-20T23:46:04Z"
+}

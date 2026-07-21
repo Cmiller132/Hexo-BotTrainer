@@ -103,6 +103,174 @@ pub struct ZoneInfo {
     pub build_horizon: u32,
 }
 
+/// Raw SHA-256 digest bytes carried by v1 Group-2 records.
+pub type Sha256Bytes = [u8; 32];
+
+/// Compiled dual authority binding (design §1.1). Every v1 Group-2 node must
+/// carry these exact six fields; any byte mismatch rejects the new class.
+pub const G2_DEFENDER_COMMIT: [u8; 20] = [
+    0x6d, 0xc0, 0x8d, 0x7a, 0x89, 0xd4, 0x22, 0x52, 0x4f, 0x6d, 0x92, 0xda, 0xdf, 0x66, 0x20,
+    0x73, 0xd2, 0x5b, 0x19, 0x63,
+];
+pub const G2_DEFENDER_PATH: &str = "docs/PROOF_TSS_DEFENDER_ZONES.md";
+pub const G2_DEFENDER_SHA256: Sha256Bytes = [
+    0x39, 0x19, 0x74, 0x60, 0xD0, 0x68, 0xCE, 0x54, 0x42, 0xBA, 0x0A, 0xFF, 0xC6, 0x87, 0xF1,
+    0x40, 0x8D, 0xF3, 0xF2, 0x8E, 0xEE, 0xB2, 0x6C, 0x4D, 0xD7, 0x19, 0x2B, 0x87, 0xA2, 0x02,
+    0x06, 0x4B,
+];
+pub const G2_FHW_COMMIT: [u8; 20] = [
+    0x99, 0x45, 0xc2, 0x1b, 0xf1, 0x77, 0x05, 0x5a, 0xa4, 0xde, 0x0b, 0xbd, 0x3a, 0xad, 0x15,
+    0xb9, 0xcf, 0x24, 0x5e, 0x51,
+];
+pub const G2_FHW_PATH: &str = "PROOF_TSS_ZONES_FHW.md";
+pub const G2_FHW_SHA256: Sha256Bytes = [
+    0x16, 0xF7, 0xD6, 0x84, 0xB5, 0xD7, 0x63, 0xE8, 0xB6, 0x73, 0xEC, 0x3A, 0x03, 0xB5, 0x11,
+    0x0B, 0x9A, 0xBF, 0x5B, 0xB7, 0xE8, 0x0F, 0xCA, 0x06, 0x3E, 0x62, 0xC8, 0x1A, 0x11, 0x3F,
+    0x9E, 0xA0,
+];
+/// Hard cap on authority path length inside a v1 certificate (design §3.5).
+pub const MAX_AUTHORITY_PATH: usize = 64;
+
+/// Dual authority binding carried by every new-class node (design §2.2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Group2AuthorityV1 {
+    pub defender_commit: [u8; 20],
+    pub defender_path: Box<str>,
+    pub defender_sha256: Sha256Bytes,
+    pub fhw_commit: [u8; 20],
+    pub fhw_path: Box<str>,
+    pub fhw_sha256: Sha256Bytes,
+}
+
+impl Group2AuthorityV1 {
+    /// The compiled dual binding. All six fields are compared byte-for-byte
+    /// at verification; the constructor exists so finder and tests emit the
+    /// only acceptable value.
+    pub fn compiled() -> Self {
+        Self {
+            defender_commit: G2_DEFENDER_COMMIT,
+            defender_path: G2_DEFENDER_PATH.into(),
+            defender_sha256: G2_DEFENDER_SHA256,
+            fhw_commit: G2_FHW_COMMIT,
+            fhw_path: G2_FHW_PATH.into(),
+            fhw_sha256: G2_FHW_SHA256,
+        }
+    }
+
+    pub fn matches_compiled(&self) -> bool {
+        self.defender_commit == G2_DEFENDER_COMMIT
+            && &*self.defender_path == G2_DEFENDER_PATH
+            && self.defender_sha256 == G2_DEFENDER_SHA256
+            && self.fhw_commit == G2_FHW_COMMIT
+            && &*self.fhw_path == G2_FHW_PATH
+            && self.fhw_sha256 == G2_FHW_SHA256
+            && self.defender_path.len() <= MAX_AUTHORITY_PATH
+            && self.fhw_path.len() <= MAX_AUTHORITY_PATH
+    }
+}
+
+/// Ordinary reduced-AND evidence record (design §2.2). Stored scalar fields
+/// are evidence only; the verifier recomputes every one of them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Group2ZoneV1 {
+    pub schema_version: u16,
+    pub authority: Group2AuthorityV1,
+    pub claimed_d14_budget: u32,
+    pub build_horizon: u32,
+    pub child_plan_sha256: Sha256Bytes,
+    pub finder_summary_sha256: Sha256Bytes,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FhwEdgeClassV1 {
+    Exact,
+    FrontierCovered,
+    NonFrontierCovered,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RoleKeyV1 {
+    ChoiceMove { node: CertNodeId, cell: HexCoord },
+    OrCompletionMove { node: CertNodeId, cell: HexCoord },
+    LeafEmpty { node: CertNodeId, witness: WindowKey, cell: HexCoord },
+    Checkpoint { gate: CertNodeId, threat: WindowKey, cell: HexCoord },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FhwRoleRowV1 {
+    ExactOrFcZero,
+    NonFcRcZero,
+    NonFcCharged,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FhwRoleClaimV1 {
+    pub role: RoleKeyV1,
+    pub child_f: u32,
+    pub row: FhwRoleRowV1,
+    pub epsilon: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FhwKappaRowV1 {
+    NonDAlive,
+    ExactOrFcNonIncident,
+    ExactOrFcDirect,
+    NonFcTouchedNonIncident,
+    NonFcTouchedDirect,
+    NonFcEmptyDirect,
+    NonFcEmptyNonIncidentQlt6,
+    NonFcEmptyNonIncidentWcPass,
+    NonFcEmptyNonIncidentWcFail,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuardResultV1 {
+    NotApplicable,
+    Pass,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FhwWindowClaimV1 {
+    pub window: WindowKey,
+    pub child_q: u32,
+    pub d_in_window: bool,
+    pub s_in_window: bool,
+    pub row: FhwKappaRowV1,
+    pub kappa: u8,
+    pub retained_guard: GuardResultV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FhwMapV1 {
+    pub real_reply: HexCoord,
+    pub representative: HexCoord,
+    pub edge_class: FhwEdgeClassV1,
+    pub roles: Vec<FhwRoleClaimV1>,
+    pub windows: Vec<FhwWindowClaimV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FhwGateProofV1 {
+    pub schema_version: u16,
+    pub authority: Group2AuthorityV1,
+    pub threats: Vec<WindowKey>,
+    pub escape_resolution_ply: u32,
+    pub map: Vec<FhwMapV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UniversalGroup2NodeV1 {
+    pub edges: Vec<CertEdge>,
+    pub proof: Group2ZoneV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FhwGateNodeV1 {
+    pub representatives: Vec<CertEdge>,
+    pub proof: FhwGateProofV1,
+}
+
 /// A proof arena node.  Nodes prove that `TssCertificate::claimant` wins.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CertNode {
@@ -137,6 +305,28 @@ pub enum CertNode {
         zone: Option<ZoneInfo>,
         commutations: Vec<CertCommutation>,
     },
+    /// v1 Group-2 reduced ordinary AND (design §2.2). Boxed so the legacy
+    /// `CertNode` size/alignment is provably unchanged.
+    UniversalGroup2V1(Box<UniversalGroup2NodeV1>),
+    /// v1 FHW-T3-R forcing gate (design §2.2). Boxed for the same reason.
+    FhwGateV1(Box<FhwGateNodeV1>),
+}
+
+impl CertNode {
+    /// True for the two v1 Group-2 extension variants. A certificate
+    /// containing any such node takes the extension verifier under the
+    /// `Group2V1` policy and REJECTS under the default legacy-only policy.
+    pub fn is_group2_extension(&self) -> bool {
+        matches!(
+            self,
+            CertNode::UniversalGroup2V1(_) | CertNode::FhwGateV1(_)
+        )
+    }
+}
+
+/// True when the certificate contains at least one v1 extension node.
+pub(crate) fn certificate_has_group2(cert: &TssCertificate) -> bool {
+    cert.nodes.iter().any(CertNode::is_group2_extension)
 }
 
 /// Replayable proof that `claimant` wins from the exactly bound root.
@@ -176,12 +366,38 @@ impl CertVerify for TssVerifier {
     }
 }
 
+/// Extension-enabled checker (design §5.1 verifier mode `Group2V1`). A
+/// certificate without any new node takes the byte-identical legacy path; a
+/// certificate containing new nodes is validated by the isolated
+/// `tss_verify_group2` module. The default [`TssVerifier`] remains
+/// `LegacyOnly` and rejects every new in-memory variant. Certificate contents
+/// can never select the policy: the caller (trainer configuration) chooses
+/// which concrete verifier to construct.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Group2Verifier;
+
+impl CertVerify for Group2Verifier {
+    type Cert = TssCertificate;
+
+    fn verify(&self, state: &RustHexoState, cert: &Self::Cert, claimed: ProofStatus) -> bool {
+        if !certificate_has_group2(cert) {
+            return verify_certificate(state, cert, claimed, false);
+        }
+        crate::tss_verify_group2::verify_group2_certificate(state, cert, claimed)
+    }
+}
+
 fn verify_certificate(
     state: &RustHexoState,
     cert: &TssCertificate,
     claimed: ProofStatus,
     dispatch_oracle: bool,
 ) -> bool {
+    // LegacyOnly policy: the two v1 extension variants are rejected before
+    // any other work; every legacy certificate takes the unchanged path below.
+    if certificate_has_group2(cert) {
+        return false;
+    }
     if claimed == ProofStatus::Unknown || cert.root != RootBinding::from_state(state) {
         return false;
     }
@@ -255,6 +471,15 @@ fn certificate_metadata(cert: &TssCertificate) -> Option<CertificateMetadata> {
                 }
             }
             CertNode::Choice { .. } => {}
+            CertNode::UniversalGroup2V1(_) => {}
+            // R1 (DESIGN_AMENDMENT_R1_R2.md): every gate escape deadline
+            // participates in the maximum defining the certificate's derived
+            // resolution T. (Gate-bearing certificates are additionally
+            // rejected wholesale by the current narrowed class rules, but the
+            // derived-T definition is the amended one.)
+            CertNode::FhwGateV1(gate) => {
+                derived_t = derived_t.max(gate.proof.escape_resolution_ply);
+            }
         }
     }
     let mut cores = vec![None; cert.nodes.len()];
@@ -295,6 +520,16 @@ fn certificate_metadata(cert: &TssCertificate) -> Option<CertificateMetadata> {
                     core.extend(build(cert, edge.child, memo, depth + 1)?);
                 }
             }
+            CertNode::UniversalGroup2V1(node) => {
+                for edge in &node.edges {
+                    core.extend(build(cert, edge.child, memo, depth + 1)?);
+                }
+            }
+            CertNode::FhwGateV1(gate) => {
+                for edge in &gate.representatives {
+                    core.extend(build(cert, edge.child, memo, depth + 1)?);
+                }
+            }
         }
         core.sort_by_key(|coord| coord_key(*coord));
         core.dedup();
@@ -317,6 +552,24 @@ fn certificate_metadata(cert: &TssCertificate) -> Option<CertificateMetadata> {
 /// semantic deadline and whether any AND node used the zone theorem.
 pub(crate) fn certificate_horizon_preflight(cert: &TssCertificate) -> Option<(u32, bool)> {
     certificate_metadata(cert).map(|meta| (meta.derived_t, meta.has_zone))
+}
+
+/// Metadata view for the Group-2 extension verifier. `derived_t` follows the
+/// R1-amended definition (gate escape deadlines participate in the maximum).
+pub(crate) struct Group2Metadata {
+    pub(crate) derived_t: u32,
+}
+
+pub(crate) fn certificate_metadata_for_group2(cert: &TssCertificate) -> Option<Group2Metadata> {
+    certificate_metadata(cert).map(|meta| Group2Metadata {
+        derived_t: meta.derived_t,
+    })
+}
+
+/// Arena validation shared with the Group-2 extension verifier (bounds,
+/// caps, per-node duplicate edges, acyclicity, full reachability).
+pub(crate) fn validate_arena_for_group2(cert: &TssCertificate) -> bool {
+    validate_arena(cert)
 }
 
 /// A full-position identity used only to make replay of shared DAG nodes both
@@ -407,6 +660,18 @@ impl ReplayMemo {
                 }
                 CertNode::Universal { edges, .. } => {
                     for edge in edges {
+                        indegree[edge.child as usize] =
+                            indegree[edge.child as usize].saturating_add(1);
+                    }
+                }
+                CertNode::UniversalGroup2V1(node) => {
+                    for edge in &node.edges {
+                        indegree[edge.child as usize] =
+                            indegree[edge.child as usize].saturating_add(1);
+                    }
+                }
+                CertNode::FhwGateV1(gate) => {
+                    for edge in &gate.representatives {
                         indegree[edge.child as usize] =
                             indegree[edge.child as usize].saturating_add(1);
                     }
@@ -550,6 +815,10 @@ fn verify_node(
             id,
             allowed_commuted,
         ),
+        // Unreachable on the legacy path (verify_certificate rejects any
+        // certificate containing an extension node before replay); kept as an
+        // explicit fail-closed arm rather than a wildcard.
+        CertNode::UniversalGroup2V1(_) | CertNode::FhwGateV1(_) => false,
     };
     #[cfg(test)]
     if !result && std::env::var_os("TSS_R3_VERIFY_TRACE").is_some() {
@@ -559,6 +828,8 @@ fn verify_node(
             CertNode::Loss { .. } => "Loss",
             CertNode::Choice { .. } => "Choice",
             CertNode::Universal { .. } => "Universal",
+            CertNode::UniversalGroup2V1(_) => "UniversalGroup2V1",
+            CertNode::FhwGateV1(_) => "FhwGateV1",
         };
         eprintln!(
             "R3_VERIFY_TRACE node={id} kind={kind} ply={} mover={:?} phase={:?} failure=replay",
@@ -1078,6 +1349,9 @@ fn verifier_zone_summary(
             }
             maximum.saturating_add(1)
         }
+        // The legacy zone theorem is never combined with extension nodes
+        // (narrow-v1 no-mixing rule); fail closed.
+        CertNode::UniversalGroup2V1(_) | CertNode::FhwGateV1(_) => return None,
     };
     protected.sort_by_key(|coord| coord_key(*coord));
     protected.dedup();
@@ -1204,6 +1478,7 @@ pub(crate) fn round3_rederived_zones(
             CertNode::OrCompletion { .. } | CertNode::Win { .. } | CertNode::Loss { .. } => {
                 Some(())
             }
+            CertNode::UniversalGroup2V1(_) | CertNode::FhwGateV1(_) => None,
         }
     }
     let mut state = root.clone();
@@ -1424,6 +1699,46 @@ fn validate_arena(cert: &TssCertificate) -> bool {
                     _ => return false,
                 };
             }
+            CertNode::UniversalGroup2V1(g2) => {
+                edge_count = match edge_count.checked_add(g2.edges.len()) {
+                    Some(count) if count <= MAX_CERT_EDGES => count,
+                    _ => return false,
+                };
+                if g2
+                    .edges
+                    .iter()
+                    .any(|edge| edge.child as usize >= cert.nodes.len())
+                {
+                    return false;
+                }
+                let mut moves: Vec<_> = g2.edges.iter().map(|edge| edge.mv).collect();
+                moves.sort_by_key(|coord| coord_key(*coord));
+                if moves.windows(2).any(|pair| pair[0] == pair[1]) {
+                    return false;
+                }
+            }
+            CertNode::FhwGateV1(gate) => {
+                edge_count = match edge_count.checked_add(gate.representatives.len()) {
+                    Some(count) if count <= MAX_CERT_EDGES => count,
+                    _ => return false,
+                };
+                if gate
+                    .representatives
+                    .iter()
+                    .any(|edge| edge.child as usize >= cert.nodes.len())
+                {
+                    return false;
+                }
+                witness_count = match witness_count.checked_add(gate.proof.threats.len()) {
+                    Some(count) if count <= MAX_CERT_WITNESSES => count,
+                    _ => return false,
+                };
+                let mut moves: Vec<_> = gate.representatives.iter().map(|edge| edge.mv).collect();
+                moves.sort_by_key(|coord| coord_key(*coord));
+                if moves.windows(2).any(|pair| pair[0] == pair[1]) {
+                    return false;
+                }
+            }
         }
     }
 
@@ -1495,6 +1810,12 @@ fn push_children(node: &CertNode, out: &mut Vec<usize>) {
                     .flat_map(|item| [item.first_child as usize, item.mirror_child as usize]),
             );
         }
+        CertNode::UniversalGroup2V1(node) => {
+            out.extend(node.edges.iter().map(|edge| edge.child as usize));
+        }
+        CertNode::FhwGateV1(gate) => {
+            out.extend(gate.representatives.iter().map(|edge| edge.child as usize));
+        }
         CertNode::OrCompletion { .. } | CertNode::Win { .. } | CertNode::Loss { .. } => {}
     }
 }
@@ -1539,6 +1860,37 @@ pub fn d6_transform_coord(coord: HexCoord, symmetry: u8) -> Option<HexCoord> {
     Some(HexCoord {
         q: i16::try_from(q).ok()?,
         r: i16::try_from(r).ok()?,
+    })
+}
+
+fn d6_transform_role_key(role: &RoleKeyV1, symmetry: u8) -> Option<RoleKeyV1> {
+    Some(match role {
+        RoleKeyV1::ChoiceMove { node, cell } => RoleKeyV1::ChoiceMove {
+            node: *node,
+            cell: d6_transform_coord(*cell, symmetry)?,
+        },
+        RoleKeyV1::OrCompletionMove { node, cell } => RoleKeyV1::OrCompletionMove {
+            node: *node,
+            cell: d6_transform_coord(*cell, symmetry)?,
+        },
+        RoleKeyV1::LeafEmpty {
+            node,
+            witness,
+            cell,
+        } => RoleKeyV1::LeafEmpty {
+            node: *node,
+            witness: d6_transform_window(*witness, symmetry)?,
+            cell: d6_transform_coord(*cell, symmetry)?,
+        },
+        RoleKeyV1::Checkpoint {
+            gate,
+            threat,
+            cell,
+        } => RoleKeyV1::Checkpoint {
+            gate: *gate,
+            threat: d6_transform_window(*threat, symmetry)?,
+            cell: d6_transform_coord(*cell, symmetry)?,
+        },
     })
 }
 
@@ -1688,9 +2040,128 @@ pub fn d6_remap_certificate(cert: &TssCertificate, symmetry: u8) -> Option<TssCe
                     })
                     .collect::<Option<_>>()?,
             }),
+            CertNode::UniversalGroup2V1(node) => {
+                Some(CertNode::UniversalGroup2V1(Box::new(UniversalGroup2NodeV1 {
+                    edges: node
+                        .edges
+                        .iter()
+                        .map(|edge| {
+                            Some(CertEdge {
+                                mv: d6_transform_coord(edge.mv, symmetry)?,
+                                child: edge.child,
+                            })
+                        })
+                        .collect::<Option<_>>()?,
+                    // Authority bytes and stored digests are D6-invariant by
+                    // construction (§2.4 lexicographic-min over transforms).
+                    proof: node.proof.clone(),
+                })))
+            }
+            CertNode::FhwGateV1(gate) => Some(CertNode::FhwGateV1(Box::new(FhwGateNodeV1 {
+                representatives: gate
+                    .representatives
+                    .iter()
+                    .map(|edge| {
+                        Some(CertEdge {
+                            mv: d6_transform_coord(edge.mv, symmetry)?,
+                            child: edge.child,
+                        })
+                    })
+                    .collect::<Option<_>>()?,
+                proof: FhwGateProofV1 {
+                    schema_version: gate.proof.schema_version,
+                    authority: gate.proof.authority.clone(),
+                    threats: gate
+                        .proof
+                        .threats
+                        .iter()
+                        .map(|key| d6_transform_window(*key, symmetry))
+                        .collect::<Option<_>>()?,
+                    escape_resolution_ply: gate.proof.escape_resolution_ply,
+                    map: gate
+                        .proof
+                        .map
+                        .iter()
+                        .map(|entry| {
+                            Some(FhwMapV1 {
+                                real_reply: d6_transform_coord(entry.real_reply, symmetry)?,
+                                representative: d6_transform_coord(
+                                    entry.representative,
+                                    symmetry,
+                                )?,
+                                edge_class: entry.edge_class,
+                                roles: entry
+                                    .roles
+                                    .iter()
+                                    .map(|claim| {
+                                        Some(FhwRoleClaimV1 {
+                                            role: d6_transform_role_key(&claim.role, symmetry)?,
+                                            child_f: claim.child_f,
+                                            row: claim.row,
+                                            epsilon: claim.epsilon,
+                                        })
+                                    })
+                                    .collect::<Option<_>>()?,
+                                windows: entry
+                                    .windows
+                                    .iter()
+                                    .map(|claim| {
+                                        Some(FhwWindowClaimV1 {
+                                            window: d6_transform_window(claim.window, symmetry)?,
+                                            child_q: claim.child_q,
+                                            d_in_window: claim.d_in_window,
+                                            s_in_window: claim.s_in_window,
+                                            row: claim.row,
+                                            kappa: claim.kappa,
+                                            retained_guard: claim.retained_guard,
+                                        })
+                                    })
+                                    .collect::<Option<_>>()?,
+                            })
+                        })
+                        .collect::<Option<_>>()?,
+                },
+            }))),
         })
         .collect::<Option<_>>()?;
 
+    let mut nodes: Vec<CertNode> = nodes;
+    // The v1 extension class mandates canonical (transformed-move sorted)
+    // edge order and canonically sorted Loss witness lists; a legacy
+    // certificate's stored order is part of its identity and stays
+    // untouched.
+    if nodes.iter().any(CertNode::is_group2_extension) {
+        for node in &mut nodes {
+            match node {
+                CertNode::Universal { edges, .. } => {
+                    edges.sort_by_key(|edge| coord_key(edge.mv));
+                }
+                CertNode::UniversalGroup2V1(g2) => {
+                    g2.edges.sort_by_key(|edge| coord_key(edge.mv));
+                }
+                CertNode::FhwGateV1(gate) => {
+                    gate.representatives.sort_by_key(|edge| coord_key(edge.mv));
+                }
+                CertNode::Loss { witnesses, .. } => {
+                    witnesses.sort_by_key(|key| {
+                        let a = key.coord_at(0);
+                        let b = key.coord_at(5);
+                        let smaller = if (a.q, a.r) <= (b.q, b.r) { a } else { b };
+                        (
+                            match key.axis {
+                                Axis::Q => 0u8,
+                                Axis::R => 1,
+                                Axis::QR => 2,
+                            },
+                            smaller.q,
+                            smaller.r,
+                        )
+                    });
+                }
+                CertNode::OrCompletion { .. } | CertNode::Win { .. } | CertNode::Choice { .. } => {}
+            }
+        }
+    }
     Some(TssCertificate {
         root,
         claimant: cert.claimant,

@@ -1,0 +1,66 @@
+{
+  "arm": "dualpass_standard",
+  "bench_exit": 0,
+  "canaries": {
+    "loss_detection": {
+      "detail": "3/3 known losses proven, win-arm clean",
+      "fired": true
+    },
+    "unbounded_horizon": {
+      "detail": "3/3 deep wins unbounded-only",
+      "fired": true
+    },
+    "wide": {
+      "detail": "manifest wide + 3/3 fixture wins",
+      "fired": true
+    }
+  },
+  "config": {
+    "dual_pass": true
+  },
+  "sets": {
+    "human_v1": {
+      "coverage": {
+        "loss": 269,
+        "n": 2185,
+        "win": 317
+      },
+      "economics": {
+        "cap_bound_n": 180,
+        "cap_bound_share": 0.6105219324032158,
+        "total_wall_s": 10.807472472,
+        "unknown_share": 0.7457228456403882
+      },
+      "split": "dev"
+    },
+    "puzzle_v3": {
+      "coverage": {
+        "loss": 92,
+        "n": 370,
+        "win": 92
+      },
+      "economics": {
+        "cap_bound_n": 185,
+        "cap_bound_share": 0.7350129689022386,
+        "total_wall_s": 9.428256359,
+        "unknown_share": 0.7351391147084951
+      },
+      "split": "dev"
+    },
+    "selfplay_v1": {
+      "coverage": {
+        "loss": 51,
+        "n": 2631,
+        "win": 150
+      },
+      "economics": {
+        "cap_bound_n": 242,
+        "cap_bound_share": 0.7120558359793216,
+        "total_wall_s": 16.146750589,
+        "unknown_share": 0.8942578630549255
+      },
+      "split": "dev"
+    }
+  },
+  "tier": "standard"
+}

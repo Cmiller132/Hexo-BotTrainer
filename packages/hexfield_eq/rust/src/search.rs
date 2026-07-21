@@ -3448,6 +3448,8 @@ const KNOWN_DIVERGENCE_KEYS: &[&str] = &[
     "tss_pair_commutation",
     "tss_solver_horizon",
     "tss_solver_dual_pass",
+    "tss_solver_loss_reserve_nodes",
+    "tss_solver_group2",
     "tss_solver_horizon_ladder",
     // Fast-class Gumbel levers (main_8: PUCT Full / Gumbel Fast). These name the
     // Fast view's values; the driver's Python side folds them into the SECOND
@@ -3630,6 +3632,12 @@ fn resolve_divergences(
         }
         if let Some(v) = overrides.get_item("tss_solver_dual_pass")? {
             dv.tss_solver_dual_pass = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("tss_solver_loss_reserve_nodes")? {
+            dv.tss_solver_loss_reserve_nodes = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("tss_solver_group2")? {
+            dv.tss_solver_group2 = v.extract()?;
         }
         if let Some(v) = overrides.get_item("tss_solver_horizon_ladder")? {
             dv.tss_solver_horizon_ladder = v.extract()?;
@@ -4121,6 +4129,8 @@ fn build_search_result_payload_native(
             let mut root_solver = crate::tss_solver::TssSolver::default();
             root_solver.configure_leaf_profile();
             root_solver.set_dual_pass(div.tss_solver_dual_pass);
+            root_solver.set_loss_reserve_nodes(div.tss_solver_loss_reserve_nodes);
+            root_solver.set_group2(div.tss_solver_group2);
             let solved = tss_solve_verified(
                 &search.root_state,
                 div.tss_solver_node_cap as u64,
@@ -4782,6 +4792,8 @@ fn harness_solver(
     zone: ZoneSearchCaps,
     dual_pass: bool,
     ordering: SolveOrdering,
+    loss_reserve_nodes: u32,
+    group2: bool,
 ) -> TssSolver {
     let mut solver = TssSolver::default();
     if wide {
@@ -4790,6 +4802,8 @@ fn harness_solver(
     solver.set_zone_options(zone);
     solver.set_dual_pass(dual_pass);
     solver.set_ordering(ordering);
+    solver.set_loss_reserve_nodes(loss_reserve_nodes);
+    solver.set_group2(group2);
     solver
 }
 
@@ -4815,8 +4829,17 @@ fn harness_solver_manifest(
     wide: bool,
     dual_pass: bool,
     ordering: SolveOrdering,
+    loss_reserve_nodes: u32,
+    group2: bool,
 ) -> HarnessSolverManifest {
-    let solver = harness_solver(wide, harness_zone_caps(zone), dual_pass, ordering);
+    let solver = harness_solver(
+        wide,
+        harness_zone_caps(zone),
+        dual_pass,
+        ordering,
+        loss_reserve_nodes,
+        group2,
+    );
     let caps = tss_verified_solve_caps(0, node_cap, horizon);
     let effective = solver.effective_solve_config(&caps, solver.sample_runtime_flags());
     HarnessSolverManifest {
@@ -4858,7 +4881,7 @@ fn set_solve_stats(d: &Bound<'_, PyDict>, stats: &SolveStats) -> PyResult<()> {
 /// values come from the same pure resolver consumed by `solve_goal`, with the
 /// production verified caps resolved for a placements=0 root.
 #[pyfunction]
-#[pyo3(signature = (node_cap, horizon, ladder, zone, wide, dual_pass=false, ordering="off"))]
+#[pyo3(signature = (node_cap, horizon, ladder, zone, wide, dual_pass=false, ordering="off", loss_reserve_nodes=0, group2=false))]
 pub fn hexfield_eq_solver_manifest(
     py: Python<'_>,
     node_cap: u64,
@@ -4868,6 +4891,8 @@ pub fn hexfield_eq_solver_manifest(
     wide: bool,
     dual_pass: bool,
     ordering: &str,
+    loss_reserve_nodes: u32,
+    group2: bool,
 ) -> PyResult<Py<PyAny>> {
     validate_harness_horizon(horizon, ladder)?;
     let ordering = parse_solve_ordering(ordering)?;
@@ -4878,12 +4903,16 @@ pub fn hexfield_eq_solver_manifest(
         wide,
         dual_pass,
         ordering,
+        loss_reserve_nodes,
+        group2,
     );
     let effective = manifest.effective;
     let d = PyDict::new(py);
     d.set_item("vcf_pair_complete", effective.vcf_pair_complete)?;
     d.set_item("dual_pass", effective.dual_pass)?;
     d.set_item("ordering", effective.ordering)?;
+    d.set_item("loss_reserve_nodes", effective.loss_reserve_nodes)?;
+    d.set_item("group2", effective.group2)?;
     d.set_item("quiet_turn_or_edges", effective.quiet_turn_or_edges)?;
     d.set_item(
         "ranked_unforced_defender_zone",
@@ -4976,7 +5005,7 @@ pub fn hexfield_eq_deep_solve_probe(
     let zone_caps = harness_zone_caps(zone);
     let placements = s.placements_made();
 
-    let mut solver = harness_solver(wide, zone_caps, false, SolveOrdering::Off);
+    let mut solver = harness_solver(wide, zone_caps, false, SolveOrdering::Off, 0, false);
     let mut counters = TssCounters::default();
     let start = Instant::now();
     let solved = tss_solve_verified(
@@ -5010,6 +5039,8 @@ pub fn hexfield_eq_deep_solve_probe(
                         univ += 1;
                         zn += u32::from(zone.is_some());
                     }
+                    CertNode::UniversalGroup2V1(_) => univ += 1,
+                    CertNode::FhwGateV1(_) => {}
                 }
             }
             (
@@ -5068,7 +5099,7 @@ pub fn hexfield_eq_deep_solve_probe(
     d.set_item("zone_verify_failed", counters.zone_verify_failed)?;
 
     if with_stats {
-        let mut stats_solver = harness_solver(wide, zone_caps, false, SolveOrdering::Off);
+        let mut stats_solver = harness_solver(wide, zone_caps, false, SolveOrdering::Off, 0, false);
         // Shared production-cap constructor keeps this cold diagnostic at the
         // trainer leaf/root/async memory profile.
         let caps = tss_verified_solve_caps(
@@ -5095,7 +5126,7 @@ pub fn hexfield_eq_deep_solve_probe(
 /// verified-path counters, and actual aggregate `stats_*` telemetry from this
 /// persistent solver. Measurement only.
 #[pyfunction]
-#[pyo3(signature = (states, node_cap, goal, horizon, ladder, zone, wide, dual_pass=false, ordering_hints=None))]
+#[pyo3(signature = (states, node_cap, goal, horizon, ladder, zone, wide, dual_pass=false, ordering_hints=None, loss_reserve_nodes=0, group2=false))]
 #[allow(clippy::too_many_arguments)]
 pub fn hexfield_eq_deep_solve_batch(
     py: Python<'_>,
@@ -5108,6 +5139,8 @@ pub fn hexfield_eq_deep_solve_batch(
     wide: bool,
     dual_pass: bool,
     ordering_hints: Option<&Bound<'_, PyList>>,
+    loss_reserve_nodes: u32,
+    group2: bool,
 ) -> PyResult<Py<PyAny>> {
     validate_harness_horizon(horizon, ladder)?;
     let goal_enum = match goal {
@@ -5127,7 +5160,7 @@ pub fn hexfield_eq_deep_solve_batch(
         SolveOrdering::Off
     };
     let zone_caps = harness_zone_caps(zone);
-    let mut solver = harness_solver(wide, zone_caps, dual_pass, ordering);
+    let mut solver = harness_solver(wide, zone_caps, dual_pass, ordering, loss_reserve_nodes, group2);
     let out = PyList::empty(py);
     for (state_index, state_any) in states.iter().enumerate() {
         let s = single_state_from_py(py, &state_any)?;
@@ -5150,6 +5183,7 @@ pub fn hexfield_eq_deep_solve_batch(
         let wall_nanos = start.elapsed().as_nanos() as u64;
         let mut derived_t = 0u32;
         let mut zn = 0u32;
+        let mut g2n = 0u32;
         if let Some(cert) = &solved.cert {
             for node in &cert.nodes {
                 match node {
@@ -5162,6 +5196,8 @@ pub fn hexfield_eq_deep_solve_batch(
                     }
                     CertNode::Universal { zone, .. } => zn += u32::from(zone.is_some()),
                     CertNode::Choice { .. } => {}
+                    CertNode::UniversalGroup2V1(_) => g2n += 1,
+                    CertNode::FhwGateV1(_) => {}
                 }
             }
         }
@@ -5181,6 +5217,7 @@ pub fn hexfield_eq_deep_solve_batch(
         d.set_item("horizon_cut_tall", counters.horizon_cut_tall)?;
         d.set_item("deep_kb_death", counters.deep_kb_death)?;
         d.set_item("zone_nodes", zn)?;
+        d.set_item("group2_nodes", g2n)?;
         set_solve_stats(&d, &verified.stats)?;
         out.append(d)?;
     }
@@ -5509,6 +5546,8 @@ mod fallback_tests {
             true,
             false,
             SolveOrdering::Off,
+            0,
+            false,
         );
         assert_eq!(off.env.shared_fragments, None);
         assert!(!off.effective.shared_fragments_enabled);
@@ -5525,6 +5564,8 @@ mod fallback_tests {
             true,
             false,
             SolveOrdering::Off,
+            0,
+            false,
         );
         assert_eq!(on.env.shared_fragments.as_deref(), Some("1"));
         assert!(on.effective.shared_fragments_enabled);
@@ -5548,10 +5589,12 @@ mod fallback_tests {
             true,
             false,
             SolveOrdering::Off,
+            0,
+            false,
         );
         let state = RustHexoState::new();
         let zone = harness_zone_caps(false);
-        let mut solver = harness_solver(true, zone, false, SolveOrdering::Off);
+        let mut solver = harness_solver(true, zone, false, SolveOrdering::Off, 0, false);
         let mut counters = TssCounters::default();
         let _ = tss_solve_verified(
             &state,
@@ -5583,6 +5626,8 @@ mod fallback_tests {
                 true,
                 dual_pass,
                 SolveOrdering::Off,
+                0,
+                false,
             );
             assert_eq!(manifest.effective.dual_pass, dual_pass);
 
@@ -5591,6 +5636,8 @@ mod fallback_tests {
                 harness_zone_caps(false),
                 dual_pass,
                 SolveOrdering::Off,
+                0,
+                false,
             );
             let caps = tss_verified_solve_caps(0, 500, horizon);
             assert_eq!(
@@ -5601,7 +5648,7 @@ mod fallback_tests {
             Python::initialize();
             Python::attach(|py| {
                 let echoed = hexfield_eq_solver_manifest(
-                    py, 500, 0, false, false, true, dual_pass, "off",
+                    py, 500, 0, false, false, true, dual_pass, "off", 0, false,
                 )
                 .unwrap();
                 let dict = echoed.bind(py).cast::<PyDict>().unwrap();
@@ -5627,10 +5674,25 @@ mod fallback_tests {
             (SolveOrdering::Off, "off"),
             (SolveOrdering::Prior, "prior"),
         ] {
-            let manifest =
-                harness_solver_manifest(500, horizon, false, true, false, ordering);
+            let manifest = harness_solver_manifest(
+                500,
+                horizon,
+                false,
+                true,
+                false,
+                ordering,
+                0,
+                false,
+            );
             assert_eq!(manifest.effective.ordering, name);
-            let solver = harness_solver(true, harness_zone_caps(false), false, ordering);
+            let solver = harness_solver(
+                true,
+                harness_zone_caps(false),
+                false,
+                ordering,
+                0,
+                false,
+            );
             let caps = tss_verified_solve_caps(0, 500, horizon);
             assert_eq!(
                 solver.effective_solve_config(&caps, solver.sample_runtime_flags()),
@@ -5639,9 +5701,10 @@ mod fallback_tests {
 
             Python::initialize();
             Python::attach(|py| {
-                let echoed =
-                    hexfield_eq_solver_manifest(py, 500, 0, false, false, true, false, name)
-                        .unwrap();
+                let echoed = hexfield_eq_solver_manifest(
+                    py, 500, 0, false, false, true, false, name, 0, false,
+                )
+                .unwrap();
                 let dict = echoed.bind(py).cast::<PyDict>().unwrap();
                 assert_eq!(
                     dict.get_item("ordering")
@@ -5672,6 +5735,122 @@ mod fallback_tests {
             let bad_outer = PyList::new(py, [bad_row]).unwrap();
             assert!(parse_batch_ordering_hints(1, Some(&bad_outer)).is_err());
         });
+    }
+
+    #[test]
+    fn solver_manifest_echoes_group2_from_shared_resolver() {
+        let horizon = SolverHorizon {
+            horizon: 0,
+            ladder: false,
+        };
+        for group2 in [false, true] {
+            let manifest = harness_solver_manifest(
+                500,
+                horizon,
+                false,
+                true,
+                false,
+                SolveOrdering::Off,
+                0,
+                group2,
+            );
+            assert_eq!(manifest.effective.group2, group2);
+
+            let solver = harness_solver(
+                true,
+                harness_zone_caps(false),
+                false,
+                SolveOrdering::Off,
+                0,
+                group2,
+            );
+            let caps = tss_verified_solve_caps(0, 500, horizon);
+            assert_eq!(
+                solver.effective_solve_config(&caps, solver.sample_runtime_flags()),
+                manifest.effective,
+            );
+
+            Python::initialize();
+            Python::attach(|py| {
+                let echoed = hexfield_eq_solver_manifest(
+                    py, 500, 0, false, false, true, false, "off", 0, group2,
+                )
+                .unwrap();
+                let dict = echoed.bind(py).cast::<PyDict>().unwrap();
+                assert_eq!(
+                    dict.get_item("group2")
+                        .unwrap()
+                        .unwrap()
+                        .extract::<bool>()
+                        .unwrap(),
+                    group2,
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn solver_manifest_echoes_loss_reserve_from_shared_resolver() {
+        let horizon = SolverHorizon {
+            horizon: 0,
+            ladder: false,
+        };
+        for loss_reserve_nodes in [0, 32, 64] {
+            let manifest = harness_solver_manifest(
+                500,
+                horizon,
+                false,
+                true,
+                true,
+                SolveOrdering::Off,
+                loss_reserve_nodes,
+                false,
+            );
+            assert_eq!(
+                manifest.effective.loss_reserve_nodes,
+                loss_reserve_nodes
+            );
+
+            let solver = harness_solver(
+                true,
+                harness_zone_caps(false),
+                true,
+                SolveOrdering::Off,
+                loss_reserve_nodes,
+                false,
+            );
+            let caps = tss_verified_solve_caps(0, 500, horizon);
+            assert_eq!(
+                solver.effective_solve_config(&caps, solver.sample_runtime_flags()),
+                manifest.effective,
+            );
+
+            Python::initialize();
+            Python::attach(|py| {
+                let echoed = hexfield_eq_solver_manifest(
+                    py,
+                    500,
+                    0,
+                    false,
+                    false,
+                    true,
+                    true,
+                    "off",
+                    loss_reserve_nodes,
+                    false,
+                )
+                .unwrap();
+                let dict = echoed.bind(py).cast::<PyDict>().unwrap();
+                assert_eq!(
+                    dict.get_item("loss_reserve_nodes")
+                        .unwrap()
+                        .unwrap()
+                        .extract::<u32>()
+                        .unwrap(),
+                    loss_reserve_nodes,
+                );
+            });
+        }
     }
 
     fn shared_fragment_batch_fixture() -> RustHexoState {
@@ -5711,7 +5890,7 @@ mod fallback_tests {
         };
 
         env.set(Some("1"));
-        let mut warm_solver = harness_solver(true, zone, false, SolveOrdering::Off);
+        let mut warm_solver = harness_solver(true, zone, false, SolveOrdering::Off, 0, false);
         let mut first_counters = TssCounters::default();
         let first = tss_solve_verified_with_stats(
             &state,
@@ -5740,7 +5919,7 @@ mod fallback_tests {
         assert_eq!(second.stats.nodes, second_counters.deep_nodes);
 
         env.set(None);
-        let mut cold_solver = harness_solver(true, zone, false, SolveOrdering::Off);
+        let mut cold_solver = harness_solver(true, zone, false, SolveOrdering::Off, 0, false);
         let mut cold_first_counters = TssCounters::default();
         let _ = tss_solve_verified_with_stats(
             &state,
@@ -6514,9 +6693,19 @@ mod fallback_tests {
 
             let dual_pass = PyDict::new(py);
             dual_pass.set_item("tss_solver_dual_pass", true).unwrap();
+            dual_pass
+                .set_item("tss_solver_loss_reserve_nodes", 32u32)
+                .unwrap();
             let dv = resolve_divergences(None, Some(&dual_pass))
-                .expect("tss_solver_dual_pass must pass the known-keys gate");
+                .expect("loss-side solver keys must pass the known-keys gate");
             assert!(dv.tss_solver_dual_pass);
+            assert_eq!(dv.tss_solver_loss_reserve_nodes, 32);
+
+            let negative_reserve = PyDict::new(py);
+            negative_reserve
+                .set_item("tss_solver_loss_reserve_nodes", -1i32)
+                .unwrap();
+            assert!(resolve_divergences(None, Some(&negative_reserve)).is_err());
 
             let park_without_async = PyDict::new(py);
             park_without_async.set_item("tss_solver_park", true).unwrap();

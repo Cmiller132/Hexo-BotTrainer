@@ -29,7 +29,7 @@ use crate::threats_shared as threats;
 use crate::tss_async::{SolveRequest, SolveResponse, TssAsyncHandle};
 use crate::tss_core::{self, HardValue, ProofStatus, SolveCaps, SolveGoal, SolveStats};
 use crate::tss_solver::TssSolver;
-use crate::tss_verify::{RootBinding, TssVerifier};
+use crate::tss_verify::{Group2Verifier, RootBinding, TssVerifier};
 
 /// Edge Q is `value_sum / visits` on the symmetric interval [-1, 1] (win/loss
 /// utility, no per-node normalization). The exploration (U) and value (Q) terms
@@ -226,6 +226,14 @@ pub struct Divergences {
     /// Reuse the unused portion of an undecided wide `Both` WIN attempt for
     /// the opponent-WIN attempt. Default off preserves the primal-only split.
     pub tss_solver_dual_pass: bool,
+    /// Post-root budget reserved for the opponent-WIN attempt in wide `Both`
+    /// solves. A positive value schedules the floor independently; dual-pass
+    /// additionally donates unused primal work. Zero preserves current policy.
+    pub tss_solver_loss_reserve_nodes: u32,
+    /// v1 Group-2 reduced-fanout selector (default off). Flag-off is
+    /// bit-identical to the pre-change engine; flag-on additionally selects
+    /// the `Group2V1` verifier policy at the sealed mint.
+    pub tss_solver_group2: bool,
     /// Horizon-ladder escalation (default off): when the base solve is Unknown
     /// with `horizon_cuts > 0`, re-solve ONCE at `2 * horizon` on the same
     /// solver instance (the shared TT replays the proven prefix). Unbounded
@@ -289,6 +297,8 @@ impl Divergences {
             tss_pair_commutation: false,
             tss_solver_horizon: 16,
             tss_solver_dual_pass: false,
+            tss_solver_loss_reserve_nodes: 0,
+            tss_solver_group2: false,
             tss_solver_horizon_ladder: false,
         }
     }
@@ -880,7 +890,13 @@ fn tss_solve_verified_impl(
                 cert: None,
             }
         }
-        status => match tss_core::hard_value_from_verified(&TssVerifier, state, &result) {
+        status => match if solver.group2_enabled() {
+            // Trainer configuration (the solver flag), never certificate
+            // contents, selects the Group2V1 verifier policy (design §5.1).
+            tss_core::hard_value_from_verified_group2(&Group2Verifier, state, &result)
+        } else {
+            tss_core::hard_value_from_verified(&TssVerifier, state, &result)
+        } {
             Some(hard) => {
                 match status {
                     ProofStatus::Win => counters.deep_win += 1,
@@ -1483,6 +1499,8 @@ impl RustSearch {
                                 ladder: self.divergences.tss_solver_horizon_ladder,
                             },
                             dual_pass: self.divergences.tss_solver_dual_pass,
+                            loss_reserve_nodes: self.divergences.tss_solver_loss_reserve_nodes,
+                            group2: self.divergences.tss_solver_group2,
                         })
                     })
                     .flatten();
@@ -1604,6 +1622,10 @@ impl RustSearch {
                                         ladder: self.divergences.tss_solver_horizon_ladder,
                                     },
                                     dual_pass: self.divergences.tss_solver_dual_pass,
+                                    loss_reserve_nodes: self
+                                        .divergences
+                                        .tss_solver_loss_reserve_nodes,
+                                    group2: self.divergences.tss_solver_group2,
                                 })
                             })
                             .flatten();
@@ -1632,6 +1654,12 @@ impl RustSearch {
                 self.tss_solver
                     .0
                     .set_dual_pass(self.divergences.tss_solver_dual_pass);
+                self.tss_solver
+                    .0
+                    .set_loss_reserve_nodes(self.divergences.tss_solver_loss_reserve_nodes);
+                self.tss_solver
+                    .0
+                    .set_group2(self.divergences.tss_solver_group2);
                 let solved = tss_solve_verified(
                     state,
                     node_cap,

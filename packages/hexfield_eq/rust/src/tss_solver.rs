@@ -761,6 +761,8 @@ pub(crate) struct EffectiveSolveConfig {
     pub(crate) vcf_pair_complete: bool,
     pub(crate) dual_pass: bool,
     pub(crate) ordering: &'static str,
+    pub(crate) loss_reserve_nodes: u32,
+    pub(crate) group2: bool,
     pub(crate) quiet_turn_or_edges: &'static str,
     pub(crate) ranked_unforced_defender_zone: &'static str,
     pub(crate) tt_enabled: bool,
@@ -795,6 +797,19 @@ pub(crate) struct TssSolver {
     /// Position-specific policy weights. `solve_goal` takes this value at its
     /// boundary, so even early returns leave no hint available to a later root.
     ordering_hints: Option<OrderingHints>,
+    /// Hold this many post-root nodes out of the wide `Both` primal for an
+    /// opponent-WIN attempt. A positive reserve schedules that attempt even
+    /// without the leftover policy; if the primal returns early, an enabled
+    /// dual pass upgrades it to every actual leftover node. Zero preserves the
+    /// current full-primal allocation.
+    loss_reserve_nodes: u32,
+    /// Default-off v1 Group-2 reduced-fanout selector (narrow zone path only;
+    /// DESIGN_G2_CERT_EXTENSION.md §2.4, task flag `tss_solver_group2`). When
+    /// on, eligible unforced defender nodes attempt the exact FHW closure and
+    /// emit `UniversalGroup2V1`; any failure falls back to the legacy paths
+    /// and, at the attempt boundary, to a clean group2-off re-solve so the
+    /// flag can never decide fewer positions than off.
+    group2: bool,
     /// Leaf-profile overrides (PLAN_TSS_MCTS_INTEGRATION.md §3). When `Some`,
     /// they replace the per-solve environment reads for the lazy defender
     /// frontier and the interior census gate, so the trainer leaf/root/async
@@ -834,6 +849,8 @@ impl Default for TssSolver {
             dual_pass: false,
             ordering: SolveOrdering::Off,
             ordering_hints: None,
+            loss_reserve_nodes: 0,
+            group2: false,
             force_lazy_frontier: None,
             force_interior_census_gate: None,
             #[cfg(test)]
@@ -949,6 +966,32 @@ impl TssSolver {
         self.ordering_hints = Some(hints);
     }
 
+    pub(crate) fn set_loss_reserve_nodes(&mut self, loss_reserve_nodes: u32) {
+        if self.loss_reserve_nodes != loss_reserve_nodes {
+            self.shared_tt.clear();
+            self.fragment_store.clear();
+        }
+        self.loss_reserve_nodes = loss_reserve_nodes;
+    }
+
+    /// Enable/disable the v1 Group-2 selector. Changing the option drops the
+    /// persistent caches (same profile-isolation rule as the other options:
+    /// cached fragments' node-cost provenance must not leak across profiles).
+    pub(crate) fn set_group2(&mut self, group2: bool) {
+        if self.group2 != group2 {
+            self.shared_tt.clear();
+            self.fragment_store.clear();
+        }
+        self.group2 = group2;
+    }
+
+    /// Externally selected verifier policy follows this solver option
+    /// (design §5.1: trainer configuration, never certificate contents,
+    /// chooses the policy).
+    pub(crate) fn group2_enabled(&self) -> bool {
+        self.group2
+    }
+
     /// Configure this solver to the campaign leaf-decided profile
     /// (PLAN_TSS_MCTS_INTEGRATION.md §3, HUNT_REPORT_LEAF_SURFACE config D):
     /// wide `vcf_pair_complete` attacker width, the lazy defender frontier ON,
@@ -1013,6 +1056,8 @@ impl TssSolver {
             vcf_pair_complete: self.width.vcf_pair_complete,
             dual_pass: self.dual_pass,
             ordering: self.ordering.name(),
+            loss_reserve_nodes: self.loss_reserve_nodes,
+            group2: self.group2,
             quiet_turn_or_edges: self.width.quiet_turn_or_edges.name(),
             ranked_unforced_defender_zone: self.width.ranked_unforced_defender_zone.name(),
             tt_enabled: self.tt_enabled,
@@ -1048,6 +1093,8 @@ impl TssSolver {
             dual_pass: false,
             ordering: SolveOrdering::Off,
             ordering_hints: None,
+            loss_reserve_nodes: 0,
+            group2: false,
             force_lazy_frontier: None,
             force_interior_census_gate: None,
             last_narrow_signatures: Vec::new(),
@@ -1074,6 +1121,8 @@ impl TssSolver {
             dual_pass: false,
             ordering: SolveOrdering::Off,
             ordering_hints: None,
+            loss_reserve_nodes: 0,
+            group2: false,
             force_lazy_frontier: None,
             force_interior_census_gate: None,
             last_narrow_signatures: Vec::new(),
@@ -1219,11 +1268,13 @@ impl TssSolver {
             SolveGoal::Win => (remaining, 0),
             SolveGoal::Loss => (0, remaining),
             // Pair-complete mode is deliberately a restricted VCF WIN search.
-            // Spending half of a `Both` budget on the opponent's independent
-            // restricted attack cannot establish a useful NO result for this
-            // profile (the corpus accepts Loss or Unknown there), while it
-            // halves the advertised forcing-proof cap.
-            SolveGoal::Both if self.width.vcf_pair_complete => (remaining, 0),
+            // The default reserve is zero, preserving its full advertised
+            // forcing-proof cap. A configured floor is an explicit policy
+            // experiment and remains a positive opponent-claim search only;
+            // its failure can establish no NO result.
+            SolveGoal::Both if self.width.vcf_pair_complete => {
+                wide_both_initial_caps(remaining, effective.loss_reserve_nodes)
+            }
             SolveGoal::Both => ((remaining + 1) / 2, remaining / 2),
         };
         let root_player = state.current_player();
@@ -1241,6 +1292,7 @@ impl TssSolver {
                 effective.interior_census_gate,
                 effective.lazy_frontier,
                 ordering_hints,
+                effective.group2,
             );
             #[cfg(test)]
             if let Some(signature) = attempt.tt_signature.as_ref() {
@@ -1275,6 +1327,7 @@ impl TssSolver {
                 effective.interior_census_gate,
                 effective.lazy_frontier,
                 ordering_hints,
+                effective.group2,
             );
             #[cfg(test)]
             if let Some(signature) = attempt.tt_signature.as_ref() {
@@ -1317,6 +1370,7 @@ impl TssSolver {
         interior_census_gate: bool,
         lazy_frontier: bool,
         ordering_hints: Option<&OrderingHints>,
+        group2: bool,
     ) -> AttemptResult {
         if !width.vcf_pair_complete
             || (width.consumes_quiet_turns() && width.consumes_ranked_zone())
@@ -1347,6 +1401,7 @@ impl TssSolver {
                 (width.consumes_quiet_turns() && std::env::var_os("TSS_K_REPLY_SHADOW").is_some())
                     .then_some(&mut self.last_k_reply_shadow),
                 interior_census_gate,
+                group2,
             );
         }
         let depth_cap = wide_search_final_depth(state.placements_made(), semantic_horizon);
@@ -1895,6 +1950,18 @@ fn rebase_zone_distances(cert: &mut TssCertificate, root: &RustHexoState) -> Opt
                     stack.push((edge.child, next));
                 }
             }
+            CertNode::UniversalGroup2V1(node) => {
+                for edge in &node.edges {
+                    let mut next = state.clone();
+                    let result = apply_placement(&mut next, Placement { coord: edge.mv }).ok()?;
+                    if result.outcome.is_some() {
+                        return None;
+                    }
+                    stack.push((edge.child, next));
+                }
+            }
+            // Gates are never produced by this solver; fail closed.
+            CertNode::FhwGateV1(_) => return None,
             _ => {}
         }
     }
@@ -1933,6 +2000,18 @@ fn rebase_zone_distances(cert: &mut TssCertificate, root: &RustHexoState) -> Opt
                 }
                 maximum.saturating_add(1)
             }
+            CertNode::UniversalGroup2V1(node) => {
+                let mut maximum = 0u32;
+                for edge in &node.edges {
+                    let child = edge.child as usize;
+                    if child >= index {
+                        return None;
+                    }
+                    maximum = maximum.max(*local_budgets.get(child)?);
+                }
+                maximum.saturating_add(1)
+            }
+            CertNode::FhwGateV1(_) => return None,
         };
         local_budgets.push(local_budget);
     }
@@ -2003,6 +2082,9 @@ fn rebase_shared_fragment_labels(cert: &mut TssCertificate, root: &RustHexoState
                 }
                 maximum.saturating_add(1)
             }
+            // Shared-fragment relabelling never sees extension nodes (they
+            // are excluded from fragment promotion); fail closed.
+            CertNode::UniversalGroup2V1(_) | CertNode::FhwGateV1(_) => return None,
         };
         visiting[index] = false;
         memo[index] = Some((key, budget));
@@ -2035,6 +2117,14 @@ fn rebase_shared_fragment_labels(cert: &mut TssCertificate, root: &RustHexoState
 fn split_tt_cap(total: usize) -> (usize, usize) {
     let shared = total / 2;
     (total - shared, shared)
+}
+
+/// Split the post-root wide `Both` allowance while always leaving a nonempty
+/// primal allowance when any post-root work is available. This rules out a
+/// configuration value silently turning a `Both` solve into loss-only search.
+fn wide_both_initial_caps(remaining: u64, loss_reserve_nodes: u32) -> (u64, u64) {
+    let reserve = u64::from(loss_reserve_nodes).min(remaining.saturating_sub(1));
+    (remaining - reserve, reserve)
 }
 
 fn goal_accepts(goal: SolveGoal, status: ProofStatus) -> bool {
@@ -2265,6 +2355,9 @@ fn node_resolution(node: &CertNode) -> u32 {
         CertNode::Win { resolution_ply, .. } | CertNode::Loss { resolution_ply, .. } => {
             *resolution_ply
         }
+        CertNode::UniversalGroup2V1(_) => 0,
+        // R1: a gate's escape deadline participates in the derived resolution.
+        CertNode::FhwGateV1(gate) => gate.proof.escape_resolution_ply,
         CertNode::Choice { .. } | CertNode::Universal { .. } => 0,
     }
 }
@@ -4031,6 +4124,7 @@ impl<'store> WidePnSearch<'store> {
         k_reply_consume: bool,
         #[cfg(test)] k_reply_shadow: Option<&mut Vec<KReplyShadowRecord>>,
         interior_census_gate: bool,
+        group2: bool,
     ) -> AttemptResult {
         debug_assert!(
             !width.vcf_pair_complete
@@ -4044,7 +4138,7 @@ impl<'store> WidePnSearch<'store> {
             node_cap,
             local_tt_cap,
             hash_mask,
-            shared_tt,
+            &mut *shared_tt,
             root_ply,
             semantic_horizon,
             zone,
@@ -4054,6 +4148,7 @@ impl<'store> WidePnSearch<'store> {
             #[cfg(test)]
             k_reply_shadow,
             interior_census_gate,
+            group2,
         );
         let proof = search.prove(&mut work, claimant, root_ply, None);
 
@@ -4073,7 +4168,27 @@ impl<'store> WidePnSearch<'store> {
                 nodes,
                 semantic_horizon,
             };
-            rebase_zone_distances(&mut cert, state)?;
+            if cert.nodes.iter().any(CertNode::is_group2_extension) {
+                // v1 Group-2 finalization: canonical order, strict-tree
+                // unfolding, derived scalars, and both digests — then a
+                // strict self-verification under the extension policy. Any
+                // failure drops the certificate; the clean re-solve below
+                // restores flag-off behavior.
+                let finalized =
+                    crate::tss_verify_group2::finder_finalize_group2(state, &cert)?;
+                let claimed = status_for_claimant(state.current_player(), claimant);
+                if !crate::tss_core::CertVerify::verify(
+                    &crate::tss_verify::Group2Verifier,
+                    state,
+                    &finalized,
+                    claimed,
+                ) {
+                    return None;
+                }
+                cert = finalized;
+            } else {
+                rebase_zone_distances(&mut cert, state)?;
+            }
             Some(cert)
         });
         let stats = SolveStats {
@@ -4097,6 +4212,36 @@ impl<'store> WidePnSearch<'store> {
         if let Some(telemetry) = search.quotient_telemetry.take() {
             let report = telemetry.finish(&search.tt, search.tt_hits);
             LAST_QUOTIENT_REPORT.with(|slot| *slot.borrow_mut() = Some(report));
+        }
+        drop(search);
+        if group2 && cert.is_none() {
+            // Fail-safe re-solve with the selector off: the flag must never
+            // decide fewer positions than flag-off. Costs are summed.
+            let rerun = Self::prove_narrow_compat(
+                state,
+                claimant,
+                node_cap,
+                local_tt_cap,
+                hash_mask,
+                shared_tt,
+                semantic_horizon,
+                zone,
+                width,
+                depth_cap,
+                k_reply_consume,
+                #[cfg(test)]
+                None,
+                interior_census_gate,
+                false,
+            );
+            let mut merged = stats;
+            merged.merge(rerun.stats);
+            return AttemptResult {
+                cert: rerun.cert,
+                stats: merged,
+                #[cfg(test)]
+                tt_signature: rerun.tt_signature,
+            };
         }
         AttemptResult {
             cert,
@@ -7435,7 +7580,10 @@ impl WideProofMaterializer<'_, '_> {
         let added_witnesses = match &node {
             CertNode::OrCompletion { .. } | CertNode::Win { .. } => 1,
             CertNode::Loss { witnesses, .. } => witnesses.len(),
-            CertNode::Choice { .. } | CertNode::Universal { .. } => 0,
+            CertNode::Choice { .. }
+            | CertNode::Universal { .. }
+            | CertNode::UniversalGroup2V1(_) => 0,
+            CertNode::FhwGateV1(gate) => gate.proof.threats.len(),
         };
         if self.arena.len() >= MAX_CERT_NODES
             || self.edge_count.saturating_add(added_edges) > MAX_CERT_EDGES
@@ -7515,6 +7663,13 @@ struct NarrowCompatSearch<'a> {
     /// (SolveStats::horizon_cuts / kb_death_cuts) for the narrow-compat path.
     horizon_cuts: u64,
     kb_death_cuts: u64,
+    /// v1 Group-2 selector opt-in for this attempt.
+    group2: bool,
+    /// True once any node outside the narrow v1 class (implicit dispatch,
+    /// legacy zone, commutation) has been allocated. Later Group-2 attempts
+    /// are skipped: the assembled certificate could no longer validate as v1
+    /// (class rules 2/3), so trying would only waste budget.
+    emitted_dirty: bool,
 }
 
 #[cfg(test)]
@@ -7701,6 +7856,8 @@ impl NarrowCompatSearch<'static> {
             interior_gate_nanos: 0,
             horizon_cuts: 0,
             kb_death_cuts: 0,
+            group2: false,
+            emitted_dirty: false,
         }
     }
 }
@@ -7719,6 +7876,7 @@ impl<'a> NarrowCompatSearch<'a> {
         k_reply_consume: bool,
         #[cfg(test)] k_reply_shadow: Option<&'a mut Vec<KReplyShadowRecord>>,
         interior_census_gate: bool,
+        group2: bool,
     ) -> Self {
         let tt = BoundedTt::new(tt_bytes_cap, hash_mask);
         let peak_tt_bytes = tt.current_bytes.saturating_add(shared_tt.current_bytes);
@@ -7750,6 +7908,8 @@ impl<'a> NarrowCompatSearch<'a> {
             interior_gate_nanos: 0,
             horizon_cuts: 0,
             kb_death_cuts: 0,
+            group2,
+            emitted_dirty: false,
         }
     }
 
@@ -8202,6 +8362,24 @@ impl<'a> NarrowCompatSearch<'a> {
             return None;
         }
 
+        // v1 Group-2 selector (design §2.4, gate-free sub-class): at an
+        // eligible unforced node, run the exact append-only FHW closure and
+        // emit `UniversalGroup2V1`. Any failure falls through to the
+        // unchanged legacy paths below; children proven during the attempt
+        // stay memoized in the local TT, so the fallback re-proves them at
+        // hit cost.
+        if self.group2
+            && !implicit_dispatch
+            && !self.emitted_dirty
+            && (self.zone.enabled || self.width.consumes_ranked_zone())
+            && !matches!(state.phase(), TurnPhase::Opening)
+            && group2_finder_preconditions(state, claimant, analysis)
+        {
+            if let Some(node) = self.prove_universal_group2(state, claimant, ply) {
+                return Some(node);
+            }
+        }
+
         // At the proved L1 boundary U3 lets the verifier theorem-dismiss the
         // complement without enumerating it.  At spare nodes the default-off
         // U1 generator is consumable only because U2 re-derives the zone.
@@ -8326,12 +8504,111 @@ impl<'a> NarrowCompatSearch<'a> {
         )
     }
 
+    /// G2-Z1 append-only closure with the exact §3.4 required set: seed with
+    /// the current hitting universe (or the least legal cell), prove children,
+    /// recompute `Required_FHW` against the frozen children, and repeat until
+    /// the explicit set covers it. Emits a placeholder-proof
+    /// `UniversalGroup2V1`; scalars and digests are filled by
+    /// `finder_finalize_group2` after compaction.
+    fn prove_universal_group2(
+        &mut self,
+        state: &mut RustHexoState,
+        claimant: Player,
+        ply: u32,
+    ) -> Option<CertNodeId> {
+        let mut legal = Vec::new();
+        state.write_legal_moves(&mut legal);
+        legal.sort_by_key(|coord| raw_coord_key(*coord));
+        if legal.is_empty() {
+            return None;
+        }
+        let in_legal = |mv: HexCoord| {
+            legal
+                .binary_search_by_key(&raw_coord_key(mv), |c| raw_coord_key(*c))
+                .is_ok()
+        };
+        let mut queue: Vec<HexCoord> = hitting_universe(state, claimant)
+            .into_iter()
+            .filter(|mv| in_legal(*mv))
+            .collect();
+        queue.sort_by_key(|coord| raw_coord_key(*coord));
+        queue.dedup();
+        if queue.is_empty() {
+            queue.push(legal[0]);
+        }
+        let mut edges: Vec<CertEdge> = Vec::new();
+        let mut proven: Vec<HexCoord> = Vec::new();
+        // The required set is monotone in the frozen child set and bounded by
+        // the finite legal set, so this loop terminates.
+        loop {
+            for mv in std::mem::take(&mut queue) {
+                let Ok((result, delta)) = state.apply_with_delta(Placement { coord: mv }) else {
+                    return None;
+                };
+                if result.outcome.is_some() {
+                    state.undo(delta);
+                    return None;
+                }
+                let child = self.prove(state, claimant, ply.checked_add(1)?, None);
+                state.undo(delta);
+                let child = child?;
+                edges.push(CertEdge { mv, child });
+                proven.push(mv);
+            }
+            let pairs: Vec<(HexCoord, CertNodeId)> =
+                edges.iter().map(|edge| (edge.mv, edge.child)).collect();
+            let required = crate::tss_verify_group2::finder_required_fhw(
+                state,
+                claimant,
+                &pairs,
+                &self.arena,
+            )?;
+            let mut missing: Vec<HexCoord> = required
+                .into_iter()
+                .filter(|mv| in_legal(*mv) && !proven.contains(mv))
+                .collect();
+            if missing.is_empty() {
+                break;
+            }
+            missing.sort_by_key(|coord| raw_coord_key(*coord));
+            missing.dedup();
+            queue = missing;
+        }
+        edges.sort_by_key(|edge| raw_coord_key(edge.mv));
+        let edge_count = edges.len();
+        self.alloc_node(
+            CertNode::UniversalGroup2V1(Box::new(crate::tss_verify::UniversalGroup2NodeV1 {
+                edges,
+                proof: crate::tss_verify::Group2ZoneV1 {
+                    schema_version: 1,
+                    authority: crate::tss_verify::Group2AuthorityV1::compiled(),
+                    claimed_d14_budget: 0,
+                    build_horizon: 0,
+                    child_plan_sha256: [0u8; 32],
+                    finder_summary_sha256: [0u8; 32],
+                },
+            })),
+            edge_count,
+        )
+    }
+
     fn alloc_node(&mut self, node: CertNode, added_edges: usize) -> Option<CertNodeId> {
         if self.arena.len() >= MAX_CERT_NODES
             || self.edge_count.saturating_add(added_edges) > MAX_CERT_EDGES
         {
             self.hit_limit = true;
             return None;
+        }
+        if let CertNode::Universal {
+            implicit_dispatch,
+            zone,
+            commutations,
+            ..
+        } = &node
+        {
+            if *implicit_dispatch || zone.is_some() || !commutations.is_empty() {
+                self.emitted_dirty = true;
+            }
         }
         let id = u32::try_from(self.arena.len()).ok()?;
         self.arena.push(node);
@@ -9406,6 +9683,62 @@ fn all_incident_windows_two_coloured(state: &RustHexoState, cell: HexCoord) -> b
     true
 }
 
+/// Finder-side mirror of the verifier's Group-2 class-rule 4 preconditions
+/// (§2.3): defender to move at a nonterminal post-opening node, b in {1,2},
+/// no mover win-now (conservative direct window upper bound AND the shared
+/// analysis), and the exactly reconstructed k < b. This is a pre-check only:
+/// the emitted certificate is still strictly re-verified.
+fn group2_finder_preconditions(
+    state: &RustHexoState,
+    claimant: Player,
+    analysis: &threats::ThreatAnalysis,
+) -> bool {
+    if state.is_terminal() || state.current_player() == claimant || analysis.own_win_now {
+        return false;
+    }
+    let b = threats::placements_remaining(state);
+    if !(1..=2).contains(&b) {
+        return false;
+    }
+    let mover = state.current_player();
+    let direct_win_upper = state.board().windows().entries().any(|entry| {
+        entry.count(claimant) == 0 && entry.count(mover).saturating_add(b) >= 6
+    });
+    if direct_win_upper {
+        return false;
+    }
+    // Exact k: 0 iff the claimant-threat family is empty; 1 iff every member
+    // shares a common cell; else >= 2 (rejecting at both accepted budgets).
+    let defender = claimant.other();
+    let mut family: Vec<Vec<HexCoord>> = Vec::new();
+    for entry in state.board().windows().entries() {
+        if entry.count(defender) == 0 && entry.count(claimant) >= 4 {
+            let empties = entry.empty_cells();
+            if empties.is_empty() {
+                return false;
+            }
+            family.push(empties);
+        }
+    }
+    let k: u8 = if family.is_empty() {
+        0
+    } else {
+        let mut common = family[0].clone();
+        for member in &family[1..] {
+            common.retain(|cell| member.contains(cell));
+            if common.is_empty() {
+                break;
+            }
+        }
+        if common.is_empty() {
+            2
+        } else {
+            1
+        }
+    };
+    k < b
+}
+
 fn zone_initial_candidates(
     state: &RustHexoState,
     claimant: Player,
@@ -9463,6 +9796,16 @@ fn arena_core(arena: &[CertNode], root: CertNodeId, out: &mut Vec<HexCoord>) -> 
         }
         CertNode::Universal { edges, .. } => {
             for edge in edges {
+                arena_core(arena, edge.child, out)?;
+            }
+        }
+        CertNode::UniversalGroup2V1(node) => {
+            for edge in &node.edges {
+                arena_core(arena, edge.child, out)?;
+            }
+        }
+        CertNode::FhwGateV1(gate) => {
+            for edge in &gate.representatives {
                 arena_core(arena, edge.child, out)?;
             }
         }
@@ -9675,6 +10018,7 @@ pub(crate) fn round3_shadow_certificate(
         let node = cert.nodes.get(id as usize)?;
         let mut protected = Vec::new();
         let local_budget = match node {
+            CertNode::UniversalGroup2V1(_) | CertNode::FhwGateV1(_) => return None,
             CertNode::OrCompletion { mv, .. } => {
                 protected.push(*mv);
                 0
@@ -10145,6 +10489,9 @@ impl CachedProof {
                     commutation_count = commutation_count.checked_add(commutations.len())?;
                 }
                 CertNode::Choice { .. } => {}
+                // Extension nodes are never admitted to the proof caches;
+                // refusing here keeps every cached fragment legacy-shaped.
+                CertNode::UniversalGroup2V1(_) | CertNode::FhwGateV1(_) => return None,
             }
             if let CertNode::Universal {
                 zone: Some(zone), ..
@@ -10188,6 +10535,7 @@ impl CachedProof {
                     }
                     height
                 }
+                CertNode::UniversalGroup2V1(_) | CertNode::FhwGateV1(_) => return None,
             };
         }
         let height = heights[root_node as usize];
@@ -10250,6 +10598,9 @@ impl CachedProof {
                     commutation_count = commutation_count.checked_add(commutations.len())?;
                 }
                 CertNode::Choice { .. } => {}
+                // Extension nodes are never admitted to the proof caches;
+                // refusing here keeps every cached fragment legacy-shaped.
+                CertNode::UniversalGroup2V1(_) | CertNode::FhwGateV1(_) => return None,
             }
             if let CertNode::Universal {
                 zone: Some(zone), ..
@@ -10293,6 +10644,7 @@ impl CachedProof {
                     }
                     height
                 }
+                CertNode::UniversalGroup2V1(_) | CertNode::FhwGateV1(_) => return None,
             };
         }
         Some((
@@ -10330,11 +10682,60 @@ impl CachedProof {
                         size_of::<WindowKey>(),
                     ));
                 }
+                // Complete boxed-v3 accounting (design §2.5): extension nodes
+                // never enter the cache (from_compact refuses them), but the
+                // charge is exhaustive so a future admission path cannot
+                // silently understate heap.
+                CertNode::UniversalGroup2V1(node) => {
+                    bytes = bytes.saturating_add(group2_node_heap_bytes(node));
+                }
+                CertNode::FhwGateV1(gate) => {
+                    bytes = bytes.saturating_add(fhw_gate_heap_bytes(gate));
+                }
                 CertNode::OrCompletion { .. } | CertNode::Win { .. } | CertNode::Choice { .. } => {}
             }
         }
         bytes
     }
+}
+
+/// Exhaustive heap charge for one boxed `UniversalGroup2NodeV1`.
+fn group2_node_heap_bytes(node: &crate::tss_verify::UniversalGroup2NodeV1) -> usize {
+    allocation_bytes(1, size_of::<crate::tss_verify::UniversalGroup2NodeV1>())
+        .saturating_add(allocation_bytes(node.edges.capacity(), size_of::<CertEdge>()))
+        .saturating_add(allocation_bytes(node.proof.authority.defender_path.len(), 1))
+        .saturating_add(allocation_bytes(node.proof.authority.fhw_path.len(), 1))
+}
+
+/// Exhaustive heap charge for one boxed `FhwGateNodeV1`.
+fn fhw_gate_heap_bytes(gate: &crate::tss_verify::FhwGateNodeV1) -> usize {
+    let mut bytes = allocation_bytes(1, size_of::<crate::tss_verify::FhwGateNodeV1>())
+        .saturating_add(allocation_bytes(
+            gate.representatives.capacity(),
+            size_of::<CertEdge>(),
+        ))
+        .saturating_add(allocation_bytes(
+            gate.proof.threats.capacity(),
+            size_of::<WindowKey>(),
+        ))
+        .saturating_add(allocation_bytes(
+            gate.proof.map.capacity(),
+            size_of::<crate::tss_verify::FhwMapV1>(),
+        ))
+        .saturating_add(allocation_bytes(gate.proof.authority.defender_path.len(), 1))
+        .saturating_add(allocation_bytes(gate.proof.authority.fhw_path.len(), 1));
+    for entry in &gate.proof.map {
+        bytes = bytes
+            .saturating_add(allocation_bytes(
+                entry.roles.capacity(),
+                size_of::<crate::tss_verify::FhwRoleClaimV1>(),
+            ))
+            .saturating_add(allocation_bytes(
+                entry.windows.capacity(),
+                size_of::<crate::tss_verify::FhwWindowClaimV1>(),
+            ));
+    }
+    bytes
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -10446,6 +10847,12 @@ impl SharedProofCache {
                 CertNode::Loss { witnesses, .. } => {
                     proof_heap = proof_heap
                         .saturating_add(allocation_bytes(witnesses.len(), size_of::<WindowKey>()));
+                }
+                CertNode::UniversalGroup2V1(node) => {
+                    proof_heap = proof_heap.saturating_add(group2_node_heap_bytes(node));
+                }
+                CertNode::FhwGateV1(gate) => {
+                    proof_heap = proof_heap.saturating_add(fhw_gate_heap_bytes(gate));
                 }
                 CertNode::OrCompletion { .. } | CertNode::Win { .. } | CertNode::Choice { .. } => {}
             }
@@ -10738,6 +11145,14 @@ fn remap_node_ids_with_offset(node: &mut CertNode, base: usize, final_len: usize
                 item.mirror_child = offset_node_id(item.mirror_child, base, final_len)?;
             }
         }
+        CertNode::UniversalGroup2V1(node) => {
+            for edge in &mut node.edges {
+                edge.child = offset_node_id(edge.child, base, final_len)?;
+            }
+        }
+        // Gate role rows carry node references of their own; this solver
+        // never builds gates, so refuse rather than remap partially.
+        CertNode::FhwGateV1(_) => return None,
     }
     Some(())
 }
@@ -10864,6 +11279,31 @@ fn compact_certificate_limited(
                     commutations: mapped_commutations,
                 }
             }
+            CertNode::UniversalGroup2V1(node) => {
+                *edge_count = edge_count.checked_add(node.edges.len())?;
+                if *edge_count > max_edges {
+                    return None;
+                }
+                let mut mapped_edges = Vec::with_capacity(node.edges.len());
+                for edge in &node.edges {
+                    mapped_edges.push(CertEdge {
+                        mv: edge.mv,
+                        child: copy(
+                            edge.child, arena, remap, visiting, out, edge_count, max_nodes,
+                            max_edges,
+                        )?,
+                    });
+                }
+                CertNode::UniversalGroup2V1(Box::new(
+                    crate::tss_verify::UniversalGroup2NodeV1 {
+                        edges: mapped_edges,
+                        proof: node.proof.clone(),
+                    },
+                ))
+            }
+            // Gate role rows reference arena IDs; the solver never builds
+            // gates, so compaction refuses rather than remapping partially.
+            CertNode::FhwGateV1(_) => return None,
         };
         visiting[index] = false;
         if out.len() >= max_nodes {
@@ -14076,6 +14516,7 @@ mod tests {
                 false,
                 None,
                 false,
+                false,
             );
             let root = context
                 .prove(&mut work, claimant, descendant_root.placements_made(), None)
@@ -14444,6 +14885,9 @@ mod tests {
 
     fn wide_solver_with_dual_pass(dual_pass: bool) -> TssSolver {
         let mut solver = TssSolver::default();
+        // Keep policy tests independent of the process-global warmth env used
+        // by parallel campaign tests elsewhere in the crate.
+        solver.set_shared_fragments_for_test(false);
         solver.configure_leaf_profile();
         solver.set_dual_pass(dual_pass);
         solver
@@ -14638,6 +15082,21 @@ mod tests {
         assert_eq!(hinted_set, baseline_set);
     }
 
+    fn wide_solver_with_loss_budget(dual_pass: bool, loss_reserve_nodes: u32) -> TssSolver {
+        let mut solver = wide_solver_with_dual_pass(dual_pass);
+        solver.set_loss_reserve_nodes(loss_reserve_nodes);
+        solver
+    }
+
+    fn assert_deep_result_identical(
+        actual: &DeepResult<TssCertificate>,
+        expected: &DeepResult<TssCertificate>,
+    ) {
+        assert_eq!(actual.status, expected.status);
+        assert_eq!(actual.cert, expected.cert);
+        assert_eq!(format!("{:?}", actual.stats), format!("{:?}", expected.stats));
+    }
+
     #[test]
     fn wide_both_dual_pass_recovers_a_cheap_verified_loss_within_budget() {
         let caps = SolveCaps {
@@ -14728,6 +15187,120 @@ mod tests {
             assert_eq!(both.cert, win.cert);
             assert_eq!(both.stats.nodes, win.stats.nodes);
         }
+    }
+
+    #[test]
+    fn wide_loss_reserve_zero_is_bit_identical_with_dual_off_and_on() {
+        let caps = SolveCaps {
+            node_cap: 64,
+            tt_bytes_cap: 256 << 10,
+            semantic_horizon: u32::MAX,
+        };
+        for dual_pass in [false, true] {
+            for state in [
+                quiet_fixture(),
+                xsnfyll_forced_defender_fixture(),
+                win_now_fixture(),
+            ] {
+                let implicit_zero = wide_solver_with_dual_pass(dual_pass)
+                    .solve_goal(&state, &caps, SolveGoal::Both);
+                let explicit_zero = wide_solver_with_loss_budget(dual_pass, 0)
+                    .solve_goal(&state, &caps, SolveGoal::Both);
+                assert_deep_result_identical(&implicit_zero, &explicit_zero);
+            }
+        }
+    }
+
+    #[test]
+    fn wide_loss_reserve_preserves_an_early_exit_dual_loss() {
+        let state = xsnfyll_forced_defender_fixture();
+        let caps = SolveCaps {
+            node_cap: 500,
+            tt_bytes_cap: 256 << 10,
+            semantic_horizon: u32::MAX,
+        };
+        let current = wide_solver_with_loss_budget(true, 0)
+            .solve_goal(&state, &caps, SolveGoal::Both);
+        let reserved = wide_solver_with_loss_budget(true, 64)
+            .solve_goal(&state, &caps, SolveGoal::Both);
+        assert_eq!(current.status, ProofStatus::Loss);
+        assert_deep_result_identical(&reserved, &current);
+        assert!(TssVerifier.verify(
+            &state,
+            reserved.cert.as_ref().expect("reserved loss carries a certificate"),
+            reserved.status,
+        ));
+    }
+
+    #[test]
+    fn wide_loss_reserve_schedules_its_floor_without_leftover_policy() {
+        let state = xsnfyll_forced_defender_fixture();
+        let caps = SolveCaps {
+            node_cap: 500,
+            tt_bytes_cap: 256 << 10,
+            semantic_horizon: u32::MAX,
+        };
+        let current = wide_solver_with_loss_budget(false, 0)
+            .solve_goal(&state, &caps, SolveGoal::Both);
+        let reserved = wide_solver_with_loss_budget(false, 64)
+            .solve_goal(&state, &caps, SolveGoal::Both);
+        assert_eq!(current.status, ProofStatus::Unknown);
+        assert_eq!(reserved.status, ProofStatus::Loss);
+        assert!(TssVerifier.verify(
+            &state,
+            reserved.cert.as_ref().expect("reserved loss carries a certificate"),
+            reserved.status,
+        ));
+        assert!(reserved.stats.nodes <= caps.node_cap);
+    }
+
+    #[test]
+    fn wide_loss_reserve_never_skips_a_nonempty_primal_allowance() {
+        assert_eq!(wide_both_initial_caps(0, u32::MAX), (0, 0));
+        assert_eq!(wide_both_initial_caps(1, u32::MAX), (1, 0));
+        assert_eq!(wide_both_initial_caps(499, u32::MAX), (1, 498));
+        assert_eq!(wide_both_initial_caps(499, 32), (467, 32));
+    }
+
+    #[test]
+    fn wide_loss_reserve_keeps_combined_attempts_inside_the_original_cap() {
+        let state = quiet_fixture();
+        let caps = SolveCaps {
+            node_cap: 3,
+            tt_bytes_cap: 0,
+            semantic_horizon: u32::MAX,
+        };
+        let current = wide_solver_with_loss_budget(true, 0)
+            .solve_goal(&state, &caps, SolveGoal::Both);
+        let reserved = wide_solver_with_loss_budget(true, 1)
+            .solve_goal(&state, &caps, SolveGoal::Both);
+        assert_eq!(current.status, ProofStatus::Unknown);
+        assert_eq!(reserved.status, ProofStatus::Unknown);
+        assert_eq!(current.stats.nodes, caps.node_cap);
+        assert_eq!(reserved.stats.nodes, caps.node_cap);
+        assert!(reserved.cert.is_none());
+    }
+
+    #[test]
+    fn loss_reserve_is_inert_outside_wide_both() {
+        let caps = SolveCaps {
+            node_cap: 32,
+            tt_bytes_cap: 256 << 10,
+            semantic_horizon: u32::MAX,
+        };
+        for goal in [SolveGoal::Win, SolveGoal::Loss] {
+            let state = quiet_fixture();
+            let off = wide_solver_with_loss_budget(true, 0).solve_goal(&state, &caps, goal);
+            let on = wide_solver_with_loss_budget(true, 16).solve_goal(&state, &caps, goal);
+            assert_deep_result_identical(&on, &off);
+        }
+
+        let state = quiet_fixture();
+        let off = TssSolver::default().solve_goal(&state, &caps, SolveGoal::Both);
+        let mut on_solver = TssSolver::default();
+        on_solver.set_loss_reserve_nodes(16);
+        let on = on_solver.solve_goal(&state, &caps, SolveGoal::Both);
+        assert_deep_result_identical(&on, &off);
     }
 
     #[test]
@@ -14928,6 +15501,11 @@ mod tests {
         put_len(&mut out, cert.nodes.len());
         for node in &cert.nodes {
             match node {
+                // §2.5: the legacy canonical helper stays legacy-only; the v3
+                // transcript (tags 5/6) is a separate identity encoding.
+                CertNode::UniversalGroup2V1(_) | CertNode::FhwGateV1(_) => {
+                    panic!("legacy canonical encoder is legacy-only")
+                }
                 CertNode::OrCompletion {
                     mv,
                     witness,

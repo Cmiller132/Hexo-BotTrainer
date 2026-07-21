@@ -7,6 +7,7 @@ resolver, never re-derived here):
     node_cap: int          horizon: int (0 = unbounded, else >= 16)
     ladder: bool           zone: bool
     wide: bool             goal: "win" | "loss" | "both" | "two_pass"
+    dual_pass: bool        loss_reserve_nodes: int
     shared_fragments: bool (drives the TSS_SHARED_FRAGMENTS env gate)
 
 "two_pass" = win pass + full-budget loss pass on the unknowns (adapter-side
@@ -60,6 +61,14 @@ class TssBatchAdapter:
         # 2026-07-20): an undecided wide Both WIN attempt's leftover nodes go
         # to the opponent-WIN attempt. Default off = pre-change engine.
         "dual_pass": False,
+        # Primal-first reserved loss floor. A positive value schedules the
+        # fixed opponent attempt; dual_pass upgrades it to every actual
+        # leftover after an undecided primal. Rust always leaves a primal node.
+        "loss_reserve_nodes": 0,
+        # v1 Group-2 reduced-fanout selector (default off = pre-change
+        # engine). Search-work reduction only: verdicts must not change (a
+        # failed Group-2 attempt re-solves cleanly with the selector off).
+        "group2": False,
         "shared_fragments": False,
     }
 
@@ -71,6 +80,9 @@ class TssBatchAdapter:
             raise ValueError(f"unknown config keys for {self.name}: {unknown}")
         if cfg["goal"] not in ("win", "loss", "both", "two_pass"):
             raise ValueError(f"goal must be win|loss|both|two_pass: {cfg['goal']!r}")
+        reserve = int(cfg["loss_reserve_nodes"])
+        if not 0 <= reserve <= (1 << 32) - 1:
+            raise ValueError("loss_reserve_nodes must fit u32")
         self.config = cfg
 
     # -- env ownership ---------------------------------------------------- #
@@ -91,6 +103,8 @@ class TssBatchAdapter:
             bool(self.config["zone"]),
             bool(self.config["wide"]),
             bool(self.config["dual_pass"]),
+            int(self.config["loss_reserve_nodes"]),
+            bool(self.config["group2"]),
         )
         m["goal"] = self.config["goal"]
         m["adapter"] = self.name
@@ -114,6 +128,8 @@ class TssBatchAdapter:
                 bool(self.config["zone"]),
                 bool(self.config["wide"]),
                 bool(self.config["dual_pass"]),
+                int(self.config["loss_reserve_nodes"]),
+                bool(self.config["group2"]),
             )
 
         everyone = list(range(len(states)))
@@ -185,6 +201,8 @@ def declared_features(config: dict[str, Any]) -> tuple[str, ...]:
         feats.append("loss_detection")
     if config.get("wide", True):
         feats.append("wide")
+    if config.get("group2"):
+        feats.append("group2")
     if config.get("zone"):
         feats.append("zone")            # no canary exists -> unclaimable
     if config.get("ladder"):

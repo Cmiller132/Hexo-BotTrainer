@@ -538,6 +538,18 @@ pub fn hard_value_from_verified(
     hard_value_from_verify_impl(verifier, state, result)
 }
 
+/// Sealed sibling mint for the externally selected `Group2V1` verifier policy
+/// (design §5.1). The parameter is the CONCRETE `Group2Verifier` for the same
+/// reason as above: no stand-in can mint a `HardValue`. Certificates without
+/// extension nodes verify byte-identically to the legacy path inside it.
+pub fn hard_value_from_verified_group2(
+    verifier: &crate::tss_verify::Group2Verifier,
+    state: &RustHexoState,
+    result: &DeepResult<crate::tss_verify::TssCertificate>,
+) -> Option<HardValue> {
+    hard_value_from_verify_impl(verifier, state, result)
+}
+
 /// Trait-generic mint used by `hard_value_from_verified` and (directly) by
 /// tests exercising the accept/reject contract with stub verifiers. Private:
 /// production callers cannot name it with a stub verifier.

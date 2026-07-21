@@ -1212,6 +1212,7 @@ fn tss_spare_mine_candidate() {
                         universal_edges += edges.len();
                     }
                     CertNode::Win { .. } | CertNode::Loss { .. } => {}
+                    CertNode::UniversalGroup2V1(_) | CertNode::FhwGateV1(_) => {}
                 }
             }
         }
@@ -1516,7 +1517,10 @@ fn tss_round3_verifier_mutations() {
         }
         CertNode::Win { count, .. } => *count = count.saturating_sub(1),
         CertNode::Loss { resolution_ply, .. } => *resolution_ply = resolution_ply.saturating_add(1),
-        CertNode::Choice { .. } | CertNode::Universal { .. } => unreachable!(),
+        CertNode::Choice { .. }
+        | CertNode::Universal { .. }
+        | CertNode::UniversalGroup2V1(_)
+        | CertNode::FhwGateV1(_) => unreachable!(),
     }
     reject("forged_leaf", &forged_leaf);
 
