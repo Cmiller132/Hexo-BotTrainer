@@ -510,3 +510,17 @@ Consequences:
   the reason the emergency valve exists. Curiosity (non-blocking):
   park_wait_ms_max 6,084 > the 5,000 deadline with bails=0 — drain-pass
   granularity at move tail; bail is liveness-only, not soundness.
+
+- **2026-07-21 15:32Z main_4 RELAUNCHED under all-leaves strict mode**
+  (owner-ordered): resumed from epoch_000023.pt with the P7 engine
+  (`2c262e10`) + all_leaves config (`6c287e68`) live via the
+  supervisor-injected resume config. **Epoch 24 partials WIPED first
+  (owner-ordered): 105 pre-stop old-config games + resume marker
+  (selfplay/epoch_000024*.hxr, samples/epoch_000024/) deleted while
+  stopped — ep24 is uniformly strict-mode data** (same clean-epoch
+  discipline as the ep21 wipe). No ep24 diagnostics existed. First-epoch
+  validation gates: park_bailed==0, async_dropped==0, vf==0,
+  deep_win/loss_backups levels, moves-min pace vs the −10% bench
+  expectation. Ops note: pkill'd supervisor + driver before the wipe
+  (driver.pid was stale from the pre-wipe boot — verify by ps, not
+  pidfile).
