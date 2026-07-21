@@ -17,14 +17,20 @@ loss_reserve / fragments / zones OFF.
 
 ## 2. Measured facts the current work stands on
 
-- **Generation dominates wall.** Winning proof path ≈ 0.0003%. Production
-  shape: A_OR_GEN 60.5%, D_FORCED_GEN 20.4%, TT+verify <1%. Deep F19: 82%
-  generation (attacker 45.9% + forced defender 36.0%). Post-P7 residuals:
-  first-candidate enum ~15%, D_FORCED_GEN ~20%, second_candidates churn
-  ~8%. P7 prefilters: 1.42x bit-identical (`2c262e10`).
-- **TT at cap 500 ≈ overhead** (hit/entry ≈ 0.01). Deep memory resident =
-  WidePnSearch arena + `by_position` (no eviction; admission-rejection
-  only) — TT replacement policy cannot affect deep solves (`7c4c04f1`).
+- **Generation dominates wall — now 1.72x cheaper.** Winning proof path
+  ≈ 0.0003%. Candidate-gen rounds 1+2 folded (`2a1bdf97`, bit-identical):
+  post-fold production shape (cap 500) = attacker pair gen 48.66%,
+  defender gen 15.58%, second-cand regen 5.65%, TT probe/insert 0.46%,
+  per-solve setup 0.19%, outside-inclusive-expansion residual 32.85%
+  (the next unattributed block). Deep F19 = attacker 35.97%, defender
+  30.56%, TT 2.01%. Historic pre-fold shape (A_OR_GEN 60.5%,
+  D_FORCED_GEN 20.4%; P7 1.42x `2c262e10`) is superseded — see the
+  2026-07-21 fold entry in §5.
+- **TT at cap 500 ≈ overhead but cheap** (hit/entry ≈ 0.01; measured
+  probe/insert wall share 0.433% — below any removal payoff, TT-min
+  KILLED in r2). Deep memory resident = WidePnSearch arena +
+  `by_position` (no eviction; admission-rejection only) — TT replacement
+  policy cannot affect deep solves (`7c4c04f1`).
 - **Grind class** = 73.5% of Unknown wall; at 50k: ~23% provable WIN
   (p50 ~1.7k nodes), ~39% width-exhaust (~2k self-terminate), ~38%
   cap-bound.
@@ -75,13 +81,57 @@ loss_reserve / fragments / zones OFF.
 
 ## 4. Open probes / in-flight (details: HANDOFF §7)
 
-probe-seed (PN² init A/B) · candidate-gen (bit-identical generation
-rungs) · horizon-r2 (exact h≤6/h≤8) · lean-shallow (h2/h4/rank-two
-endpoints) · g2-hostile-review (consume-mode design attack). Queue:
-J2near A/B, sibling-transplant shadow, GPU bench close-out, integration
-fold.
+LIVE: j2near (free-tempo widening impl + witness gate + matched-cap A/B) ·
+horizon-h10 (research-first per owner ruling: translation-quotient theorem
+attempt + h≤8 bite on all rows + port spec [shelf doc]). DONE, awaiting
+owner/next-step: refute-cert v1 design (GO-conditional; hostile review
+round is the required next gate) · triage phase 1 (classification; Phase B
+sub-root telemetry optional). Queue: sibling-transplant shadow · G2
+R-item amendments + fixed step-zero screen (deep/labeling scope only) ·
+CapResumeSession promotion · GPU bench close-out.
 
 ## 5. Iteration log (from this reset)
 
 - 2026-07-22: document reset to current-facts form (owner-directed
   de-bloat); full history archived.
+- 2026-07-21 (quiet-host reference round). MEASURED: official 2 GiB gate
+  rerun — 14/14 WINs + 2 LOSSes certified, 0 failures, 416 s total
+  (load fingerprint: one background Lean lake build); 0l4291i WIN at
+  1,879,612 nodes / 1.73 GB peak TT / 172 s in-rung (~274 s with
+  fresh-ladder rungs). Strix quiet battery (120 s / 50 M / 256 MB;
+  `%TEMP%\hexo-strix-clone\battery_*.csv`): pdspn 19/19 (0l: 1,058
+  level-1 nodes, 260.9 s), idtt 16/19, dfpn 16/19, their deployed config
+  5/19. **REFRAME:** 0l is wall-PARITY (274 s vs 261 s) despite the
+  1,777x node ratio — pdspn level-1 nodes each run bounded probes, so
+  the "~1,800x informed-node gap" is node-accounting, not speed. Real
+  remaining gaps: 94gnnol-class disproof (their No 20.7 s vs our 1M-node
+  cap-bound Unknown), idtt easy-win latency 2–7x (fresh-ladder tax +
+  in-wall cert+verify), and no refutation artifacts (mvp2lvc
+  width-exhausts at 17,957 nodes / 1.8 s ≈ their No walls, uncertified).
+- 2026-07-21 (candidate-gen fold, `63b34cbb`/`2a1bdf97`). MEASURED:
+  rounds 1+2 bit-identical — production battery solve wall 49.96 s →
+  29.0 s median (~1.72x), deep F19 ~1.58x; window-generation memo at
+  32,768 direct-mapped slots, 46.2% hits (58.3% on F19). Kills by
+  measurement: TT-min profile (0.433% tax < 3% bar), per-solve setup
+  reuse (0.186% < 10% bar), 2-way associativity, defender-side memo.
+  CODE-FACT: rung-1 stateless rank-two defender plans now carry the
+  kernel-checked licensing theorem `forcedB2PairQuotient`
+  (tss-lean `f4315e6`, R-SH3). Gates: suite 218/0/39; 6,443-row identity
+  digest `a8c6f3ca3ba55827` + SHA `02CD…FDB` (independently reproduced
+  in r2 step 0); Stage-0 WSL pytest golden 33 passed.
+- 2026-07-21 (triage phase 1 — Unknown-type classification; artifacts
+  `%TEMP%\triage\`). MEASURED on 248 labeled grinds (57 provable / 97
+  width-exhaust / 94 cap-bound), 11-cap ladder 100–5,000 at 256 KiB:
+  root-endpoint pn/dn does NOT separate classes at N≤500 (precision ≈
+  base rate). Classes separate by termination at 2–5k: provable 44/57
+  prove ≤5k (median 1,293 nodes), exhaust 64/97 self-exit (median
+  1,294), cap-bound 0/94 move — root pn frozen at 34 from cap 100→5,000.
+  Stagnation feature: real signal (69% of cap-bound frozen) but 50–58%
+  precision with 20–27 provable casualties — root granularity
+  insufficient; Phase B = sub-root telemetry if pursued. Owner rulings:
+  classification now, re-allocation deferred; horizon work
+  research-first (no incremental-horizon/ladder consumption builds).
+- 2026-07-21. MEASURED: production cert-depth distribution
+  (dualpass_adoption records, 1,212 certs): ≤8 = 42.5%, ≤12 = 59.3%
+  (plies-vs-placements units unverified). Shelved sizing datum for any
+  future horizon-consumption decision.

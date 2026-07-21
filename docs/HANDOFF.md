@@ -88,24 +88,34 @@ drive; ran to ~ep25 with an eval). Not a crash; checkpoints intact.**
 
 ## 5. Measured cost structure (what to optimize and why)
 
-- Candidate **generation dominates**: winning proof path ≈ 0.0003% of
-  solve wall. Production shape: attacker OR-generation 60.5%,
-  D_FORCED_GEN 20.4%; deep F19: 82% generation machinery. Post-P7
-  residual rungs: first-candidate enumeration ~15%, D_FORCED_GEN ~20%,
-  second_candidates churn ~8%, cross-node memoization (P6) unbuilt.
-- TT at cap 500 ≈ pure overhead (hit/entry ≈ 0.01). Deep memory resident
-  = WidePnSearch arena + `by_position` index (admission-rejection only,
-  no eviction) — TT replacement policy is irrelevant to deep solves.
+- Candidate **generation dominates** (winning proof path ≈ 0.0003% of
+  solve wall) — and is now 1.72x cheaper: candidate-gen rounds 1+2
+  folded bit-identically (`2a1bdf97`; REPORT_CANDIDATE_GEN{,_R2}.md).
+  Post-fold production shape (cap 500): attacker pair gen 48.7%,
+  defender gen 15.6%, second-cand regen 5.7%, TT 0.46%, setup 0.19%,
+  outside-expansion residual 32.9% (next unattributed block). Deep F19:
+  attacker 36.0%, defender 30.6%. P6 memo BUILT (32,768 slots, 46.2%
+  hits).
+- TT at cap 500 ≈ overhead but cheap (hit/entry ≈ 0.01; probe/insert
+  wall 0.43% — TT-min removal KILLED as not worth it). Deep memory
+  resident = WidePnSearch arena + `by_position` index
+  (admission-rejection only, no eviction) — TT replacement policy is
+  irrelevant to deep solves.
 - Grinds (quiet cap-bound Unknowns) = 73.5% of Unknown wall. Anatomy at
   50k: ~23% provable WINs (p50 ~1.7k nodes), ~39% width-exhaust
   (self-terminate ~2k), ~38% still cap-bound.
 - Ordering is a dead family: miss cost measured 1.8%; two generic oracles
   rejected. Only proof-participation signals (e.g. probe-seeding) pass.
-- Reference standing (quiet 2 GiB gate + matched-host battery): we
-  certify 14/14 corpus wins + 2 LOSSes; 0l4291i proves at 512 MiB /
-  1,913,955 nodes vs pdspn 256 MB / 1,058 probe-seeded nodes — remaining
-  real gaps: ~1,800x informed-node efficiency (probe-seed lane), ~2x
-  easy-win latency, no certified refutations yet (planned capability).
+- Reference standing (2026-07-21 quiet-host pinned rerun; SOLVER_NOTES
+  §5): 14/14 corpus WINs + 2 LOSSes certified, 0 failures, 416 s;
+  0l4291i = WIN 1,879,612 nodes / 1.73 GB / ~274 s vs pdspn 1,058
+  level-1 nodes / 260.9 s — **wall PARITY on 0l; the old "~1,800x
+  informed-node gap" was node-accounting** (pdspn nodes each run bounded
+  probes; probe-seed import KILLED at matched budget, `ea4170ca`). Real
+  remaining gaps: 94gnnol-class disproofs (their No 20.7 s vs our
+  cap-bound Unknown at 1M), idtt easy-win latency 2–7x (fresh-ladder tax
+  + in-wall cert+verify), no certified refutations yet (v1 design GO —
+  pending hostile review).
 - **Corpus semantics law**: forcing/puzzle corpus measures search
   efficiency; human corpus (8,698 games) measures prevalence/economics.
   Never quote one for the other's claim.
@@ -135,24 +145,41 @@ deep-imports `7c4c04f1`; harness-robust `41b0d23d`
 parallel sweep, contended bench); research-div `274aa3d3`
 (RESEARCH_DIVERGENCE_1.md); deadline-ladder R `72f68ced`
 (REPORT_DEADLINE_LADDER_R.md — NO-GO + reduced Lean program);
-G2 consume design `fcea3c69` (DESIGN_G2_CONSUME.md).
+G2 consume design `fcea3c69` (DESIGN_G2_CONSUME.md); probe-seed KILL
+`ea4170ca` (REPORT_PROBE_SEED.md — no matched-budget coverage gain,
+prototype default-off); g2-hostile-review (g2-cert
+`.gate/HOSTILE_REVIEW_G2_CONSUME.md` — SOUND-WITH-REQUIRED-CHANGES,
+R1–R6, build NOT authorized); horizon-r2 (deadline-ladder worktree,
+REPORT_HORIZON_R2.md uncommitted — exact full-game h≤8 deciders, 76/76
+validation, theorem-blocked at h=10); candidate-gen `63b34cbb` folded as
+`2a1bdf97` (REPORT_CANDIDATE_GEN{,_R2}.md — 1.72x bit-identical);
+lean-shallow (tss-lean `f4315e6` — R-SH0..R-SH3 incl.
+`forcedB2PairQuotient`); refute-cert v1 design (refute-design worktree,
+DESIGN_REFUTE_CERT_V1.md uncommitted — GO conditional on v1 cut,
+~2.5k LOC, hostile review = required next gate).
 
 ## 7. Live lanes (as of this writing) and build queue
 
-Live: **probe-seed** (HIGH — PN² bounded-probe pn/dn init, kill = no
-coverage gain at matched budget); **lean-shallow** (ULTRA, tss-lean —
-exact h=2 iff, h≤4 forced-loss, rank-two quotient);
-**g2-hostile-review** (ULTRA — attack DESIGN_G2_CONSUME, verdict +
-R-items); **horizon-r2** (HIGH — exact h≤6/h≤8 deciders via
-proven-relevance bounding + width-witness cross-check);
-**candidate-gen** (HIGH — bit-identical generation rungs incl. rank-two
-stateless defender plans).
+Live (2026-07-21 evening, acting-orchestrator session): **j2near**
+(HIGH, worktree `j2near` — free-tempo second-stone widening: impl +
+3-witness gate + matched-cap A/B, pre-registered kills); **horizon-h10**
+(xhigh, `deadline-ladder` worktree — RESEARCH-FIRST per owner ruling:
+h=10 translation-quotient theorem attempt + h≤8 bite on all 6,443 rows +
+port spec as shelf doc; no consumption builds).
 
-Queue when slots free: J2near shadow + matched-cap A/B (top);
-sibling-certificate transplantation shadow; G2 next step per hostile
-review; h6/h8 Lean per horizon-r2; GPU bench close-out (first adoption
-A/B; needs WSL maturin build of the tree under test); integration round
-folding all lane branches (+ order-prior `a66b707a` park-sweep commit).
+Standing owner rulings this session: horizon = research primarily (no
+incremental-horizon ladders/consumption now); certified refutations only
+at manageable scope (v1 cut is GO — hostile review pending owner
+go-ahead); triage split = classification now / re-allocation deferred.
+
+Queue when slots free: refute-cert hostile review (on owner go);
+sibling-certificate transplantation shadow; G2 R-item amendments + fixed
+step-zero screen (deep/labeling scope only — NOT a cap-500 lever); h6/h8
+Lean per horizon-r2 (research track); CapResumeSession promotion (kills
+fresh-ladder tax, most of the idtt latency gap); triage Phase B
+(sub-root telemetry) if classification is pursued; GPU bench close-out;
+integration round for remaining lane branches (+ order-prior `a66b707a`
+park-sweep commit).
 
 ## 8. Laws
 
@@ -197,10 +224,18 @@ Superseded material: `docs/archive/` (INDEX.md inside).
 
 ## 10. Pending owner decisions
 
-1. G2: next step after the hostile review lands (build authorization is
-   explicitly NOT granted by the review itself).
-2. main_4 relaunch timing (currently: leave off).
-3. `hunt-cert-support` worktree holds uncommitted crel6 patches —
+1. Refute-cert v1: go/no-go on the hostile semantics/grammar review
+   round (design verdict is GO conditional on the v1 cut; review is its
+   required next gate).
+2. G2: hostile review landed (SOUND-WITH-REQUIRED-CHANGES). Owner
+   expressed interest in continuing; orchestrator assessment: deep/
+   labeling lever only, NOT cap-500. Next step if continued = R1–R6
+   amendments + fixed step-zero screen; build auth still not granted.
+3. main_4 relaunch timing (currently: leave off).
+4. `hunt-cert-support` worktree holds uncommitted crel6 patches —
    keep/commit/discard.
-4. Three closed worktrees (group2-zones, hunt-completeness, hunt-gap-raw)
+5. Three closed worktrees (group2-zones, hunt-completeness, hunt-gap-raw)
    + junk `claude/hello-*` branches await a permission-approved removal.
+6. Triage Phase B (sub-root telemetry instrumentation for the Unknown
+   classifier): pursue or park (phase-1 evidence: root-level signals
+   insufficient).
