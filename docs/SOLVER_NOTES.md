@@ -205,6 +205,23 @@ Consequences:
   Consequence for ground truth: loss labels can never be must_solve for
   arbitrary-goal arms (v3 mint: must_solve = wins ≤400 only; the loss-side
   obligation lives in the loss_detection canary for claiming arms).
+- **P6 (NEW, from the residue map `e11c393d`) — candidate-generation
+  engineering.** The wall-time residue instrument (3 bit-identical reps,
+  100% wall accounted, 0.83% overhead) found: F19 deep solves spend 82%
+  of wall in candidate GENERATION machinery (attacker 45.9% + forced
+  defender 36.0%); human-160 production-like positions spend 40.5% in
+  UNFORCED defender generation (16.7M events — the exact class the G2
+  selector addresses; ceiling for that build) and 39.4% in unresolved
+  attacker work; the winning proof path costs ~0.0003% — nearly all
+  solver cost is enumeration around proofs, not proofs. Ordering-miss
+  direct cost = 1.8% (kills the ordering family from the cost side too).
+  CAVEAT: human cohort ran at 50k-node budget, not cap 500 — proportions
+  at production cap will differ; harness remains the adoption
+  instrument. USES: (a) G2 sizing ceiling ~40%; (b) generation-machinery
+  memoization/incremental-build = top soundness-free efficiency round
+  for the offline/labeling path; (c) rerun the (feature-gated, reusable)
+  instrument after G2 to VERIFY the block shrank. OPEN-PROBE (top of the
+  efficiency stack).
 - **P5 Solver-internal efficiency — ordering MECHANISM BUILT, first hint
   source REJECTED (2026-07-20 late, R-ORDER-PRIOR `5cff787c`).** Stable
   reorder-only hints (candidate-set invariant, cold-isolated, verifier
