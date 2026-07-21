@@ -3906,6 +3906,8 @@ impl PayloadNative {
         tss.set_item("pair_omitted", self.tss_counters.pair_omitted)?;
         tss.set_item("zone_verify_failed", self.tss_counters.zone_verify_failed)?;
         tss.set_item("deep_hard_backups", self.tss_counters.deep_hard_backups)?;
+        tss.set_item("deep_win_backups", self.tss_counters.deep_win_backups)?;
+        tss.set_item("deep_loss_backups", self.tss_counters.deep_loss_backups)?;
         tss.set_item("deep_memo_hits", self.tss_counters.deep_memo_hits)?;
         tss.set_item("async_enqueued", self.tss_counters.async_enqueued)?;
         tss.set_item("async_dropped", self.tss_counters.async_dropped)?;

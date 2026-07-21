@@ -483,6 +483,15 @@ pub struct TssCounters {
     pub zone_verify_failed: u32,
     /// Verified hard values actually backed up (each one elides a GPU eval).
     pub deep_hard_backups: u32,
+    /// `deep_hard_backups` split by outcome: verified WIN / verified LOSS hard
+    /// values actually consumed through the tier gate. Their sum equals
+    /// `deep_hard_backups`. VALUE-SIGNAL SYMMETRY (docs/VALUE_SIGNAL_AUDIT.md):
+    /// `deep_win`/`deep_loss` count PROVEN results in every mode, but the
+    /// combined `deep_hard_backups` hid whether the loss half of the value
+    /// signal was actually reaching backup. In the incoming loss-heavy regime
+    /// this split lets a run see the consumed-loss stream directly.
+    pub deep_win_backups: u32,
+    pub deep_loss_backups: u32,
     /// Per-move memo hits (a solved leaf re-selected).
     pub deep_memo_hits: u32,
     // === Async-pool telemetry (tss_solver_async) ===
@@ -543,6 +552,8 @@ impl TssCounters {
         self.pair_omitted += other.pair_omitted;
         self.zone_verify_failed += other.zone_verify_failed;
         self.deep_hard_backups += other.deep_hard_backups;
+        self.deep_win_backups += other.deep_win_backups;
+        self.deep_loss_backups += other.deep_loss_backups;
         self.deep_memo_hits += other.deep_memo_hits;
         self.async_enqueued += other.async_enqueued;
         self.async_dropped += other.async_dropped;
@@ -1580,6 +1591,13 @@ impl RustSearch {
         };
         if consume.is_some() {
             self.tss.deep_hard_backups += 1;
+            // Symmetry telemetry: split the consumed stream by outcome so a
+            // loss-heavy run can see the loss half reaching backup (audit fix).
+            match status {
+                ProofStatus::Win => self.tss.deep_win_backups += 1,
+                ProofStatus::Loss => self.tss.deep_loss_backups += 1,
+                ProofStatus::Unknown => {}
+            }
         }
         consume
     }
@@ -3644,6 +3662,48 @@ mod tests {
         (state, solved.status, solved.hard)
     }
 
+    /// A verified LOSS through the production mint. Uses the canonical
+    /// forced-loss position and a dedicated LOSS goal so the result never
+    /// depends on the Both-goal budget split (docs/VALUE_SIGNAL_AUDIT.md).
+    fn verified_loss_fixture_solve() -> (RustHexoState, ProofStatus, Option<HardValue>) {
+        let state = replay(&[
+            (0, 0),
+            (0, 8),
+            (2, 7),
+            (1, 0),
+            (2, 0),
+            (4, 6),
+            (6, 5),
+            (3, 0),
+            (0, 4),
+            (8, 4),
+            (10, 3),
+            (1, 4),
+            (2, 4),
+            (12, 2),
+            (14, 1),
+            (3, 4),
+            (16, 0),
+        ]);
+        let mut counters = TssCounters::default();
+        let solved = tss_solve_verified(
+            &state,
+            8000,
+            SolveGoal::Loss,
+            crate::tss_core::ZoneSearchCaps::default(),
+            SolverHorizon::DEFAULT,
+            &mut TssSolver::default(),
+            &mut counters,
+        );
+        assert_eq!(
+            solved.status,
+            ProofStatus::Loss,
+            "forced-loss fixture must prove LOSS under the loss goal"
+        );
+        assert!(solved.hard.is_some(), "decided loss must verify");
+        (state, solved.status, solved.hard)
+    }
+
     /// A drained response flips Pending -> Done and the descent-stop then
     /// consumes the hard value (with the counters bumped), while a Done entry
     /// is never overwritten.
@@ -3697,6 +3757,68 @@ mod tests {
         assert!(
             search.tss_async_descent_hard(hash, &state).is_some(),
             "Done entry must survive a duplicate response"
+        );
+    }
+
+    /// VALUE-SIGNAL SYMMETRY (docs/VALUE_SIGNAL_AUDIT.md): the consumed
+    /// hard-backup stream splits into `deep_win_backups` + `deep_loss_backups`
+    /// by verdict through the single consume gate, and the two sum to
+    /// `deep_hard_backups`. Guards against a loss-heavy run in which the loss
+    /// half of the value signal reaches backup invisibly.
+    #[test]
+    fn consumed_hard_backups_split_by_outcome() {
+        // A verified WIN consumed at mode 3 counts only on the win side.
+        let (wstate, wstatus, whard) = verified_fixture_solve();
+        assert_eq!(wstatus, ProofStatus::Win);
+        let mut wsearch = async_search(3);
+        let whash = state_hash(&wstate);
+        wsearch.apply_tss_async_response(&SolveResponse {
+            slot: 0,
+            generation: 1,
+            hash: whash,
+            binding: RootBinding::from_state(&wstate),
+            status: wstatus,
+            hard: whard,
+            counters: TssCounters {
+                deep_calls: 1,
+                deep_win: 1,
+                ..TssCounters::default()
+            },
+        });
+        assert!(wsearch.tss_async_descent_hard(whash, &wstate).is_some());
+        assert_eq!(wsearch.tss.deep_hard_backups, 1);
+        assert_eq!(wsearch.tss.deep_win_backups, 1);
+        assert_eq!(wsearch.tss.deep_loss_backups, 0);
+        assert_eq!(
+            wsearch.tss.deep_hard_backups,
+            wsearch.tss.deep_win_backups + wsearch.tss.deep_loss_backups
+        );
+
+        // A verified LOSS consumed at mode 3 counts only on the loss side.
+        let (lstate, lstatus, lhard) = verified_loss_fixture_solve();
+        assert_eq!(lstatus, ProofStatus::Loss);
+        let mut lsearch = async_search(3);
+        let lhash = state_hash(&lstate);
+        lsearch.apply_tss_async_response(&SolveResponse {
+            slot: 0,
+            generation: 1,
+            hash: lhash,
+            binding: RootBinding::from_state(&lstate),
+            status: lstatus,
+            hard: lhard,
+            counters: TssCounters {
+                deep_calls: 1,
+                deep_loss: 1,
+                ..TssCounters::default()
+            },
+        });
+        assert!(lsearch.tss_async_descent_hard(lhash, &lstate).is_some());
+        assert_eq!(lsearch.tss.deep_hard_backups, 1);
+        assert_eq!(lsearch.tss.deep_loss_backups, 1);
+        assert_eq!(lsearch.tss.deep_win_backups, 0);
+        assert_eq!(
+            lsearch.tss.deep_hard_backups,
+            lsearch.tss.deep_win_backups + lsearch.tss.deep_loss_backups
         );
     }
 

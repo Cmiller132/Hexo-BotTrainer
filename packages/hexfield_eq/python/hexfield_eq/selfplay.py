@@ -240,6 +240,11 @@ class ContinuousDriver:
         self.tss_pair_omitted = 0
         self.tss_zone_verify_failed = 0
         self.tss_deep_hard_backups = 0
+        # deep_hard_backups split by outcome (sum == deep_hard_backups). Lets a
+        # loss-heavy run see the consumed-loss stream distinctly from wins
+        # (docs/VALUE_SIGNAL_AUDIT.md).
+        self.tss_deep_win_backups = 0
+        self.tss_deep_loss_backups = 0
         self.tss_deep_memo_hits = 0
         # Async solve pool (tss_solver_async): enqueue/drop/stale/pending
         # routing counters. dropped>0 sustained => widen the pool or queue.
@@ -415,6 +420,8 @@ class ContinuousDriver:
             self.tss_pair_omitted += int(tss_diag.get("pair_omitted", 0))
             self.tss_zone_verify_failed += int(tss_diag.get("zone_verify_failed", 0))
             self.tss_deep_hard_backups += int(tss_diag.get("deep_hard_backups", 0))
+            self.tss_deep_win_backups += int(tss_diag.get("deep_win_backups", 0))
+            self.tss_deep_loss_backups += int(tss_diag.get("deep_loss_backups", 0))
             self.tss_deep_memo_hits += int(tss_diag.get("deep_memo_hits", 0))
             self.tss_async_enqueued += int(tss_diag.get("async_enqueued", 0))
             self.tss_async_dropped += int(tss_diag.get("async_dropped", 0))
@@ -886,6 +893,8 @@ class ContinuousDriver:
                 "pair_omitted": int(self.tss_pair_omitted),
                 "zone_verify_failed": int(self.tss_zone_verify_failed),
                 "deep_hard_backups": int(self.tss_deep_hard_backups),
+                "deep_win_backups": int(self.tss_deep_win_backups),
+                "deep_loss_backups": int(self.tss_deep_loss_backups),
                 "deep_memo_hits": int(self.tss_deep_memo_hits),
                 "async_enqueued": int(self.tss_async_enqueued),
                 "async_dropped": int(self.tss_async_dropped),
@@ -1192,7 +1201,8 @@ def _merge_epoch_diag(segments: list[dict[str, Any]]) -> dict[str, Any]:
             "deep_calls", "deep_win", "deep_loss", "deep_unknown", "deep_nodes",
             "deep_verify_failed", "horizon_retry", "horizon_preflight_failed",
             "horizon_cut", "zone_nodes", "pair_omitted", "zone_verify_failed",
-            "deep_hard_backups", "deep_memo_hits",
+            "deep_hard_backups", "deep_win_backups", "deep_loss_backups",
+            "deep_memo_hits",
             "async_enqueued", "async_dropped", "async_stale", "async_pending_hits",
             "park_parked", "park_hard", "park_released", "park_bailed",
             "park_wait_ms_sum", "async_workers_spawned",
