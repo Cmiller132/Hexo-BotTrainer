@@ -18,6 +18,7 @@ crate-type = ["rlib", "cdylib"]
 [features]
 default = []
 python = ["dep:pyo3"]
+tss-residue = []
 
 [dependencies]
 hexo_engine.workspace = true

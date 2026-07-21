@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "campaign": "R-RESIDUE-IMPL",
+  "frozen_at": "2026-07-20T21:42:47.7685441-04:00",
+  "source_commit": "ec73f2631f1d11c33756159cccec0e4ebeb51e56",
+  "branch": "claude/tss-vcf-width",
+  "tracked_diff_sha256": "43E4A919FB38DDF6F7D591EED81DE853E7435959B5D7E8E834DE096479321B1C",
+  "implementation_files_sha256": {
+    "packages/hexfield_eq/Cargo.toml": "46B3F1B38F0CDD6F1D1FD51BDEA599D01C6B8B5AD7C3D0761DED90C22C3B1984",
+    "packages/hexfield_eq/rust/src/lib.rs": "B5AD7DF6178763714CD5AD1855898528BC34CC303F03A5E370CA3B02141DF85F",
+    "packages/hexfield_eq/rust/src/tss_residue.rs": "2730BC784D8D00B0EDDB4B8A846A78DA331FC5361CBE14A056738B2764BEA2CF",
+    "packages/hexfield_eq/rust/src/tss_solver.rs": "0D7CAFF73B7E5336388E0471DE14CBC3149DEAB0517BAAC9C5BF92B9561ED099",
+    "packages/hexfield_eq/rust/src/tss_spare_corpus.rs": "ECDF8E9D29055357D126812DF74E7C7055F7A1D106AAA5A0BD06982A85A430A6",
+    "packages/hexfield_eq/rust/src/tss_verify.rs": "CA38D0E28CC14C6281B91E672F6F548C46EE140A2716E80B8E6E254928EBF471",
+    "packages/hexfield_eq/rust/src/tss_cap_resume.rs": "B5DA436003C9BCF1050659125981912A677AD11EDD1E1DFDB090213D9F3D21E0"
+  },
+  "toolchain": {
+    "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+    "cargo": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)",
+    "target": "x86_64-pc-windows-msvc",
+    "target_dir": ".target-b1"
+  },
+  "machine": {
+    "cpu": "AMD Ryzen 9 7950X 16-Core Processor",
+    "physical_cores": 16,
+    "logical_processors": 32,
+    "os": "Microsoft Windows 11 Home 10.0.26200",
+    "visible_memory_kib": 32673004,
+    "power_scheme": "High performance",
+    "timezone": "America/New_York"
+  },
+  "timer_backend": {
+    "name": "Windows QueryPerformanceCounter",
+    "conversion": "raw monotonic ticks accumulated exclusively; convert each category once at job end",
+    "derived_subtraction": false
+  },
+  "inputs_sha256": {
+    "RESIDUE_MAP_SPEC.md": "8A2832E33F94CCF4714B585784F069E7BCBCF4B201D6F4B22FC1B780232262B1",
+    "forcing_corpus_moves.txt": "775E568B67B5A3BFD0904F1E85C1F7E7789B4BAB2F0081953A8986A7DC6E21C3",
+    "spare_corpus_moves.txt": "567B787A13155ADF69843B5381EE431193F970A7A42EFC9BB80AC39E41281557",
+    "human_positions.txt": "D6B629B99084575D83E898ED90B7DF3F4E779ACAAD9C0E88D5275A6EEE57B046"
+  },
+  "feature_flags": {
+    "cargo": ["tss-residue"],
+    "TSS_SHARED_FRAGMENTS": "unset/off",
+    "TSS_LAZY_FRONTIER": "unset/off",
+    "TSS_INTERIOR_CENSUS_GATE": "unset/off",
+    "TSS_K_REPLY_CONSUME": "unset/off",
+    "TSS_CAP_RESUME": "unset/off",
+    "TSS_LIVE_GE3_SEED": "unset/off",
+    "TSS_ZONE_ORDER": "unset/off"
+  },
+  "profiles": {
+    "f19": {"rows": 19, "node_ladder": [10000, 100000, 1000000, 20000000], "no_rows_stop_at": 1000000, "tt_bytes": 2147483648, "semantic_horizon": 4294967295, "width": "vcf_pair_complete", "repetitions": 3},
+    "s2": {"rows": 2, "node_cap": 1000000, "tt_bytes": 536870912, "semantic_horizon": "root placements + reference_plies", "width": "vcf_pair_complete", "repetitions": 3},
+    "human160": {"input_lines": 160, "node_cap": 50000, "tt_bytes": 268435456, "semantic_horizon": "root placements + 10", "width": "round3_consume/native uniform", "illegal_line_policy": "skip and report", "repetitions": 3},
+    "overhead": {"f19_repetitions": 7, "s2_repetitions": 3, "alternating_order": true, "target_fraction": 0.01, "hard_fraction": 0.02}
+  }
+}

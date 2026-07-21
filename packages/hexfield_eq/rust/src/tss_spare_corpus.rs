@@ -760,15 +760,15 @@ enum SpareExpectation {
     No,
 }
 
-struct SpareCorpusPosition {
-    id: String,
+pub(crate) struct SpareCorpusPosition {
+    pub(crate) id: String,
     expect: SpareExpectation,
-    reference_plies: u32,
+    pub(crate) reference_plies: u32,
     oracle: ProofStatus,
-    state: HexoState,
+    pub(crate) state: HexoState,
 }
 
-fn load_spare_corpus() -> Vec<SpareCorpusPosition> {
+pub(crate) fn load_spare_corpus() -> Vec<SpareCorpusPosition> {
     let text = include_str!("../corpus/spare_corpus_moves.txt");
     let mut out = Vec::new();
     let mut lines = text.lines();

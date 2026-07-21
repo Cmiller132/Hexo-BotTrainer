@@ -1,0 +1,57 @@
+R-RESIDUE-IMPL — implement the wall-time residue map (HIGH, cargo-enabled)
+
+You are gpt-5.6-sol in E:\Hexo-BotTrainer-hexgt\.claude\worktrees\tss-vcf-width
+(branch claude/tss-vcf-width @ ec73f263). Focused implementation round.
+
+## Mission
+
+Implement RESIDUE_MAP_SPEC.md (worktree root — THE spec, read fully first):
+the 17-category exclusive wall-time partition, exact hook map, invariant
+checks, frozen measurement protocol, and report format. Deliver the first
+real residue measurement on BOTH cohorts, honoring the corpus-semantics
+rule: efficiency numbers from the forcing/spare corpus, prevalence/economics
+numbers from the human cohort (positions file READ-ONLY at
+E:\Hexo-BotTrainer-hexgt\.claude\worktrees\group2-zones\.codex-group2-shadow\human_positions.txt
+— format `id;q,r q,r ...`, replay-skip illegal lines).
+
+Owner rulings that bind:
+- The tss_verify.rs measurement hooks are APPROVED (10-25 lines, TIMING
+  ONLY): a scope entry/callback that attributes verification wall. ZERO
+  acceptance-rule or semantic changes — the orchestrator line-reviews this
+  diff at gate. Everything else in the verifier is untouchable.
+- No solver-semantic change anywhere: flag-off bit-identity on the existing
+  suite AND flag-on identity of all verdicts/node counts (instrumentation
+  observes, never steers). Any difference = bug, fix before proceeding.
+- Spec deviations: where the spec's category partition conflicts with the
+  code's actual seams, refine per the spec's own section 2.2 invariant
+  (partition + measured OTHER + cross-check) and record the deviation in
+  the report — do not silently reinterpret.
+
+## Definition of done
+
+1. Implementation per spec section 6 (new tss_residue.rs + hooks; est.
+   650-950 lines) with the spec's section "Required tests" implemented:
+   partition/overhead gates, semantic-identity tests, snapshot/parser test
+   incl. refusal to emit the closure paragraph when gates fail.
+2. Instrumentation overhead gate: measured per spec section 4.3 (1% target
+   / 2% hard), reported honestly.
+3. First measurement: 3 repetitions/medians per spec section 4 on (a) the
+   19-corpus + spare official profiles, (b) the 160-position human cohort
+   at 50k cap / 256 MiB / rel-horizon 10 (matching the existing
+   human-cohort baseline). Emit the per-row + aggregate tables and the
+   closure paragraph (or its honest OPEN refusal) per section 5.
+4. RESIDUE_MAP_REPORT.md (worktree root) + raws + SHA-256 manifest under
+   .codex-residue/.
+
+## Laws
+
+- Cargo: ALWAYS --target x86_64-pc-windows-msvc, CARGO_TARGET_DIR=.target-b1
+  (warm cache from the prior lane, same worktree). RAM gate before any
+  TT >= 512 MiB run: PowerShell
+  (Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory/1MB >= 10 (GB);
+  wait 120 s, retry up to 2 h. A WSL soak and a Lean build are live.
+- No commits/pushes; no other worktrees beyond the read-only path above;
+  no spawned sessions.
+- OUT OF SCOPE this round (queued separately, do not start): U10 gate
+  promotion, the A6 sub-flag battery, any consume/ablation change.
+- Honest stop with exact residuals beats a rushed battery.

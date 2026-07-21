@@ -13,6 +13,8 @@ use hexo_engine::{
 
 use crate::threats_shared;
 use crate::tss_core::{seed_band_radius, CertVerify, ProofStatus};
+#[cfg(any(test, feature = "tss-residue"))]
+use crate::tss_residue::{self, ResidueCategory};
 
 /// Maximum number of arena nodes accepted from one certificate.
 pub const MAX_CERT_NODES: usize = 100_000;
@@ -182,6 +184,10 @@ fn verify_certificate(
     claimed: ProofStatus,
     dispatch_oracle: bool,
 ) -> bool {
+    // R-RESIDUE-IMPL: timing-only scope. It neither reads nor changes verifier
+    // inputs, dispatch, limits, replay, or acceptance rules.
+    #[cfg(any(test, feature = "tss-residue"))]
+    let _residue_scope = tss_residue::scope(ResidueCategory::CertVerify);
     if claimed == ProofStatus::Unknown || cert.root != RootBinding::from_state(state) {
         return false;
     }
@@ -316,6 +322,10 @@ fn certificate_metadata(cert: &TssCertificate) -> Option<CertificateMetadata> {
 /// This does not establish truth; it only derives the certificate's exact
 /// semantic deadline and whether any AND node used the zone theorem.
 pub(crate) fn certificate_horizon_preflight(cert: &TssCertificate) -> Option<(u32, bool)> {
+    // Structural preflight materializes certificate metadata and is build
+    // work, not independent acceptance replay.
+    #[cfg(any(test, feature = "tss-residue"))]
+    let _residue_scope = tss_residue::scope(ResidueCategory::CertBuild);
     certificate_metadata(cert).map(|meta| (meta.derived_t, meta.has_zone))
 }
 

@@ -30,6 +30,12 @@ mod tss_reference_fast;
 mod tss_solver;
 mod tss_verify;
 
+// Default-off wall-time partitioning. Test builds contain the observation
+// seams, but they read no hot-site clocks until a residue job is explicitly
+// opened. Production builds contain them only with `tss-residue`.
+#[cfg(any(test, feature = "tss-residue"))]
+mod tss_residue;
+
 // Background deep-solve pool (async rung): routes tree::tss_solve_verified
 // onto worker threads. Python-gated with tree (its counters/entry live there).
 #[cfg(feature = "python")]

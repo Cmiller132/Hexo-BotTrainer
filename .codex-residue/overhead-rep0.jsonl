@@ -1,0 +1,14 @@
+{"schema_version":1,"profile":"f19_sample","repetition":0,"disabled_ns":620499772900,"enabled_ns":644898024700,"overhead_pct":3.932032350,"events":83563534}
+{"schema_version":1,"profile":"f19_sample","repetition":1,"disabled_ns":589934939300,"enabled_ns":595941796200,"overhead_pct":1.018223621,"events":83563534}
+{"schema_version":1,"profile":"f19_sample","repetition":2,"disabled_ns":516269219100,"enabled_ns":498024724900,"overhead_pct":-3.533910899,"events":83563534}
+{"schema_version":1,"profile":"f19_sample","repetition":3,"disabled_ns":477680640800,"enabled_ns":481526392100,"overhead_pct":0.805088373,"events":83563534}
+{"schema_version":1,"profile":"f19_sample","repetition":4,"disabled_ns":478118799200,"enabled_ns":481220801500,"overhead_pct":0.648793209,"events":83563534}
+{"schema_version":1,"profile":"f19_sample","repetition":5,"disabled_ns":479809699900,"enabled_ns":483794452000,"overhead_pct":0.830485941,"events":83563534}
+{"schema_version":1,"profile":"f19_sample","repetition":6,"disabled_ns":477323462300,"enabled_ns":481955345400,"overhead_pct":0.970386638,"events":83563534}
+{"schema_version":1,"profile":"f19_median","repetition":null,"disabled_ns":479809699900,"enabled_ns":483794452000,"overhead_pct":0.830485941,"events":83563534}
+{"schema_version":1,"profile":"f19_p95_row_median","repetition":null,"disabled_ns":116430436100,"enabled_ns":117751556700,"overhead_pct":1.134686637,"events":0}
+{"schema_version":1,"profile":"s2_sample","repetition":0,"disabled_ns":343500,"enabled_ns":291600,"overhead_pct":-15.109170306,"events":20}
+{"schema_version":1,"profile":"s2_sample","repetition":1,"disabled_ns":282600,"enabled_ns":324300,"overhead_pct":14.755838641,"events":20}
+{"schema_version":1,"profile":"s2_sample","repetition":2,"disabled_ns":315000,"enabled_ns":277700,"overhead_pct":-11.841269841,"events":20}
+{"schema_version":1,"profile":"s2_median","repetition":null,"disabled_ns":315000,"enabled_ns":291600,"overhead_pct":-7.428571429,"events":20}
+{"schema_version":1,"profile":"s2_p95_row_median","repetition":null,"disabled_ns":287400,"enabled_ns":265400,"overhead_pct":-7.654836465,"events":0}

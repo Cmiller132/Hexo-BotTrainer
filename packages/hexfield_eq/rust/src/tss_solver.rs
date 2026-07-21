@@ -37,6 +37,8 @@ use crate::tss_core::{
 };
 #[cfg(test)]
 use crate::tss_core::{ClosureDebtStats, ThresholdScaleStats};
+#[cfg(any(test, feature = "tss-residue"))]
+use crate::tss_residue::{self, OrChoiceTracker, OrEdgeKey, ResidueCategory};
 use crate::tss_verify::{
     CertCommutation, CertEdge, CertNode, CertNodeId, RootBinding, TssCertificate, TssVerifier,
     ZoneInfo, MAX_CERT_COMMUTATIONS, MAX_CERT_DEPTH, MAX_CERT_EDGES, MAX_CERT_NODES,
@@ -372,6 +374,8 @@ fn evaluate_interior_census_gate(
     root_ply: u32,
     semantic_horizon: u32,
 ) -> Option<InteriorCensusGateEvaluation> {
+    #[cfg(any(test, feature = "tss-residue"))]
+    let _residue_scope = tss_residue::scope(ResidueCategory::CensusGate);
     if state.is_terminal()
         || state.current_player() != claimant
         || state.placements_made() <= root_ply
@@ -1215,6 +1219,8 @@ impl TssSolver {
         k_reply_consume: bool,
         interior_census_gate: bool,
     ) -> AttemptResult {
+        #[cfg(any(test, feature = "tss-residue"))]
+        let _search_scope = tss_residue::scope(ResidueCategory::SearchBookkeeping);
         if !width.vcf_pair_complete
             || (width.consumes_quiet_turns() && width.consumes_ranked_zone())
         {
@@ -1290,6 +1296,8 @@ impl TssSolver {
         search.interior_census_gate = interior_census_gate;
         let root = search.insert_root(state);
         search.run(state, root);
+        #[cfg(any(test, feature = "tss-residue"))]
+        search.finalize_residue_or_edges();
         #[cfg(test)]
         search.finalize_ordering_study();
         #[cfg(test)]
@@ -1367,6 +1375,8 @@ impl TssSolver {
             ..SolveStats::default()
         };
         let mut promotions = Vec::new();
+        #[cfg(any(test, feature = "tss-residue"))]
+        let _cert_build_scope = tss_residue::scope(ResidueCategory::CertBuild);
         let cert = search.materialize(state, root).and_then(|materialized| {
             let fragment_imports = materialized.fragment_imports;
             let _dag_reuses = materialized.dag_reuses;
@@ -1582,6 +1592,8 @@ impl CapResumeSession {
         caps: &SolveCaps,
         goal: SolveGoal,
     ) -> Result<Self, CapResumeError> {
+        #[cfg(any(test, feature = "tss-residue"))]
+        let _resume_scope = tss_residue::scope(ResidueCategory::CapResumeOverhead);
         let binding = CapResumeBinding::capture(solver, state, caps, goal)?;
         let local_tt_cap = if binding.tt_enabled {
             binding.tt_bytes_cap
@@ -1624,6 +1636,8 @@ impl CapResumeSession {
         caps: &SolveCaps,
         goal: SolveGoal,
     ) -> Result<CapResumeAdvance, CapResumeError> {
+        #[cfg(any(test, feature = "tss-residue"))]
+        let _resume_scope = tss_residue::scope(ResidueCategory::CapResumeOverhead);
         if !self.valid {
             return Err(CapResumeError::Discarded);
         }
@@ -1647,17 +1661,25 @@ impl CapResumeSession {
             self.reentries = self.reentries.saturating_add(1);
         }
         self.advances = self.advances.saturating_add(1);
-        self.search.run_resumable(
-            state,
-            self.root,
-            &mut self.stage_depth,
-            &mut self.stage_initialized,
-        );
+        {
+            #[cfg(any(test, feature = "tss-residue"))]
+            let _search_scope = tss_residue::scope(ResidueCategory::SearchBookkeeping);
+            self.search.run_resumable(
+                state,
+                self.root,
+                &mut self.stage_depth,
+                &mut self.stage_initialized,
+            );
+            #[cfg(any(test, feature = "tss-residue"))]
+            self.search.finalize_residue_or_edges();
+        }
         pn_init_finalize_wide(&self.search);
 
         let root_pn = self.search.entries[self.root].pn;
         let root_dn = self.search.entries[self.root].dn;
         let claimed = status_for_claimant(state.current_player(), self.binding.claimant);
+        #[cfg(any(test, feature = "tss-residue"))]
+        let _cert_build_scope = tss_residue::scope(ResidueCategory::CertBuild);
         let cert = self
             .search
             .materialize(state, self.root)
@@ -4133,10 +4155,14 @@ impl<'store> WidePnSearch<'store> {
     fn insert_position(&mut self, key: WidePositionKey, depth: usize, prior: WidePnPrior) -> usize {
         #[cfg(test)]
         let _timer = WideGenTimer::start(&WIDE_INSERT_NANOS);
+        #[cfg(any(test, feature = "tss-residue"))]
+        let probe = tss_residue::scope(ResidueCategory::TtProbe);
         if let Some(&id) = self.by_position.get(&key) {
             self.tt_hits = self.tt_hits.saturating_add(1);
             return id;
         }
+        #[cfg(any(test, feature = "tss-residue"))]
+        drop(probe);
         let deferred = self
             .lazy_frontier
             .then(|| self.deferred_by_position.remove(&key))
@@ -4163,6 +4189,8 @@ impl<'store> WidePnSearch<'store> {
             universal_obligation: None,
         });
 
+        #[cfg(any(test, feature = "tss-residue"))]
+        let _store_scope = tss_residue::scope(ResidueCategory::TtStore);
         let added = wide_position_index_bytes(&key);
         if self.tt_bytes_cap > 0 && self.current_bytes.saturating_add(added) <= self.tt_bytes_cap {
             self.by_position.insert(key, id);
@@ -4886,6 +4914,9 @@ impl<'store> WidePnSearch<'store> {
                     if let Some(selection) = threshold_band_selection {
                         self.threshold_band_stack.push(selection);
                     }
+                    #[cfg(any(test, feature = "tss-residue"))]
+                    let or_edge_scope = (kind == WidePnKind::Choice)
+                        .then(|| tss_residue::or_edge_scope(id as u64, child_index as u32));
                     let outcome = self.work(
                         state,
                         child_id,
@@ -4893,6 +4924,8 @@ impl<'store> WidePnSearch<'store> {
                         child_pn_threshold,
                         child_dn_threshold,
                     );
+                    #[cfg(any(test, feature = "tss-residue"))]
+                    drop(or_edge_scope);
                     #[cfg(test)]
                     if let Some(selection) = threshold_band_selection {
                         debug_assert_eq!(self.threshold_band_stack.pop(), Some(selection));
@@ -4978,6 +5011,9 @@ impl<'store> WidePnSearch<'store> {
                     if let Some(selection) = threshold_band_selection {
                         self.threshold_band_stack.push(selection);
                     }
+                    #[cfg(any(test, feature = "tss-residue"))]
+                    let or_edge_scope = (kind == WidePnKind::Choice)
+                        .then(|| tss_residue::or_edge_scope(id as u64, child_index as u32));
                     let outcome = self.work(
                         state,
                         child_id,
@@ -4985,6 +5021,8 @@ impl<'store> WidePnSearch<'store> {
                         child_pn_threshold,
                         child_dn_threshold,
                     );
+                    #[cfg(any(test, feature = "tss-residue"))]
+                    drop(or_edge_scope);
                     #[cfg(test)]
                     if let Some(selection) = threshold_band_selection {
                         debug_assert_eq!(self.threshold_band_stack.pop(), Some(selection));
@@ -5967,6 +6005,40 @@ impl<'store> WidePnSearch<'store> {
             );
     }
 
+    #[cfg(any(test, feature = "tss-residue"))]
+    fn finalize_residue_or_edges(&self) {
+        for (choice_node, entry) in self.entries.iter().enumerate() {
+            let WidePnNode::Branch {
+                kind: WidePnKind::Choice,
+                children,
+            } = &entry.node
+            else {
+                continue;
+            };
+            let winner = (entry.pn == 0)
+                .then(|| {
+                    children
+                        .iter()
+                        .position(|child| self.child_numbers(child).0 == 0)
+                })
+                .flatten();
+            for child in 0..children.len() {
+                let category = match winner {
+                    Some(index) if index == child => ResidueCategory::AOrWinnerPath,
+                    Some(_) => ResidueCategory::AOrOrderingMiss,
+                    None => ResidueCategory::AOrUnresolved,
+                };
+                tss_residue::classify_or_edge(
+                    OrEdgeKey {
+                        choice_node: choice_node as u64,
+                        child: child as u32,
+                    },
+                    category,
+                );
+            }
+        }
+    }
+
     #[cfg(test)]
     fn finalize_ordering_study(&self) {
         if !self.ordering_study {
@@ -6274,6 +6346,8 @@ impl<'store> WidePnSearch<'store> {
     }
 
     fn attack_children(&self, state: &mut RustHexoState, depth: usize) -> Vec<WidePnChild> {
+        #[cfg(any(test, feature = "tss-residue"))]
+        let _residue_scope = tss_residue::scope(ResidueCategory::AOrGen);
         match state.phase() {
             TurnPhase::FirstStone => self.attack_pair_children(state, depth),
             TurnPhase::SecondStone { first } => {
@@ -6807,6 +6881,8 @@ impl<'store> WidePnSearch<'store> {
         state: &mut RustHexoState,
         defender_budget: u8,
     ) -> Vec<WidePnChild> {
+        #[cfg(any(test, feature = "tss-residue"))]
+        let _residue_scope = tss_residue::scope(ResidueCategory::DForcedGen);
         let mut explicit = forced_defender_replies(
             state,
             self.claimant,
@@ -6874,6 +6950,8 @@ impl<'store> WidePnSearch<'store> {
     }
 
     fn defender_pair_children(&mut self, state: &mut RustHexoState) -> Option<Vec<WidePnChild>> {
+        #[cfg(any(test, feature = "tss-residue"))]
+        let _residue_scope = tss_residue::scope(ResidueCategory::DForcedGen);
         #[cfg(test)]
         let _gen_timer = WideGenTimer::start(&WIDE_GEN_DEFENDER_NANOS);
         let plan = forced_defender_pair_plan(state, self.claimant)?;
@@ -7932,6 +8010,8 @@ impl<'a> NarrowCompatSearch<'a> {
         analysis: &threats::ThreatAnalysis,
         pair: Option<&PairContext>,
     ) -> Option<CertNodeId> {
+        #[cfg(any(test, feature = "tss-residue"))]
+        let attacker_gen_scope = tss_residue::scope(ResidueCategory::AOrGen);
         // Descending line count is the static proof-number initialization:
         // completions before four-builds before three-builds.  The coordinate
         // tie break makes the order independent of WindowStore hash iteration.
@@ -7970,6 +8050,10 @@ impl<'a> NarrowCompatSearch<'a> {
         } else {
             None
         };
+        #[cfg(any(test, feature = "tss-residue"))]
+        drop(attacker_gen_scope);
+        #[cfg(any(test, feature = "tss-residue"))]
+        let mut residue_choice = OrChoiceTracker::new();
         for candidate in candidates {
             let Ok((result, delta)) = state.apply_with_delta(Placement {
                 coord: candidate.coord,
@@ -8020,10 +8104,21 @@ impl<'a> NarrowCompatSearch<'a> {
                     turn_start_legal: turn_start_legal.clone(),
                 })
             });
+            #[cfg(any(test, feature = "tss-residue"))]
+            let residue_edge = residue_choice.next_edge();
+            #[cfg(any(test, feature = "tss-residue"))]
+            let residue_edge_scope =
+                residue_edge.map(|key| tss_residue::or_edge_scope(key.choice_node, key.child));
             let child = self.prove(state, claimant, ply.checked_add(1)?, pair_context.as_ref());
+            #[cfg(any(test, feature = "tss-residue"))]
+            drop(residue_edge_scope);
             state.undo(delta);
 
             if let Some(child) = child {
+                #[cfg(any(test, feature = "tss-residue"))]
+                if let Some(winner) = residue_edge {
+                    residue_choice.finish_winner(winner);
+                }
                 return self.alloc_node(
                     CertNode::Choice {
                         mv: candidate.coord,
@@ -8115,9 +8210,20 @@ impl<'a> NarrowCompatSearch<'a> {
                         turn_start_legal: turn_start_legal.clone(),
                     })
                 });
+                #[cfg(any(test, feature = "tss-residue"))]
+                let residue_edge = residue_choice.next_edge();
+                #[cfg(any(test, feature = "tss-residue"))]
+                let residue_edge_scope =
+                    residue_edge.map(|key| tss_residue::or_edge_scope(key.choice_node, key.child));
                 let child = self.prove(state, claimant, completion_ply, pair_context.as_ref());
+                #[cfg(any(test, feature = "tss-residue"))]
+                drop(residue_edge_scope);
                 state.undo(delta);
                 if let Some(child) = child {
+                    #[cfg(any(test, feature = "tss-residue"))]
+                    if let Some(winner) = residue_edge {
+                        residue_choice.finish_winner(winner);
+                    }
                     let node = self.alloc_node(CertNode::Choice { mv: coord, child }, 1);
                     #[cfg(test)]
                     if node.is_some() {
@@ -8149,6 +8255,21 @@ impl<'a> NarrowCompatSearch<'a> {
             && analysis.opp_threat_count > 0
             && !analysis.own_win_now
             && analysis.min_hitting_set == Some(analysis.b);
+
+        #[cfg(any(test, feature = "tss-residue"))]
+        let defender_category = if implicit_dispatch {
+            ResidueCategory::DForcedGen
+        } else {
+            // This revision has no reviewed frozen FHW selector. Missing or
+            // unavailable class data is unclassified, never non-FHW.
+            ResidueCategory::DUnforcedUnclassifiedGen
+        };
+        #[cfg(any(test, feature = "tss-residue"))]
+        if !implicit_dispatch {
+            tss_residue::count_unforced(defender_category);
+        }
+        #[cfg(any(test, feature = "tss-residue"))]
+        let defender_gen_scope = tss_residue::scope(defender_category);
 
         // A wide descendant defender is reachable only after a completed
         // forcing attacker turn.  Keep this invariant at the dispatcher as a
@@ -8221,6 +8342,8 @@ impl<'a> NarrowCompatSearch<'a> {
                 legal.sort_by_key(|coord| raw_coord_key(*coord));
                 legal
             });
+        #[cfg(any(test, feature = "tss-residue"))]
+        drop(defender_gen_scope);
         let mut edges = Vec::with_capacity(explicit.len());
         for &mv in &explicit {
             let Ok((result, delta)) = state.apply_with_delta(Placement { coord: mv }) else {
@@ -8241,6 +8364,9 @@ impl<'a> NarrowCompatSearch<'a> {
 
         if let Some(zone) = zone {
             loop {
+                #[cfg(any(test, feature = "tss-residue"))]
+                let closure_gen_scope =
+                    tss_residue::scope(ResidueCategory::DUnforcedUnclassifiedGen);
                 let required =
                     zone_certificate_extras(state, claimant, zone.d, &edges, &self.arena)?;
                 let mut added = required
@@ -8250,6 +8376,8 @@ impl<'a> NarrowCompatSearch<'a> {
                 if added.is_empty() {
                     break;
                 }
+                #[cfg(any(test, feature = "tss-residue"))]
+                drop(closure_gen_scope);
                 let frame = canonical_frame(state);
                 added.sort_by_key(|coord| canonical_coord_key(frame, *coord));
                 for mv in added {
@@ -10054,6 +10182,8 @@ impl BoundedTt {
     }
 
     fn lookup(&self, key: &PositionKey, claimant: Player) -> Option<CertNodeId> {
+        #[cfg(any(test, feature = "tss-residue"))]
+        let _residue_scope = tss_residue::scope(ResidueCategory::TtProbe);
         if self.slots.is_empty() {
             return None;
         }
@@ -10069,6 +10199,8 @@ impl BoundedTt {
     }
 
     fn insert(&mut self, key: PositionKey, claimant: Player, node: CertNodeId) {
+        #[cfg(any(test, feature = "tss-residue"))]
+        let _residue_scope = tss_residue::scope(ResidueCategory::TtStore);
         if self.slots.is_empty() {
             return;
         }
@@ -10417,6 +10549,8 @@ impl SharedProofCache {
     }
 
     fn lookup_cloned(&self, key: &PositionKey, claimant: Player) -> Option<CachedProof> {
+        #[cfg(any(test, feature = "tss-residue"))]
+        let _residue_scope = tss_residue::scope(ResidueCategory::TtProbe);
         if self.slots.is_empty() {
             return None;
         }
@@ -10462,6 +10596,8 @@ impl SharedProofCache {
     }
 
     fn could_admit_heap(&self, key: &PositionKey, proof_heap: usize) -> bool {
+        #[cfg(any(test, feature = "tss-residue"))]
+        let _residue_scope = tss_residue::scope(ResidueCategory::TtStore);
         if self.slots.is_empty() {
             return false;
         }
@@ -10479,6 +10615,8 @@ impl SharedProofCache {
     }
 
     fn insert(&mut self, key: PositionKey, claimant: Player, proof: CachedProof) {
+        #[cfg(any(test, feature = "tss-residue"))]
+        let _residue_scope = tss_residue::scope(ResidueCategory::TtStore);
         if self.slots.is_empty() || proof.validate().is_none() {
             return;
         }
@@ -10613,6 +10751,8 @@ impl ProvenFragmentStore {
     }
 
     fn lookup(&self, key: &PositionKey, claimant: Player) -> Option<Arc<ProvenFragment>> {
+        #[cfg(any(test, feature = "tss-residue"))]
+        let _residue_scope = tss_residue::scope(ResidueCategory::TtProbe);
         if self.slots.is_empty() {
             return None;
         }
@@ -10624,6 +10764,8 @@ impl ProvenFragmentStore {
     }
 
     fn insert(&mut self, key: PositionKey, claimant: Player, proof: CachedProof) -> bool {
+        #[cfg(any(test, feature = "tss-residue"))]
+        let _residue_scope = tss_residue::scope(ResidueCategory::TtStore);
         if proof.validate().is_none() || !self.ensure_slots() {
             self.refusals = self.refusals.saturating_add(1);
             return false;

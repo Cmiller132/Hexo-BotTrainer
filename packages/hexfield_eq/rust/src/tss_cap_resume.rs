@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use crate::tss_core::{CertVerify, DeepSolve, ProofStatus, SolveCaps, SolveGoal};
 use crate::tss_corpus::load_corpus;
+use crate::tss_residue::{self, ResidueCategory, ResidueJobKey, ResidueJobOutcome};
 use crate::tss_solver::{CapResumeError, CapResumeSession, TssSolver, WidthOptions};
 use crate::tss_verify::TssVerifier;
 
@@ -165,6 +166,15 @@ fn tss_cap_resume_campaign() {
 
 #[test]
 fn cap_resume_discards_on_binding_or_cap_mismatch() {
+    tss_residue::begin_job(ResidueJobKey {
+        profile: "unit".to_owned(),
+        row: "cap_resume_discard".to_owned(),
+        cap_rung: 20,
+        horizon_rung: "binding_mismatch".to_owned(),
+        horizon: u32::MAX,
+        resume: true,
+        repetition: 0,
+    });
     let position = load_corpus()
         .into_iter()
         .find(|position| position.id == "xsnfyll")
@@ -213,4 +223,14 @@ fn cap_resume_discards_on_binding_or_cap_mismatch() {
         session.advance_to_node_cap(&solver, &position.state, &changed, SolveGoal::Both),
         Err(CapResumeError::Discarded)
     ));
+    let residue = tss_residue::end_job(ResidueJobOutcome::default());
+    assert!(
+        residue.valid,
+        "{}",
+        residue.invalid_reason.unwrap_or_default()
+    );
+    assert!(
+        residue.category_ns[ResidueCategory::CapResumeOverhead as usize] > 0,
+        "binding/cap rejection must remain visible as resume orchestration"
+    );
 }
