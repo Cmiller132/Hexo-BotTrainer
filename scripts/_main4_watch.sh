@@ -18,7 +18,10 @@ for i in $(seq 1 24); do
     grep -iA5 "traceback" "$L" | head -30
     exit 1
   fi
-  launches=$(grep -c "LAUNCH out=" "$RUN/supervisor.log" 2>/dev/null || echo 0)
+  # Count launches only within the CURRENT supervisor session (the log is
+  # cumulative across sessions; the pre-fix 03:48 session crash-looped and
+  # halted — counting it tripped a false alarm on the first watcher run).
+  launches=$(awk '/SUPERVISOR start/{n=0} /LAUNCH out=/{n++} END{print n+0}' "$RUN/supervisor.log" 2>/dev/null || echo 0)
   if [ "$launches" -gt 3 ]; then
     echo "FAIL: crash loop ($launches launches)"
     tail -20 "$RUN/supervisor.log"
