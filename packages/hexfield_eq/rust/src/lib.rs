@@ -29,6 +29,9 @@ mod tss_reference;
 mod tss_reference_fast;
 mod tss_solver;
 mod tss_verify;
+// Isolated extension verifier for the v1 Group-2 certificate class
+// (.codex-g2-resolve/DESIGN_G2_CERT_EXTENSION.md). Never imports tss_solver.
+mod tss_verify_group2;
 
 // Background deep-solve pool (async rung): routes tree::tss_solve_verified
 // onto worker threads. Python-gated with tree (its counters/entry live there).

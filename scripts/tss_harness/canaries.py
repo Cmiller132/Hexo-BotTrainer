@@ -106,6 +106,40 @@ def wide_canary(make_adapter) -> tuple[bool, str]:
     return True, f"manifest wide + {len(wins)}/{len(fx)} fixture wins"
 
 
+@register_canary("group2")
+def group2_canary(make_adapter) -> tuple[bool, str]:
+    """The manifest must echo group2 truthfully in both directions, and the
+    fixture battery must return IDENTICAL verified verdicts with the flag on
+    and off: the feature reduces search work, it must not change verdicts.
+    (The Rust side guarantees this structurally — a failed Group-2 attempt
+    re-solves with the selector off — so a mismatch here is an engine bug.)"""
+    fx = _load("wide_win") + _load("loss_pos")
+    on_adapter = make_adapter({"group2": True, "goal": "both"})
+    off_adapter = make_adapter({"group2": False, "goal": "both"})
+    m_on = on_adapter.manifest()
+    m_off = off_adapter.manifest()
+    if m_on.get("group2") is not True:
+        return False, f"group2 ON but manifest echoes {m_on.get('group2')!r}"
+    if m_off.get("group2") is not False:
+        return False, f"group2 OFF but manifest echoes {m_off.get('group2')!r}"
+    on = on_adapter.solve_sequence(fx)
+    off = off_adapter.solve_sequence(fx)
+    mismatches = [
+        (a.pos_id, a.status, a.verified, b.status, b.verified)
+        for a, b in zip(on, off)
+        if (a.status, a.verified) != (b.status, b.verified)
+    ]
+    if mismatches:
+        return False, f"verdicts diverge with group2 on/off: {mismatches[:4]}"
+    vf = sum(r.verify_failed for r in on)
+    if vf:
+        return False, f"group2 arm reported {vf} verifier failures"
+    return True, (
+        f"manifest truthful both ways; {len(fx)} fixture verdicts identical "
+        f"on/off, zero verify failures"
+    )
+
+
 @register_canary("loss_detection")
 def loss_detection_canary(make_adapter) -> tuple[bool, str]:
     """An arm claiming loss detection (goal loss/both) must prove the known

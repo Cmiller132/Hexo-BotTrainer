@@ -147,6 +147,11 @@ class SelfplayConfig:
     # dual_pass additionally upgrades it to every actual leftover node. The
     # Rust split always leaves a primal node, and 0 preserves current behavior.
     tss_solver_loss_reserve_nodes: int = 0
+    # v1 Group-2 reduced-fanout selector (default off). Flag-off is
+    # bit-identical to the pre-change engine; flag-on also selects the
+    # Group2V1 verifier policy at the Rust mint. Verdicts never change:
+    # a failed Group-2 attempt re-solves cleanly with the selector off.
+    tss_solver_group2: bool = False
     # Horizon ladder (default off): a bounded base solve that came back Unknown
     # while still depth-cut (horizon_cuts > 0) is re-solved once at 2x horizon
     # on the same solver instance. Unbounded bases skip it.
@@ -643,6 +648,7 @@ def build_divergence_overrides(
         "tss_solver_horizon": int(sp.tss_solver_horizon),
         "tss_solver_dual_pass": bool(sp.tss_solver_dual_pass),
         "tss_solver_loss_reserve_nodes": int(sp.tss_solver_loss_reserve_nodes),
+        "tss_solver_group2": bool(sp.tss_solver_group2),
         "tss_solver_horizon_ladder": bool(sp.tss_solver_horizon_ladder),
         # Gumbel AlphaZero levers (default OFF).
         "gumbel_target": bool(sp.gumbel_target_enabled),

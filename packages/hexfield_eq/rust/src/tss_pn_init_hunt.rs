@@ -1178,6 +1178,8 @@ fn certificate_resolution_depth(state: &HexoState, cert: &TssCertificate) -> u32
                 Some(*resolution_ply)
             }
             CertNode::Choice { .. } | CertNode::Universal { .. } => None,
+            CertNode::UniversalGroup2V1(_) => None,
+            CertNode::FhwGateV1(gate) => Some(gate.proof.escape_resolution_ply),
         })
         .max()
         .expect("WIN certificate must contain a typed leaf resolution");

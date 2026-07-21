@@ -224,6 +224,7 @@ pub struct SolveRequest {
     pub horizon: SolverHorizon,
     pub dual_pass: bool,
     pub loss_reserve_nodes: u32,
+    pub group2: bool,
 }
 
 /// A completed, already-verified solve. `hard` is `Some` only when the
@@ -579,6 +580,7 @@ fn worker_loop(
             let mut counters = TssCounters::default();
             solver.set_dual_pass(request.dual_pass);
             solver.set_loss_reserve_nodes(request.loss_reserve_nodes);
+            solver.set_group2(request.group2);
             let solved = tss_solve_verified(
                 &request.state,
                 request.node_cap,
@@ -691,6 +693,7 @@ mod tests {
             horizon: SolverHorizon::DEFAULT,
             dual_pass: false,
             loss_reserve_nodes: 0,
+            group2: false,
         }
     }
 
@@ -833,6 +836,7 @@ mod tests {
             horizon: SolverHorizon::DEFAULT,
             dual_pass: false,
             loss_reserve_nodes: 0,
+            group2: false,
         }));
         let response = drain_one(&pool);
         assert_eq!(response.slot, 7);

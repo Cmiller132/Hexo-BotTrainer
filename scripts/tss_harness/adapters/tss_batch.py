@@ -65,6 +65,10 @@ class TssBatchAdapter:
         # fixed opponent attempt; dual_pass upgrades it to every actual
         # leftover after an undecided primal. Rust always leaves a primal node.
         "loss_reserve_nodes": 0,
+        # v1 Group-2 reduced-fanout selector (default off = pre-change
+        # engine). Search-work reduction only: verdicts must not change (a
+        # failed Group-2 attempt re-solves cleanly with the selector off).
+        "group2": False,
         "shared_fragments": False,
     }
 
@@ -100,6 +104,7 @@ class TssBatchAdapter:
             bool(self.config["wide"]),
             bool(self.config["dual_pass"]),
             int(self.config["loss_reserve_nodes"]),
+            bool(self.config["group2"]),
         )
         m["goal"] = self.config["goal"]
         m["adapter"] = self.name
@@ -124,6 +129,7 @@ class TssBatchAdapter:
                 bool(self.config["wide"]),
                 bool(self.config["dual_pass"]),
                 int(self.config["loss_reserve_nodes"]),
+                bool(self.config["group2"]),
             )
 
         everyone = list(range(len(states)))
@@ -195,6 +201,8 @@ def declared_features(config: dict[str, Any]) -> tuple[str, ...]:
         feats.append("loss_detection")
     if config.get("wide", True):
         feats.append("wide")
+    if config.get("group2"):
+        feats.append("group2")
     if config.get("zone"):
         feats.append("zone")            # no canary exists -> unclaimable
     if config.get("ladder"):

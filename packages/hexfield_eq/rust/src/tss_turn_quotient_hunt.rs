@@ -998,6 +998,9 @@ fn certificate_bytes(cert: &Option<TssCertificate>) -> Vec<u8> {
     put_len(&mut out, cert.nodes.len());
     for node in &cert.nodes {
         match node {
+            CertNode::UniversalGroup2V1(_) | CertNode::FhwGateV1(_) => {
+                panic!("legacy canonical encoder is legacy-only")
+            }
             CertNode::OrCompletion {
                 mv,
                 witness,
