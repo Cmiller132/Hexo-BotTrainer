@@ -416,3 +416,15 @@ Consequences:
   branch, main_4 runs from it). claude/g2-cert continued past the merge
   point (accept path → wide-PN port, 4f87b893) — fold into a future
   integration round together with the amendment decision.
+
+- **2026-07-21 maintenance retune MEASURED (fresh ep21 vs ep18-20, clean
+  paired-adjacent epochs):** async 8/12→12/24 + park 300→600 ms →
+  **2.5x proof yield** (wins 15k→38.3k, losses 22.6k→51.8k per epoch;
+  proofs/move 2.3→5.5), drops 35%→3.4%, bail 76-85%→43%, vf=0, at
+  −16% selfplay pace (18.8→15.8 pos/s). KEPT — signal density beats
+  pace for the internalization mission. Residual: bail 43% at avg wait
+  805 ms (hard-park tail); wider windows = diminishing returns, revisit
+  only with cause. Ops lesson (twice-burned): halt-flag races the
+  relaunch loop — deterministic stop = kill SUPERVISOR pid first, then
+  child; never remove the flag while the supervisor lives (orphan
+  dual-trainer incident; ep21 wiped + rerun clean on owner order).
