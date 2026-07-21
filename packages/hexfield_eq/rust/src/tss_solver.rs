@@ -7601,7 +7601,9 @@ impl WideProofMaterializer<'_, '_> {
         if plan.pairs.len() != children.len() {
             return None;
         }
-        let mut child_by_pair: HashMap<((i16, i16), (i16, i16)), &WidePnChild> =
+        // Resolve each directed pair reply to its proven child entry, keyed by
+        // the raw-sorted pair, then drop the borrow on `children`.
+        let mut entry_by_pair: HashMap<((i16, i16), (i16, i16)), usize> =
             HashMap::with_capacity(children.len());
         for child in children {
             if child.result != WidePnChildResult::Pending || self.search.child_numbers(child).0 != 0
@@ -7611,104 +7613,192 @@ impl WideProofMaterializer<'_, '_> {
             let WidePnMove::DefenderPair(first, second) = child.mv else {
                 return None;
             };
-            if raw_coord_key(first) >= raw_coord_key(second)
-                || child_by_pair
-                    .insert((raw_coord_key(first), raw_coord_key(second)), child)
-                    .is_some()
-            {
+            if raw_coord_key(first) >= raw_coord_key(second) {
+                return None;
+            }
+            let key = (raw_coord_key(first), raw_coord_key(second));
+            let entry = self.search.resolved_child_entry(child)?;
+            if entry_by_pair.insert(key, entry).is_some() {
                 return None;
             }
         }
-        let final_key_by_pair: HashMap<((i16, i16), (i16, i16)), WidePositionKey> = plan
-            .pairs
-            .iter()
-            .map(|pair| {
-                (
-                    (raw_coord_key(pair.first), raw_coord_key(pair.second)),
-                    pair.final_key.clone(),
-                )
-            })
-            .collect();
+        let mut final_key_by_pair: HashMap<((i16, i16), (i16, i16)), WidePositionKey> =
+            HashMap::with_capacity(plan.pairs.len());
+        // Forced second stones for each first stone, in EITHER orientation, so a
+        // commutation-free unfold can cover both defender turn orders.
+        let mut seconds_by_first: HashMap<(i16, i16), Vec<HexCoord>> = HashMap::new();
+        for pair in &plan.pairs {
+            let key = (raw_coord_key(pair.first), raw_coord_key(pair.second));
+            if !entry_by_pair.contains_key(&key) {
+                return None;
+            }
+            final_key_by_pair.insert(key, pair.final_key.clone());
+            seconds_by_first
+                .entry(raw_coord_key(pair.first))
+                .or_default()
+                .push(pair.second);
+            seconds_by_first
+                .entry(raw_coord_key(pair.second))
+                .or_default()
+                .push(pair.first);
+        }
 
-        // Outer b=2 gate at the turn-start defender node P_Q.
-        let outer = crate::tss_verify_group2::finder_build_fhw_gate(
+        // Outer b=2 node at the turn-start defender P_Q: a reduced FHW gate when
+        // it closes (representative first stones only), else a COMPACT forced
+        // legacy Universal over every first stone (mixed-cert amendment — an
+        // ungateable turn-start is unfolded commutation-free rather than
+        // dropped, so a gate elsewhere in the certificate can still fire).
+        let outer_gate = crate::tss_verify_group2::finder_build_fhw_gate(
             state,
             self.search.claimant,
             self.search.semantic_horizon,
             true,
-        )?;
-        let mut outer_rep_edges: Vec<CertEdge> = Vec::with_capacity(outer.representatives.len());
-        for &s in &outer.representatives {
+        );
+        let first_moves: Vec<HexCoord> = match &outer_gate {
+            Some(gate) => gate.representatives.clone(),
+            None => {
+                let mut fs: Vec<HexCoord> = plan
+                    .pairs
+                    .iter()
+                    .flat_map(|pair| [pair.first, pair.second])
+                    .collect();
+                fs.sort_by_key(|c| raw_coord_key(*c));
+                fs.dedup_by_key(|c| raw_coord_key(*c));
+                fs
+            }
+        };
+
+        let mut outer_edges: Vec<CertEdge> = Vec::with_capacity(first_moves.len());
+        for &s in &first_moves {
             let (first_result, first_delta) =
                 state.apply_with_delta(Placement { coord: s }).ok()?;
             if first_result.outcome.is_some() {
                 state.undo(first_delta);
                 return None;
             }
-            // Inner b=1 gate at the materialized one-stone child C_s = P_Q + s.
-            let inner = match crate::tss_verify_group2::finder_build_fhw_gate(
-                state,
-                self.search.claimant,
-                self.search.semantic_horizon,
-                true,
-            ) {
-                Some(inner) => inner,
-                None => {
-                    state.undo(first_delta);
-                    return None;
-                }
-            };
-            let mut inner_rep_edges: Vec<CertEdge> =
-                Vec::with_capacity(inner.representatives.len());
-            let mut inner_ok = true;
+            let inner =
+                self.build_pair_inner_node(state, s, &seconds_by_first, &entry_by_pair, &final_key_by_pair);
+            state.undo(first_delta);
+            outer_edges.push(CertEdge {
+                mv: s,
+                child: inner?,
+            });
+        }
+
+        match outer_gate {
+            Some(gate) => self.alloc_fhw_gate(gate, outer_edges),
+            None => {
+                let edge_count = outer_edges.len();
+                self.alloc(
+                    CertNode::Universal {
+                        edges: outer_edges,
+                        implicit_dispatch: true,
+                        zone: None,
+                        commutations: Vec::new(),
+                    },
+                    edge_count,
+                )
+            }
+        }
+    }
+
+    /// Inner b=1 node of a two-stone forced turn at `C_s = P_Q + first_s` (the
+    /// state has already been advanced by the first stone). Emits a reduced FHW
+    /// b=1 gate when it closes, otherwise a COMPACT forced legacy Universal over
+    /// EVERY forced second stone (mixed-cert amendment: a non-gateable inner
+    /// node no longer sinks the whole outer gate). Either child composes under
+    /// the outer node's reconstruction — the verifier derives the inner node's
+    /// roles/clocks as an ordinary AND and the outer gate's FHW-T3-R rows from
+    /// them uniformly.
+    fn build_pair_inner_node(
+        &mut self,
+        state: &mut RustHexoState,
+        first_s: HexCoord,
+        seconds_by_first: &HashMap<(i16, i16), Vec<HexCoord>>,
+        entry_by_pair: &HashMap<((i16, i16), (i16, i16)), usize>,
+        final_key_by_pair: &HashMap<((i16, i16), (i16, i16)), WidePositionKey>,
+    ) -> Option<CertNodeId> {
+        // Try the reduced inner gate over its representative second stones.
+        if let Some(inner) = crate::tss_verify_group2::finder_build_fhw_gate(
+            state,
+            self.search.claimant,
+            self.search.semantic_horizon,
+            true,
+        ) {
+            let mut rep_edges: Vec<CertEdge> = Vec::with_capacity(inner.representatives.len());
+            let mut ok = true;
             for &s2 in &inner.representatives {
-                let key = if raw_coord_key(s) < raw_coord_key(s2) {
-                    (raw_coord_key(s), raw_coord_key(s2))
-                } else {
-                    (raw_coord_key(s2), raw_coord_key(s))
-                };
-                let Some(&child) = child_by_pair.get(&key) else {
-                    inner_ok = false;
-                    break;
-                };
-                let Ok((second_result, second_delta)) =
-                    state.apply_with_delta(Placement { coord: s2 })
-                else {
-                    inner_ok = false;
-                    break;
-                };
-                let matches_key = second_result.outcome.is_none()
-                    && final_key_by_pair
-                        .get(&key)
-                        .is_some_and(|expected| WidePositionKey::from_state(state) == *expected);
-                if !matches_key {
-                    state.undo(second_delta);
-                    inner_ok = false;
-                    break;
-                }
-                let child_id = self.search.resolved_child_entry(child);
-                let proof = child_id.and_then(|id| self.build(state, id));
-                state.undo(second_delta);
-                match proof {
-                    Some(proof) => inner_rep_edges.push(CertEdge { mv: s2, child: proof }),
+                match self.build_pair_second_edge(state, first_s, s2, entry_by_pair, final_key_by_pair)
+                {
+                    Some(edge) => rep_edges.push(edge),
                     None => {
-                        inner_ok = false;
+                        ok = false;
                         break;
                     }
                 }
             }
-            if !inner_ok {
-                state.undo(first_delta);
-                return None;
+            if ok {
+                if let Some(id) = self.alloc_fhw_gate(inner, rep_edges) {
+                    return Some(id);
+                }
             }
-            let inner_gate = self.alloc_fhw_gate(inner, inner_rep_edges);
-            state.undo(first_delta);
-            outer_rep_edges.push(CertEdge {
-                mv: s,
-                child: inner_gate?,
-            });
         }
-        self.alloc_fhw_gate(outer, outer_rep_edges)
+        // Legacy fallback: compact forced Universal over every forced second
+        // stone (⊇ the verifier's b=1 dispatch kernel).
+        let mut second_moves: Vec<HexCoord> =
+            seconds_by_first.get(&raw_coord_key(first_s))?.clone();
+        second_moves.sort_by_key(|c| raw_coord_key(*c));
+        second_moves.dedup_by_key(|c| raw_coord_key(*c));
+        let mut edges: Vec<CertEdge> = Vec::with_capacity(second_moves.len());
+        for &s2 in &second_moves {
+            edges.push(self.build_pair_second_edge(state, first_s, s2, entry_by_pair, final_key_by_pair)?);
+        }
+        let edge_count = edges.len();
+        self.alloc(
+            CertNode::Universal {
+                edges,
+                implicit_dispatch: true,
+                zone: None,
+                commutations: Vec::new(),
+            },
+            edge_count,
+        )
+    }
+
+    /// Prove the pair child reached by playing `second_s` after `first_s` (state
+    /// at `C_s = P_Q + first_s`), returning the `(second_s, child)` edge. The
+    /// exact final-position identity is checked against the plan before the
+    /// child is trusted.
+    fn build_pair_second_edge(
+        &mut self,
+        state: &mut RustHexoState,
+        first_s: HexCoord,
+        second_s: HexCoord,
+        entry_by_pair: &HashMap<((i16, i16), (i16, i16)), usize>,
+        final_key_by_pair: &HashMap<((i16, i16), (i16, i16)), WidePositionKey>,
+    ) -> Option<CertEdge> {
+        let key = if raw_coord_key(first_s) < raw_coord_key(second_s) {
+            (raw_coord_key(first_s), raw_coord_key(second_s))
+        } else {
+            (raw_coord_key(second_s), raw_coord_key(first_s))
+        };
+        let &entry = entry_by_pair.get(&key)?;
+        let (second_result, second_delta) =
+            state.apply_with_delta(Placement { coord: second_s }).ok()?;
+        let matches_key = second_result.outcome.is_none()
+            && final_key_by_pair
+                .get(&key)
+                .is_some_and(|expected| WidePositionKey::from_state(state) == *expected);
+        if !matches_key {
+            state.undo(second_delta);
+            return None;
+        }
+        let proof = self.build(state, entry);
+        state.undo(second_delta);
+        Some(CertEdge {
+            mv: second_s,
+            child: proof?,
+        })
     }
 
     fn alloc(&mut self, node: CertNode, added_edges: usize) -> Option<CertNodeId> {
@@ -11695,6 +11785,229 @@ mod tests {
             .nodes
             .iter()
             .any(CertNode::is_group2_extension));
+    }
+
+    /// Owner-authorized MIXED-CERT amendment: the wide-PN builder now emits
+    /// certificates that combine FHW `FhwGateV1` gates with COMPACT forced
+    /// legacy Universals (`implicit_dispatch=true`) at non-gateable forced
+    /// nodes. This drives real production output (leaf profile + dual-pass +
+    /// group2 — the harness A/B config) to a genuine mixed certificate,
+    /// confirms it strictly verifies, that flag-off decides the identical
+    /// verdict extension-free, and that its 12 D6 images verify (the compact
+    /// legacy node composes through the digest machinery in a mixed tree).
+    /// It then runs an ADVERSARIAL seam battery — every mutation of the
+    /// gate/legacy boundary must REJECT (fail-closed).
+    #[test]
+    fn mixed_cert_seam_mutation_battery() {
+        use crate::tss_core::{ProofStatus, SolveCaps, SolveGoal};
+        use crate::tss_verify::{CertCommutation, Group2Verifier, ZoneInfo};
+
+        // Known-firing production positions (dev human/puzzle/selfplay splits,
+        // measured under the A/B config). At least one produces a mixed cert.
+        const FIRING: &[&[(i16, i16)]] = &[
+            &[(0,0),(-8,0),(-8,-1),(1,0),(-8,1),(-9,0),(-7,-1),(-10,1),(-9,1),(-7,0),(-6,0),(-10,0),(-5,0),(-6,-1),(-5,-1),(-4,-1),(-10,-1)],
+            &[(0,0),(0,1),(8,1),(1,-1),(2,-2),(3,-3),(2,0),(1,-2),(0,-1),(0,-2),(1,-3),(-1,-1),(-2,-1),(3,-1),(-3,-1),(-1,0),(-2,1),(-3,2)],
+            &[(0,0),(0,1),(2,0),(-3,3),(-3,0),(-3,1),(-2,0),(-5,3),(0,-2),(-4,3),(1,1),(-6,3),(0,-3),(-1,3),(0,2),(-2,4),(3,-1),(-1,1),(-2,1),(2,1),(-4,1),(-1,4),(-1,2),(-1,5)],
+            &[(0,0),(5,0),(5,-1),(0,-1),(0,1),(6,-1),(0,-2),(0,2),(-1,2),(0,4),(-2,2),(1,0),(2,-1),(-2,3),(3,-2),(-1,0),(-2,0),(-3,0),(3,0)],
+            &[(0,0),(5,0),(5,-1),(0,-1),(0,1),(6,-1),(0,-2),(0,2),(-1,2),(0,4),(-2,2),(1,0),(2,-1),(-2,3),(3,-2),(-1,0),(-2,0),(-3,0),(3,0),(-1,-1),(-1,1)],
+            &[(0,0),(5,0),(5,-1),(0,-1),(0,1),(6,-1),(0,-2),(0,2),(-1,2),(0,4),(-2,2),(1,0),(2,-1),(-2,3),(3,-2),(-1,0),(-2,0),(-3,0),(3,0),(-1,-1),(-1,1),(-1,-2)],
+            &[(0,0),(-3,0),(3,0),(-2,0),(3,-1),(-1,0),(0,1),(-1,1),(1,1),(-4,0),(-4,1),(-4,2),(-2,2),(-3,1),(-3,-1),(-3,2),(-2,-1),(-5,0),(-5,1),(-6,1),(-2,-2),(-2,1),(-5,2),(-6,2)],
+            &[(0,0),(0,1),(1,0),(-1,0),(0,-1),(1,1),(-1,-1),(1,2),(-1,2),(2,0),(2,1),(-1,1),(3,1),(2,-1),(2,2),(2,-2),(2,3),(3,-1),(3,-2),(4,-3),(0,2),(-2,2),(-1,3)],
+            &[(0,0),(-2,1),(0,-2),(1,0),(1,-1),(-1,0),(1,-2),(2,-3),(2,-2),(-1,1),(0,-1),(-3,2),(2,-1),(-1,-1),(-1,-2),(-1,2),(-1,-3),(-3,1),(-4,1),(0,1),(-5,1),(-2,3)],
+        ];
+
+        let solve = |moves: &[(i16, i16)], group2: bool| {
+            let state = replay(moves);
+            let mut solver = TssSolver::default();
+            solver.configure_leaf_profile();
+            solver.set_dual_pass(true);
+            solver.set_group2(group2);
+            let caps = SolveCaps {
+                node_cap: 500,
+                tt_bytes_cap: 1 << 20,
+                semantic_horizon: state.placements_made() + 40,
+            };
+            let r = solver.solve_goal(&state, &caps, SolveGoal::Both);
+            (state, r)
+        };
+
+        // Locate the first position whose flag-on certificate is genuinely
+        // MIXED: at least one FhwGateV1 AND at least one compact legacy
+        // Universal (the amendment's new node kind).
+        let mut found: Option<(usize, RustHexoState, TssCertificate, ProofStatus)> = None;
+        for (idx, moves) in FIRING.iter().enumerate() {
+            let (state, on) = solve(moves, true);
+            if !matches!(on.status, ProofStatus::Win | ProofStatus::Loss) {
+                continue;
+            }
+            let Some(cert) = on.cert.clone() else { continue };
+            let has_gate = cert
+                .nodes
+                .iter()
+                .any(|n| matches!(n, CertNode::FhwGateV1(_)));
+            let has_compact = cert.nodes.iter().any(
+                |n| matches!(n, CertNode::Universal { implicit_dispatch: true, .. }),
+            );
+            if has_gate && has_compact {
+                found = Some((idx, state, cert, on.status));
+                break;
+            }
+        }
+        let (idx, state, cert, status) = found.expect(
+            "the mixed-cert amendment must produce a gate+compact-legacy certificate \
+             on a known-firing production position",
+        );
+
+        // ---- Positive composition ----
+        assert!(
+            Group2Verifier.verify(&state, &cert, status),
+            "the mixed gate+legacy certificate must strictly verify"
+        );
+        assert!(
+            !TssVerifier.verify(&state, &cert, status),
+            "the legacy-only policy must reject a mixed extension certificate"
+        );
+        // Never-decides-less: flag-off reaches the same verdict, extension-free.
+        let (_soff, off) = solve(FIRING[idx], false);
+        assert_eq!(off.status, status, "flag-off must never decide differently");
+        assert!(
+            !off
+                .cert
+                .expect("flag-off decides too")
+                .nodes
+                .iter()
+                .any(CertNode::is_group2_extension),
+            "flag-off stays extension-free (bit-identity discipline)"
+        );
+        // Every D6 image of the mixed certificate verifies against the
+        // correspondingly transformed state (the compact legacy node composes
+        // through the remap + digest machinery in a mixed tree).
+        for sym in 0..D6_SYMMETRY_COUNT {
+            let image = d6_remap_certificate(&cert, sym).expect("D6 remap of the mixed cert");
+            assert_eq!(image.nodes.len(), cert.nodes.len(), "remap preserves node count");
+            let tstate = transformed_state(&state, sym);
+            assert!(
+                Group2Verifier.verify(&tstate, &image, status),
+                "D6 image {sym} of the mixed certificate must verify"
+            );
+        }
+
+        // Index of the first compact legacy node (the seam target).
+        let compact_idx = cert
+            .nodes
+            .iter()
+            .position(|n| matches!(n, CertNode::Universal { implicit_dispatch: true, .. }))
+            .expect("mixed cert has a compact legacy node");
+
+        let reject = |label: &str, mutated: &TssCertificate| {
+            assert!(
+                !Group2Verifier.verify(&state, mutated, status),
+                "seam mutation `{label}` must reject (fail-closed)"
+            );
+        };
+
+        // M1 — no-mixing protection preserved: a same-turn commutation spliced
+        // onto the compact legacy node must reject (design §2.3 rule 3).
+        {
+            let mut m = cert.clone();
+            if let CertNode::Universal {
+                edges, commutations, ..
+            } = &mut m.nodes[compact_idx]
+            {
+                let first = edges[0].mv;
+                commutations.push(CertCommutation {
+                    first,
+                    omitted_second: first,
+                    first_child: edges[0].child,
+                    mirror_child: edges[0].child,
+                });
+            }
+            reject("compact_legacy_commutation_smuggled", &m);
+        }
+
+        // M2 — no-mixing protection preserved: a legacy zone annotation on the
+        // compact legacy node must reject (zone stays out of the new class).
+        {
+            let mut m = cert.clone();
+            if let CertNode::Universal { zone, .. } = &mut m.nodes[compact_idx] {
+                *zone = Some(ZoneInfo {
+                    d: 1,
+                    build_horizon: cert.semantic_horizon,
+                });
+            }
+            reject("compact_legacy_zone_smuggled", &m);
+        }
+
+        // M3 — class boundary: a compact forced node cannot masquerade as a
+        // FULL-enumeration node. Flipping `implicit_dispatch=false` makes the
+        // verifier demand `edges == full legal set`; the compact edge set is a
+        // strict subset, so it must reject.
+        {
+            let mut m = cert.clone();
+            if let CertNode::Universal {
+                implicit_dispatch, ..
+            } = &mut m.nodes[compact_idx]
+            {
+                *implicit_dispatch = false;
+            }
+            reject("compact_legacy_claims_full_enumeration", &m);
+        }
+
+        // M4 — duplicate discharge across the seam: duplicating one forced-reply
+        // edge (same child) must reject (canonical strict order + tree indegree).
+        {
+            let mut m = cert.clone();
+            if let CertNode::Universal { edges, .. } = &mut m.nodes[compact_idx] {
+                let dup = edges[0].clone();
+                edges.push(dup);
+            }
+            reject("compact_legacy_duplicate_edge", &m);
+        }
+
+        // M5 — omitted-reply coverage (T6 kernel-staple): dropping a forced
+        // reply from the compact legacy node must reject (either the dispatch
+        // kernel is no longer covered, or the orphaned child breaks the exact
+        // tree). Every single-edge drop must reject.
+        {
+            let edge_total = match &cert.nodes[compact_idx] {
+                CertNode::Universal { edges, .. } => edges.len(),
+                _ => unreachable!(),
+            };
+            assert!(edge_total >= 1);
+            for drop in 0..edge_total {
+                let mut m = cert.clone();
+                if let CertNode::Universal { edges, .. } = &mut m.nodes[compact_idx] {
+                    edges.remove(drop);
+                }
+                reject(&format!("compact_legacy_drop_forced_reply_{drop}"), &m);
+            }
+        }
+
+        // M6 — gate node smuggled where legacy coverage was required: relabel
+        // the compact legacy node as an `FhwGateV1` carrying an empty threat
+        // family. Gate reconstruction demands a nonempty tau==b threat family,
+        // so it must reject.
+        {
+            use crate::tss_verify::{
+                FhwGateNodeV1, FhwGateProofV1, Group2AuthorityV1,
+            };
+            let mut m = cert.clone();
+            let reps = match &m.nodes[compact_idx] {
+                CertNode::Universal { edges, .. } => edges.clone(),
+                _ => unreachable!(),
+            };
+            m.nodes[compact_idx] = CertNode::FhwGateV1(Box::new(FhwGateNodeV1 {
+                representatives: reps,
+                proof: FhwGateProofV1 {
+                    schema_version: 1,
+                    authority: Group2AuthorityV1::compiled(),
+                    threats: Vec::new(),
+                    escape_resolution_ply: 0,
+                    map: Vec::new(),
+                },
+            }));
+            reject("compact_legacy_relabeled_as_bogus_gate", &m);
+        }
     }
 
     #[test]

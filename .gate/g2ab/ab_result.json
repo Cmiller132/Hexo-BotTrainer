@@ -24,9 +24,9 @@
       "decided_on": 257,
       "nodes_per_decision_off": 80.9,
       "nodes_per_decision_on": 80.9,
-      "gate_positions": 0,
-      "gate_nodes": 0,
-      "gate_firing_rate": 0.0,
+      "gate_positions": 4,
+      "gate_nodes": 17,
+      "gate_firing_rate": 0.0012,
       "group2_zone_positions": 0,
       "verify_failed_off": 0,
       "verify_failed_on": 0
@@ -45,9 +45,9 @@
       "decided_on": 727,
       "nodes_per_decision_off": 55.2,
       "nodes_per_decision_on": 55.2,
-      "gate_positions": 0,
-      "gate_nodes": 0,
-      "gate_firing_rate": 0.0,
+      "gate_positions": 85,
+      "gate_nodes": 193,
+      "gate_firing_rate": 0.0312,
       "group2_zone_positions": 0,
       "verify_failed_off": 0,
       "verify_failed_on": 0
@@ -66,9 +66,9 @@
       "decided_on": 228,
       "nodes_per_decision_off": 181.7,
       "nodes_per_decision_on": 181.7,
-      "gate_positions": 0,
-      "gate_nodes": 0,
-      "gate_firing_rate": 0.0,
+      "gate_positions": 17,
+      "gate_nodes": 45,
+      "gate_firing_rate": 0.0363,
       "group2_zone_positions": 0,
       "verify_failed_off": 0,
       "verify_failed_on": 0
@@ -101,11 +101,11 @@
     "verify_failed_total_off": 0,
     "verify_failed_total_on": 0,
     "cross_verification": {
-      "checked": 0,
-      "agree": 0,
+      "checked": 106,
+      "agree": 106,
       "mismatch": []
     },
-    "gate_positions_total": 0,
-    "gate_nodes_total": 0
+    "gate_positions_total": 106,
+    "gate_nodes_total": 255
   }
 }

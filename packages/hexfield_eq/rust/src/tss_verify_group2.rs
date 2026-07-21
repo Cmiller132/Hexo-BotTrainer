@@ -1111,14 +1111,22 @@ fn preflight_structure(cert: &TssCertificate) -> Option<()> {
             }
             CertNode::Universal {
                 edges,
-                implicit_dispatch,
+                implicit_dispatch: _,
                 zone,
                 commutations,
             } => {
-                // Class rule 2/3: a legacy Universal is admissible only as a
-                // plain full-enumeration node (the full-set check itself needs
-                // the replayed position and happens in build_context).
-                if *implicit_dispatch || zone.is_some() || !commutations.is_empty() {
+                // MIXED-CERT amendment (§5 of G2V2_WIDEPN_REPORT): a legacy
+                // Universal is admissible either as a plain full-enumeration
+                // node (`implicit_dispatch=false`, edges == full legal set) OR
+                // as a COMPACT forced node (`implicit_dispatch=true`, edges ⊇
+                // the reconstructed T6 dispatch kernel). Both obligations are
+                // re-derived from the replayed position in `build_context`;
+                // which of the two applies is decided there, never here. The
+                // no-mixing rule is preserved for the two things it actually
+                // protected: legacy zoned nodes and same-turn commutation stay
+                // fail-closed rejected (design §2.3 rule 3), so no cheaper
+                // sibling label can enter a gate's ancestor envelope.
+                if zone.is_some() || !commutations.is_empty() {
                     return None;
                 }
                 let mut previous: Option<CoordKey> = None;
@@ -1355,10 +1363,13 @@ fn replay_node(
             ctx.children[id as usize].push((*mv, *child));
             replay_node(cert, *child, next, claimant, root_stones, depth + 1, states, ctx)?;
         }
-        CertNode::Universal { edges, .. } => {
-            // Legacy full-enumeration AND inside the new class: defender to
-            // move, nonterminal, no win-now, and the edge set must be exactly
-            // the full sorted legal set.
+        CertNode::Universal {
+            edges,
+            implicit_dispatch,
+            ..
+        } => {
+            // Legacy AND inside the new class. Shared preconditions: post-opening,
+            // defender to move, nonterminal, not own-win-now.
             if state.current_player() == claimant
                 || state.is_terminal()
                 || matches!(state.phase(), TurnPhase::Opening)
@@ -1367,11 +1378,37 @@ fn replay_node(
             {
                 return None;
             }
-            let legal = sorted_legal_moves(&state);
-            ctx.charge(legal.len() as u64)?;
+            // Edges are canonical sorted-unique by move (preflight), so this
+            // vector is sorted for `set_contains`.
             let moves: Vec<HexCoord> = edges.iter().map(|edge| edge.mv).collect();
-            if moves != legal {
-                return None;
+            if *implicit_dispatch {
+                // COMPACT forced node (mixed-cert amendment). Its entire
+                // omitted-reply obligation is the legacy T6 kernel-staple:
+                // reconstruct the exact tau==b dispatch kernel from the board
+                // and require the explicit forced replies to cover it. Every
+                // omitted (non-kernel) reply fails to block a live attacker
+                // threat, so it is a dead defender move (the attacker completes
+                // the threat next) — no window/role/zone coverage is owed AT
+                // this node. This is precisely the legacy `verify_universal`
+                // implicit-dispatch obligation, re-derived here with the same
+                // threat-family/transversal primitives the gate path uses (so
+                // the seam is consistent). Because the reconstruction requires
+                // tau==b, an UNFORCED (k<b) node can never be smuggled in as a
+                // compact Universal to dodge the `UniversalGroup2V1` zone check.
+                let (_b, kernel) = reconstruct_dispatch_kernel(&state, claimant, ctx)?;
+                for k in &kernel {
+                    if !set_contains(&moves, *k) {
+                        return None;
+                    }
+                }
+            } else {
+                // Full-enumeration node: the edge set must be exactly the full
+                // sorted legal set (no omission ⇒ trivial coverage).
+                let legal = sorted_legal_moves(&state);
+                ctx.charge(legal.len() as u64)?;
+                if moves != legal {
+                    return None;
+                }
             }
             for edge in edges {
                 let mut next = state.clone();
@@ -1488,6 +1525,82 @@ fn derive_exact_k(state: &RustHexoState, claimant: Player, ctx: &mut G2Context<'
         }
     }
     Some(if common.is_empty() { 2 } else { 1 })
+}
+
+/// Reconstruct the T6 dispatch kernel at a COMPACT (`implicit_dispatch`) forced
+/// legacy Universal, entirely from the replayed board (mixed-cert amendment).
+///
+/// This mirrors the legacy `tss_verify::dispatch_boundary` + the
+/// `verify_universal` implicit-dispatch obligation (`explicit ⊇ kernel`),
+/// reconstructed in-module with the SAME threat-family/transversal primitives
+/// the FHW gate path uses so the two forced-node channels are consistent at the
+/// seam. Returns `(b, kernel)`; `None` (⇒ reject the certificate, fail-closed)
+/// whenever the node is not at a valid tau==b forced boundary or the kernel is
+/// empty.
+///
+/// Soundness of the kernel definition. The claimant threat family `F` is every
+/// count>=4, defender-0 window's empty set (a claimant that fills such a window
+/// wins; the defender must therefore block). The node is FORCED iff the exact
+/// finite transversal number of `F` equals the full remaining budget `b`
+/// (`min_hitting_set == b`). The kernel is `{ legal d : tau(F \ {threats
+/// containing d}) <= b-1 }` — cells extendable to a size-`b` transversal. For
+/// `b in {1,2}` this equals the legacy `extendable_hit_kernel_for_family`
+/// (b=1: the common intersection of every threat; b=2: cells with a mate that
+/// jointly hit every threat). Any legal reply outside the kernel leaves some
+/// threat un-blockable within the remaining `b` stones, so it is a dead
+/// defender move covered by the omitted-reply argument; hence the explicit
+/// forced replies need only cover the kernel.
+fn reconstruct_dispatch_kernel(
+    state: &RustHexoState,
+    claimant: Player,
+    ctx: &mut G2Context<'_>,
+) -> Option<(u8, Vec<HexCoord>)> {
+    let b = placements_remaining(state);
+    // Connect-6 forced defender boundaries only carry budgets one or two; a
+    // wider budget is rejected (fail-closed), never silently full-universed.
+    if !(1..=2).contains(&b) {
+        return None;
+    }
+    let defender = claimant.other();
+    let mut family: Vec<Vec<HexCoord>> = Vec::new();
+    for entry in state.board().windows().entries() {
+        ctx.charge(1)?;
+        if entry.count(claimant) >= 4 && entry.count(defender) == 0 {
+            let empties = entry.empty_cells();
+            if empties.is_empty() {
+                // A filled claimant window is terminal; the node was required
+                // nonterminal above, so this is corrupt state.
+                return None;
+            }
+            family.push(empties);
+        }
+    }
+    if family.is_empty() {
+        // No live attacker threat ⇒ the node is not forced; a compact Universal
+        // may not stand in for an unforced (or already-won) position.
+        return None;
+    }
+    // FORCED: the exact transversal number must equal the full budget b. This
+    // is the `min_hitting_set == Some(b)` precondition of the legacy dispatch
+    // boundary. `k < b` (an unforced node) rejects here.
+    if transversal_exact(&family, b) != b {
+        return None;
+    }
+    let legal = sorted_legal_moves(state);
+    ctx.charge((legal.len() as u64).checked_mul((family.len() as u64).checked_add(1)?)?)?;
+    let mut kernel: Vec<HexCoord> = Vec::new();
+    for &d in &legal {
+        let residual: Vec<Vec<HexCoord>> =
+            family.iter().filter(|s| !s.contains(&d)).cloned().collect();
+        if transversal_exact(&residual, b) <= b.saturating_sub(1) {
+            kernel.push(d);
+        }
+    }
+    if kernel.is_empty() {
+        return None;
+    }
+    kernel.sort_by_key(|c| coord_key(*c));
+    Some((b, kernel))
 }
 
 fn check_or_completion(
@@ -3138,7 +3251,11 @@ fn copy_subtree(
                 zone,
                 commutations,
             } => {
-                if *implicit_dispatch || zone.is_some() || !commutations.is_empty() {
+                // Mixed-cert amendment: a COMPACT forced legacy Universal
+                // (`implicit_dispatch=true`) is now a first-class member of the
+                // narrow class, so its flag is preserved through the unfold.
+                // Legacy zoned/commuted nodes stay out (fail-closed).
+                if zone.is_some() || !commutations.is_empty() {
                     return None;
                 }
                 let mut new_edges = Vec::with_capacity(edges.len());
@@ -3151,7 +3268,7 @@ fn copy_subtree(
                 new_edges.sort_by_key(|edge| coord_key(edge.mv));
                 CertNode::Universal {
                     edges: new_edges,
-                    implicit_dispatch: false,
+                    implicit_dispatch: *implicit_dispatch,
                     zone: None,
                     commutations: Vec::new(),
                 }
