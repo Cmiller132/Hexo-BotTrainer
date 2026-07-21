@@ -530,6 +530,18 @@ Consequences:
   [caveat: R-TS1 null must be re-read first], work-weighted TT
   replacement, Unknown-subtree summaries; production-honesty note inside).
 
+- **2026-07-21 (evening) 0l4291i PROVEN AT THE OFFICIAL 2 GiB PROFILE —
+  the last open row vs pdspn settles.** Quiet-host 19-position corpus
+  gate (`TSS_BACKWALK_TT_BYTES=2147483648`, background run,
+  /tmp/our_corpus_gate_2gb.log): CORPUS_DONE failures=0, suite 484.2 s.
+  0l4291i WIN at the 20M rung — 1,879,612 nodes, 195.8 s final rung
+  (≈316 s ladder-cumulative), peak_tt_bytes 1.73 GiB. Honest read vs
+  pdspn's 305 s @ 256 MB / 1,058 seeded level-1 nodes: capability
+  parity at wall, but ~7x their memory and ~1,800x their informed node
+  count — the probe-seeding import (INVESTIGATION item 1) is
+  STRENGTHENED as a memory/node-efficiency prize, no longer a
+  can't-solve gap. MEASURED.
+
 - **2026-07-21 15:32Z main_4 RELAUNCHED under all-leaves strict mode**
   (owner-ordered): resumed from epoch_000023.pt with the P7 engine
   (`2c262e10`) + all_leaves config (`6c287e68`) live via the
