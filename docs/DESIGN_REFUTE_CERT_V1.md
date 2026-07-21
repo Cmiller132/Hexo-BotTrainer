@@ -1,724 +1,914 @@
-# Certified `vcf_pair_complete` refutations: v1 design
+# Certified `vcf_pair_complete` refutations: amended v1 design
 
-Status: design only, 2026-07-21. This document proposes a new artifact and a
-separate verifier arm. It does not authorize changes to search policy, the
-trainer, the positive certificate grammar, or `tss_verify.rs`.
+Status: design only, amended 2026-07-21 after hostile review. This document
+does not authorize source, test, Lean, search-policy, trainer, positive-certificate,
+or `tss_verify.rs` changes. A new hostile review of this amended target is
+required before implementation.
 
 **HYPOTHESIS — evidence discipline.** In this document, **CODE-FACT** means a
 fact directly visible in the current Rust implementation and is accompanied by
 a current line reference. Every proposed rule, semantic bridge, estimate, gate,
-and Lean statement is labelled **HYPOTHESIS**. In particular, naming a Lean
-target below is not a claim that the target has been implemented, proved, or
-connected to the executed Rust bytes.
+and Lean statement is labelled **HYPOTHESIS**. Naming a theorem is not a claim
+that it exists or that executed Rust has been connected to it. Normative
+`MUST`/`MUST NOT` language freezes the proposed contract; it is not implementation
+evidence.
+
+## Amendment ledger
+
+| item | sections touched | amendment |
+|---|---|---|
+| R1 | 1.1, 1.3, 2.1, 4.2, 5, 7 | Publishes the literal phase-indexed positive judgment, clock lifting, reachability premise, and four separate theorem layers. |
+| R2 | 1.1, 2.1, 2.2, 2.4, 4.2, 4.3, 6 | Freezes direct-window sets, `T/G1/S/U`, quotient orientation, pair classification, expansion, telemetry, oracle fixtures, and version-bump rules. |
+| R3 | 1.2, 3.2, 3.3, 6 | Replaces shallow-zero selection with a memoized recursive `Structural | Unresolved` support fixed point and alternative defender selection. |
+| R4 | 1.3, 2.1, 2.4, 4.2, 4.3, 7 | Deletes `NoPositiveConstructor` and `NoJointCarrier`, closes the leaf/polarity matrix, and retains only exact empty enumeration in leaf v1. |
+| R5 | 4.1, 4.2, 4.3, 6 | Makes independence a transitive source/call-graph contract with a stated shared trust base, direct transition cross-checks, and one-sided fault tests. |
+| R6 | 2.5, 2.6, 3.3, 4.3, 4.4, 6 | Adds externally selected hard limits for regenerated semantic work, state retention, CPU/wall, and heap; the one-million-stone allowance is removed. |
+| R7 | 2.6, 3.3, 4.4, 6, 7 | Gates producer and end-to-end cost, uses causal size/work denominators, requires competitive baselines and held-out tails, and withdraws the unpinned node estimate. |
+| R8 | 2.1, 2.5, 4.1, 4.3, 6 | Restricts acceptance to a checked D6-safe coordinate closure and binds ruleset, coordinate, and semantic versions into root identity and the typed result. |
 
 ## 1. Claim semantics
 
-### 1.1 The exact claim
+### 1.1 Literal phase-indexed proposition — amended per R1, R2, R8
 
-**HYPOTHESIS.** Fix a reachable, nonterminal, post-opening engine state `P` in
-`FirstStone`, let `A = P.current_player()`, and let
-`nextPly = P.placements_made() + 1`. The v1 artifact certifies exactly:
+**HYPOTHESIS — normative semantic block.** The following definitions, together
+with the equations in section 2.2, are the single v1 meaning of the class. The
+producer, independent Rust verifier, simple oracle, and later model checker
+MUST implement this specification independently. Agreement between two
+implementations is not a definition and is not a completeness proof.
+
+The frozen identifiers are:
 
 ```text
-NoContractWin VcfPairComplete P nextPly
-
-meaning: there is no finite positive contract tree, at any finite
-resolution clock, whose attacker turns obey VcfPairComplete and whose
-defender coverage is licensed by the baseline forced-hit rules.
+ruleset       = HexoConnect6/Opening1-Then2/Win6/LegalRadius8/I16/V1
+coordinate    = AxialQR/D6SafeClosure/V1
+class         = VcfPairComplete/EqualityDispatch/V1
+wire          = RefuteLeafExact/V1
 ```
 
-**HYPOTHESIS.** Equivalently, in a horizon-indexed presentation, the accepted artifact proves
-the negative proposition for every finite semantic horizon at or after
-`nextPly`; it does not merely refute one selected horizon. `u32::MAX` is the
-producer-profile marker, not a mathematical infinity witness.
+A semantic change to legality radius, opening rule, win length, coordinate
+meaning, phase schedule, direct-window equations, constructor priority,
+`T/G1/S/U`, quotienting, pair disposition, or equality dispatch MUST use a new
+ruleset/class identifier and a new wire format. An old verifier MUST reject the
+new identifier unless an explicit compatibility theorem and policy entry exist.
 
-**HYPOTHESIS.** The v1 root hypotheses are deliberately narrower than every
-state the wide engine can search:
+Let `P` be a finite engine state, `A` the fixed claimant, `D = other(A)`,
+`phi = P.phase()`, and `n = P.placements_made()`. `h` is an absolute finite
+resolution deadline measured in placements. A placement constructor is
+available only when its resulting placement clock is at most `h`. The phase
+budget is
 
-- the root is nonterminal and its exact phase is `FirstStone`;
-- the claimant is the current player, not the other player and not a colour
-  inferred from placement parity;
-- the root is post-opening and its phase/placement clock is internally
-  consistent;
-- the width profile is exactly `vcf_pair_complete` with its proven-exact
-  `T(P)`/`S(P,a)` characterization;
-- the semantic profile is unbounded, Group-2 and certificate-relative zones
-  are absent, and no census dismissal participates; and
-- every leaf in the negative support is structural. No cap, staged-depth,
-  semantic-horizon, or verifier-depth refusal is admissible evidence.
+```text
+B(Opening) = 1;  B(FirstStone) = 2;  B(SecondStone { first }) = 1.
+```
 
-**HYPOTHESIS.** This root-phase refinement is the v1 manageability cut. It covers the supplied
-`l9mxn59` and `mvp2lvc` witnesses and the ordinary fresh-turn corpus rows. A
-root in `Opening` or claimant `SecondStone` remains `Unknown` to this artifact
-arm in v1. Defender `SecondStone` states reached while replaying a selected
-counterturn are supported.
+The state arguments always include the complete phase payload, especially
+`SecondStone { first }`; writing only `phi` below is notation, not permission to
+drop `first`. `H_X(P)`, `tau`, `K_b`, `T`, `G1`, `S`, the ordered occurrence
+universe `U`, and `Disposition` are the exact functions in sections 2.2-2.3.
+`OwnWinNow_X(P,b)` means that player `X`, who is the mover, has a direct sequence
+of at most `b` legal placements in the current turn completing a live length-six
+`X` window. `ForcedLoss_X(P,b)` means `not OwnWinNow_X(P,b)` and
+`tau(H_other(X)(P)) > b`. Both predicates are recomputed from literal windows.
 
-**CODE-FACT.** Player identity, not depth parity, must control polarity:
-`FirstStone -> SecondStone` keeps the mover, whereas completing `SecondStone`
+`ContractWinV1(P,A,phi,n,h,ruleset,class,reachable)` is the least finite,
+mutually phase-indexed judgment generated by exactly the following closed
+constructor table, in the listed priority order:
+
+| exact state | positive constructor | exact premises |
+|---|---|---|
+| any supported phase | `ClaimantTerminal` | `P.terminal().winner = A` and `n <= h`. |
+| claimant `FirstStone` | `ClaimantWinNow` | nonterminal; `P.current_player() = A`; `OwnWinNow_A(P,2)` has a direct completing sequence whose last clock is `<= h`. |
+| claimant `FirstStone` | `ClaimantChoice` | no prior constructor; not `ForcedLoss_A(P,2)`; there exists `(a,b) in U(P)` whose ordered replay is legal. A claimant-terminal prefix or full successor yields `ClaimantCompletion`; otherwise `Disposition(P,a,b)` is either `ClaimantTactical` (`tau > 2`) or `TightPair` (`tau = 2`) and, for `TightPair`, the resulting nonclaimant `FirstStone` state satisfies the mutually recursive judgment. |
+| nonclaimant `FirstStone` | `ClaimantTactical` | nonterminal; mover is `D`; `not OwnWinNow_D(P,2)`; `H_A(P)` is nonempty; `tau(H_A(P)) > 2`; its fixed resolution clock is `n + 2 <= h`. |
+| nonclaimant `FirstStone` | `DefenderUniversal2` | nonterminal; mover is `D`; `not OwnWinNow_D(P,2)`; `H_A(P)` is nonempty; `tau(H_A(P)) = 2`; for every `d in K_2(P,A)`, applying `d` is legal and the resulting `SecondStone { first = d }` state satisfies the mutually recursive judgment. |
+| nonclaimant `SecondStone { first }` | `ClaimantTactical` | nonterminal; mover is `D`; `not OwnWinNow_D(P,1)`; `H_A(P)` is nonempty; `tau(H_A(P)) > 1`; its fixed resolution clock is `n + 1 <= h`. |
+| nonclaimant `SecondStone { first }` | `DefenderUniversal1` | nonterminal; mover is `D`; `not OwnWinNow_D(P,1)`; `H_A(P)` is nonempty; `tau(H_A(P)) = 1`; for every `d in K_1(P,A)`, applying `d` is legal and the resulting claimant `FirstStone` state satisfies the mutually recursive judgment. |
+
+There are no other constructors. In particular:
+
+- a terminal winner `D`, `OwnWinNow_D`, or `ForcedLoss_A` is an opponent
+  structural failure of the positive judgment;
+- at a nonclaimant state, an empty `H_A(P)` or `tau(H_A(P)) < b` has no
+  Universal constructor; this class is equality-only and does **not** import
+  the full-legal-set `tau < b` branch of generic T6;
+- `tau(H_A(P)) > b` is claimant-positive tactical success, never a negative
+  “not tight” leaf;
+- a claimant `Opening` or claimant `SecondStone` state is outside the class;
+  and
+- an unknown future constructor is a new class version, never fall-through
+  authority for an old negative verifier.
+
+**HYPOTHESIS — explicit negative.** A v1 call takes a
+`ReachableRootV1(P, ruleset)` premise minted either by replaying a canonical
+legal history from the opening or by a separately trusted engine API. Sorted
+stones, phase, and clock consistency do not establish reachability. The public
+result MUST retain this premise or require the trusted token; bare external
+bytes are insufficient.
+
+For all arguments visible, define:
+
+```text
+NoContractWinAtV1(P,A,phi,n,h,ruleset,class,reachable)
+  := not ContractWinV1(P,A,phi,n,h,ruleset,class,reachable)
+
+NoContractWinV1(P,A,FirstStone,n,nextPly,ruleset,class,reachable)
+  := forall finite h, h >= nextPly ->
+       NoContractWinAtV1(P,A,FirstStone,n,h,ruleset,class,reachable)
+```
+
+The artifact root MUST be reachable, nonterminal, post-opening,
+`FirstStone`, D6-safe under section 2.5, and have `A = P.current_player()` and
+`nextPly = n + 1`. The artifact certifies exactly the second proposition. It
+does not certify full-game loss, an opponent strategy, or even that `A` lacks a
+quiet or otherwise out-of-class win.
+
+**HYPOTHESIS — clock lifting obligation.** Define `BoundaryFreeNo(P,A,phi,n)`
+by structural recursion over the closed negative grammar of section 2.1, with
+no horizon/cap/depth premise. The model MUST prove:
+
+```text
+boundaryFreeNo_sound_at:
+  BoundaryFreeNo(P,A,phi,n) ->
+  forall finite h >= n, not ContractWinV1(P,A,phi,n,h,...)
+
+contractWin_monotone:
+  ContractWinV1(P,A,phi,n,h,...) -> h <= h' ->
+  ContractWinV1(P,A,phi,n,h',...)
+```
+
+The first theorem is proved by induction on the negative tree against the
+literal constructor table; monotonicity is proved by induction on the positive
+derivation because enlarging an absolute deadline preserves every placement
+side condition. Only then may a boundary-free accepted object yield all finite
+horizons. `u32::MAX` remains a producer-profile marker and is not infinity.
+
+**CODE-FACT.** Player identity, not depth parity, controls polarity:
+`FirstStone -> SecondStone` keeps the mover, while completing `SecondStone`
 changes it
 ([`state.rs` lines 317-334](../packages/hexo_engine/rust/src/state.rs#L317)).
-The hard-result seam also defines `Loss` as a real opponent winning strategy
-and leaves exhausted or unproven work as `Unknown`
+The hard-result seam defines `Loss` as a real opponent winning strategy and
+leaves exhausted work as `Unknown`
 ([`tss_core.rs` lines 24-43](../packages/hexfield_eq/rust/src/tss_core.rs#L24)).
 
-**HYPOTHESIS.** Therefore this artifact is never a `ProofStatus::Loss`, never a
-`HardValue(-1)`, and never evidence that the other player wins. A position may
-satisfy `NoContractWin VcfPairComplete` while the same player wins through a
-quiet, free-tempo, or otherwise out-of-class strategy. It may also be a draw or
-a full-game win for either side. Any conversion of this class fact to a
-full-game `Loss` is a soundness bug and kills v1.
+**HYPOTHESIS.** A verified v1 fact is never `ProofStatus::Loss`,
+`HardValue(-1)`, or a full-game `NO`. Any such conversion kills the design.
 
-### 1.2 Clock and “natural exhaustion”
+### 1.2 Clock and natural exhaustion — amended per R3
 
-**CODE-FACT.** The wide engine derives its final search depth from the semantic
-horizon but clamps it to `MAX_SEARCH_DEPTH`
-([`tss_solver.rs` lines 2555-2561](../packages/hexfield_eq/rust/src/tss_solver.rs#L2555)).
-A depth cutoff and a structural refutation currently both receive disproof
-numbers `(infinity, 0)`
-([lines 5935-5967](../packages/hexfield_eq/rust/src/tss_solver.rs#L5935)).
-The expansion code also maps semantic-horizon refusal, opponent tactical facts,
-unsupported defender boundaries, census dismissal, and empty child lists into
-the same `WidePnNode::Refuted` representation
-([lines 6341-6497](../packages/hexfield_eq/rust/src/tss_solver.rs#L6341)).
+**CODE-FACT.** Current PN arithmetic gives both depth cutoffs and structural
+refutations zero disproof number, and several unrelated refusals collapse into
+`WidePnNode::Refuted`
+([`tss_solver.rs` lines 5935-5967](../packages/hexfield_eq/rust/src/tss_solver.rs#L5935),
+[`lines 6341-6497`](../packages/hexfield_eq/rust/src/tss_solver.rs#L6341)).
 
-**HYPOTHESIS.** Consequently `root.dn == 0` is necessary but not sufficient for
-v1 emission. A **natural width exhaust** is a root with `dn == 0` for which a
-complete negative support can be selected without traversing any
-`DepthCutoff`, horizon refusal, census dismissal, cap boundary, stalled edge,
-or other resource-derived condition. The producer additionally requires
-`semantic_horizon == u32::MAX`, `expansions < node_cap`, and the exact v1
-profile. Reaching `dn == 0` on the last permitted expansion is rejected by the
-strict v1 trigger even if a later independent replay might establish the same
-fact; this conservative loss of coverage keeps “natural” mechanically clear.
+**HYPOTHESIS.** `root.dn == 0`, a termination enum, and the current
+`child_is_genuinely_refuted` helper are not provenance. A full-tree candidate is
+a **natural width exhaust** only after all staged reopens and bottom-up PN
+refreshes and only if the recursive fixed point in section 3.2 returns
+`Structural(plan)` at the root. `semantic_horizon == u32::MAX`, exact v1 width
+options, and `expansions < node_cap` remain necessary producer conditions, but
+none can substitute for the completed support plan.
 
-**HYPOTHESIS.** The artifact itself contains no `StructuralBoundary` leaf. An
-accepted negative DAG is therefore horizon-parametric: increasing a semantic
-horizon cannot invalidate a forcing-gate failure, an exact empty attacker
-universe, a legal defender counterline, or an opponent terminal fact. A
-verifier recursion/byte cap is only a reason to reject an oversized artifact;
-it is never a proposition inside an accepted artifact.
+The plan MUST contain no depth/horizon/census/cap/stalled/lazy/zone/Group-2
+boundary. A producer or verifier resource limit causes `Unsupported`/rejection;
+it is never a logical leaf. The currently authorized leaf-only v1 cut does not
+consume the PN arena and therefore cannot confuse a shallow zero with evidence.
 
-### 1.3 Lean statement family
+### 1.3 Theorem layers — amended per R1, R4
 
-**HYPOTHESIS — Lean targets only.** The design is intended to specialize the
-existing `ContractWin` / `NoContractWin` statement family, not the full-game
-`AttackerWinsBy` proposition. The target theorem names and direction are:
+**HYPOTHESIS — Lean targets only.** The following layers are distinct and MUST
+not be stated as one theorem:
 
-1. `refuteCertV1_accepts_implies_noContractWin`: acceptance of the exact
-   replayed v1 bytes implies `NoContractWin VcfPairComplete P nextPly`.
-2. `refuteCertV1_accepts_implies_noContractWin_at`: for every exact finite
-   horizon query for the same root, acceptance implies the query-bound
-   `NoContractWin` proposition.
-3. `noContractWin_of_noJointCarrier` and
-   `noContractWin_of_noAdmissibleFirstTurn`: the optional compact leaves imply
-   the same class-relative negative proposition under the side conditions in
-   section 2.4.
-4. `widePnNaturalExhaust_materializes_acceptedRefuteCertV1`: a later Rust/Lean
-   correspondence target connecting the producer's eligible `dn == 0` support
-   to accepted bytes.
+1. `modelCheckLeafV1Bytes_sound`: the model decoder/checker accepts a model byte
+   list and a model reachable root, therefore the literal
+   `NoContractWinV1` proposition holds. A later full-tree format needs its own
+   `modelCheckNoDagBytes_sound` theorem.
+2. `noContractWin_of_noAdmissibleFirstTurn`: exact `U` expansion has no
+   admitted occurrence, therefore `BoundaryFreeNo` and the literal negative
+   judgment hold. There is no v1 `NoJointCarrier` theorem.
+3. `rustLeafV1_extensional`: the executed Rust decoder/checker returns the same
+   answer as the model checker on the same literal bytes, policy, root, and
+   reachability token. Until this exists, `refuteCertV1_accepts...` may name
+   model acceptance only, not executed Rust acceptance.
+4. `producerLeafV1_materializes_accepted`: an eligible exact-empty producer
+   emits bytes accepted by the checker. A future
+   `widePnStructuralSupport_materializes...` is a separate producer
+   completeness theorem, not part of the semantic capstone.
 
-**HYPOTHESIS.** The generic negative-tree capstone name
-`checkNoDagBytes_implies_noContractWin` is the intended model-side precedent.
-V1 still needs a specialization to the literal `VcfPairComplete`
-regeneration, a proof that the wire compression expands to the negative
-grammar, and a structural-boundary-free all-horizons corollary. None of those
-bridges is claimed by this design, and no Lean source belongs in the v1 Rust
-build round.
+The boundary-free soundness and horizon monotonicity lemmas in section 1.1 are
+prerequisites to layer 1. No Lean file exists in the target and no Lean work is
+authorized by this design.
 
 ## 2. Certificate grammar
 
-### 2.1 Logical tree and compact wire form
+### 2.1 Logical tree and literal wire form — amended per R1, R2, R4, R8
 
-**HYPOTHESIS.** The logical certificate is the polarity dual of a positive
-strategy tree. Its uncompressed grammar is:
+**HYPOTHESIS — closed logical grammar.** The polarity dual of the constructor
+table is:
 
 ```text
-RefuteNode :=
-    ChoiceExhausted(FirstRow*)
-  | UniversalCounterexample(reply, EdgeNo)
-  | NoPositiveConstructor(reason)
-  | OpponentTerminal(winner)
-  | OpponentTactical
-  | NoJointCarrier
+NoA(P : claimant FirstStone) :=
+    OpponentTerminal(winner = D)
+  | OpponentForcedTactical(b = 2)
   | NoAdmissibleFirstTurn
+  | ChoiceExhausted(for every admitted PairClass, NoD(child))
 
-FirstRow := FirstStone(a, PairDisposition for every b in S(P,a))
+NoD(P : nonclaimant FirstStone | SecondStone { first }) :=
+    OpponentTerminal(winner = D)
+  | OpponentOwnWinNow(b)
+  | EmptyClaimantThreatFamily(b)
+  | LooseDefenderBoundary(b, tau)          // H_A nonempty and tau < b
+  | UniversalCounterexample(b, reply, No(child))
 
-PairDisposition :=
-    FailsForcingGate(reason)
-  | DefenderCoverSurvives(UniversalCounterexample)
-
-EdgeNo := ChildNo(RefuteNode) | OpponentTerminal(winner)
+PairComplement :=
+    NoNewClaimantThreat
+  | DefenderWinsFirst
+  | LooseReply(tau = 0 | 1)
 ```
 
-**HYPOTHESIS.** `ChoiceExhausted` is valid only when the claimant moves. It reconstructs the
-exact first-stone universe `T(P)`, reconstructs `S(P,a)` for every `a`, and
-gives one negative disposition for every resulting ordered pair. A passing
-unordered pair appears only once after the verifier proves the same-turn
-quotient side conditions. Every other ordered occurrence maps either to that
-same exact final position or to a `FailsForcingGate` leaf.
+`OpponentForcedTactical` is accepted only at a claimant state with no claimant
+own-win-now and `tau(H_D(P)) > 2`. `OpponentOwnWinNow` is accepted only at a
+nonclaimant state with the direct completing sequence. The empty and loose
+leaves have the exact premises shown. There is no `NoPositiveConstructor`, no
+open reason value, no `NoJointCarrier`, and no producer-selected gate-failure
+tag. `PairComplement` is derived virtual expansion, not stored authority.
 
-**HYPOTHESIS.** The wire form is a versioned, backward-referenced DAG encoding
-of this logical tree. It stores only forcing-gate-passing canonical pairs and
-their negative dispositions. The verifier regenerates all of `T`, every `S`,
-and every pair classification; the omitted complement expands uniquely to
-`FailsForcingGate` leaves. A node stores the regenerated counts as redundant
-assertions, and the verifier requires both exact counts and exact set equality.
-This complement encoding avoids one coordinate record per rejected pair while
-retaining the full logical coverage claim.
+**HYPOTHESIS — v1 scope cut.** The accepted `RefuteLeafExact/V1` wire contains
+exactly one `NoAdmissibleFirstTurn` leaf. Every full-tree node form above is a
+mathematical specification and future design constraint, not an accepted v1
+tag. Enabling `ChoiceExhausted`, `UniversalCounterexample`, or any other leaf
+requires a new wire identifier and another hostile review. This smaller cut is
+the manageability decision in section 7.
 
-**HYPOTHESIS.** The file header contains:
+**HYPOTHESIS — literal leaf wire.** Multibyte integers are little-endian;
+unsigned counts use shortest-form unsigned LEB128; coordinates are signed
+little-endian `i16`; players and phases use the closed one-byte enums below.
+The exact byte sequence is:
 
-- magic, format version, and exact class identifier
-  `NoContractWin/VcfPairComplete/V1`;
-- the complete root binding: sorted `(q,r,owner)` stones, current player,
-  `FirstStone`, placements made, nonterminal marker, and a digest of those
-  canonical bytes;
-- claimant identity, which must equal the root mover;
-- the fixed profile bits `pair_complete`, `baseline_t6_kernel`, `unbounded`,
-  `no_group2`, `no_zone`, and `no_census`;
-- hard counts for nodes, negative dispositions, and root ID; and
-- a checksum over the payload for corruption detection. The checksum is not a
-  proof identity; exact decoded fields and replay are authoritative.
+```text
+Header :=
+  magic[8] = "HXRFLV1\0"
+  format_u16 = 1
+  ruleset_u16 = 1
+  coordinate_u16 = 1
+  class_u16 = 1
+  profile_u16 = 1                    // exact-enumeration leaf
+  root_stone_count_uvar
+  root_stones[root_stone_count]      // (q_i16, r_i16, owner_u8), raw sorted
+  mover_u8                            // 0 or 1
+  phase_u8 = 1                        // FirstStone only
+  placements_made_u32
+  terminal_u8 = 0                     // nonterminal only
+  claimant_u8                         // MUST equal mover
+  root_semantic_sha256[32]
+  payload_len_uvar
 
-**HYPOTHESIS.** Node IDs are backward-only. Shared nodes are legal only when every incoming
-path independently reconstructs the same full semantic state, claimant,
-phase—including a `SecondStone.first` witness—and placement clock. Orphans,
-forward references, duplicate propositions, and cycles are rejected. The
-logical object remains a finite tree; DAG sharing is serialization only.
+Payload :=
+  tag_u8 = 0x20                       // NoAdmissibleFirstTurn
+  t_count_uvar
+  q_count_uvar
+  quotient_class_count_uvar
+  fail_no_new_uvar
+  fail_defender_first_uvar
+  fail_loose_0_uvar
+  fail_loose_1_uvar
 
-**HYPOTHESIS.** `NoPositiveConstructor` is a narrow structural leaf, not a
-catch-all `Refuted` tag. It is accepted only when direct replay finds no
-claimant terminal/tactical state leaf and the current nonclaimant node is not a
-tight defender dispatcher, so the positive `VcfPairComplete` grammar has no
-Universal constructor there. A producer resource refusal can never use this
-tag.
+Trailer := payload_sha256[32]
+```
 
-### 2.2 Exact attacker coverage and pair leaves
+No bytes may follow the trailer. Owner/player encodings are
+`0 = Player0`, `1 = Player1`; these are wire values, not Rust discriminants.
+`root_semantic_sha256` hashes the
+canonical sequence
 
-**CODE-FACT.** In wide mode the current first-candidate generator takes empties
-from claimant-pure count-at-least-two windows and adds empties of live defender
-count-at-least-four windows
-([`tss_solver.rs` lines 8961-9046](../packages/hexfield_eq/rust/src/tss_solver.rs#L8961),
-[`lines 9063-9076`](../packages/hexfield_eq/rust/src/tss_solver.rs#L9063)).
-For a first stone, `second_candidates` constructs the turn-start candidates,
-the stronger same-window promotions, and the count-one promotions
-([lines 9384-9444](../packages/hexfield_eq/rust/src/tss_solver.rs#L9384)).
-This is the executable shape of
-`S(P,a) = (T(P) - {a}) union G1(P,a)`.
+```text
+(ruleset, coordinate, class, wire/profile,
+ sorted stones, mover, full phase payload, placements_made, nonterminal=true)
+```
 
-**HYPOTHESIS.** The independent verifier defines `T` and `S` from direct
-six-cell window scans, not by importing either generator. It canonicalizes the
-finite ordered pair universe as follows:
+and is part of proof identity. The payload hash detects corruption only. Exact
+decoded fields, root binding, policy, reachability token, and regeneration are
+authoritative. Unknown enum values, tags, versions, or noncanonical encodings
+MUST be rejected.
 
-1. enumerate every `a` in `T(P)` in raw `(q,r)` order;
-2. enumerate every `b` in `S(P,a)` in raw order and check both placements are
-   legal at the turn start;
-3. if both singleton prefixes are nonwinning and both orders reach the same
-   full state, map `(a,b)` and `(b,a)` to the lexicographically smaller
-   unordered key; otherwise keep the ordered edge distinct; and
-4. require the stored passing-pair keys to equal exactly the keys whose
-   independently rederived forcing gate passes.
+**HYPOTHESIS — future full-tree wire constraint.** A later format MUST use
+backward-only node IDs, canonical raw ordering, the typed logical tags above,
+and the `PairKey` definition in section 2.2. It MUST publish numeric tags and
+every field before implementation. Reuse requires equality of the complete
+state, claimant, clock, and `SecondStone.first`; hashes and D6 images never
+authorize reuse. This paragraph does not reserve silently accepted v1 tags.
 
-**HYPOTHESIS.** No candidate is omitted because the producer did not happen to generate it;
-producer/verifier set equality is the coverage proof.
+### 2.2 Versioned direct mathematics — amended per R2
 
-**CODE-FACT.** The current gate admits a pair only after building its post-pair
-claimant threat family, excluding an unblocked defender win-now, and finding
-minimum hitting number two or no two-cell cover
-([`tss_solver.rs` lines 9446-9558](../packages/hexfield_eq/rust/src/tss_solver.rs#L9446)).
-The producer deduplicates the two legal coordinate orders only after successful
-classification
-([lines 6772-6805](../packages/hexfield_eq/rust/src/tss_solver.rs#L6772)).
+**HYPOTHESIS — coordinates and windows.** Let raw coordinate order be signed
+numeric lexicographic `(q,r)`. The three positive window axes, in order, are
+`(1,0)`, `(0,1)`, and `(1,-1)`. A `WindowKey` is `(axis_index,start_q,start_r)`;
+its six cells are `start + i*axis` for `i=0..5`. Keys are ordered by the tuple
+shown. Direct enumeration takes the 18 length-six keys through each occupied
+cell, deduplicates keys, sorts them, and recounts all six cells from canonical
+stone ownership. Incremental window-store membership is not part of the
+definition.
 
-**HYPOTHESIS.** The logical `FailsForcingGate` leaf has one of three canonical
-reasons, chosen in this order so the wire has one representation:
+For player `X`, write `c_X(P,W)` for its stone count and
+`E(P,W)` for the raw-sorted empty cells. A window is `live_X(P,W)` exactly when
+`c_X(P,W) > 0`, `c_other(X)(P,W) = 0`, and `E(P,W)` is nonempty. `Legal_P(c)`
+is the frozen ruleset's turn-start placement predicate, including emptiness and
+radius. All set outputs below are raw-sorted and duplicate-free.
 
-1. `NoNewClaimantThreat`: the pair creates no post-pair live claimant
-   count-four-or-better family;
-2. `DefenderWinsFirst`: at least one live defender count-four/count-five
-   window remains unhit, so the defender has own win-now; or
-3. `LooseReply`: the new claimant threat family has a hitting set of size zero
-   or one, so the pair does not consume the defender's two-stone turn.
+**HYPOTHESIS — exact attacker universe.** At a nonterminal claimant
+`FirstStone` turn start:
 
-**HYPOTHESIS.** The verifier derives the reason. It does not trust a producer reason tag. A
-pair with no hitting set of size at most two is a positive tactical constructor
-under this contract, not a negative leaf. Encountering such a pair in a
-purported root refutation makes the verifier reject because the claimant has an
-admitted local win constructor.
+```text
+T(P) =
+  { c | Legal_P(c) and exists W,
+        live_A(P,W) and c_A(P,W) >= 2 and c in E(P,W) }
+  union
+  { c | Legal_P(c) and exists W,
+        live_D(P,W) and c_D(P,W) >= 4 and c in E(P,W) }.
 
-**HYPOTHESIS.** A `NoAdmissiblePair(a)` wire run is the compact form for a whole
-`S(P,a)` row in which every pair fails one of those gates. A
-`NoAdmissibleFirstTurn` node compresses all rows only when the verifier obtains
-an empty set of gate-passing canonical pairs for the entire root. These are
-compressions of exact regeneration, not trusted producer summaries.
+G1(P,a) =
+  { c | c != a and Legal_P(c) and exists W,
+        live_A(P,W) and c_A(P,W) >= 1 and
+        a in E(P,W) and c in E(P,W) }.
 
-### 2.3 Defender Universal nodes and surviving covers
+S(P,a) = (T(P) - {a}) union G1(P,a).
 
-**CODE-FACT.** The current PN recurrence already has the required negative
-polarity. At an attacker `Choice`, `dn` is the sum of every child disproof
-number; at a defender `Universal`, `dn` is the minimum child disproof number
-([`tss_solver.rs` lines 5944-5967](../packages/hexfield_eq/rust/src/tss_solver.rs#L5944)).
-Thus an attacker Choice is refuted only when all admitted attacker turns are
-refuted, whereas one defender counterexample refutes a positive Universal.
+U(P) = { (a,b) | a in T(P), b in S(P,a), a != b }.
+Q(P) = |U(P)| = sum_{a in T(P)} |S(P,a)|.
+```
 
-**HYPOTHESIS.** A v1 `UniversalCounterexample` therefore stores exactly one
-legal defender reply plus its negative child. Requiring every defender reply's
-subtree to be refuted would be a strictly stronger claim, would reverse the
-dual recurrence, and would inflate the artifact for no soundness benefit. The
-verifier nevertheless reconstructs the complete positive Universal reply set
-to prove that the selected reply belongs to it.
+All terms are evaluated on the same turn-start `P`; `T` MUST NOT be regenerated
+after applying `a`. The `c_A >= 2` part of `G1` is definitionally redundant
+with `T(P)-{a}` but remains in the equation to make the promotion rule explicit.
+The nonredundant `c_A = 1` part is the weak same-turn promotion. A stale
+defender-block candidate remains in `S` even if applying `a` would kill its
+turn-start defender-window status.
 
-**CODE-FACT.** At a forced boundary the current wide generator uses the
-extendable-hit kernel: a cell belongs to `K_b` exactly when the residual threat
-family can be hit with at most `b-1` further cells
-([`tss_solver.rs` lines 9723-9789](../packages/hexfield_eq/rust/src/tss_solver.rs#L9723)).
-The two-stone optimization is all-or-nothing and falls back unless every first
-reply remains at an exact forced boundary and both legal orders reach the same
-final position
-([lines 3388-3421](../packages/hexfield_eq/rust/src/tss_solver.rs#L3388)).
+**HYPOTHESIS — ordered replay and pair family.** For `(a,b) in U(P)`, replay
+`a` and then `b` through both the engine transition and the independent direct
+transition cross-check. A terminal claimant prefix is `ClaimantCompletion` and
+MUST remain orientation-specific. Otherwise let `Pab` be the full successor
+and define the distinct, `WindowKey`-keyed post-pair family
 
-**HYPOTHESIS.** The verifier accepts a defender counter node only after it
-independently establishes all of the following:
+```text
+Hpair_A(P,a,b) =
+  { E(Pab,W) |
+      live_A(P,W), c_A(P,W) >= 2,
+      (a in W or b in W),
+      c_A(P,W) + [a in E(P,W)] + [b in E(P,W)] >= 4 }.
+```
 
-- defender to move, nonterminal, post-opening, and no defender own win-now;
-- the claimant threat family is nonempty and its exact hitting number equals
-  the phase budget `b`;
-- the complete positive reply set is the independently enumerated `K_b`;
-- the selected reply is legal and is a member of `K_b`; and
-- replaying the selected reply yields exactly the state claimed by its child.
+`DefenderWinsFirst(P,a,b)` holds when a turn-start live defender window with
+count at least four contains neither placement. `tau(F)` is the least cardinality
+of a coordinate transversal of every set in finite family `F`, with
+`tau(empty)=0` and `tau(F)=infinity` if no finite transversal exists. V1 only
+needs the exact cases `0`, `1`, `2`, and `>2`; an empty member gives `>2` for
+the defender budget.
 
-**HYPOTHESIS.** At defender `FirstStone`, the usual selected path is a two-step surviving
-cover: choose `d1 in K_2`, then at defender `SecondStone` choose
-`d2 in K_1` for the residual family, then recursively refute the claimant's
-next `FirstStone` node. The wire uses two ordinary Universal-counterexample
-nodes. It deliberately unfolds the search's atomic `DefenderPair`; v1 needs no
-commutation witness or zone annotation on the refutation side. An opponent
-terminal reached by a selected reply is a typed `OpponentTerminal` leaf.
+Disposition uses this total precedence:
 
-**HYPOTHESIS.** T6 is treated as the baseline forced-hit theorem, not as a
-certificate-relative zone. The proof document describes `K_b` as all legal
-replies when the hitting number is below budget and as a possible strict
-refinement at equality (`PROOF_TSS_DEFENDER_ZONES.md` section 6, T6). V1 accepts
-only the equality boundary used by the pair-complete forcing gate. Group-2,
-ranked zones, FHW gates, substitute replies, and unforced-turn quotients are
-format errors, not ignored extensions.
+1. illegal replay or a nonclaimant terminal prefix is not a disposition and
+   makes the purported root/specification invalid;
+2. claimant terminal after `a` or `b` is `ClaimantCompletion`;
+3. empty `Hpair_A` is `Fail(NoNewClaimantThreat)`;
+4. otherwise `DefenderWinsFirst` is `Fail(DefenderWinsFirst)`;
+5. otherwise `tau = 0` or `1` is `Fail(LooseReply(tau))`;
+6. otherwise `tau = 2` is `TightPair(Pab)`; and
+7. otherwise `tau > 2` is `ClaimantTactical`.
 
-### 2.4 Optional compact base leaves
+Completion and claimant tactical dispositions are positive constructors. A
+negative artifact encountering either MUST reject; they can never be encoded
+as a failing complement.
 
-**HYPOTHESIS — `NoJointCarrier`.** This optional leaf is valid only at a
-nonterminal claimant `FirstStone` node with no claimant own win-now. The
-verifier directly scans the current claimant-pure windows and establishes all
-three side conditions from `RESEARCH_DIVERGENCE_1.md` section 7.1:
+**HYPOTHESIS — exact quotient and expansion.** Define a relation only between
+reverse ordered occurrences. `(a,b) ~ (b,a)` exactly when both occurrences are
+in `U(P)`, both singleton prefixes are nonterminal, and both ordered replays
+produce the identical full semantic state including owner map, mover, phase
+payload, and placement clock. Its two-member class has
+`PairKey = Commuting(min_raw(a,b),max_raw(a,b))`. Every other occurrence,
+including a sole reverse orientation, has
+`PairKey = Ordered(first=a,second=b)`; orientation MUST NOT be inferred from an
+unordered key.
 
-1. fewer than two claimant count-three windows exist;
-2. no count-three/count-two pair has intersecting empty sets; and
-3. no two distinct count-two windows share an unordered pair of empty cells.
+Each class is classified from every member; members MUST agree after the guarded
+commutation check. Every occurrence in `U(P)` maps to exactly one class. Every
+failing class expands uniquely to its derived `PairComplement`; every tight
+class maps to exactly one stored future full-tree disposition; any completion
+or tactical class prevents a negative node. Thus the conceptual expansion is a
+total function from all `Q` ordered occurrences, not merely from stored `K`.
 
-**HYPOTHESIS.** Under those conditions no pair can create the two distinct post-pair threats
-required by an admitted `vcf_pair_complete` turn. The leaf proves only
-`NoContractWin VcfPairComplete`. It is optional because its verifier logic is
-different from ordinary exact enumeration and because it did not hit the
-measured grind roots in the cited research.
+**HYPOTHESIS — required evidence.** Tests MUST exhaustively compare bounded
+small direct-board states to a third, simple specification oracle. Mandatory
+fixtures include the weak count-one `G1` promotion (NCE-03), a stale
+turn-start defender block, sole-orientation keys, both quotient orientations,
+hidden terminal prefixes, and every disposition priority. Telemetry MUST report
+`|T|`, every `|S(P,a)|`, `Q`, quotient class count, all four failing counts,
+positive completion/tactical counts, and stored `K`; producer/verifier equality
+is only an implementation gate.
 
-**HYPOTHESIS — `NoAdmissibleFirstTurn`.** This optional leaf is valid only at a
-nonterminal claimant `FirstStone` node with no claimant own win-now. The
-verifier independently enumerates exact `T(P)` and every exact `S(P,a)` and
-checks that every pair fails at least one of: creation of a new claimant threat,
-answering defender win-now, or hitting number at least two. It is equivalent to
-an empty gate-passing pair list and may be used at any recursive fresh-turn
-node, not just the artifact root.
+### 2.3 Equality-only defender Universal nodes
 
-**HYPOTHESIS.** Neither compact leaf is licensed by producer detection alone.
-The producer may request the tag, but the verifier reruns the entire predicate.
-Any mismatch rejects the file. If either predicate ever holds while ordinary
-independent regeneration finds a passing pair, the leaf and its producer fast
-path are removed.
+**HYPOTHESIS.** At a nonclaimant state let `b = B(P.phase())` and let
 
-### 2.5 D6 handling and graph bounds
+```text
+H_A(P) = { E(P,W) | live_A(P,W) and c_A(P,W) >= 4 }.
 
-**CODE-FACT.** The current search uses the lexicographically least of twelve
-D6 images only for tie ordering; its TT retains exact raw-position equality
+K_b(P,A) =
+  { d in union(H_A(P)) |
+      Legal_P(d) and tau({ H - {d} | H in H_A(P), d notin H }) <= b-1 }.
+```
+
+The residual notation drops threats hit by `d`; equivalently, `d` belongs to a
+size-`b` transversal. `K_b` is complete, raw-sorted, and duplicate-free. At
+`tau=b`, generic T6 licenses omission of replies outside this kernel. V1's
+positive grammar has a Universal constructor **only** at `tau=b`; it does not
+import generic T6's full-legal-set behavior at `tau<b`.
+
+The negative polarity is exact: a claimant Choice is refuted only if every
+admitted pair class is refuted, while one independently checked member of exact
+`K_b` refutes a positive Universal. At defender `FirstStone`, an eventual
+full-tree wire unfolds `d1 in K_2` and then `d2 in K_1` as two ordinary nodes;
+an atomic search `DefenderPair` is never proof evidence.
+
+Group-2, ranked zones, FHW gates, substitute replies, certificate-relative
+zones, and unforced-turn quotients are outside the class and MUST reject.
+
+### 2.4 Closed negative leaves — amended per R2, R4
+
+**HYPOTHESIS.** The state/polarity acceptance matrix is exhaustive:
+
+| leaf | allowed state | directly rederived premises |
+|---|---|---|
+| `NoAdmissibleFirstTurn` | claimant nonterminal `FirstStone` | no claimant terminal or own-win-now; not opponent-forced tactical; exact expansion of `U(P)` contains no completion, claimant tactical, or `TightPair` class. |
+| `EmptyClaimantThreatFamily(b)` | nonclaimant phase with matching `b` | nonterminal; no opponent own-win-now; `H_A(P)` is empty. |
+| `LooseDefenderBoundary(b,tau)` | nonclaimant phase with matching `b` | nonterminal; no opponent own-win-now; `H_A(P)` nonempty; exact `tau < b`. |
+| `OpponentTerminal(D)` | any supported recursive state | direct terminal replay names `D`; claimant terminal rejects. |
+| `OpponentOwnWinNow(b)` | nonclaimant phase | direct `OwnWinNow_D(P,b)` and no prior terminal. |
+| `OpponentForcedTactical(2)` | claimant `FirstStone` | no claimant own-win-now and exact `tau(H_D(P)) > 2`. |
+
+Unknown tags or reasons reject. `tau>b` at a nonclaimant state is claimant
+tactical and is absent from this negative table. `NoAdmissibleFirstTurn` is the
+sole compact v1 leaf because it is definitionally the exact expansion with an
+empty admitted set. The verifier reruns that expansion under the work limits.
+
+`NoJointCarrier` is removed from full-tree v1 and the fallback. It may be
+reconsidered only in a new class/wire version after a present model theorem,
+pinned source, exhaustive bounded-state testing, and measured advantage over
+exact enumeration.
+
+### 2.5 Coordinate closure and graph/work bounds — amended per R6, R8
+
+**CODE-FACT.** The engine stores axial components as `i16`; current checked D6
+transforms can fail when an image leaves that type. Search uses D6 only for tie
+ordering and retains raw exact equality
 ([`tss_solver.rs` lines 10318-10370](../packages/hexfield_eq/rust/src/tss_solver.rs#L10318)).
 
-**HYPOTHESIS.** V1 likewise performs no symmetry quotient in the proof
-identity. Root stones, pair coordinates, and selected defender replies are raw
-axial coordinates. A certificate transformed by any of the twelve D6 actions
-must transform every coordinate, rebuild canonical list order and counts, bind
-to the transformed exact root, and verify. The original bytes must fail against
-the transformed root. No value-bearing cache or shared DAG node crosses a D6
-image merely because a hash or canonical image matches.
+**HYPOTHESIS — D6-safe closure.** For axial `(q,r)`, let its cube triple be
+`(q,r,-q-r)`, computed in checked `i32`. The accepted root domain requires the
+absolute value of every cube component of every root stone to be at most
+31,480. This fixed hexagonal domain is closed under all twelve D6 actions and
+is checked before semantic proof work. The margin covers at least five cube
+units per placement through the future depth-256 ceiling plus a final
+length-six-window scan while remaining inside positive `i16::MAX`.
 
-**HYPOTHESIS.** Initial hard parser limits are 100,000 DAG nodes, 1,000,000
-negative dispositions, depth 256, 1,000,000 root stones, and 8 MiB of bytes.
-All count arithmetic is checked before allocation. These are rejection limits,
-not semantic refutation leaves. The hostile build round may lower them after
-measuring the frozen cohorts; raising them requires another memory review.
+In addition, `D6Safe(c)` means all twelve axial images of `c`, computed first
+in checked `i32`, have both components representable as `i16`. An input is
+`D6ClosedV1` only when the fixed root-domain check passes and `D6Safe` holds for
+every coordinate subsequently encountered while directly enumerating windows,
+`T`, each `S`, pair successors, threat families, `K_b`, and decoded replies at
+every accepted node. The check happens before a discovered coordinate is
+converted or used. If semantic enumeration discovers an unsafe coordinate,
+the root is unsupported and no artifact is accepted.
 
-### 2.6 Size model and the two witnesses
+This predicate is closed under all twelve actions. Every accepted artifact can
+therefore be transformed, fully re-sorted and rehashed, and verified against
+all twelve transformed roots. Original bytes MUST fail against a distinct
+image. No D6 image or hash permits proof-node reuse. The `-32768` construction
+in NCE-06 is rejected by the root preflight.
 
-**HYPOTHESIS.** Let:
+**HYPOTHESIS — external policy.** Limits are selected by the trusted offline
+caller and are not read from artifact bytes. A caller may lower them. The
+compiled `OfflinePolicyV1` MUST NOT permit values above these design ceilings
+without a new memory/work review:
 
-- `R` be root stones;
-- `A` be fresh-turn attacker nodes in the negative support;
-- `Q` be the number of logical ordered `(a,b)` pairs independently checked;
-- `K` be gate-passing canonical pair dispositions stored in the file;
-- `U` be stored defender counterexample nodes; and
-- `L` be terminal or compact base leaves.
+| resource | hard ceiling |
+|---|---:|
+| wire bytes | 8 MiB |
+| root stones | 4,096 |
+| deduplicated direct windows | 80,000 (covers `18 * (root_stones + depth)` with checked headroom) |
+| `|T|` | 4,096 |
+| any `|S(P,a)|` | 4,096 |
+| total ordered `Q` | 2,000,000 |
+| threat-family memberships visited | 8,000,000 |
+| pair-gate primitive membership tests | 16,000,000 |
+| `K_b`/transversal primitive membership tests | 8,000,000 |
+| future full-tree DAG nodes / depth | 100,000 / 256 |
+| retained exact-state bytes | 64 MiB |
+| verifier peak heap | 256 MiB |
+| verifier CPU / wall | 30 s / 60 s |
 
-**HYPOTHESIS.** With fixed-width root coordinates and varint IDs/counts, the planning model is
+The 4,096-stone bound replaces the unsupported one-million-stone value. The
+direct-window bound covers the root plus the future depth ceiling; `Q` and operation
+caps bound the omitted complement. Checked counters MUST be charged before the
+operation and checked arithmetic MUST precede allocation. Pair evaluation MUST
+stream and MUST NOT allocate a `T x T` table. Exact-state retention includes
+all keys, owner maps, phase payloads, and memo overhead, not only serialized
+coordinates.
 
-```text
-bytes = 64 + 5R
-      + sum_AttackNode(3 + 10..12 * passing_pairs)
-      + sum_UniversalNode(6..8)
-      + sum_Leaf(1..5)
-      + checksum/padding.
-```
+CPU/wall cancellation is checked at deterministic work checkpoints by the
+supported offline API. Crossing any count, CPU, wall, heap, or allocation
+budget returns `UnsupportedPolicyBudget`; malformed structure returns
+`Rejected`. Neither result is a semantic negative leaf. Valid-but-hostile and
+malformed inputs MUST terminate deterministically within the selected budget.
 
-**HYPOTHESIS.** The logical size is `O(Q + U + L)`. Complement encoding makes serialized size
-`O(A + K + U + L)`, while replay time remains `O(Q + defender-family work)`.
-DAG sharing is by full replay state and can only reduce the tree size.
+### 2.6 Size and work model — amended per R6, R7
 
-**HYPOTHESIS — estimate, not measurement.** On naturally exhausted trees,
-each stored passing pair or selected defender reply normally corresponds to an
-expanded arena obligation. Using a planning band of 10-16 serialized bytes per
-reported exhausted node, plus the root binding, gives:
+**HYPOTHESIS.** Required causal metrics are:
 
-| witness | reported exhausted nodes | root stones | planning estimate |
-|---|---:|---:|---:|
-| `l9mxn59` | 226 | 17 | 2.4-3.7 KiB |
-| `mvp2lvc` | 17,957 | 45 | 176-281 KiB |
+- `R`: root stones; `W`: deduplicated direct windows;
+- `A`: fresh-turn attacker propositions; ordered `Q`; quotient classes; and
+  stored tight `K` dispositions;
+- stored edge occurrences, `U_d`: defender counter nodes, typed leaves `L`,
+  unique propositions, and retained exact-state-key bytes;
+- threat-family memberships, pair-gate operations, and kernel/transversal
+  operations; and
+- encoded bytes, producer CPU/wall/heap, verifier CPU/wall/heap, and cold-search
+  CPU/wall.
 
-**HYPOTHESIS.** These figures are not allowed to become implementation folklore. The producer
-must report `A`, `Q`, `K`, `U`, `L`, unique DAG nodes, encoded bytes, and the
-corresponding minimal stored-search snapshot bytes. Section 6 makes the
-measured ratios gates.
+Logical full-tree replay is `O(Q + defender-family work + edge occurrences)`;
+complement encoding can make bytes `O(A + K + U_d + L)` while leaving replay
+quadratic in `|T|` until the absolute `Q` cap intervenes. No byte or node-count
+density is a proxy for regenerated work.
+
+The earlier 10-16 bytes per “reported exhausted node” estimate and the
+17,957-node `mvp2lvc` premise are withdrawn. The committed 226-node
+`l9mxn59` row does not supply `Q/K/U/L`, edge, state-byte, or emission evidence;
+the available `mvp2lvc` row is cap-bound `Unknown`, not a pinned natural
+exhaust. Neither witness may authorize size, LOC, or performance claims until
+the manifest records the exact command, flags, binary hash, termination reason,
+arena nodes, expansions, edge occurrences, all metrics above, wall/CPU/heap,
+and raw output.
+
+Reports MUST give per-root median/p95/max and aggregate weighted totals. Leaf
+v1 MUST be compared with a predeclared competent `RootPlusEmptySetV1` archival
+baseline containing the same canonical root and semantic identity; its bytes
+MUST be no more than 110% of that baseline on every root and in aggregate. A
+future full-tree format MUST be smaller than a compact, competently implemented
+stored-support representation with the same root and semantic keys both in
+aggregate and on every named gate witness. On a common exact-empty root it MUST
+emit the leaf-v1 representation byte-for-byte instead of a larger tree. An
+intentionally verbose baseline is inadmissible.
 
 ## 3. Producer
 
-### 3.1 Existing arena facts and the emission seam
+### 3.1 Emission seam
 
-**CODE-FACT.** `WidePnEntry` retains a node, proof/disproof numbers, depth, and
-child vectors; each child retains its move, result, optional entry/future key,
-and prior
-([`tss_solver.rs` lines 2782-2815](../packages/hexfield_eq/rust/src/tss_solver.rs#L2782),
-[`lines 3026-3069`](../packages/hexfield_eq/rust/src/tss_solver.rs#L3026)).
-The production wide call inserts the root, runs the search, and still has the
-whole arena available before materialization
-([lines 1472-1503](../packages/hexfield_eq/rust/src/tss_solver.rs#L1472)).
-The current materializer immediately refuses unless the root has `pn == 0`
-([lines 7147-7168](../packages/hexfield_eq/rust/src/tss_solver.rs#L7147)), so a
-`dn == 0` arena produces no artifact.
+**CODE-FACT.** The wide arena is live after `search.run` and before current
+positive materialization
+([`tss_solver.rs` lines 1472-1503](../packages/hexfield_eq/rust/src/tss_solver.rs#L1472)).
 
-**HYPOTHESIS.** The owner-gated build should add a sibling
-`materialize_refutation_v1` call after `search.run` and before the arena is
-dropped. It must not route through the positive `TssCertificate` or
-`AttemptResult.cert` field. The result is an optional side artifact with its
-own type and verifier result; the ordinary deep result remains
-`ProofStatus::Unknown`.
+**HYPOTHESIS.** Leaf v1 uses a solve-local, read-once
+`TSS_REFUTE_CERT_V1=off|emit` flag. `off` takes the historical path with no new
+allocation, ordering, statistic, cache entry, digest, or output byte. `emit`
+does no work until ordinary search terminates and cheap root/profile/policy
+eligibility succeeds. It then performs independent producer-side exact
+enumeration. The side artifact has its own type; ordinary status remains
+`Unknown`. Producer self-verification uses the public independent entry point,
+and rejection only drops the artifact and records isolated telemetry.
 
-**HYPOTHESIS.** The call is gated by a solve-local, read-once
-`TSS_REFUTE_CERT_V1=off|emit` flag. `off` takes the historical path without a
-new arena allocation, child reorder, stat mutation, digest field, cache entry,
-or output byte. `emit` does no extra work until the ordinary search terminates
-and the cheap eligibility predicate succeeds. Thus non-exhaust solves do not
-pay for a shadow provenance sidecar.
+### 3.2 Eligibility and future full-tree support — amended per R3
 
-### 3.2 Eligibility and materialization algorithm
+**HYPOTHESIS — leaf v1.** Eligibility requires the exact root conditions,
+natural-exhaust profile marker, `expansions < node_cap`, policy preflight, and a
+producer enumeration whose admitted pair set is empty. It does not rely on an
+arena zero. Exact counts are encoded, the independent verifier is invoked, and
+bytes are emitted only on acceptance.
 
-**CODE-FACT.** The search loop stops when the root has either zero proof or
-zero disproof number, when the node cap binds, or when staged deepening cannot
-continue
-([`tss_solver.rs` lines 4529-4568](../packages/hexfield_eq/rust/src/tss_solver.rs#L4529),
-[`lines 4621-4661`](../packages/hexfield_eq/rust/src/tss_solver.rs#L4621)).
-Production currently exposes root proof/disproof numbers only in test-oriented
-paths and telemetry, while the wide positive result is built later from
-`search.materialize`
-([lines 1490-1503](../packages/hexfield_eq/rust/src/tss_solver.rs#L1490),
-[`lines 1565-1594`](../packages/hexfield_eq/rust/src/tss_solver.rs#L1565)).
+**HYPOTHESIS — mandatory algorithm before any full-tree version.** A full-tree
+producer MUST first compute a bottom-up memoized classification keyed by exact
+arena entry/direct-edge proposition:
 
-**HYPOTHESIS.** Retain one local termination enum until the post-search seam:
-`Proven`, `NaturalExhaust`, `NodeCap`, `DepthBoundary`, `HorizonBoundary`, or
-`Stalled`. This value is producer telemetry, never verifier evidence.
-`NaturalExhaust` requires all section 1.2 conditions and an independently
-selected support free of forbidden boundaries.
+```text
+Support = Structural(negative_plan) | Unresolved(cause_set)
 
-**HYPOTHESIS.** Materialization is a deterministic replay from the exact root:
+Cause = DepthCutoff | HorizonRefusal | CensusDismissal | NodeCap
+      | StalledOrLazyFrontier | UnsupportedDefenderBoundary
+      | ClaimantPositiveLeaf(kind) | OpponentStructuralLeaf(kind)
+      | UnexplainedCurrentRefuted | PolicyBudget
+```
 
-1. At a claimant `Choice` with `dn == 0`, regenerate the producer's complete
-   pair list, key it by the artifact's canonical pair key, and require every
-   gate-passing pair to have a genuinely refuted child. Recursively materialize
-   all such children. Recompute gate-failing rows only to choose the compact
-   wire form.
-2. At a defender `Universal` with `dn == 0`, select the lexicographically least
-   genuinely refuted reply, replay it, and recursively materialize that one
-   child. A child whose only zero came from `DepthCutoff` is not genuine; the
-   current helper already distinguishes that case
-   ([`tss_solver.rs` lines 5908-5921](../packages/hexfield_eq/rust/src/tss_solver.rs#L5908)).
-3. If the search child is an atomic `DefenderPair`, replay its two placements
-   and emit two ordinary Universal-counter nodes. Do not copy the positive
-   commutation representation.
-4. Reclassify every terminal `Refuted` arena state by replay. Accept only a
-   structural gate failure, exact empty attacker set, opponent terminal, or
-   independently materializable recursive refutation. A horizon/census/depth
-   cause makes materialization return `None`.
-5. Memoize by the full exact position key plus claimant. A repeated state may
-   reuse an already built backward node; a hash alone never authorizes reuse.
-6. Sort records canonically, encode them, call the independent v1 verifier, and
-   emit bytes only if that verifier accepts. Verifier rejection drops the side
-   artifact and increments diagnostic telemetry; it cannot alter the ordinary
-   `Unknown` result.
+`OpponentStructuralLeaf(kind)` records the typed replay cause and produces a
+`Structural` leaf; it is retained in provenance telemetry rather than confused
+with a generic zero. Claimant terminal/completion/tactical produces
+`Unresolved({ClaimantPositiveLeaf(kind)})` for a negative plan. A generic
+current-source `Refuted` is never structural without direct reclassification.
 
-**HYPOTHESIS.** Facts currently discarded but needed at the seam are only the
-root numbers/termination classification and the still-live arena itself. The
-producer does **not** need to retain every gate failure or add a refutation
-cause to every hot-path node: exact pairs and causes can be regenerated after
-natural exhaustion. Direct defender terminal edges already retain their move;
-replay recovers the outcome. This choice is the main reason v1 can have zero
-non-exhaust hot-path memory cost.
+The fixed point MUST obey:
 
-### 3.3 Cost and isolation budget
+1. Reconstruct the exact semantic state and apply the closed constructor
+   priority before consulting PN numbers.
+2. At claimant Choice, independently regenerate every admitted quotient class.
+   `Structural` requires a structural child plan for every tight pair; one
+   unresolved child makes the Choice unresolved, and a completion/tactical
+   pair makes it claimant-positive.
+3. At defender Universal with exact `tau=b`, recursively classify every member
+   of exact `K_b`. The result is structural if at least one member has a
+   structural plan. Choose the raw-lexicographically least **successful plan**;
+   continue past earlier unresolved members. If none succeeds, union their
+   cause sets.
+4. An atomic `DefenderPair` edge is structural only after both placements are
+   unfolded, both intermediate transitions and kernels are checked, and the
+   final child plan succeeds.
+5. Memo reuse requires complete state/claimant/phase-clock equality, including
+   `SecondStone.first`; recursion through an in-progress key is a cycle and
+   unresolved. Only a completed plan may become a backward wire reference.
+6. Derive `NaturalExhaust` from the completed root fixed point after all stage
+   reopens and refreshes. The search termination enum is telemetry only.
 
-**HYPOTHESIS.** Let the logical exhausted support include all virtual
-gate-failure leaves. Producer emission is one deterministic pass over that
-support: `O(Q + K + U + L)` time and `O(K + U + L)` additional memory. It may
-not invoke PN search, deepen a cutoff, expand a new recursive position, consult
-a persistent proof/refutation cache, or change a child result. Regeneration for
-encoding is allowed; new search is not.
+The current shallow helper at lines 5908-5919 is explicitly insufficient. The
+mandatory NCE-01 family includes a lexicographically earlier descendant cutoff,
+a later structural reply, reversed order, lazy thunks, horizon-refuted nodes,
+and the current both-winners-to-`Refuted` terminal arm. NCE-08 requires claimant
+terminal replay to fail negative materialization and opponent terminal replay
+to become the typed structural leaf.
 
-**HYPOTHESIS.** Initial resource targets are:
+### 3.3 Cost, isolation, and utility — amended per R3, R6, R7
 
-- peak additional producer heap at most 32 bytes per unique emitted DAG node
-  plus the final byte buffer, and below 16 MiB for `mvp2lvc`;
-- emission wall excluded from search-node telemetry and separately reported;
-- flag-off status, positive-certificate bytes, stats, node counts, TT
-  signatures, and corpus output are bit-identical; and
-- with emission enabled, every non-natural result has identical search
-  behavior and no materialization scan.
+**HYPOTHESIS.** Producer enumeration and any future support fixed point are
+subject to the same externally supplied semantic-work ceilings as verification.
+They may not invoke PN search, deepen, expand a new recursive state, consult a
+persistent proof cache, or mutate a child result. The future classifier is one
+memoized pass over available arena propositions plus bounded semantic
+regeneration; alternative defender plans are classified once, not searched.
 
-**HYPOTHESIS.** Any need to retain window snapshots, gate-failure vectors, or refutation
-subtrees during ordinary search is a scope alarm. The build returns to hostile
-design review before accepting such a regression.
+The prototype purchases one declared utility: a portable archival class fact
+expected to receive `N = 3` independent offline audits. Let `S` be cold search
+CPU/wall, `E` all post-search emission cost including regeneration, support
+planning if any, encoding, and self-verification, and `V` one standalone
+verification. All measurements use the same frozen root and binary.
+
+Hard producer and end-to-end gates are:
+
+- absolute per-root producer CPU/wall is at most 30 s/60 s and peak additional
+  heap at most 256 MiB, with lower caller limits honored;
+- aggregate `E < 0.25*S`; producer p95 is below `0.35*S` and max below
+  `0.50*S` on matched roots;
+- aggregate enabled solve `S+E < 1.25*S`; per-root p95 and max are below
+  `1.40*S` and `1.50*S`, respectively; and
+- amortized archival cost satisfies `E + 3*V < 3*S` both in aggregate and for
+  every preregistered named gate witness.
+
+Sub-millisecond roots may be batched for ratios, but absolute totals and maxima
+remain reported. If three audits are not a real owner workflow, the utility
+premise fails and the artifact-only prototype is economically rejected. The
+NCE-05 schedule (`E=0.70*S`) fails both producer and end-to-end gates even if
+verification alone is faster.
+
+Flag-off status, positive bytes/digests, stats, nodes, TT signatures, logs, and
+corpus output MUST be byte-identical. With emission enabled, a noneligible root
+performs only bounded cheap preflight and no semantic enumeration or arena scan.
+Any hot-path window snapshot, failure vector, or refutation-tree retention is a
+scope alarm requiring hostile review.
 
 ## 4. Independent verifier arm
 
-### 4.1 Module and API boundary
+### 4.1 Trust-base and API contract — amended per R5, R8
 
-**HYPOTHESIS.** V1 lives in a new module such as
-`tss_refute_verify.rs`, with its wire types either in that module or a small
-`tss_refute_cert.rs`. It must not modify or add variants to `tss_verify.rs`.
-Its public result is a typed class fact, for example
-`VerifiedClassRefutation { class: VcfPairComplete, root_digest }`, not
-`ProofStatus`, `HardValue`, or `TssCertificate`.
+**HYPOTHESIS.** V1 lives in a new isolated module such as
+`tss_refute_verify.rs`; data-only wire constants may live in
+`tss_refute_leaf_cert.rs`. It MUST NOT modify `tss_verify.rs`. Its public result
+is, for example:
 
-**HYPOTHESIS.** The firewall is stricter than ordinary code reuse:
+```text
+VerifiedClassRefutation {
+  ruleset, coordinate_version, class_version, wire_version,
+  root_semantic_sha256, claimant, reachable_root_token
+}
+```
 
-- forbidden imports/calls include `WidePnSearch`, `WidthOptions`,
-  `ordered_threat_creating_moves_with_width`, `WideTurnGate`,
-  `wide_family_min_hitting_set`, `forced_defender_replies`,
-  `extendable_hit_kernel`, `forced_defender_pair_plan`, producer canonical
-  ordering, and any producer-only window summary;
-- allowed dependencies are engine state/placement primitives, coordinate and
-  player types, a local checksum implementation/library, and separately
-  audited direct geometry; and
-- the verifier implements its own legal-move check, direct six-cell window
-  enumeration, count classification, hitting-set-at-most-two search, pair
-  quotient check, and D6 transforms.
+It is not convertible to `ProofStatus`, `HardValue`, or `TssCertificate`.
 
-**HYPOTHESIS.** Even apparently harmless shared `T(P)` or hitting-set helpers violate this v1
-firewall. If duplication becomes unmanageable, the answer is to shrink the
-scope, not to merge producer and verifier truth sources.
+**HYPOTHESIS — deliberately shared trust base.** Runtime dependencies are
+transitively allowlisted to:
 
-### 4.2 Re-derivation obligations
+- Rust core/std checked integer, slice, allocation, and time primitives;
+- raw `HexCoord` and `Player` value types and the frozen phase value type;
+- read-only canonical stone iteration plus engine placement/terminal primitives,
+  each used only alongside the independent direct-state cross-check;
+- a reviewed SHA-256 implementation; and
+- verifier-private codec, policy counters, direct board map, direct geometry,
+  transition, terminal, window, transversal, and semantic functions reachable
+  only from the refutation verifier.
 
-**HYPOTHESIS.** After strict decoding and exact root binding, the verifier
-performs these obligations from scratch:
+Sharing engine transitions means independence concerns theorem analysis rather
+than the entire game engine. Before an engine-applied child contributes to
+acceptance, verifier-private direct state must independently check legality,
+owner insertion, mover/phase/`SecondStone.first` transition, placement clock,
+and terminal result and require exact agreement.
 
-1. Enumerate all potentially live length-six windows by taking the 18 windows
-   through every occupied cell, deduplicate their `(axis,start)` keys, and
-   recount ownership directly from the board.
-2. Reconstruct `T(P)` from claimant count-at-least-two windows and live
-   defender count-at-least-four windows.
-3. For every first stone reconstruct `G1(P,a)` and exact `S(P,a)`; check
-   turn-start legality and the same-turn quotient rather than trusting the
-   stored pair key.
-4. Apply both attacker placements through the engine and independently check
-   the new claimant threat family, defender own win-now, and exact hitting
-   number. Compare the complete passing-pair set with the stored dispositions.
-5. At every defender counter node directly derive the claimant threat family,
-   budget, `not own_win_now`, exact `tau == b`, and complete `K_b`; check the
-   selected reply and replay its successor.
-6. Recompute every optional base predicate from direct window facts.
-7. Before accepting any negative node, prove that no claimant terminal,
-   lambda-one, or other admitted local positive constructor exists at that
-   exact state and clock. An opponent tactical fact must be independently
-   established before accepting `OpponentTactical`.
-8. Reconstruct the full state reached at every DAG node and require equality on
-   every reuse. Verify phase and placement-clock transitions per placement.
-9. Expand the accepted DAG conceptually into the logical polarity-dual tree and
-   conclude the class-relative negative proposition by well-founded induction.
+The transitive denylist includes all `tss_solver` and positive-verifier modules,
+`WidePnSearch`, `WidthOptions`, every producer generator/order/canonicalizer,
+`Board::windows`, `WindowStore`, `threats::analyze`/`threats_shared`, and any
+shared or “neutral” helper computing live windows, `T/G1/S/U`, threat families,
+transversals, `K_b`, quotient classes, gate outcomes, normalized semantic
+decoding, or semantic successors. Moving forbidden logic behind another name
+does not make it allowed.
 
-**HYPOTHESIS.** The verifier does not have to enumerate every legal defender
-cell outside `K_b`: the baseline T6 premise proves that an off-kernel reply
-cannot be a required positive Universal edge at the equality boundary. It does
-have to derive the complete finite `K_b` and the premise independently. V1 does
-not accept the `mhs < b` case, where T6 says the kernel becomes the full legal
-set.
+Data-only tag constants, plain wire structs, and SHA-256 primitives may be
+shared. Producer semantic normalization/decoding may not be shared unless the
+literal decoder is separately modeled, golden-tested, and approved in the
+call-graph review.
 
-### 4.3 Fail-closed rules
+### 4.2 Re-derivation obligations — amended per R1, R2, R4, R5
 
-**HYPOTHESIS.** Verification returns false on the first of:
+**HYPOTHESIS.** After strict decoding, version/policy checks, reachable-token
+validation, D6 preflight, and exact root binding, the verifier MUST:
 
-- bad magic/version/class/profile, unknown tag or noncanonical varint;
-- trailing bytes, checksum mismatch, count overflow, bound excess, or failed
-  allocation preflight;
-- root mismatch in any stone owner, mover, phase, placement count, terminal
-  record, claimant, or digest;
-- an Opening/SecondStone root, terminal root, wrong claimant, or inconsistent
-  phase schedule;
-- duplicate/unsorted pair records, duplicate replies, bad node IDs, forward
-  references, cycles, or orphans;
-- any regenerated-set/count mismatch;
-- an illegal placement, hidden terminal prefix, wrong full successor state, or
-  unequal pair quotient;
-- a claimed gate failure that passes, a missing passing pair, an extra pair, or
-  a `tau > 2` positive tactical pair;
-- any exact state with a claimant terminal/tactical positive constructor, or a
-  false `NoPositiveConstructor`/`OpponentTactical` classification;
-- a defender counter outside exact `K_b`, wrong budget, own win-now, or a loose
-  `tau < b` boundary;
-- a false compact base predicate;
-- a depth/horizon/cap/census/zone/Group-2/quotient boundary tag; or
-- a DAG reuse at a merely hashed, D6-related, or otherwise nonidentical state.
+1. Build its private direct board from canonical stones and enumerate/deduplicate
+   literal `(axis,start)` windows; it MUST not read an incremental window store.
+2. Reconstruct exact `T`, every `G1/S`, ordered `U/Q`, quotient class, pair
+   family, terminal prefix, defender precedence, `tau` case, and total
+   disposition under section 2.2 while charging work before execution.
+3. Prove that there is no claimant terminal/own-win-now constructor and no
+   opponent-forced-tactical leaf misclassification before accepting
+   `NoAdmissibleFirstTurn`.
+4. Require an empty admitted set and exact equality of `T/Q/class/failure`
+   telemetry with redundant payload counts. A producer count never limits the
+   verifier loop.
+5. Cross-check every engine placement, phase transition, semantic successor,
+   and terminal result against the private direct state.
+6. Conclude `BoundaryFreeNo` using the closed matrix, then use the model soundness
+   and clock-lifting layers; it MUST NOT appeal to search exhaustion.
 
-**HYPOTHESIS.** Malformed artifacts never panic, allocate from unchecked counts, partially
-accept, or degrade to a weaker class claim.
+Before a future full-tree version, the same arm must additionally derive exact
+`K_b`, validate one selected equality-boundary reply, replay every DAG reuse,
+and reject claimant-positive constructors at every state. The future work does
+not broaden leaf-v1 acceptance.
 
-### 4.4 Replay-cost bar
+Tests MUST include independent golden vectors from a third simple oracle and
+one-sided defect injection: omit a weak promotion in only one implementation,
+retain one stale defender window, flip each `tau` case, corrupt
+`SecondStone.first`, and change only one transition/terminal result. Seeded
+producer/verifier agreement alone is insufficient.
 
-**HYPOTHESIS.** Replay must beat rerunning the search on the same frozen
-natural-exhaust cohort. The preregistered measurement is a quiet, single-thread,
-release binary with warmed code pages, fresh solver state for each search, and
-at least 30 batched repetitions per small witness. The hard gates are:
+### 4.3 Enforced fail-closed rules — amended per R2, R4, R5, R6, R8
 
-- total verifier wall over all emitted cohort artifacts is less than 75% of
-  total cold rerun search wall;
-- for each of `l9mxn59` and `mvp2lvc`, median verifier wall is strictly below
-  median cold rerun wall, with a target at or below 50%;
-- verifier p95 is below the matching rerun p95 on the cohort; and
-- each DAG node is replayed at most once per exact proposition, while every
-  logical `(a,b)` gate is evaluated at most once.
+**HYPOTHESIS.** Verification returns `Rejected` on malformed or semantically
+false input and `UnsupportedPolicyBudget` on an externally imposed resource
+limit. It MUST never partially accept, panic, or turn either result into a
+weaker claim. It fails on the first of:
 
-**HYPOTHESIS.** The economic design is killed if aggregate replay is not strictly faster than
-rerun, even if individual noisy sub-millisecond rows fluctuate. A verifier that
-secretly invokes search automatically fails this gate.
+- bad magic, noncanonical integer, trailing byte, checksum, count, length,
+  allocation preflight, or unknown field/tag;
+- any ruleset/coordinate/class/wire/profile mismatch or an unproved semantic
+  compatibility path;
+- root/reachable-token mismatch in stone, owner, mover, full phase payload,
+  clock, claimant, terminal status, semantic digest, or D6-safe closure;
+- unsorted/duplicate stones or pair facts, invalid owner/coordinate, illegal
+  move, hidden terminal mismatch, wrong quotient orientation, or unequal direct
+  and engine successor;
+- any regenerated `T/S/U/Q`, class, reason, count, or disposition mismatch;
+- any claimant completion/terminal/tactical constructor or a false closed leaf;
+- any depth/horizon/cap/census/zone/Group-2/quotient resource tag;
+- any semantic-work, exact-state-byte, CPU, wall, or heap budget excess; or
+- for a future DAG, bad/backward IDs, cycle/orphan, nonidentical reuse,
+  `SecondStone.first` alias, bad `K_b`, loose Universal, or unexplained
+  current-source `Refuted`.
 
-## 5. Consumption roadmap (post-v1, informational)
+CI MUST enforce the firewall in three ways: a source/import denylist; a compiled
+call-graph reachability audit from the public verifier entry point against
+forbidden symbols/modules; and one-sided mutation builds plus third-oracle
+golden tests. A waiver, indirect call, generated table, or newly reachable
+semantic helper fails the build until hostile review. CI records the audited
+compiler, feature set, symbol map, and allowlist hash.
 
-**HYPOTHESIS.** V1 has no consumer. After artifact and verifier gates pass, the
-following are separate owner decisions:
+### 4.4 Replay and lifecycle cost bar — amended per R6, R7
 
-1. **Trainer width-exhaust backup.** Keep the ordinary scalar result
-   `Unknown`; attach a separate categorical
-   `NoContractWin(VcfPairComplete)` fact or auxiliary target. It must not enter
-   `backup_virtual` as `-1`, force an opponent move, or rewrite game value.
-2. **Atlas NO-side.** Display and query a distinct
-   `CERTIFIED-NO(VcfPairComplete)` state with artifact hash and verifier
-   version. Do not merge it with full-game `NO`/`Loss`.
-3. **Corpus NO rows.** Add a certification column to NO-labelled rows and
-   preserve the original reference label. This can distinguish a class theorem
-   from an uncertified heuristic `No` without claiming equivalence.
-4. **Harness disproof coverage.** Populate the existing width-exhaust/disproof
-   metric with `eligible`, `emitted`, `accepted`, bytes, emit wall, and replay
-   wall. Keep cap-bound Unknowns in a separate denominator.
-5. **Lean/Rust correspondence.** Only after the byte grammar is frozen and the
-   Rust arm survives hostile review, connect the literal decoder/checker to the
-   target theorem family in section 1.3.
+**HYPOTHESIS.** Measurements use a quiet single-thread release binary, warmed
+code pages, fresh solver/verifier state, at least 30 batched repetitions for
+small roots, a preregistered training cohort, and an untouched held-out cohort.
+Reports include median/p95/max and weighted totals for all causal metrics in
+section 2.6, including absolute `Q`, operation counters, CPU, wall, and heap.
 
-**HYPOTHESIS.** Cache reuse, search pruning, atlas-to-solver imports, and trainer consumption
-are explicitly post-v1. A verified refutation may be stored as an artifact, but
-the v1 search never trusts one to close a node.
+Hard replay requirements are logical ANDs:
 
-## 6. Gates and kill criteria
+- total verifier CPU and wall are each below 75% of matched cold rerun search;
+- each preregistered named witness median is below rerun, with a target at or
+  below 50%, and verifier p95 **and max** are below matched rerun tails;
+- every artifact remains within the absolute work/time/heap policy; and
+- verification invokes no search and performs no semantic operation without
+  charging the appropriate absolute counter.
 
-**HYPOTHESIS.** Before implementation measurements, freeze manifests and hashes
-for the 248 grind roots, the forcing/puzzle NO rows, the human-160 residue, and
-the two named witnesses. Record the exact solver flags, binary revision,
-node/TT caps, and which rows are natural exhaust versus cap-bound. Moving a row
-between cohorts after results are visible invalidates the gate.
+“At most once” is reported for memo multiplicity but is not a work bound. The
+producer/end-to-end/amortization gates in section 3.3 are equally mandatory.
+Malformed and valid-but-hostile NCE-02 roots are in the robustness battery and
+must terminate with the same deterministic budget classification.
 
-**HYPOTHESIS.** The build must pass every gate below:
+## 5. Consumption roadmap (post-v1, informational) — amended per R1
+
+**HYPOTHESIS.** V1 has no live consumer. An archival record carries the typed
+literal proposition arguments, semantic versions, root identity, claimant,
+and reachability token. Any later trainer, atlas, corpus, or harness consumer
+is a separate owner decision and MUST preserve `Unknown` as ordinary game
+status.
+
+Potential future uses are a categorical
+`NoContractWin(VcfPairComplete/EqualityDispatch/V1)` auxiliary target, a
+distinct atlas `CERTIFIED-NO(class)` label, a corpus certification column, and
+disproof-coverage telemetry. None may become `-1`, full-game `Loss`, a forced
+opponent move, search pruning, a proof cache, or imported atlas truth. The
+executed-byte/model correspondence is a separate later proof round.
+
+## 6. Gates, NCE disposition, and kill criteria — amended per R2, R3, R5, R6, R7, R8
+
+**HYPOTHESIS.** Before measurements, freeze hashes/manifests for training and
+held-out cohorts, exact commands, solver flags, binary/compiler/features,
+policy limits, caps, natural/cap termination reasons, and raw outputs. Cohort
+movement after results are visible invalidates the campaign. The two historical
+full-tree witnesses are evidence rows only until independently pinned; leaf v1
+does not promise they emit.
+
+Every required-result cell below is a logical AND. Failure of any applicable
+gate stops the artifact cut; there is no “fail both” exception.
 
 | gate | required result | hard stop |
 |---|---|---|
-| Eligibility | 100% of roots classified as v1 natural exhaust before the build either emit an artifact or have a pre-registered unsupported root-phase reason; `l9mxn59` and `mvp2lvc` both emit. | Any eligible FirstStone natural exhaust silently falls back because materialization cannot explain a `Refuted` node. |
-| Acceptance | The independent verifier accepts 100% of emitted artifacts on every frozen cohort. Producer self-verification uses the same public entry point as offline replay. | Any emitted artifact rejection. |
-| No false scope | No cap-bound, finite-horizon, depth-cutoff, census, Group-2, zone, Opening-root, or claimant-SecondStone-root attempt emits. | One such emission. |
-| Class boundary | The ordinary solve status stays `Unknown`; no `HardValue`, `Loss`, trainer backup, or full-game label is minted. | Any exposure as game value. |
-| Flag-off identity | Statuses, positive certificate bytes/digests, stats, node counts, TT behavior signatures, logs, and corpus outputs are byte-identical with the feature compiled and `off`. | One unexplained byte or behavior difference. |
-| Enabled non-exhaust identity | With `emit`, non-natural searches have identical nodes, selected paths, and positive outputs and perform no post-search tree scan. | Any search regression or result change. |
-| Mutation rejection | 100% rejection for dropped/extra pair, changed root owner/phase/claimant, changed reply, bad count/ID/order, false compact leaf, injected boundary/zone tag, cycle/orphan, checksum-only repair, and D6 root mismatch. | One accepted semantic mutation. |
-| D6 | Each accepted artifact transformed and re-canonicalized under all twelve symmetries verifies against the transformed root; original bytes fail on a different image. | Any asymmetric semantic result or cross-root acceptance. |
-| Size density | Cohort median at most 16 bytes and p95 at most 24 bytes per exhausted search node; `l9mxn59 <= 4 KiB`, `mvp2lvc <= 320 KiB`. | Either witness exceeds twice its bar, or cohort p95 exceeds 32 bytes/node. |
-| Stored-search comparison | Artifact bytes are at most 50% of a predeclared `StoredSearchV0` serialization of the exact negative support (full replay keys, moves, kinds, and child links) on aggregate and on both named witnesses. | Artifact is no smaller than the stored-search alternative on aggregate. |
-| Producer memory | Additional peak heap follows section 3.3 and remains below 16 MiB on `mvp2lvc`. | Unbounded growth, unchecked allocation, or a hot-path retention requirement. |
-| Replay cost | All section 4.4 hard bars pass. | Aggregate verifier wall is at least rerun wall, either named witness median does not improve, or search is called by verification. |
-| Firewall | A source audit finds no forbidden solver/generator import and direct tests compare independent `T`, `S`, gate, and `K_b` results with the producer on seeded positions. | Shared truth helper, shared window summary, or unexplained differential. |
+| Leaf eligibility | Every reachable, D6-closed, policy-bounded claimant `FirstStone` root with an exactly empty admitted set emits and self-verifies; every other root returns a typed unsupported/not-empty reason. | Silent fallback, use of PN zero as evidence, or emission with a positive class. |
+| Acceptance | Independent verifier accepts 100% of emitted training and held-out artifacts through the public entry point. | One emitted rejection. |
+| No false scope | No cap/depth/horizon/census/Group-2/zone/opening/claimant-SecondStone/root-policy failure emits. | One such emission. |
+| Class boundary | Ordinary status remains `Unknown`; no hard value, Loss, trainer backup, or full-game label is minted. | Any game-value exposure. |
+| Flag isolation | Flag-off named observables are byte-identical; enabled noneligible roots perform no semantic scan and preserve search/output identity. | Any unexplained difference or search regression. |
+| Specification | Exhaustive bounded-state oracle comparison and every R2 adversarial fixture pass; exact telemetry is recorded. | One oracle contradiction, omitted occurrence, or ambiguous orientation. |
+| Mutation | 100% rejection of root/version/policy/count/owner/phase/claimant/reply/order/checksum-only/terminal/leaf mutations and unknown tags. | One semantic mutation accepted. |
+| D6/domain | Preflight rejects unsafe roots; all twelve rebuilt images of every accepted artifact verify; original bytes fail on a distinct image. | Unsafe acceptance, failed accepted-root image, or cross-root acceptance. |
+| Semantic work | All section 2.5 counters, memory, CPU, and wall ceilings hold on valid, malformed, and hostile roots including NCE-02. | Uncharged/unbounded work, budget-selected artifact, or nondeterministic overrun. |
+| Firewall | Source and compiled transitive call graphs pass; third-oracle goldens and one-sided fault injections fail the altered implementation. | Shared semantic truth, forbidden reachable symbol, or correlated fault acceptance. |
+| Size/baselines | Causal denominators and exact bytes are reported median/p95/max/aggregate; no node proxy is used; leaf bytes are `<=110%` of the competent compact leaf baseline. Any future full tree beats the compact stored-support baseline in aggregate and on every named gate witness and uses leaf bytes on common empty roots. | Any size conjunct fails, an unpinned witness claim is used, tail/held-out data is missing, or the baseline is intentionally weak. |
+| Replay | Every section 4.4 conjunct passes. | Any replay conjunct fails. |
+| Producer/end-to-end | Every section 3.3 absolute, relative, tail, and three-audit conjunct passes. | Any producer, enabled-workflow, or amortization conjunct fails. |
 
-**HYPOTHESIS.** Soundness stops are absolute: a false acceptance, set-coverage
-mismatch, structural-boundary acceptance, full-game `Loss` exposure, or
-producer/verifier shared truth helper kills the design rather than merely the
-current implementation. Economic stops kill **full-tree v1** if artifacts fail
-both the stored-search size advantage and replay-speed advantage after one
-codec-only optimization round. Do not keep a larger, slower artifact merely
-because it is interesting.
+**HYPOTHESIS — explicit counterexample closure.** None of the eight review
+counterexamples is accepted residual risk:
 
-## 7. Manageability verdict
+| NCE | disposition |
+|---|---|
+| NCE-01 | Neutralized by R3: full-tree promotion requires recursive fixed-point classification, tries later structural `K_b` members, and is order-invariant. Leaf v1 has no recursive selector. The full variant remains a mandatory promotion test. |
+| NCE-02 | Neutralized by R6: `R/W/T/S/Q`, membership-operation, state-byte, heap, CPU, and wall caps are external and charged before work; pair evaluation streams. |
+| NCE-03 | Neutralized by R2/R5: literal `G1` includes count-one-through-`a`, all sets use turn-start `P`, and a one-sided omission plus third-oracle vector is mandatory. |
+| NCE-04 | Neutralized by exact identity and R5: `SecondStone.first` participates in state, direct transition, memo equality, mutation tests, and root/node replay. |
+| NCE-05 | Neutralized by R7: `E < 25% S`, enabled solve tails, absolute producer cost, and `E+3V < 3S` are hard gates; its 70% emission regression fails. |
+| NCE-06 | Neutralized by R8: every semantic coordinate must satisfy checked `D6Safe`; the extreme `i16` root is unsupported before proof work. |
+| NCE-07 | Neutralized by R1/R4: the published grammar is equality-only; nonempty `tau<b` is the typed `LooseDefenderBoundary`, while `tau>b` is claimant-positive. Generic full-T6 syntax is not imported. |
+| NCE-08 | Neutralized by R3/R4/R5: direct terminal replay distinguishes the winner; claimant terminal blocks negative materialization, opponent terminal has a typed leaf, and generic `Refuted` has no authority. |
 
-**HYPOTHESIS.** Under the strict scope in section 1, the expected owner-gated
-implementation size is:
+Soundness stops—false acceptance, incomplete ordered coverage, boundary evidence,
+version drift, unsafe D6 admission, shared semantic truth, or full-game exposure—kill
+the design, not merely one implementation. Economic gates are also independent
+hard stops after one codec-only optimization round; a size win cannot excuse a
+replay or producer loss, and vice versa.
 
-| component | estimated LOC |
+## 7. Re-audited manageability verdict — amended per R1, R4, R7
+
+**HYPOTHESIS.** R1's literal semantics, R3's fixed point, R5's enforceable
+firewall, R6's operational budgets, and R7's lifecycle campaign add real work;
+removing `NoJointCarrier` does not offset it. The amended full-tree estimate is:
+
+| full-tree component | estimated Rust/test LOC |
 |---|---:|
-| producer trigger, negative materializer, canonical compaction, telemetry | 400-550 |
-| v1 wire types and strict codec | 250-350 |
-| separate independent verifier arm | 900-1,200 |
-| unit, mutation, D6, differential, corpus, and cost tests | 700-950 |
-| total Rust/test change | 2,250-3,050 |
+| producer trigger, recursive support fixed point, canonical compaction, telemetry | 650-900 |
+| strict full-tree codec and exact-state DAG machinery | 300-450 |
+| independent direct-state verifier and policy accounting | 1,100-1,500 |
+| oracle, call-graph, mutation, D6, hostile-work, corpus, and lifecycle tests | 1,200-1,600 |
+| benchmark/baseline tooling | 300-450 |
+| total | 3,550-4,900 |
 
-**HYPOTHESIS.** No estimate includes a trainer consumer, cache, Group-2/zone rule, arbitrary
-root-phase support, `tss_verify.rs` edit, or Lean proof.
+**HYPOTHESIS — verdict: FULL-TREE V1 IS TOO BIG / NO-GO.** This exceeds the
+owner's roughly 2.5k-LOC manageable envelope, and its large-witness economics
+are unpinned. The design MUST NOT quietly absorb that growth. `l9mxn59` and
+`mvp2lvc` are therefore removed as v1 emission gates; they remain future
+full-tree evidence targets after pinned natural-exhaust measurements.
 
-**HYPOTHESIS.** Three review rounds are required after this design:
+**HYPOTHESIS — amended v1 cut: exact leaf only, still review-gated.** The only
+implementation-sized cut is `RefuteLeafExact/V1`:
 
-1. hostile semantics/grammar review, especially the all-horizons claim,
-   attacker-pair quotient, and Universal polarity;
-2. implementation/firewall review with mutation and direct-regeneration
-   differentials; and
-3. owner gate on frozen-cohort acceptance, flag identity, size, memory, and
-   replay economics.
+- reachable, nonterminal, claimant `FirstStone`, fixed equality-only class;
+- one literal `NoAdmissibleFirstTurn` payload after complete `T/G1/S/U`
+  regeneration;
+- no DAG, Universal node, recursive support, catch-all, compact theorem leaf,
+  consumer, cache, or game-value conversion; and
+- the full R5 firewall, R6 work budgets, R7 lifecycle economics, semantic
+  version binding, and D6-safe closure remain mandatory.
 
-**HYPOTHESIS.** The later Lean/Rust correspondence is a fourth, separately owned proof round,
-not a condition for starting the artifact-only Rust prototype.
+Its planning range is 1,600-2,300 Rust/test/tooling LOC: producer/codec
+`350-500`, verifier/direct geometry `550-800`, and oracle/firewall/mutation/D6/
+resource/economic tests `700-1,000`. This is within but near the original
+envelope. The verdict is **NO-GO pending a hostile review of this amended
+document**; after that review, it may become a conditional owner GO only if all
+section 6 gates are preregistered.
 
-**HYPOTHESIS — verdict: GO, conditional on the v1 cut.** A roughly 2.5k LOC
-artifact/verifier addition is manageable because it replays an already closed
-arena, uses the polarity-dual recurrence already present in PN, unfolds
-defender-pair optimization, forbids all zones and boundary leaves, and has no
-v1 consumer. The design becomes **TOO BIG** if the first build is asked to
-support arbitrary phases, bounded-horizon negatives, Group-2/FHW/ranked zones,
-unforced defender quotients, refutation caches, or trainer backup; those change
-the proposition and trusted surface rather than merely the codec.
-
-**HYPOTHESIS — fallback.** If full-tree v1 is killed by verifier complexity or
-economics, the smallest sub-scope that still pays is leaf-only certification
-for one-expansion fresh-turn exhausts:
-
-- `NoAdmissibleFirstTurn` as the mandatory exact leaf; and
-- `NoJointCarrier` only if it is smaller/faster than exact enumeration and has
-  zero shadow contradictions.
-
-**HYPOTHESIS.** That fallback will not certify `l9mxn59` or `mvp2lvc`, but it preserves the
-class-relative theorem, independent-verifier firewall, and future wire namespace
-without pretending a partial negative tree is a complete refutation.
+The full phase-indexed mathematics is retained because even the exact leaf must
+prove absence of every root positive constructor. Any later recursive artifact
+must use a new wire version, implement the R3 algorithm, pin its evidence, and
+return to hostile design review. Arbitrary phases, bounded-horizon negatives,
+Group-2/FHW/ranked zones, unforced defender quotients, refutation caches,
+trainer backup, and `tss_verify.rs` changes remain outside the cut.
