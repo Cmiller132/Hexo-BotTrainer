@@ -1316,6 +1316,7 @@ impl TssSolver {
             width,
             interior_census_gate,
             lazy_frontier,
+            group2,
         )
     }
 
@@ -1344,6 +1345,7 @@ impl TssSolver {
             width,
             interior_census_gate,
             lazy_frontier,
+            false,
         )
     }
 
@@ -1359,6 +1361,7 @@ impl TssSolver {
         width: WidthOptions,
         interior_census_gate: bool,
         lazy_frontier: bool,
+        group2: bool,
     ) -> AttemptResult {
         let fragments_enabled = self.shared_fragments_enabled;
         let shared_bytes = self
@@ -1459,7 +1462,25 @@ impl TssSolver {
             ..SolveStats::default()
         };
         let mut promotions = Vec::new();
-        let cert = search.materialize(state, root).and_then(|materialized| {
+        // Group-2 FHW gate emission (design §5, default OFF). The PN search tree
+        // is group2-agnostic, so we materialize a gate-bearing candidate first;
+        // if it finalizes and passes the strict in-process self-verify it is the
+        // ON result, otherwise we fall through to the exact legacy
+        // materialization below. Never-decides-less is therefore structural: the
+        // fallback is bit-identical to the flag-off cert.
+        let group2_cert = group2
+            .then(|| materialize_group2_wide(&search, state, root, claimant, semantic_horizon))
+            .flatten();
+        if group2_cert.is_some() {
+            stats.fragment_imports = 0;
+            return AttemptResult {
+                cert: group2_cert,
+                stats,
+                #[cfg(test)]
+                tt_signature: None,
+            };
+        }
+        let cert = search.materialize(state, root, false).and_then(|materialized| {
             let fragment_imports = materialized.fragment_imports;
             let _dag_reuses = materialized.dag_reuses;
             let (nodes, root_node) =
@@ -1502,7 +1523,8 @@ impl TssSolver {
                 if promoted_keys.contains(&key) {
                     continue;
                 }
-                let Some(materialized) = search.materialize(&candidate.state, candidate.id) else {
+                let Some(materialized) = search.materialize(&candidate.state, candidate.id, false)
+                else {
                     continue;
                 };
                 let Some((nodes, root_node)) = compact_certificate_limited(
@@ -1748,7 +1770,7 @@ impl CapResumeSession {
         let claimed = status_for_claimant(state.current_player(), self.binding.claimant);
         let cert = self
             .search
-            .materialize(state, self.root)
+            .materialize(state, self.root, false)
             .and_then(|materialized| {
                 let (nodes, root_node) =
                     compact_certificate(&materialized.arena, materialized.root_node)?;
@@ -6926,7 +6948,12 @@ impl<'store> WidePnSearch<'store> {
         )
     }
 
-    fn materialize(&self, state: &RustHexoState, root: usize) -> Option<WideMaterializedProof> {
+    fn materialize(
+        &self,
+        state: &RustHexoState,
+        root: usize,
+        group2: bool,
+    ) -> Option<WideMaterializedProof> {
         if self.entries.get(root)?.pn != 0 {
             return None;
         }
@@ -6940,6 +6967,7 @@ impl<'store> WidePnSearch<'store> {
             fragment_imports: 0,
             dag_reuses: 0,
             memo: HashMap::new(),
+            group2,
         };
         let root_node = builder.build(&mut work, root)?;
         Some(WideMaterializedProof {
@@ -6958,6 +6986,48 @@ struct WideMaterializedProof {
     dag_reuses: u64,
 }
 
+/// Materialize a gate-bearing Group-2 certificate from a proven wide-PN root,
+/// finalize it (canonical strict tree, derived scalars/rows, both digests) and
+/// verify it in-process under the strict `Group2Verifier` (design §5.1 sealed
+/// mint). Returns `Some` only for a self-verified cert that actually carries a
+/// gate; any closure failure, mixed/legacy-only cert, or verifier rejection
+/// returns `None` so the caller falls back to the bit-identical flag-off
+/// materialization. The solver never consumes a cert the strict verifier
+/// rejects.
+fn materialize_group2_wide(
+    search: &WidePnSearch<'_>,
+    state: &RustHexoState,
+    root: usize,
+    claimant: Player,
+    semantic_horizon: u32,
+) -> Option<TssCertificate> {
+    let materialized = search.materialize(state, root, true)?;
+    let (nodes, root_node) = compact_certificate(&materialized.arena, materialized.root_node)?;
+    if !nodes.iter().any(CertNode::is_group2_extension) {
+        // No forced node gated: the cert is byte-identical to the flag-off
+        // build, so decline and let the caller take the untouched legacy path.
+        return None;
+    }
+    let cert = TssCertificate {
+        root: RootBinding::from_state(state),
+        claimant,
+        root_node,
+        nodes,
+        semantic_horizon,
+    };
+    let finalized = crate::tss_verify_group2::finder_finalize_group2(state, &cert)?;
+    let claimed = status_for_claimant(state.current_player(), claimant);
+    if !crate::tss_core::CertVerify::verify(
+        &crate::tss_verify::Group2Verifier,
+        state,
+        &finalized,
+        claimed,
+    ) {
+        return None;
+    }
+    Some(finalized)
+}
+
 struct WideProofMaterializer<'search, 'store> {
     search: &'search WidePnSearch<'store>,
     arena: Vec<CertNode>,
@@ -6967,6 +7037,17 @@ struct WideProofMaterializer<'search, 'store> {
     fragment_imports: u64,
     dag_reuses: u64,
     memo: HashMap<PositionKey, CertNodeId>,
+    /// When set, forced (implicit-dispatch) defender nodes attempt an FHW
+    /// forcing-gate closure (`FhwGateV1`) in place of the full forced-reply
+    /// Universal (design §5 native-PN closure). Single-stone forced universals
+    /// become a b∈{1,2} gate directly; a two-stone `DefenderPair` turn becomes a
+    /// b=2 outer gate whose representative one-stone children are materialized as
+    /// nested b=1 gates. A failed closure falls through to the unchanged legacy
+    /// build; the resulting (possibly mixed) cert is caught by the finalize
+    /// self-verify + group2-off fallback in the caller (never-decides-less is
+    /// structural). The DAG that memoization may produce is unfolded to the
+    /// required strict tree by `finder_finalize_group2`.
+    group2: bool,
 }
 
 impl WideProofMaterializer<'_, '_> {
@@ -7226,7 +7307,23 @@ impl WideProofMaterializer<'_, '_> {
             {
                 return None;
             }
+            // Group-2 FHW gate on the two-stone forced turn: a b=2 outer gate
+            // whose one-stone representative children are materialized as nested
+            // b=1 gates (design §5). Any closure failure falls back to the
+            // legacy pair Universal; the finalize self-verify decides.
+            if self.group2 {
+                if let Some(gate) = self.build_defender_pair_gate(state, children) {
+                    return Some(gate);
+                }
+            }
             return self.build_defender_pair_universal(state, children);
+        }
+        // Group-2 FHW gate on a single-stone forced defender turn (b∈{1,2}).
+        // Falls through to the legacy Universal on any closure failure.
+        if self.group2 && implicit_dispatch {
+            if let Some(gate) = self.build_single_stone_gate(state, children) {
+                return Some(gate);
+            }
         }
         let mut edges = Vec::with_capacity(children.len());
         for child in children {
@@ -7391,6 +7488,227 @@ impl WideProofMaterializer<'_, '_> {
             },
             edge_count,
         )
+    }
+
+    /// Allocate an `FhwGateV1` node from a finder skeleton and the proven
+    /// representative edges. The map carries EMPTY role/window rows; the
+    /// finalizer (`finder_finalize_group2`) fills them from the proven subtrees
+    /// before the strict self-verify. Shared by the single-stone and nested
+    /// pair gate paths.
+    fn alloc_fhw_gate(
+        &mut self,
+        skel: crate::tss_verify_group2::FhwGateSkeleton,
+        mut rep_edges: Vec<CertEdge>,
+    ) -> Option<CertNodeId> {
+        rep_edges.sort_by_key(|edge| raw_coord_key(edge.mv));
+        let map: Vec<crate::tss_verify::FhwMapV1> = skel
+            .map
+            .iter()
+            .map(|(d, s, cls)| crate::tss_verify::FhwMapV1 {
+                real_reply: *d,
+                representative: *s,
+                edge_class: *cls,
+                roles: Vec::new(),
+                windows: Vec::new(),
+            })
+            .collect();
+        let edge_count = rep_edges.len();
+        self.alloc(
+            CertNode::FhwGateV1(Box::new(crate::tss_verify::FhwGateNodeV1 {
+                representatives: rep_edges,
+                proof: crate::tss_verify::FhwGateProofV1 {
+                    schema_version: 1,
+                    authority: crate::tss_verify::Group2AuthorityV1::compiled(),
+                    threats: skel.threats,
+                    escape_resolution_ply: skel.escape_resolution_ply,
+                    map,
+                },
+            })),
+            edge_count,
+        )
+    }
+
+    /// Group-2 FHW gate at a single-stone forced defender node. Every forced
+    /// reply is a pending one-stone edge; the finder closure supplies H_Q, K,
+    /// the reductive representative set R ⊆ K, and per-edge classes. We prove
+    /// one representative subtree per s ∈ R (each s is among the forced replies)
+    /// and emit the reduced gate. Returns `None` (⇒ legacy fallback) on any
+    /// closure failure, class out of the Exact/FC set, missing representative
+    /// child, or Unknown subtree.
+    fn build_single_stone_gate(
+        &mut self,
+        state: &mut RustHexoState,
+        children: &[WidePnChild],
+    ) -> Option<CertNodeId> {
+        let mut child_by_move: HashMap<(i16, i16), &WidePnChild> =
+            HashMap::with_capacity(children.len());
+        for child in children {
+            if self.search.child_numbers(child).0 != 0 || child.result != WidePnChildResult::Pending
+            {
+                return None;
+            }
+            let WidePnMove::One(coord) = child.mv else {
+                return None;
+            };
+            if child_by_move.insert(raw_coord_key(coord), child).is_some() {
+                return None;
+            }
+        }
+        let skel = crate::tss_verify_group2::finder_build_fhw_gate(
+            state,
+            self.search.claimant,
+            self.search.semantic_horizon,
+            true,
+        )?;
+        let mut rep_edges: Vec<CertEdge> = Vec::with_capacity(skel.representatives.len());
+        for &s in &skel.representatives {
+            let child = *child_by_move.get(&raw_coord_key(s))?;
+            let (result, delta) = state.apply_with_delta(Placement { coord: s }).ok()?;
+            if result.outcome.is_some() {
+                state.undo(delta);
+                return None;
+            }
+            let child_id = self.search.resolved_child_entry(child);
+            let proof = child_id.and_then(|id| self.build(state, id));
+            state.undo(delta);
+            rep_edges.push(CertEdge {
+                mv: s,
+                child: proof?,
+            });
+        }
+        self.alloc_fhw_gate(skel, rep_edges)
+    }
+
+    /// Group-2 FHW gate on a two-stone forced defender turn (design §5 native-PN
+    /// closure, the DefenderPair-vs-`C_s` grammar reduction). The wide search
+    /// aggregates the defender's whole b=2 turn as pair replies with checked
+    /// commutations; the gate grammar instead wants a b=2 outer gate whose
+    /// one-stone representative children `C_s = P_Q + s` are themselves b=1
+    /// gates (the no-mixing rule forbids a legacy Universal at a forced node).
+    /// We materialize those intermediate one-stone states for representatives
+    /// ONLY — |R_outer| of them — and inside each, prove |R_inner| second-stone
+    /// subtrees drawn from the already-proven pair children. Any structural
+    /// mismatch or closure failure returns `None` ⇒ legacy pair Universal, and
+    /// the finalize self-verify is the firewall.
+    fn build_defender_pair_gate(
+        &mut self,
+        state: &mut RustHexoState,
+        children: &[WidePnChild],
+    ) -> Option<CertNodeId> {
+        // Authoritative pair set + final-state keys (mirrors the legacy path's
+        // consistency guard).
+        let plan = forced_defender_pair_plan(state, self.search.claimant)?;
+        if plan.pairs.len() != children.len() {
+            return None;
+        }
+        let mut child_by_pair: HashMap<((i16, i16), (i16, i16)), &WidePnChild> =
+            HashMap::with_capacity(children.len());
+        for child in children {
+            if child.result != WidePnChildResult::Pending || self.search.child_numbers(child).0 != 0
+            {
+                return None;
+            }
+            let WidePnMove::DefenderPair(first, second) = child.mv else {
+                return None;
+            };
+            if raw_coord_key(first) >= raw_coord_key(second)
+                || child_by_pair
+                    .insert((raw_coord_key(first), raw_coord_key(second)), child)
+                    .is_some()
+            {
+                return None;
+            }
+        }
+        let final_key_by_pair: HashMap<((i16, i16), (i16, i16)), WidePositionKey> = plan
+            .pairs
+            .iter()
+            .map(|pair| {
+                (
+                    (raw_coord_key(pair.first), raw_coord_key(pair.second)),
+                    pair.final_key.clone(),
+                )
+            })
+            .collect();
+
+        // Outer b=2 gate at the turn-start defender node P_Q.
+        let outer = crate::tss_verify_group2::finder_build_fhw_gate(
+            state,
+            self.search.claimant,
+            self.search.semantic_horizon,
+            true,
+        )?;
+        let mut outer_rep_edges: Vec<CertEdge> = Vec::with_capacity(outer.representatives.len());
+        for &s in &outer.representatives {
+            let (first_result, first_delta) =
+                state.apply_with_delta(Placement { coord: s }).ok()?;
+            if first_result.outcome.is_some() {
+                state.undo(first_delta);
+                return None;
+            }
+            // Inner b=1 gate at the materialized one-stone child C_s = P_Q + s.
+            let inner = match crate::tss_verify_group2::finder_build_fhw_gate(
+                state,
+                self.search.claimant,
+                self.search.semantic_horizon,
+                true,
+            ) {
+                Some(inner) => inner,
+                None => {
+                    state.undo(first_delta);
+                    return None;
+                }
+            };
+            let mut inner_rep_edges: Vec<CertEdge> =
+                Vec::with_capacity(inner.representatives.len());
+            let mut inner_ok = true;
+            for &s2 in &inner.representatives {
+                let key = if raw_coord_key(s) < raw_coord_key(s2) {
+                    (raw_coord_key(s), raw_coord_key(s2))
+                } else {
+                    (raw_coord_key(s2), raw_coord_key(s))
+                };
+                let Some(&child) = child_by_pair.get(&key) else {
+                    inner_ok = false;
+                    break;
+                };
+                let Ok((second_result, second_delta)) =
+                    state.apply_with_delta(Placement { coord: s2 })
+                else {
+                    inner_ok = false;
+                    break;
+                };
+                let matches_key = second_result.outcome.is_none()
+                    && final_key_by_pair
+                        .get(&key)
+                        .is_some_and(|expected| WidePositionKey::from_state(state) == *expected);
+                if !matches_key {
+                    state.undo(second_delta);
+                    inner_ok = false;
+                    break;
+                }
+                let child_id = self.search.resolved_child_entry(child);
+                let proof = child_id.and_then(|id| self.build(state, id));
+                state.undo(second_delta);
+                match proof {
+                    Some(proof) => inner_rep_edges.push(CertEdge { mv: s2, child: proof }),
+                    None => {
+                        inner_ok = false;
+                        break;
+                    }
+                }
+            }
+            if !inner_ok {
+                state.undo(first_delta);
+                return None;
+            }
+            let inner_gate = self.alloc_fhw_gate(inner, inner_rep_edges);
+            state.undo(first_delta);
+            outer_rep_edges.push(CertEdge {
+                mv: s,
+                child: inner_gate?,
+            });
+        }
+        self.alloc_fhw_gate(outer, outer_rep_edges)
     }
 
     fn alloc(&mut self, node: CertNode, added_edges: usize) -> Option<CertNodeId> {
@@ -11298,6 +11616,87 @@ mod tests {
         state
     }
 
+    /// Wide-PN native-PN gate closure (design §5): the production leaf profile
+    /// (`wide=true`) drives the ported `build_single_stone_gate` at a forced
+    /// single-stone defender node inside the WIDE-PN certificate builder — the
+    /// piece prior lanes documented as out of scope. The fixture (borrowed from
+    /// the narrow-emission fixture: P0 defender, SecondStone, b=1, a single named
+    /// threat U with kernel {(4,1),(5,1)}; the FC coverage stone (9,1) makes both
+    /// couplings FrontierCovered so the greedy cover is reductive R = {(4,1)} ⊊ K)
+    /// is solved through the wide prover. Flag-on emits a reductive `FhwGateV1`
+    /// that survives finalize + the in-process strict `Group2Verifier`
+    /// self-verify and re-verifies here; flag-off decides the identical verdict
+    /// gate-free (never-decides-less is structural).
+    #[test]
+    fn wide_pn_emits_reductive_gate_on_forced_single_stone_defender() {
+        const MOVES: [(i16, i16); 20] = [
+            (0, 0),
+            (0, 1),
+            (1, 1),
+            (-1, 1),
+            (9, 1),
+            (2, 1),
+            (3, 1),
+            (-3, 0),
+            (-4, 0),
+            (0, 5),
+            (1, 5),
+            (-3, -1),
+            (-4, -1),
+            (2, 5),
+            (0, -3),
+            (2, -1),
+            (3, -1),
+            (1, -3),
+            (2, -3),
+            (6, -2),
+        ];
+        let state = replay(&MOVES);
+        assert_eq!(state.current_player(), Player::Player0, "defender to move");
+        assert!(matches!(state.phase(), TurnPhase::SecondStone { .. }), "b=1");
+        let solve = |group2: bool| {
+            let mut solver = TssSolver::default();
+            solver.configure_leaf_profile();
+            solver.set_group2(group2);
+            let caps = SolveCaps {
+                node_cap: 200_000,
+                tt_bytes_cap: 1 << 20,
+                semantic_horizon: state.placements_made() + 16,
+            };
+            solver.solve_goal(&state, &caps, SolveGoal::Loss)
+        };
+        let off = solve(false);
+        let on = solve(true);
+        assert_eq!(
+            off.status,
+            ProofStatus::Loss,
+            "flag-off decides the fixture via the wide profile"
+        );
+        assert_eq!(on.status, ProofStatus::Loss, "flag-on never decides less");
+        let cert = on.cert.expect("decided flag-on result carries a certificate");
+        let gate = cert
+            .nodes
+            .iter()
+            .find_map(|n| match n {
+                CertNode::FhwGateV1(g) => Some(g),
+                _ => None,
+            })
+            .expect("the wide-PN flag-on certificate must contain an emitted FhwGateV1");
+        assert_eq!(gate.proof.map.len(), 2, "|K| == 2");
+        assert_eq!(gate.representatives.len(), 1, "|R| == 1 (reductive)");
+        assert!(
+            crate::tss_verify::Group2Verifier.verify(&state, &cert, ProofStatus::Loss),
+            "the emitted wide-PN gate certificate must strictly verify"
+        );
+        // Flag-off stays extension-free (bit-identity discipline).
+        assert!(!off
+            .cert
+            .expect("flag-off cert")
+            .nodes
+            .iter()
+            .any(CertNode::is_group2_extension));
+    }
+
     #[test]
     fn interior_census_phase_tables_match_contract_8_1() {
         let first = [10, 10, 9, 6, 2, 1];
@@ -12531,7 +12930,7 @@ mod tests {
                 .is_some_and(|entry| matches!(entry.node, WidePnNode::DepthCutoff))
         }));
         assert_ne!(search.entries[root].pn, 0);
-        assert!(search.materialize(&state, root).is_none());
+        assert!(search.materialize(&state, root, false).is_none());
     }
 
     #[test]
@@ -13177,7 +13576,7 @@ mod tests {
         search.run(&state, root);
         assert_eq!(search.entries[root].pn, 0);
         let materialized = search
-            .materialize(&state, root)
+            .materialize(&state, root, false)
             .expect("collapsed defender proof must materialize");
         let cert = TssCertificate {
             root: RootBinding::from_state(&state),
