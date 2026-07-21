@@ -448,6 +448,51 @@ pub struct SolveStats {
     pub(crate) threshold_scale: ThresholdScaleStats,
 }
 
+impl SolveStats {
+    /// Fold one solver attempt into a solve-level aggregate. Additive counters
+    /// sum, high-water marks take their maximum, and resident-store gauges
+    /// describe the most recently completed attempt.
+    pub(crate) fn merge(&mut self, part: Self) {
+        self.nodes = self.nodes.saturating_add(part.nodes);
+        self.expansions = self.expansions.saturating_add(part.expansions);
+        self.tt_hits = self.tt_hits.saturating_add(part.tt_hits);
+        self.tt_entries = self.tt_entries.max(part.tt_entries);
+        self.peak_tt_bytes = self.peak_tt_bytes.max(part.peak_tt_bytes);
+        self.horizon_cuts = self.horizon_cuts.saturating_add(part.horizon_cuts);
+        self.kb_death_cuts = self.kb_death_cuts.saturating_add(part.kb_death_cuts);
+        self.tt_evictions = self.tt_evictions.saturating_add(part.tt_evictions);
+        self.tt_admission_rejections = self
+            .tt_admission_rejections
+            .saturating_add(part.tt_admission_rejections);
+        self.fragment_lookups = self.fragment_lookups.saturating_add(part.fragment_lookups);
+        self.fragment_hits = self.fragment_hits.saturating_add(part.fragment_hits);
+        self.fragment_imports = self.fragment_imports.saturating_add(part.fragment_imports);
+        self.fragment_store_entries = part.fragment_store_entries;
+        self.fragment_store_bytes = part.fragment_store_bytes;
+        self.interior_gate_evaluations = self
+            .interior_gate_evaluations
+            .saturating_add(part.interior_gate_evaluations);
+        self.interior_gate_dismissals = self
+            .interior_gate_dismissals
+            .saturating_add(part.interior_gate_dismissals);
+        self.interior_gate_nanos = self
+            .interior_gate_nanos
+            .saturating_add(part.interior_gate_nanos);
+        #[cfg(test)]
+        {
+            self.stage_refreshes = self.stage_refreshes.saturating_add(part.stage_refreshes);
+            self.live_ge3_seed_scans = self
+                .live_ge3_seed_scans
+                .saturating_add(part.live_ge3_seed_scans);
+            self.live_ge3_seed_nanos = self
+                .live_ge3_seed_nanos
+                .saturating_add(part.live_ge3_seed_nanos);
+            self.closure_debt.merge(part.closure_debt);
+            self.threshold_scale.merge(part.threshold_scale);
+        }
+    }
+}
+
 /// A deep solve's outcome: a typed status, an optional replayable certificate
 /// (present for every Win/Loss claim), and diagnostics. The certificate type
 /// is solver-defined; the search consumes only `status` — and only via

@@ -1,0 +1,44 @@
+[
+  {
+    "detail": "",
+    "gate": "features_have_canaries",
+    "hard": true,
+    "passed": true
+  },
+  {
+    "detail": "",
+    "gate": "manifest_subset_match",
+    "hard": true,
+    "passed": true
+  },
+  {
+    "detail": "",
+    "gate": "soundness",
+    "hard": true,
+    "passed": true
+  },
+  {
+    "detail": "",
+    "gate": "soundness",
+    "hard": true,
+    "passed": true
+  },
+  {
+    "detail": "",
+    "gate": "soundness",
+    "hard": true,
+    "passed": true
+  },
+  {
+    "detail": "",
+    "gate": "ground_truth",
+    "hard": true,
+    "passed": true
+  },
+  {
+    "detail": "",
+    "gate": "determinism",
+    "hard": true,
+    "passed": true
+  }
+]
