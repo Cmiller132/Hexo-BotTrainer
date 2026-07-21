@@ -511,6 +511,25 @@ Consequences:
   park_wait_ms_max 6,084 > the 5,000 deadline with bails=0 — drain-pass
   granularity at move tail; bail is liveness-only, not soundness.
 
+- **2026-07-21 FIRST DIRECT MATCHED-HOST BATTERY vs hexo-solver (SootyOwl/
+  hexo-strix — the idtt/dfpn/pdspn reference drivers; those historical
+  columns were never a direct experiment until now).** Same 19-position
+  corpus (15 fixtures verified stone-identical to their repo), same host,
+  both sides under live trainer load. Ours: 13/13 available wins PROVEN
+  with verified certs + 2/5 NO rows proven as dual-cert LOSSes, zero false
+  claims (512 MiB ladder; 0l excluded pending the 2 GiB quiet-window
+  rerun). Theirs: deployed self-play config decided 5/19; pdspn decided
+  19/19 (0l WIN 305 s at 256 MB — currently the better result on 0l at
+  matched-or-less memory); their idtt 2–5x faster on easy wins (our wall
+  includes ladder tax + in-wall verification); their No beats our Unknown
+  on 94gnnol/mvp2lvc (width trade-off measured: wider win-completeness =
+  costlier disproof). KEY MECHANISM DATUM: on 0l, dfpn 50M nodes FAIL vs
+  pdspn 1,058 seeded level-1 nodes WIN — bounded-probe pn/dn init is worth
+  ~4 OOM. Owner-directed follow-ups + Codex lane briefs:
+  **docs/INVESTIGATION_PDSPN_IMPORTS.md** (probe-seeding, 1+ε thresholds
+  [caveat: R-TS1 null must be re-read first], work-weighted TT
+  replacement, Unknown-subtree summaries; production-honesty note inside).
+
 - **2026-07-21 15:32Z main_4 RELAUNCHED under all-leaves strict mode**
   (owner-ordered): resumed from epoch_000023.pt with the P7 engine
   (`2c262e10`) + all_leaves config (`6c287e68`) live via the
