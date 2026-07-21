@@ -59,11 +59,12 @@ tss_solver_async_threads = 8
 tss_solver_async_inline_16 = 4
 tss_solver_async_threads_max = 12
 # Wait-at-leaf parking: every gated leaf parks in the scheduler pen until its
-# verified result lands, released by a liveness bail. window = PARK_PLACEHOLDER
-# ms (orchestrator fills from the running park sweep; 150 is the main_3-proven
-# default if unresolved).
+# verified result lands, released by a liveness bail. 300 ms per the park sweep
+# (docs/PARK_SWEEP_REPORT.md on claude/order-prior, commit a66b707a): bail
+# 12.7% -> 0.0%, decided verdicts/min +2.8%, hard consumptions +11%, throughput
+# flat — the release-binary grind tail fits inside 150-300 ms. Cap-500-specific.
 tss_solver_park = true
-tss_solver_park_timeout_ms = 150  # PARK_PLACEHOLDER -- orchestrator fills from park sweep (default 150)
+tss_solver_park_timeout_ms = 300
 # Zone AND-generation OFF (production A/B measured zero additional decided
 # positions; a TOML flip away if a deeper-cap corpus ever shows value).
 tss_zone = false
