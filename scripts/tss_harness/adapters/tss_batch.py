@@ -96,6 +96,9 @@ class TssBatchAdapter:
     def manifest(self) -> dict[str, Any]:
         self._apply_env()
         from hexfield_eq import _rust
+        # ordering / ordering_hints default (this adapter does not drive the
+        # order-prior policy path); pass the g2 knobs by keyword so the merged
+        # `ordering` positional param takes its "off" default.
         m = _rust.hexfield_eq_solver_manifest(
             int(self.config["node_cap"]),
             int(self.config["horizon"]),
@@ -103,8 +106,8 @@ class TssBatchAdapter:
             bool(self.config["zone"]),
             bool(self.config["wide"]),
             bool(self.config["dual_pass"]),
-            int(self.config["loss_reserve_nodes"]),
-            bool(self.config["group2"]),
+            loss_reserve_nodes=int(self.config["loss_reserve_nodes"]),
+            group2=bool(self.config["group2"]),
         )
         m["goal"] = self.config["goal"]
         m["adapter"] = self.name
@@ -128,8 +131,8 @@ class TssBatchAdapter:
                 bool(self.config["zone"]),
                 bool(self.config["wide"]),
                 bool(self.config["dual_pass"]),
-                int(self.config["loss_reserve_nodes"]),
-                bool(self.config["group2"]),
+                loss_reserve_nodes=int(self.config["loss_reserve_nodes"]),
+                group2=bool(self.config["group2"]),
             )
 
         everyone = list(range(len(states)))
