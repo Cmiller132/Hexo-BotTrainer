@@ -1,5 +1,6 @@
 //! Default-off J2near matched-cap and broader-coverage measurement harness.
-//! The ignored tests write machine-readable rows under `.scratch/j2near_ab`.
+//! The ignored tests write machine-readable rows under `.scratch/j2near_ab`
+//! unless `TSS_J2NEAR_OUTPUT_DIR` overrides the destination.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
@@ -163,9 +164,25 @@ fn run_repetitions(
 }
 
 fn output_writer(name: &str) -> BufWriter<File> {
-    let dir = root_dir().join(".scratch/j2near_ab");
+    let dir = std::env::var_os("TSS_J2NEAR_OUTPUT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root_dir().join(".scratch/j2near_ab"));
     fs::create_dir_all(&dir).expect("create J2near scratch output");
     BufWriter::new(File::create(dir.join(name)).expect("create J2near output"))
+}
+
+fn matched_caps() -> Vec<u64> {
+    let caps = std::env::var("TSS_J2NEAR_CAPS")
+        .unwrap_or_else(|_| "500,2000".to_owned())
+        .split(',')
+        .map(|value| value.trim().parse::<u64>().expect("numeric J2near cap"))
+        .collect::<Vec<_>>();
+    assert!(!caps.is_empty(), "at least one J2near cap is required");
+    assert!(
+        caps.iter().all(|&cap| cap > 0),
+        "J2near caps must be positive"
+    );
+    caps
 }
 
 fn write_rows(
@@ -239,7 +256,7 @@ fn tss_j2near_matched_ab() {
     let frozen = all_frozen();
     assert_eq!(frozen.len(), 6_443);
     let mut writer = output_writer("matched.jsonl");
-    for cap in [500, 2_000] {
+    for cap in matched_caps() {
         let (off, on) = run_repetitions(&frozen, cap, 256 << 10, repetitions);
         if cap == 500 {
             let archive = archived_identity();
