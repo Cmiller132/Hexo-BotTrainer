@@ -66,6 +66,8 @@ def _bench_overlay(effective: dict) -> dict:
         # TSS_SHARED_FRAGMENTS would need to travel via subprocess env AND
         # be verified engine-side; not wired yet — refuse, don't fake.
         raise RuntimeError("bench cannot yet carry shared_fragments arms")
+    if effective.get("free_tempo_j2near"):
+        raise RuntimeError("bench cannot yet carry free_tempo_j2near arms")
     return {
         "tss_solver_node_cap": int(effective["node_cap"]),
         "tss_solver_horizon": int(effective["horizon"]),

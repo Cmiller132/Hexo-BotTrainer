@@ -664,6 +664,7 @@ impl Round3Flag {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct WidthOptions {
     vcf_pair_complete: bool,
+    free_tempo_j2near: bool,
     quiet_turn_or_edges: Round3Flag,
     ranked_unforced_defender_zone: Round3Flag,
 }
@@ -716,8 +717,16 @@ impl WidthOptions {
     pub(crate) fn vcf_pair_complete() -> Self {
         Self {
             vcf_pair_complete: true,
+            free_tempo_j2near: false,
             quiet_turn_or_edges: Round3Flag::Off,
             ranked_unforced_defender_zone: Round3Flag::Off,
+        }
+    }
+
+    pub(crate) fn vcf_pair_j2near() -> Self {
+        Self {
+            free_tempo_j2near: true,
+            ..Self::vcf_pair_complete()
         }
     }
 
@@ -725,6 +734,7 @@ impl WidthOptions {
     pub(crate) fn round3_shadow() -> Self {
         Self {
             vcf_pair_complete: true,
+            free_tempo_j2near: false,
             quiet_turn_or_edges: Round3Flag::Shadow,
             ranked_unforced_defender_zone: Round3Flag::Shadow,
         }
@@ -733,6 +743,7 @@ impl WidthOptions {
     pub(crate) fn round3_consume() -> Self {
         Self {
             vcf_pair_complete: true,
+            free_tempo_j2near: false,
             quiet_turn_or_edges: Round3Flag::Consume,
             ranked_unforced_defender_zone: Round3Flag::Consume,
         }
@@ -755,6 +766,7 @@ pub(crate) struct SolveRuntimeFlags {
     lazy_frontier: bool,
     interior_census_gate: bool,
     k_reply_consume: bool,
+    free_tempo_j2near: bool,
 }
 
 /// Fully resolved flags and memory caps used by one `solve_goal` invocation.
@@ -762,6 +774,7 @@ pub(crate) struct SolveRuntimeFlags {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct EffectiveSolveConfig {
     pub(crate) vcf_pair_complete: bool,
+    pub(crate) free_tempo_j2near: bool,
     pub(crate) dual_pass: bool,
     pub(crate) ordering: &'static str,
     pub(crate) loss_reserve_nodes: u32,
@@ -1018,6 +1031,18 @@ impl TssSolver {
             interior_census_gate: std::env::var_os("TSS_INTERIOR_CENSUS_GATE")
                 .is_some_and(|value| value == "1"),
             k_reply_consume: matches!(std::env::var("TSS_K_REPLY_CONSUME").as_deref(), Ok("1")),
+            free_tempo_j2near: matches!(
+                std::env::var("TSS_VCF_J2NEAR").as_deref(),
+                Ok("1")
+            ),
+        }
+    }
+
+    fn effective_width(&self, runtime: SolveRuntimeFlags) -> WidthOptions {
+        WidthOptions {
+            free_tempo_j2near: self.width.free_tempo_j2near
+                || (self.width.vcf_pair_complete && runtime.free_tempo_j2near),
+            ..self.width
         }
     }
 
@@ -1029,13 +1054,14 @@ impl TssSolver {
         caps: &SolveCaps,
         runtime: SolveRuntimeFlags,
     ) -> EffectiveSolveConfig {
+        let width = self.effective_width(runtime);
         let tt_bytes_cap = if self.tt_enabled {
             caps.tt_bytes_cap
         } else {
             0
         };
-        let uses_wide_pn = self.width.vcf_pair_complete
-            && !(self.width.consumes_quiet_turns() && self.width.consumes_ranked_zone());
+        let uses_wide_pn = width.vcf_pair_complete
+            && !(width.consumes_quiet_turns() && width.consumes_ranked_zone());
         let fragment_store_cap_bytes = if uses_wide_pn && self.shared_fragments_enabled {
             tt_bytes_cap / WIDE_FRAGMENT_CAP_DIVISOR
         } else {
@@ -1050,13 +1076,14 @@ impl TssSolver {
         };
         let (local_tt_cap, shared_tt_cap) = if uses_wide_pn && self.shared_fragments_enabled {
             (tt_bytes_cap.saturating_sub(fragment_store_bytes), 0)
-        } else if self.width.vcf_pair_complete {
+        } else if width.vcf_pair_complete {
             (tt_bytes_cap, 0)
         } else {
             split_tt_cap(tt_bytes_cap)
         };
         EffectiveSolveConfig {
-            vcf_pair_complete: self.width.vcf_pair_complete,
+            vcf_pair_complete: width.vcf_pair_complete,
+            free_tempo_j2near: width.free_tempo_j2near,
             dual_pass: self.dual_pass,
             ordering: self.ordering.name(),
             loss_reserve_nodes: self.loss_reserve_nodes,
@@ -1182,6 +1209,7 @@ impl TssSolver {
         }
 
         let runtime = self.sample_runtime_flags();
+        let width = self.effective_width(runtime);
         let effective = self.effective_solve_config(caps, runtime);
         #[cfg(test)]
         {
@@ -1244,7 +1272,7 @@ impl TssSolver {
             nodes: 1,
             ..initial_stats
         };
-        if let Some((claimant, leaf)) = immediate_winner(state, self.width) {
+        if let Some((claimant, leaf)) = immediate_winner(state, width) {
             if node_resolution(&leaf) > caps.semantic_horizon {
                 return unknown(stats);
             }
@@ -1275,7 +1303,7 @@ impl TssSolver {
             // forcing-proof cap. A configured floor is an explicit policy
             // experiment and remains a positive opponent-claim search only;
             // its failure can establish no NO result.
-            SolveGoal::Both if self.width.vcf_pair_complete => {
+            SolveGoal::Both if width.vcf_pair_complete => {
                 wide_both_initial_caps(remaining, effective.loss_reserve_nodes)
             }
             SolveGoal::Both => ((remaining + 1) / 2, remaining / 2),
@@ -1290,7 +1318,7 @@ impl TssSolver {
                 effective.local_tt_cap,
                 caps.semantic_horizon,
                 self.zone,
-                self.width,
+                width,
                 effective.k_reply_consume,
                 effective.interior_census_gate,
                 effective.lazy_frontier,
@@ -1325,7 +1353,7 @@ impl TssSolver {
                 effective.local_tt_cap,
                 caps.semantic_horizon,
                 self.zone,
-                self.width,
+                width,
                 effective.k_reply_consume,
                 effective.interior_census_gate,
                 effective.lazy_frontier,
@@ -6953,6 +6981,14 @@ impl<'store> WidePnSearch<'store> {
                 }
                 #[cfg(not(test))]
                 let _ = optimized_growths;
+                if self.width.free_tempo_j2near {
+                    gate.append_j2near_after_turn_buying_first(
+                        state,
+                        first,
+                        &mut second_coords,
+                        &mut second_seen,
+                    );
+                }
                 #[cfg(test)]
                 if let Some(started) = second_started {
                     let elapsed = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
@@ -7180,11 +7216,32 @@ impl<'store> WidePnSearch<'store> {
         depth: usize,
         turn_first: Option<HexCoord>,
     ) -> Vec<WidePnChild> {
-        let candidates = ordered_threat_creating_moves_with_width(
+        let mut candidates = ordered_threat_creating_moves_with_width(
             state,
             self.claimant,
             WidthOptions::vcf_pair_complete(),
         );
+        if self.width.free_tempo_j2near
+            && turn_first.is_some()
+            && partial_turn_is_turn_buying(state, self.claimant)
+        {
+            let mut seen = candidates
+                .iter()
+                .map(|candidate| candidate.coord)
+                .collect::<HashSet<_>>();
+            for coord in j2near_candidates_in_state(state, self.claimant, &mut seen) {
+                candidates.push(Candidate {
+                    coord,
+                    strength: 1,
+                    priority_class: 3,
+                    child_threats: 0,
+                    defender_block: false,
+                    pair_start_degree: 0,
+                    own_proximity: i16::MAX,
+                    created_threats: Vec::new(),
+                });
+            }
+        }
         #[cfg(test)]
         let ordering_context = self
             .ordering_study
@@ -9456,6 +9513,10 @@ impl CompactEmpties {
     fn contains(&self, cell: &HexCoord) -> bool {
         self.iter().any(|candidate| candidate == cell)
     }
+
+    fn as_slice(&self) -> &[HexCoord] {
+        &self.cells[..self.len as usize]
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -9920,6 +9981,83 @@ impl WideTurnGate {
         constrained
     }
 
+    /// Whether the first placement alone already buys the whole defender
+    /// turn. At a generated FirstStone node no claimant >=4 window exists, so
+    /// the post-first family consists exactly of turn-start count-three
+    /// windows through `first`. The claimant stone also answers a defender
+    /// win-now window exactly when it belongs to that window's empty set.
+    fn first_is_turn_buying(&self, first: HexCoord) -> bool {
+        if self
+            .defender_threats
+            .iter()
+            .any(|empties| !empties.contains(&first))
+        {
+            return false;
+        }
+        let family = self
+            .windows_by_cell
+            .get(&first)
+            .into_iter()
+            .flatten()
+            .filter_map(|&index| {
+                let window = &self.windows[index as usize];
+                (window.strength == 3).then(|| {
+                    (
+                        window.key,
+                        window
+                            .empties
+                            .iter()
+                            .copied()
+                            .filter(|&cell| cell != first)
+                            .collect::<Vec<_>>(),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        matches!(wide_family_min_hitting_set(&family), Some(2) | None)
+    }
+
+    /// Append J2near cells outside the already-built exact second universe.
+    /// This remains stateless: count-one windows after `first` are precisely
+    /// (a) turn-start count-one windows not containing `first`, plus (b) the
+    /// at most 18 previously empty windows through `first`.
+    fn append_j2near_after_turn_buying_first<S: std::hash::BuildHasher>(
+        &self,
+        state: &RustHexoState,
+        first: HexCoord,
+        out: &mut Vec<HexCoord>,
+        seen: &mut HashSet<HexCoord, S>,
+    ) {
+        if !self.first_is_turn_buying(first) {
+            return;
+        }
+        let mut support = HashMap::<HexCoord, [u8; 3]>::new();
+        for window in &self.weak_windows {
+            if window.empties.contains(&first) {
+                continue;
+            }
+            add_window_axis_support(&mut support, window.key.axis, window.empties.as_slice());
+        }
+        for axis in Axis::ALL {
+            for offset in 0..6i16 {
+                let key = WindowKey {
+                    start: first - axis.vector().scale(offset),
+                    axis,
+                };
+                if state.board().windows().entry(key).is_some() {
+                    continue;
+                }
+                let empties = key
+                    .cells()
+                    .into_iter()
+                    .filter(|&cell| cell != first)
+                    .collect::<Vec<_>>();
+                add_window_axis_support(&mut support, axis, &empties);
+            }
+        }
+        out.extend(ordered_j2near_cells(state, support, seen));
+    }
+
     #[cfg(test)]
     fn live_ge3_after_pair(&self, first: HexCoord, second: HexCoord) -> usize {
         self.live_claimant_windows
@@ -10182,6 +10320,74 @@ impl WideTurnGate {
         }
         None
     }
+}
+
+fn add_window_axis_support(
+    support: &mut HashMap<HexCoord, [u8; 3]>,
+    axis: Axis,
+    empties: &[HexCoord],
+) {
+    for &cell in empties {
+        let counts = support.entry(cell).or_default();
+        let slot = &mut counts[usize::from(axis.index())];
+        *slot = slot.saturating_add(1);
+    }
+}
+
+fn ordered_j2near_cells<S: std::hash::BuildHasher>(
+    state: &RustHexoState,
+    support: HashMap<HexCoord, [u8; 3]>,
+    seen: &mut HashSet<HexCoord, S>,
+) -> Vec<HexCoord> {
+    let frame = canonical_frame(state);
+    let mut cells = support
+        .into_iter()
+        .filter_map(|(cell, counts)| {
+            let mut ordered = counts;
+            ordered.sort_unstable_by(|left, right| right.cmp(left));
+            (ordered[1] >= 4 && seen.insert(cell)).then_some((cell, ordered))
+        })
+        .collect::<Vec<_>>();
+    cells.sort_by_key(|&(cell, counts)| {
+        (
+            Reverse(counts[1]),
+            Reverse(counts.iter().copied().map(u16::from).sum::<u16>()),
+            canonical_coord_key(frame, cell),
+        )
+    });
+    cells.into_iter().map(|(cell, _)| cell).collect()
+}
+
+fn partial_turn_is_turn_buying(state: &RustHexoState, claimant: Player) -> bool {
+    let mut family = Vec::<(WindowKey, Vec<HexCoord>)>::new();
+    for entry in state.board().windows().entries() {
+        let Some(owner) = entry.active_player() else {
+            continue;
+        };
+        let count = entry.count(owner);
+        if owner == claimant {
+            if count >= 4 {
+                family.push((entry.key(), entry.empty_cells()));
+            }
+        } else if count >= 4 {
+            return false;
+        }
+    }
+    matches!(wide_family_min_hitting_set(&family), Some(2) | None)
+}
+
+fn j2near_candidates_in_state(
+    state: &RustHexoState,
+    claimant: Player,
+    seen: &mut HashSet<HexCoord>,
+) -> Vec<HexCoord> {
+    let mut support = HashMap::<HexCoord, [u8; 3]>::new();
+    for entry in state.board().windows().entries() {
+        if entry.active_player() == Some(claimant) && entry.count(claimant) == 1 {
+            add_window_axis_support(&mut support, entry.key().axis, &entry.empty_cells());
+        }
+    }
+    ordered_j2near_cells(state, support, seen)
 }
 
 /// Exact replica of the shared threat-analysis minimum hitting set at the
@@ -12258,6 +12464,171 @@ mod tests {
             .unwrap();
         }
         state
+    }
+
+    fn j2near_root_children(
+        moves: &[(i16, i16)],
+        width: WidthOptions,
+    ) -> Vec<WidePnMove> {
+        let mut state = replay(moves);
+        let search = WidePnSearch::new_with_width(
+            state.current_player(),
+            state.placements_made(),
+            100_000,
+            256 << 20,
+            u32::MAX,
+            MAX_SEARCH_DEPTH,
+            width,
+            None,
+        );
+        search
+            .attack_children(&mut state, 0)
+            .into_iter()
+            .map(|child| child.mv)
+            .collect()
+    }
+
+    #[test]
+    fn j2near_widens_only_the_three_preregistered_root_shapes() {
+        let witnesses = [
+            (
+                &[(0, 0), (-6, 1), (-7, 2), (0, 1), (0, 2), (-7, 1), (-8, 2)][..],
+                19,
+                39,
+                WidePnMove::Pair(HexCoord::new(0, -1), HexCoord::new(-1, 2)),
+            ),
+            (
+                &[(0, 0), (-8, 0), (-8, 1), (1, -1), (2, -2), (-8, 2), (-9, 2)][..],
+                19,
+                39,
+                WidePnMove::Pair(HexCoord::new(3, -3), HexCoord::new(3, -2)),
+            ),
+            (
+                &[
+                    (0, 0),
+                    (-4, 8),
+                    (4, -8),
+                    (-1, 0),
+                    (1, 0),
+                    (1, -1),
+                    (-1, 1),
+                    (-2, 0),
+                ][..],
+                8,
+                12,
+                WidePnMove::One(HexCoord::new(0, -2)),
+            ),
+        ];
+        for (moves, off_count, on_count, predicted) in witnesses {
+            let off = j2near_root_children(moves, WidthOptions::vcf_pair_complete());
+            let on = j2near_root_children(moves, WidthOptions::vcf_pair_j2near());
+            assert_eq!(off.len(), off_count);
+            assert_eq!(on.len(), on_count);
+            assert!(!off.contains(&predicted));
+            assert!(on.contains(&predicted));
+        }
+    }
+
+    #[test]
+    fn j2near_environment_flag_resolves_default_off_profile() {
+        let mut solver = TssSolver::default();
+        solver.set_width_options(WidthOptions::vcf_pair_complete());
+        let runtime = SolveRuntimeFlags {
+            lazy_frontier: false,
+            interior_census_gate: false,
+            k_reply_consume: false,
+            free_tempo_j2near: true,
+        };
+        assert!(solver
+            .effective_solve_config(
+                &SolveCaps {
+                    node_cap: 500,
+                    tt_bytes_cap: 256 << 10,
+                    semantic_horizon: u32::MAX,
+                },
+                runtime,
+            )
+            .free_tempo_j2near);
+        assert!(!WidthOptions::vcf_pair_complete().free_tempo_j2near);
+        assert!(WidthOptions::vcf_pair_j2near().free_tempo_j2near);
+    }
+
+    #[test]
+    #[ignore = "100k-node J2near witness and full D6 verifier gate"]
+    fn tss_j2near_witness_gate() {
+        let witnesses = [
+            (
+                "oa-0153903c5a863630",
+                &[(0, 0), (-6, 1), (-7, 2), (0, 1), (0, 2), (-7, 1), (-8, 2)][..],
+                42,
+            ),
+            (
+                "oa-773ca1a59e95f4e1",
+                &[(0, 0), (-8, 0), (-8, 1), (1, -1), (2, -2), (-8, 2), (-9, 2)][..],
+                42,
+            ),
+            (
+                "oa-6fda812864c6d19a",
+                &[
+                    (0, 0),
+                    (-4, 8),
+                    (4, -8),
+                    (-1, 0),
+                    (1, 0),
+                    (1, -1),
+                    (-1, 1),
+                    (-2, 0),
+                ][..],
+                20,
+            ),
+        ];
+        let caps = SolveCaps {
+            node_cap: 100_000,
+            tt_bytes_cap: 256 << 20,
+            semantic_horizon: u32::MAX,
+        };
+        for (id, moves, baseline_nodes) in witnesses {
+            let state = replay(moves);
+            let mut off_solver = TssSolver::default();
+            off_solver.set_width_options(WidthOptions::vcf_pair_complete());
+            let off = off_solver.solve_goal(&state, &caps, SolveGoal::Win);
+            assert_eq!(off.status, ProofStatus::Unknown, "{id}: flag-off status");
+            assert_eq!(off.stats.nodes, baseline_nodes, "{id}: flag-off nodes");
+
+            let mut on_solver = TssSolver::default();
+            on_solver.set_width_options(WidthOptions::vcf_pair_j2near());
+            let on = on_solver.solve_goal(&state, &caps, SolveGoal::Win);
+            assert_eq!(on.status, ProofStatus::Win, "{id}: flag-on status");
+            let cert = on.cert.as_ref().expect("WIN carries a certificate");
+            assert!(TssVerifier.verify(&state, cert, ProofStatus::Win), "{id}: canonical verifier");
+            let mut d6_verified = 0usize;
+            let mut d6_mask = 0u16;
+            for symmetry in 0..D6_SYMMETRY_COUNT {
+                let transformed_moves = moves
+                    .iter()
+                    .map(|&(q, r)| {
+                        d6_transform_coord(HexCoord::new(q, r), symmetry)
+                            .expect("witness coordinate transforms")
+                    })
+                    .collect::<Vec<_>>();
+                let mut transformed_state = RustHexoState::new();
+                for coord in transformed_moves {
+                    apply_placement(&mut transformed_state, Placement { coord }).unwrap();
+                }
+                let transformed_cert =
+                    d6_remap_certificate(cert, symmetry).expect("certificate transforms");
+                if TssVerifier.verify(&transformed_state, &transformed_cert, ProofStatus::Win) {
+                    d6_verified += 1;
+                    d6_mask |= 1u16 << symmetry;
+                }
+            }
+            assert!(d6_verified >= 2, "{id}: fewer than two verified D6 images");
+            println!(
+                "J2NEAR_WITNESS id={id} off=UNKNOWN off_nodes={baseline_nodes} on=WIN on_nodes={} cert_nodes={} d6_verified={d6_verified} d6_mask=0x{d6_mask:03x}",
+                on.stats.nodes,
+                cert.nodes.len(),
+            );
+        }
     }
 
     #[test]

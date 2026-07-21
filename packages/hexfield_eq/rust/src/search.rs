@@ -4913,6 +4913,7 @@ pub fn hexfield_eq_solver_manifest(
     let effective = manifest.effective;
     let d = PyDict::new(py);
     d.set_item("vcf_pair_complete", effective.vcf_pair_complete)?;
+    d.set_item("free_tempo_j2near", effective.free_tempo_j2near)?;
     d.set_item("dual_pass", effective.dual_pass)?;
     d.set_item("ordering", effective.ordering)?;
     d.set_item("loss_reserve_nodes", effective.loss_reserve_nodes)?;

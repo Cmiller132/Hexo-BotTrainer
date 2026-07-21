@@ -8,6 +8,7 @@ resolver, never re-derived here):
     ladder: bool           zone: bool
     wide: bool             goal: "win" | "loss" | "both" | "two_pass"
     dual_pass: bool        loss_reserve_nodes: int
+    free_tempo_j2near: bool (drives the TSS_VCF_J2NEAR env gate)
     shared_fragments: bool (drives the TSS_SHARED_FRAGMENTS env gate)
 
 "two_pass" = win pass + full-budget loss pass on the unknowns (adapter-side
@@ -69,6 +70,7 @@ class TssBatchAdapter:
         # engine). Search-work reduction only: verdicts must not change (a
         # failed Group-2 attempt re-solves cleanly with the selector off).
         "group2": False,
+        "free_tempo_j2near": False,
         "shared_fragments": False,
     }
 
@@ -87,6 +89,10 @@ class TssBatchAdapter:
 
     # -- env ownership ---------------------------------------------------- #
     def _apply_env(self) -> None:
+        if self.config["free_tempo_j2near"]:
+            os.environ["TSS_VCF_J2NEAR"] = "1"
+        else:
+            os.environ.pop("TSS_VCF_J2NEAR", None)
         if self.config["shared_fragments"]:
             os.environ["TSS_SHARED_FRAGMENTS"] = "1"
         else:
@@ -206,6 +212,8 @@ def declared_features(config: dict[str, Any]) -> tuple[str, ...]:
         feats.append("wide")
     if config.get("group2"):
         feats.append("group2")
+    if config.get("free_tempo_j2near"):
+        feats.append("j2near")
     if config.get("zone"):
         feats.append("zone")            # no canary exists -> unclaimable
     if config.get("ladder"):
