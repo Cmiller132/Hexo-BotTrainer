@@ -428,3 +428,18 @@ Consequences:
   relaunch loop — deterministic stop = kill SUPERVISOR pid first, then
   child; never remove the flag while the supervisor lives (orphan
   dual-trainer incident; ep21 wiped + rerun clean on owner order).
+
+- **2026-07-21 G2 mixed-cert amendment GATED `af3a9a88` (owner-authorized
+  trusted-base change): FIRES AND IS SOUND, still DO-NOT-ADOPT.** Firing
+  0 → 36-106 gate positions across 6,462 (count non-deterministic from
+  parallel materialization order; soundness invariant); cross-verify
+  142/142 clean across both runs; coverage and nodes/decision byte-
+  identical ON vs OFF — the search never consumes the cert-level
+  reduction (never-decides-less is structural). THE G2 LADDER IS NOW:
+  theory PROVEN → verifier SOUND → emission FIRES → **consume-mode
+  (design §5.1) = the one remaining step to any harness gain**, and the
+  realistic prize sits at the deep/offline operating point (cap 2000+/
+  50k labeling, 40% residue), not cap-500 in-game (gateable class ~1%
+  of positions). Seam hostile review + consume-mode design = the next
+  trusted-base round (Codex Jul 24 or owner-authorized). tss_verify.rs
+  byte-identical through the whole campaign.
