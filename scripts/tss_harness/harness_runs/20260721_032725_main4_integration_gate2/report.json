@@ -1,0 +1,63 @@
+{
+  "arm": "main4_integration_gate2",
+  "canaries": {
+    "loss_detection": {
+      "detail": "3/3 known losses proven, win-arm clean",
+      "fired": true
+    },
+    "unbounded_horizon": {
+      "detail": "3/3 deep wins unbounded-only",
+      "fired": true
+    },
+    "wide": {
+      "detail": "manifest wide + 3/3 fixture wins",
+      "fired": true
+    }
+  },
+  "config": {},
+  "sets": {
+    "human_v1": {
+      "coverage": {
+        "loss": 15,
+        "n": 338,
+        "win": 48
+      },
+      "economics": {
+        "cap_bound_n": 16,
+        "cap_bound_share": 0.6448559357210119,
+        "total_wall_s": 1.091591171,
+        "unknown_share": 0.8014274705048893
+      },
+      "split": "dev"
+    },
+    "puzzle_v3": {
+      "coverage": {
+        "loss": 1,
+        "n": 48,
+        "win": 11
+      },
+      "economics": {
+        "cap_bound_n": 16,
+        "cap_bound_share": 0.8588762104642456,
+        "total_wall_s": 0.762890873,
+        "unknown_share": 0.8611254128871981
+      },
+      "split": "dev"
+    },
+    "selfplay_v1": {
+      "coverage": {
+        "loss": 0,
+        "n": 343,
+        "win": 18
+      },
+      "economics": {
+        "cap_bound_n": 23,
+        "cap_bound_share": 0.6867763740355867,
+        "total_wall_s": 1.65934949,
+        "unknown_share": 0.887606977237809
+      },
+      "split": "dev"
+    }
+  },
+  "tier": "quick"
+}
