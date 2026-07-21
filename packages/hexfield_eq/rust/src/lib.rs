@@ -65,6 +65,9 @@ mod tss_j2near_ab;
 #[cfg(test)]
 mod tss_leaf_surface_hunt;
 
+#[cfg(test)]
+mod tss_trajectory_phase_b;
+
 #[cfg(feature = "python")]
 mod cache;
 #[cfg(feature = "python")]

@@ -22,6 +22,10 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::cell::Cell;
 #[cfg(test)]
+use std::fs::{File, OpenOptions};
+#[cfg(test)]
+use std::io::{BufWriter, Write};
+#[cfg(test)]
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -4247,6 +4251,12 @@ struct WidePnSearch<'store> {
     threshold_band_stack: Vec<ThresholdBandSelection>,
     #[cfg(test)]
     quotient_telemetry: Option<QuotientTelemetry>,
+    /// Phase-B trajectory sampling is test-only and absent from production
+    /// layout and code generation. `None` is the env-unset fast path.
+    #[cfg(test)]
+    trajectory: Option<TrajectoryTrace>,
+    #[cfg(test)]
+    trajectory_root: Option<usize>,
     entries: Vec<WidePnEntry>,
     by_position: HashMap<WidePositionKey, usize>,
     /// Exact prospective identity for lazy defender thunks. This preserves the
@@ -4262,6 +4272,44 @@ struct WidePnSearch<'store> {
     fragment_hits: u64,
     proven_candidate_ids: HashSet<usize>,
     proven_candidates: Vec<WideProvenCandidate>,
+}
+
+/// Test-only owner for the Phase-B sub-root trajectory stream. The writer is
+/// constructed only when `TSS_TRACE_TRAJECTORY` is set; production builds do
+/// not contain this type, its fields, or the call that records expansions.
+#[cfg(test)]
+struct TrajectoryTrace {
+    writer: BufWriter<File>,
+    solve_id: String,
+    next_snapshot: u64,
+    expanded_counts: HashMap<usize, u32>,
+}
+
+#[cfg(test)]
+impl TrajectoryTrace {
+    const INTERVAL: u64 = 25;
+
+    fn from_env() -> Option<Self> {
+        let path = std::env::var_os("TSS_TRACE_TRAJECTORY")?;
+        let solve_id = std::env::var("TSS_TRACE_SOLVE_ID")
+            .unwrap_or_else(|_| "unspecified".to_owned());
+        let writer = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "open TSS_TRACE_TRAJECTORY {}: {error}",
+                    std::path::Path::new(&path).display()
+                )
+            });
+        Some(Self {
+            writer: BufWriter::new(writer),
+            solve_id,
+            next_snapshot: Self::INTERVAL,
+            expanded_counts: HashMap::new(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -4577,6 +4625,10 @@ impl<'store> WidePnSearch<'store> {
             threshold_band_stack: Vec::new(),
             #[cfg(test)]
             quotient_telemetry: QuotientTelemetry::enabled(),
+            #[cfg(test)]
+            trajectory: TrajectoryTrace::from_env(),
+            #[cfg(test)]
+            trajectory_root: None,
             entries: Vec::new(),
             by_position: HashMap::new(),
             deferred_by_position: HashMap::new(),
@@ -4606,7 +4658,12 @@ impl<'store> WidePnSearch<'store> {
 
     fn insert_root(&mut self, state: &RustHexoState) -> usize {
         let prior = self.position_prior(state);
-        self.insert_position(WidePositionKey::from_state(state), 0, prior)
+        let root = self.insert_position(WidePositionKey::from_state(state), 0, prior);
+        #[cfg(test)]
+        {
+            self.trajectory_root = Some(root);
+        }
+        root
     }
 
     fn insert_position(&mut self, key: WidePositionKey, depth: usize, prior: WidePnPrior) -> usize {
@@ -6502,7 +6559,204 @@ impl<'store> WidePnSearch<'store> {
         self.recompute(id);
     }
 
+    #[cfg(test)]
+    fn trajectory_child_numbers(
+        &self,
+        child: &WidePnChild,
+        memo: &mut [Option<(u32, u32)>],
+        visiting: &mut HashSet<usize>,
+    ) -> (u32, u32) {
+        match child.result {
+            WidePnChildResult::ClaimantCompletion | WidePnChildResult::ClaimantTactical => {
+                (0, PN_INFINITY)
+            }
+            WidePnChildResult::Refuted => (PN_INFINITY, 0),
+            WidePnChildResult::Pending => self
+                .resolved_child_entry(child)
+                .filter(|&entry| self.entries.get(entry).is_some())
+                .map(|entry| self.trajectory_entry_numbers(entry, memo, visiting))
+                .or_else(|| {
+                    child
+                        .future_key
+                        .as_ref()
+                        .and_then(WideFutureKey::virtual_key)
+                        .and_then(|key| self.deferred_by_position.get(key))
+                        .map(|deferred| (deferred.prior.pn, deferred.prior.dn))
+                })
+                .unwrap_or((child.prior.pn, child.prior.dn)),
+        }
+    }
+
+    /// Recompute an observational PN/DN view without mutating the search.
+    /// This avoids reporting stale ancestors while df-pn is still unwinding
+    /// from the expansion that triggered a snapshot.
+    #[cfg(test)]
+    fn trajectory_entry_numbers(
+        &self,
+        id: usize,
+        memo: &mut [Option<(u32, u32)>],
+        visiting: &mut HashSet<usize>,
+    ) -> (u32, u32) {
+        if let Some(numbers) = memo.get(id).copied().flatten() {
+            return numbers;
+        }
+        let Some(entry) = self.entries.get(id) else {
+            return (PN_INFINITY, 0);
+        };
+        // Placement depth is strictly increasing, so this should be
+        // unreachable. Fail closed to the cached observation if a malformed
+        // test graph ever introduces a cycle.
+        if !visiting.insert(id) {
+            return (entry.pn, entry.dn);
+        }
+        let numbers = match &entry.node {
+            WidePnNode::Unexpanded => (entry.prior.pn, entry.prior.dn),
+            WidePnNode::ProvenLeaf(_) | WidePnNode::ProvenFragment(_) => (0, PN_INFINITY),
+            WidePnNode::DepthCutoff | WidePnNode::Refuted => (PN_INFINITY, 0),
+            WidePnNode::Branch { kind, children } => match kind {
+                WidePnKind::Choice => {
+                    let mut pn = PN_INFINITY;
+                    let mut dn = 0u32;
+                    for child in children {
+                        let child = self.trajectory_child_numbers(child, memo, visiting);
+                        pn = pn.min(child.0);
+                        dn = dn.saturating_add(child.1).min(PN_INFINITY);
+                    }
+                    (pn, dn)
+                }
+                WidePnKind::Universal { .. } => {
+                    let mut pn = 0u32;
+                    let mut dn = if children.is_empty() { 0 } else { PN_INFINITY };
+                    for child in children {
+                        let child = self.trajectory_child_numbers(child, memo, visiting);
+                        pn = pn.saturating_add(child.0).min(PN_INFINITY);
+                        dn = dn.min(child.1);
+                    }
+                    (pn, dn)
+                }
+            },
+        };
+        visiting.remove(&id);
+        if let Some(slot) = memo.get_mut(id) {
+            *slot = Some(numbers);
+        }
+        numbers
+    }
+
+    #[cfg(test)]
+    fn trajectory_json(&self, root: usize) -> String {
+        use std::fmt::Write as _;
+
+        let mut memo = vec![None; self.entries.len()];
+        let mut visiting = HashSet::new();
+        let (root_pn, root_dn) = self.trajectory_entry_numbers(root, &mut memo, &mut visiting);
+        let mut child_rows = Vec::<(usize, u32, u32, u32, u32)>::new();
+        let mut root_kind = "non_branch";
+        if let Some(WidePnEntry {
+            node: WidePnNode::Branch { kind, children },
+            ..
+        }) = self.entries.get(root)
+        {
+            root_kind = match kind {
+                WidePnKind::Choice => "choice",
+                WidePnKind::Universal { .. } => "universal",
+            };
+            for (ordinal, child) in children.iter().enumerate() {
+                let (pn, dn) = self.trajectory_child_numbers(child, &mut memo, &mut visiting);
+                child_rows.push((ordinal, pn, dn, child.prior.pn, child.prior.dn));
+            }
+            child_rows.sort_by_key(|&(ordinal, pn, dn, _, _)| match kind {
+                WidePnKind::Choice => (pn, ordinal),
+                WidePnKind::Universal { .. } => (dn, ordinal),
+            });
+        }
+
+        let child_count = child_rows.len();
+        let child_pn_sum = child_rows
+            .iter()
+            .fold(0u64, |sum, row| sum.saturating_add(u64::from(row.1)));
+        let child_dn_sum = child_rows
+            .iter()
+            .fold(0u64, |sum, row| sum.saturating_add(u64::from(row.2)));
+        let child_pn_min = child_rows.iter().map(|row| row.1).min().unwrap_or(0);
+        let child_pn_max = child_rows.iter().map(|row| row.1).max().unwrap_or(0);
+        let child_dn_min = child_rows.iter().map(|row| row.2).min().unwrap_or(0);
+        let child_dn_max = child_rows.iter().map(|row| row.2).max().unwrap_or(0);
+        let child_pn_zero = child_rows.iter().filter(|row| row.1 == 0).count();
+        let child_dn_zero = child_rows.iter().filter(|row| row.2 == 0).count();
+        let open_nodes = self
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry.node, WidePnNode::Unexpanded))
+            .count();
+        let cutoff_nodes = self
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry.node, WidePnNode::DepthCutoff))
+            .count();
+        let max_depth = self.entries.iter().map(|entry| entry.depth).max().unwrap_or(0);
+        let trace = self.trajectory.as_ref().expect("enabled trajectory");
+        let distinct_expanded = trace.expanded_counts.len();
+        let max_node_expansions = trace
+            .expanded_counts
+            .values()
+            .copied()
+            .max()
+            .unwrap_or(0);
+        let reselected_expansions = self
+            .expansions
+            .saturating_sub(u64::try_from(distinct_expanded).unwrap_or(u64::MAX));
+        let solve_id = serde_json::to_string(&trace.solve_id).expect("serialize trajectory id");
+        let mut top = String::from("[");
+        for (rank, &(ordinal, pn, dn, prior_pn, prior_dn)) in
+            child_rows.iter().take(4).enumerate()
+        {
+            if rank != 0 {
+                top.push(',');
+            }
+            write!(
+                top,
+                "{{\"rank\":{rank},\"ordinal\":{ordinal},\"pn\":{pn},\"dn\":{dn},\"prior_pn\":{prior_pn},\"prior_dn\":{prior_dn}}}"
+            )
+            .expect("format trajectory child");
+        }
+        top.push(']');
+        format!(
+            "{{\"solve_id\":{solve_id},\"expansions\":{},\"root_pn\":{root_pn},\"root_dn\":{root_dn},\"root_kind\":\"{root_kind}\",\"root_child_count\":{child_count},\"root_child_pn_sum\":{child_pn_sum},\"root_child_dn_sum\":{child_dn_sum},\"root_child_pn_min\":{child_pn_min},\"root_child_pn_max\":{child_pn_max},\"root_child_dn_min\":{child_dn_min},\"root_child_dn_max\":{child_dn_max},\"root_child_pn_zero\":{child_pn_zero},\"root_child_dn_zero\":{child_dn_zero},\"root_top\":{top},\"open_nodes\":{open_nodes},\"cutoff_nodes\":{cutoff_nodes},\"max_depth\":{max_depth},\"arena_size\":{},\"tt_entries\":{},\"tt_hits\":{},\"tt_admission_rejections\":{},\"distinct_expanded_nodes\":{distinct_expanded},\"reselected_expansions\":{reselected_expansions},\"max_node_expansions\":{max_node_expansions}}}",
+            self.expansions,
+            self.entries.len(),
+            self.by_position.len(),
+            self.tt_hits,
+            self.tt_index_rejections,
+        )
+    }
+
+    #[cfg(test)]
+    fn record_trajectory_expansion(&mut self, id: usize) {
+        let Some(trace) = self.trajectory.as_mut() else {
+            return;
+        };
+        let count = trace.expanded_counts.entry(id).or_insert(0);
+        *count = count.saturating_add(1);
+        if self.expansions < trace.next_snapshot {
+            return;
+        }
+        debug_assert_eq!(self.expansions, trace.next_snapshot);
+        trace.next_snapshot = trace.next_snapshot.saturating_add(TrajectoryTrace::INTERVAL);
+        let root = self.trajectory_root.expect("trajectory root inserted");
+        let row = self.trajectory_json(root);
+        let trace = self.trajectory.as_mut().expect("enabled trajectory");
+        writeln!(trace.writer, "{row}").expect("write trajectory snapshot");
+    }
+
     fn expand(&mut self, state: &mut RustHexoState, id: usize) -> WidePnStepOutcome {
+        let outcome = self.expand_inner(state, id);
+        #[cfg(test)]
+        self.record_trajectory_expansion(id);
+        outcome
+    }
+
+    fn expand_inner(&mut self, state: &mut RustHexoState, id: usize) -> WidePnStepOutcome {
         #[cfg(test)]
         let _timer = WideGenTimer::start(&WIDE_EXPAND_NANOS);
         if self.expansions >= self.node_cap {
