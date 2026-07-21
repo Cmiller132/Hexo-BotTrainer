@@ -1,0 +1,375 @@
+{
+  "cohorts": {
+    "forcing19": {
+      "certified_h10_new_ids": [],
+      "h10_certified_floor_pct": 0.0,
+      "h10_certified_floor_wins": 0,
+      "h8_not_h10": [],
+      "h8_pct": 0.0,
+      "h8_wins": 0,
+      "interpretation": "h10 value is a certified lower bound, not an exhaustive cohort firing rate",
+      "population_n": 18
+    },
+    "grinds": {
+      "certified_h10_new_ids": [],
+      "h10_certified_floor_pct": 0.0,
+      "h10_certified_floor_wins": 0,
+      "h8_not_h10": [],
+      "h8_pct": 0.0,
+      "h8_wins": 0,
+      "interpretation": "h10 value is a certified lower bound, not an exhaustive cohort firing rate",
+      "population_n": 193
+    },
+    "human_v1": {
+      "certified_h10_new_ids": [
+        "human_438cf2993db2676d_p43",
+        "human_57bd45a74adeb628_p39",
+        "human_60818dbe5a13a9f9_p31",
+        "human_7d16286a4c1ae774_p19",
+        "human_b132a09ccb4eb829_p101"
+      ],
+      "h10_certified_floor_pct": 7.488653555219365,
+      "h10_certified_floor_wins": 99,
+      "h8_not_h10": [],
+      "h8_pct": 7.110438729198185,
+      "h8_wins": 94,
+      "interpretation": "h10 value is a certified lower bound, not an exhaustive cohort firing rate",
+      "population_n": 1322
+    },
+    "puzzle_v3": {
+      "certified_h10_new_ids": [
+        "human_b132a09ccb4eb829_p101"
+      ],
+      "h10_certified_floor_pct": 4.531722054380665,
+      "h10_certified_floor_wins": 15,
+      "h8_not_h10": [],
+      "h8_pct": 4.229607250755287,
+      "h8_wins": 14,
+      "interpretation": "h10 value is a certified lower bound, not an exhaustive cohort firing rate",
+      "population_n": 331
+    },
+    "selfplay_v1": {
+      "certified_h10_new_ids": [
+        "sp_20_p77"
+      ],
+      "h10_certified_floor_pct": 3.4161490683229814,
+      "h10_certified_floor_wins": 55,
+      "h8_not_h10": [],
+      "h8_pct": 3.3540372670807455,
+      "h8_wins": 54,
+      "interpretation": "h10 value is a certified lower bound, not an exhaustive cohort firing rate",
+      "population_n": 1610
+    }
+  },
+  "engine_certificates_h10": {
+    "depth_le_8_caught_by_exact_shortcut": 76,
+    "eligible": 123,
+    "new_caught": 2,
+    "new_depth_9_10": 47,
+    "new_tested": 2,
+    "new_untested_after_timeout": 45,
+    "registry_unique": 2941,
+    "tested_rows": [
+      {
+        "cert_depth": 10,
+        "nodes": 34703,
+        "pos_id": "human_b132a09ccb4eb829_p101",
+        "wall_us": 1176455.5,
+        "win": true,
+        "witness_first_pair": [
+          [
+            -4,
+            -5
+          ],
+          [
+            12,
+            -12
+          ]
+        ]
+      },
+      {
+        "cert_depth": 10,
+        "nodes": 689531,
+        "pos_id": "sp_20_p77",
+        "wall_us": 9779392.6,
+        "win": true,
+        "witness_first_pair": [
+          [
+            6,
+            -12
+          ],
+          [
+            10,
+            -19
+          ]
+        ]
+      }
+    ]
+  },
+  "metadata": {
+    "exact_decider": true,
+    "horizons": [
+      8,
+      10
+    ],
+    "measurement_boundary": "full 123-certificate plus atlas run exceeded 1200 seconds and produced no completed output"
+  },
+  "remote_empty_subgame": {
+    "all_have_two_cover": true,
+    "constant": false,
+    "rows": [
+      {
+        "cover": [
+          -2,
+          4
+        ],
+        "covered": true,
+        "residuals": [
+          [
+            -2,
+            -1
+          ],
+          [
+            -1,
+            4
+          ],
+          [
+            4,
+            5
+          ]
+        ],
+        "stones": [
+          0,
+          1,
+          2,
+          3
+        ]
+      },
+      {
+        "cover": [
+          3
+        ],
+        "covered": true,
+        "residuals": [
+          [
+            -1,
+            3
+          ],
+          [
+            3,
+            5
+          ]
+        ],
+        "stones": [
+          0,
+          1,
+          2,
+          4
+        ]
+      },
+      {
+        "cover": [
+          3
+        ],
+        "covered": true,
+        "residuals": [
+          [
+            3,
+            4
+          ]
+        ],
+        "stones": [
+          0,
+          1,
+          2,
+          5
+        ]
+      },
+      {
+        "cover": [
+          2
+        ],
+        "covered": true,
+        "residuals": [
+          [
+            -1,
+            2
+          ],
+          [
+            2,
+            5
+          ]
+        ],
+        "stones": [
+          0,
+          1,
+          3,
+          4
+        ]
+      },
+      {
+        "cover": [
+          2
+        ],
+        "covered": true,
+        "residuals": [
+          [
+            2,
+            4
+          ]
+        ],
+        "stones": [
+          0,
+          1,
+          3,
+          5
+        ]
+      },
+      {
+        "cover": [
+          2
+        ],
+        "covered": true,
+        "residuals": [
+          [
+            2,
+            3
+          ]
+        ],
+        "stones": [
+          0,
+          1,
+          4,
+          5
+        ]
+      },
+      {
+        "cover": [
+          1
+        ],
+        "covered": true,
+        "residuals": [
+          [
+            -1,
+            1
+          ],
+          [
+            1,
+            5
+          ]
+        ],
+        "stones": [
+          0,
+          2,
+          3,
+          4
+        ]
+      },
+      {
+        "cover": [
+          1
+        ],
+        "covered": true,
+        "residuals": [
+          [
+            1,
+            4
+          ]
+        ],
+        "stones": [
+          0,
+          2,
+          3,
+          5
+        ]
+      },
+      {
+        "cover": [
+          1
+        ],
+        "covered": true,
+        "residuals": [
+          [
+            1,
+            3
+          ]
+        ],
+        "stones": [
+          0,
+          2,
+          4,
+          5
+        ]
+      },
+      {
+        "cover": [
+          1
+        ],
+        "covered": true,
+        "residuals": [
+          [
+            1,
+            2
+          ]
+        ],
+        "stones": [
+          0,
+          3,
+          4,
+          5
+        ]
+      }
+    ],
+    "shapes": 10
+  },
+  "width_exhaust_comparison": {
+    "h10_status": "not completed; exact negative evaluation entered the same universal tail",
+    "h8_rows": [
+      {
+        "nodes": 28,
+        "phase": "first",
+        "pos_id": "oa-0153903c5a863630",
+        "universe": 8,
+        "wall_us": 332.9,
+        "win_within_8": false
+      },
+      {
+        "nodes": 30665,
+        "phase": "second",
+        "pos_id": "oa-23c6c04ad42d0904",
+        "universe": 27,
+        "wall_us": 321477.8,
+        "win_within_8": false
+      },
+      {
+        "nodes": 153,
+        "phase": "first",
+        "pos_id": "oa-611666d7d930eb1f",
+        "universe": 18,
+        "wall_us": 751.8,
+        "win_within_8": false
+      },
+      {
+        "nodes": 25,
+        "phase": "second",
+        "pos_id": "oa-6fda812864c6d19a",
+        "universe": 8,
+        "wall_us": 141.1,
+        "win_within_8": false
+      },
+      {
+        "nodes": 28,
+        "phase": "first",
+        "pos_id": "oa-773ca1a59e95f4e1",
+        "universe": 8,
+        "wall_us": 349.2,
+        "win_within_8": false
+      }
+    ],
+    "known_j2near_ids": [
+      "oa-0153903c5a863630",
+      "oa-6fda812864c6d19a",
+      "oa-773ca1a59e95f4e1"
+    ]
+  }
+}

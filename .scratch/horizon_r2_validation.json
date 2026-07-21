@@ -1,0 +1,1590 @@
+{
+  "adapted_false_dismissal": {
+    "h8_ground_truth_eligible": 76,
+    "h8_ground_truth_misses": [],
+    "interpretation": "NoWinWithin8 is a bounded partial refutation, never a full-game LOSS.",
+    "later_than_8": 2600,
+    "registry_unique": 2941,
+    "undated": 265
+  },
+  "engine_certificates": {
+    "6": {
+      "caught": 76,
+      "eligible": 76,
+      "misses": [],
+      "rows": [
+        {
+          "cert_depth": 5,
+          "nodes": 400,
+          "phase": "second",
+          "pos_id": "atlas_oa-3c2762e55c2af7e2",
+          "universe": 16,
+          "wall_us": 4034.6,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 81,
+          "phase": "second",
+          "pos_id": "atlas_oa-4a91f3b61b890567",
+          "universe": 8,
+          "wall_us": 302.6,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 152,
+          "phase": "second",
+          "pos_id": "human_67630ab3b7277e43_p22",
+          "universe": 11,
+          "wall_us": 724.6,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "human_b81f05b4f52ddee3_p25",
+          "universe": 14,
+          "wall_us": 710.6,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 482,
+          "phase": "second",
+          "pos_id": "human_bec873af729120b3_p26",
+          "universe": 16,
+          "wall_us": 3717.9,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "human_db9e61448d342d8d_p35",
+          "universe": 45,
+          "wall_us": 4335.6,
+          "win": true
+        },
+        {
+          "cert_depth": 1,
+          "nodes": 2,
+          "phase": "second",
+          "pos_id": "sp_16_p50",
+          "universe": 1,
+          "wall_us": 16.1,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 211,
+          "phase": "second",
+          "pos_id": "sp_19_p42",
+          "universe": 13,
+          "wall_us": 1500.2,
+          "win": true
+        },
+        {
+          "cert_depth": 1,
+          "nodes": 2,
+          "phase": "second",
+          "pos_id": "sp_2_p70",
+          "universe": 1,
+          "wall_us": 9.3,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "sp_31_p49",
+          "universe": 36,
+          "wall_us": 2736.4,
+          "win": true
+        },
+        {
+          "cert_depth": 1,
+          "nodes": 2,
+          "phase": "second",
+          "pos_id": "sp_33_p30",
+          "universe": 1,
+          "wall_us": 9.1,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "sp_41_p57",
+          "universe": 31,
+          "wall_us": 2199.7,
+          "win": true
+        },
+        {
+          "cert_depth": 1,
+          "nodes": 2,
+          "phase": "second",
+          "pos_id": "sp_43_p28",
+          "universe": 1,
+          "wall_us": 9.2,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "human_3d17d05a42459994_p25",
+          "universe": 31,
+          "wall_us": 1814.9,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 3,
+          "phase": "first",
+          "pos_id": "human_3e6a7aaa8d136721_p31",
+          "universe": 33,
+          "wall_us": 2061.6,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 97,
+          "phase": "second",
+          "pos_id": "human_438cf2993db2676d_p48",
+          "universe": 10,
+          "wall_us": 405.4,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 3,
+          "phase": "first",
+          "pos_id": "human_572f17e89f6ab4b4_p63",
+          "universe": 46,
+          "wall_us": 4605.0,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 99,
+          "phase": "second",
+          "pos_id": "human_5aef7545813a348a_p34",
+          "universe": 9,
+          "wall_us": 409.9,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "human_5cfcb378a9dc6e84_p45",
+          "universe": 46,
+          "wall_us": 4167.3,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "human_6e548d2127ed37cb_p25",
+          "universe": 28,
+          "wall_us": 1516.5,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "human_92b740931483965e_p25",
+          "universe": 30,
+          "wall_us": 1365.3,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 2,
+          "phase": "first",
+          "pos_id": "human_ab93c3b77edcd8c1_p57",
+          "universe": 49,
+          "wall_us": 4596.1,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "human_b8c6422dc42a5552_p23",
+          "universe": 24,
+          "wall_us": 984.4,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 77,
+          "phase": "second",
+          "pos_id": "human_bcae226331bcae63_p26",
+          "universe": 8,
+          "wall_us": 278.9,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "human_c54c79e3ba4eed5a_p319",
+          "universe": 165,
+          "wall_us": 138401.6,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 284,
+          "phase": "second",
+          "pos_id": "human_d190fa3322965e18_p24",
+          "universe": 15,
+          "wall_us": 2199.6,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 206,
+          "phase": "second",
+          "pos_id": "human_d371694020b025f3_p26",
+          "universe": 11,
+          "wall_us": 1108.5,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 99,
+          "phase": "second",
+          "pos_id": "human_d5c9e65ee824b42e_p52",
+          "universe": 9,
+          "wall_us": 399.1,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "human_db9e61448d342d8d_p31",
+          "universe": 35,
+          "wall_us": 2401.0,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 4,
+          "phase": "first",
+          "pos_id": "human_de78dc834d1cf367_p73",
+          "universe": 73,
+          "wall_us": 15472.8,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "human_f3dfd95284c2b5b4_p19",
+          "universe": 18,
+          "wall_us": 729.6,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 590,
+          "phase": "second",
+          "pos_id": "human_f9f50871d4efa2d9_p32",
+          "universe": 20,
+          "wall_us": 8224.7,
+          "win": true
+        },
+        {
+          "cert_depth": 1,
+          "nodes": 2,
+          "phase": "second",
+          "pos_id": "atlas_full_oa-39674c790c5437da",
+          "universe": 2,
+          "wall_us": 14.7,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-ee5eae78c9a82d05",
+          "universe": 40,
+          "wall_us": 3404.9,
+          "win": true
+        },
+        {
+          "cert_depth": 1,
+          "nodes": 2,
+          "phase": "second",
+          "pos_id": "atlas_full_oa-677c5db6ef8d57a2",
+          "universe": 1,
+          "wall_us": 8.8,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-b22d9e7bf339df90",
+          "universe": 20,
+          "wall_us": 642.0,
+          "win": true
+        },
+        {
+          "cert_depth": 1,
+          "nodes": 2,
+          "phase": "second",
+          "pos_id": "atlas_full_oa-d049938e91bc7c71",
+          "universe": 1,
+          "wall_us": 7.1,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-0ba4d353ceed58dd",
+          "universe": 61,
+          "wall_us": 7273.8,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-5799a06a546f5980",
+          "universe": 66,
+          "wall_us": 9998.9,
+          "win": true
+        },
+        {
+          "cert_depth": 1,
+          "nodes": 2,
+          "phase": "second",
+          "pos_id": "atlas_full_oa-fe7e1980dc545256",
+          "universe": 1,
+          "wall_us": 19.4,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-daa537edfe2edefd",
+          "universe": 31,
+          "wall_us": 1906.1,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 304,
+          "phase": "second",
+          "pos_id": "atlas_full_oa-21e88affe3597bbf",
+          "universe": 14,
+          "wall_us": 1737.0,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-8879bbcab94a3163",
+          "universe": 33,
+          "wall_us": 2228.6,
+          "win": true
+        },
+        {
+          "cert_depth": 1,
+          "nodes": 2,
+          "phase": "second",
+          "pos_id": "atlas_full_oa-ac4e139c0c235214",
+          "universe": 1,
+          "wall_us": 10.2,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-804525958e2600db",
+          "universe": 40,
+          "wall_us": 3025.2,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 81,
+          "phase": "second",
+          "pos_id": "atlas_full_oa-4a91f3b61b890567",
+          "universe": 8,
+          "wall_us": 301.0,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-2b428a33ac46597c",
+          "universe": 47,
+          "wall_us": 4456.7,
+          "win": true
+        },
+        {
+          "cert_depth": 1,
+          "nodes": 2,
+          "phase": "second",
+          "pos_id": "atlas_full_oa-c5d0933314357fb6",
+          "universe": 1,
+          "wall_us": 10.0,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-61a6af9aed05053d",
+          "universe": 39,
+          "wall_us": 2693.2,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-8b2f9b5a954134a5",
+          "universe": 16,
+          "wall_us": 742.8,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 26,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-f902f3534eff1449",
+          "universe": 13,
+          "wall_us": 630.8,
+          "win": true
+        },
+        {
+          "cert_depth": 1,
+          "nodes": 2,
+          "phase": "second",
+          "pos_id": "atlas_full_oa-5e92071b23b32555",
+          "universe": 1,
+          "wall_us": 9.8,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-4cf66ead127526be",
+          "universe": 36,
+          "wall_us": 1934.7,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 77,
+          "phase": "second",
+          "pos_id": "atlas_full_oa-82095adae0b94f52",
+          "universe": 8,
+          "wall_us": 267.2,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 11,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-f6170888a8d617a1",
+          "universe": 31,
+          "wall_us": 1601.0,
+          "win": true
+        },
+        {
+          "cert_depth": 1,
+          "nodes": 2,
+          "phase": "second",
+          "pos_id": "atlas_full_oa-4d38ecd758048686",
+          "universe": 2,
+          "wall_us": 8.8,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-b7bbc03e1327f7b5",
+          "universe": 65,
+          "wall_us": 11512.1,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 343,
+          "phase": "second",
+          "pos_id": "atlas_full_oa-42551fb87e915ae5",
+          "universe": 20,
+          "wall_us": 3730.0,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-fcdeed9ad5ba60c9",
+          "universe": 40,
+          "wall_us": 3803.9,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 400,
+          "phase": "second",
+          "pos_id": "atlas_full_oa-3c2762e55c2af7e2",
+          "universe": 16,
+          "wall_us": 3798.5,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 6,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-9a06a71943b29908",
+          "universe": 45,
+          "wall_us": 5001.2,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-5ae978cdace13480",
+          "universe": 17,
+          "wall_us": 622.7,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 9,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-ddbdbfab6ee8a3c3",
+          "universe": 16,
+          "wall_us": 470.4,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 10,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-8a68dadb57fe9456",
+          "universe": 12,
+          "wall_us": 407.0,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 9,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-40f189b7cbf82b28",
+          "universe": 16,
+          "wall_us": 462.2,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-07ff57191ae3fdfa",
+          "universe": 18,
+          "wall_us": 573.1,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 8,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-fd81b5e1d141fe07",
+          "universe": 28,
+          "wall_us": 1188.9,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 4,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-6d4adfc83c511a3a",
+          "universe": 23,
+          "wall_us": 854.8,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 6,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-36a221aa702154ba",
+          "universe": 20,
+          "wall_us": 689.4,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 23,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-951fffa65da710af",
+          "universe": 24,
+          "wall_us": 1004.7,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 6,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-778d8c161251c0c3",
+          "universe": 20,
+          "wall_us": 569.8,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 9,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-c120563f2da87614",
+          "universe": 20,
+          "wall_us": 566.2,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-38ef9e79b9ab8bd6",
+          "universe": 4,
+          "wall_us": 331.2,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-5425d35403416f9b",
+          "universe": 12,
+          "wall_us": 392.8,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-75e133bf45ef42c4",
+          "universe": 24,
+          "wall_us": 943.8,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 9,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-9b4b787c7f1dcf98",
+          "universe": 21,
+          "wall_us": 665.6,
+          "win": true
+        }
+      ],
+      "wall_ms": 373.504
+    },
+    "8": {
+      "caught": 76,
+      "eligible": 76,
+      "misses": [],
+      "rows": [
+        {
+          "cert_depth": 5,
+          "nodes": 400,
+          "phase": "second",
+          "pos_id": "atlas_oa-3c2762e55c2af7e2",
+          "universe": 16,
+          "wall_us": 3947.2,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 81,
+          "phase": "second",
+          "pos_id": "atlas_oa-4a91f3b61b890567",
+          "universe": 8,
+          "wall_us": 282.0,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 152,
+          "phase": "second",
+          "pos_id": "human_67630ab3b7277e43_p22",
+          "universe": 11,
+          "wall_us": 721.2,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "human_b81f05b4f52ddee3_p25",
+          "universe": 14,
+          "wall_us": 672.3,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 482,
+          "phase": "second",
+          "pos_id": "human_bec873af729120b3_p26",
+          "universe": 16,
+          "wall_us": 3578.1,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "human_db9e61448d342d8d_p35",
+          "universe": 45,
+          "wall_us": 4289.4,
+          "win": true
+        },
+        {
+          "cert_depth": 1,
+          "nodes": 2,
+          "phase": "second",
+          "pos_id": "sp_16_p50",
+          "universe": 1,
+          "wall_us": 9.7,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 211,
+          "phase": "second",
+          "pos_id": "sp_19_p42",
+          "universe": 13,
+          "wall_us": 1430.5,
+          "win": true
+        },
+        {
+          "cert_depth": 1,
+          "nodes": 2,
+          "phase": "second",
+          "pos_id": "sp_2_p70",
+          "universe": 1,
+          "wall_us": 6.9,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "sp_31_p49",
+          "universe": 36,
+          "wall_us": 2659.0,
+          "win": true
+        },
+        {
+          "cert_depth": 1,
+          "nodes": 2,
+          "phase": "second",
+          "pos_id": "sp_33_p30",
+          "universe": 1,
+          "wall_us": 7.4,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "sp_41_p57",
+          "universe": 31,
+          "wall_us": 2261.5,
+          "win": true
+        },
+        {
+          "cert_depth": 1,
+          "nodes": 2,
+          "phase": "second",
+          "pos_id": "sp_43_p28",
+          "universe": 1,
+          "wall_us": 12.4,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "human_3d17d05a42459994_p25",
+          "universe": 31,
+          "wall_us": 1841.1,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 3,
+          "phase": "first",
+          "pos_id": "human_3e6a7aaa8d136721_p31",
+          "universe": 33,
+          "wall_us": 2040.4,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 97,
+          "phase": "second",
+          "pos_id": "human_438cf2993db2676d_p48",
+          "universe": 10,
+          "wall_us": 390.7,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 3,
+          "phase": "first",
+          "pos_id": "human_572f17e89f6ab4b4_p63",
+          "universe": 46,
+          "wall_us": 4528.2,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 99,
+          "phase": "second",
+          "pos_id": "human_5aef7545813a348a_p34",
+          "universe": 9,
+          "wall_us": 403.4,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "human_5cfcb378a9dc6e84_p45",
+          "universe": 46,
+          "wall_us": 4146.3,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "human_6e548d2127ed37cb_p25",
+          "universe": 28,
+          "wall_us": 1492.0,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "human_92b740931483965e_p25",
+          "universe": 30,
+          "wall_us": 1358.4,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 2,
+          "phase": "first",
+          "pos_id": "human_ab93c3b77edcd8c1_p57",
+          "universe": 49,
+          "wall_us": 4591.1,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "human_b8c6422dc42a5552_p23",
+          "universe": 24,
+          "wall_us": 978.6,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 77,
+          "phase": "second",
+          "pos_id": "human_bcae226331bcae63_p26",
+          "universe": 8,
+          "wall_us": 265.8,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "human_c54c79e3ba4eed5a_p319",
+          "universe": 165,
+          "wall_us": 174833.8,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 284,
+          "phase": "second",
+          "pos_id": "human_d190fa3322965e18_p24",
+          "universe": 15,
+          "wall_us": 2305.1,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 206,
+          "phase": "second",
+          "pos_id": "human_d371694020b025f3_p26",
+          "universe": 11,
+          "wall_us": 1109.5,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 99,
+          "phase": "second",
+          "pos_id": "human_d5c9e65ee824b42e_p52",
+          "universe": 9,
+          "wall_us": 400.6,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "human_db9e61448d342d8d_p31",
+          "universe": 35,
+          "wall_us": 2366.0,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 4,
+          "phase": "first",
+          "pos_id": "human_de78dc834d1cf367_p73",
+          "universe": 73,
+          "wall_us": 14940.3,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "human_f3dfd95284c2b5b4_p19",
+          "universe": 18,
+          "wall_us": 770.0,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 590,
+          "phase": "second",
+          "pos_id": "human_f9f50871d4efa2d9_p32",
+          "universe": 20,
+          "wall_us": 8089.0,
+          "win": true
+        },
+        {
+          "cert_depth": 1,
+          "nodes": 2,
+          "phase": "second",
+          "pos_id": "atlas_full_oa-39674c790c5437da",
+          "universe": 2,
+          "wall_us": 10.6,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-ee5eae78c9a82d05",
+          "universe": 40,
+          "wall_us": 3450.6,
+          "win": true
+        },
+        {
+          "cert_depth": 1,
+          "nodes": 2,
+          "phase": "second",
+          "pos_id": "atlas_full_oa-677c5db6ef8d57a2",
+          "universe": 1,
+          "wall_us": 11.6,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-b22d9e7bf339df90",
+          "universe": 20,
+          "wall_us": 668.7,
+          "win": true
+        },
+        {
+          "cert_depth": 1,
+          "nodes": 2,
+          "phase": "second",
+          "pos_id": "atlas_full_oa-d049938e91bc7c71",
+          "universe": 1,
+          "wall_us": 9.9,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-0ba4d353ceed58dd",
+          "universe": 61,
+          "wall_us": 7212.9,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-5799a06a546f5980",
+          "universe": 66,
+          "wall_us": 9938.2,
+          "win": true
+        },
+        {
+          "cert_depth": 1,
+          "nodes": 2,
+          "phase": "second",
+          "pos_id": "atlas_full_oa-fe7e1980dc545256",
+          "universe": 1,
+          "wall_us": 18.3,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-daa537edfe2edefd",
+          "universe": 31,
+          "wall_us": 1877.5,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 304,
+          "phase": "second",
+          "pos_id": "atlas_full_oa-21e88affe3597bbf",
+          "universe": 14,
+          "wall_us": 1712.1,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-8879bbcab94a3163",
+          "universe": 33,
+          "wall_us": 2164.5,
+          "win": true
+        },
+        {
+          "cert_depth": 1,
+          "nodes": 2,
+          "phase": "second",
+          "pos_id": "atlas_full_oa-ac4e139c0c235214",
+          "universe": 1,
+          "wall_us": 11.9,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-804525958e2600db",
+          "universe": 40,
+          "wall_us": 3032.7,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 81,
+          "phase": "second",
+          "pos_id": "atlas_full_oa-4a91f3b61b890567",
+          "universe": 8,
+          "wall_us": 288.6,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-2b428a33ac46597c",
+          "universe": 47,
+          "wall_us": 4386.7,
+          "win": true
+        },
+        {
+          "cert_depth": 1,
+          "nodes": 2,
+          "phase": "second",
+          "pos_id": "atlas_full_oa-c5d0933314357fb6",
+          "universe": 1,
+          "wall_us": 7.8,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-61a6af9aed05053d",
+          "universe": 39,
+          "wall_us": 2707.4,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-8b2f9b5a954134a5",
+          "universe": 16,
+          "wall_us": 743.2,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 26,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-f902f3534eff1449",
+          "universe": 13,
+          "wall_us": 624.3,
+          "win": true
+        },
+        {
+          "cert_depth": 1,
+          "nodes": 2,
+          "phase": "second",
+          "pos_id": "atlas_full_oa-5e92071b23b32555",
+          "universe": 1,
+          "wall_us": 9.6,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-4cf66ead127526be",
+          "universe": 36,
+          "wall_us": 1922.4,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 77,
+          "phase": "second",
+          "pos_id": "atlas_full_oa-82095adae0b94f52",
+          "universe": 8,
+          "wall_us": 260.3,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 11,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-f6170888a8d617a1",
+          "universe": 31,
+          "wall_us": 1580.0,
+          "win": true
+        },
+        {
+          "cert_depth": 1,
+          "nodes": 2,
+          "phase": "second",
+          "pos_id": "atlas_full_oa-4d38ecd758048686",
+          "universe": 2,
+          "wall_us": 8.8,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-b7bbc03e1327f7b5",
+          "universe": 65,
+          "wall_us": 11389.4,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 343,
+          "phase": "second",
+          "pos_id": "atlas_full_oa-42551fb87e915ae5",
+          "universe": 20,
+          "wall_us": 3703.7,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-fcdeed9ad5ba60c9",
+          "universe": 40,
+          "wall_us": 3770.1,
+          "win": true
+        },
+        {
+          "cert_depth": 5,
+          "nodes": 400,
+          "phase": "second",
+          "pos_id": "atlas_full_oa-3c2762e55c2af7e2",
+          "universe": 16,
+          "wall_us": 3788.4,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 6,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-9a06a71943b29908",
+          "universe": 45,
+          "wall_us": 4987.5,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-5ae978cdace13480",
+          "universe": 17,
+          "wall_us": 636.2,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 9,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-ddbdbfab6ee8a3c3",
+          "universe": 16,
+          "wall_us": 468.7,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 10,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-8a68dadb57fe9456",
+          "universe": 12,
+          "wall_us": 406.5,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 9,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-40f189b7cbf82b28",
+          "universe": 16,
+          "wall_us": 462.0,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-07ff57191ae3fdfa",
+          "universe": 18,
+          "wall_us": 574.2,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 8,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-fd81b5e1d141fe07",
+          "universe": 28,
+          "wall_us": 1187.8,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 4,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-6d4adfc83c511a3a",
+          "universe": 23,
+          "wall_us": 857.9,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 6,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-36a221aa702154ba",
+          "universe": 20,
+          "wall_us": 570.5,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 23,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-951fffa65da710af",
+          "universe": 24,
+          "wall_us": 810.3,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 6,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-778d8c161251c0c3",
+          "universe": 20,
+          "wall_us": 559.7,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 9,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-c120563f2da87614",
+          "universe": 20,
+          "wall_us": 556.0,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-38ef9e79b9ab8bd6",
+          "universe": 4,
+          "wall_us": 328.8,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-5425d35403416f9b",
+          "universe": 12,
+          "wall_us": 394.4,
+          "win": true
+        },
+        {
+          "cert_depth": 2,
+          "nodes": 1,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-75e133bf45ef42c4",
+          "universe": 24,
+          "wall_us": 933.1,
+          "win": true
+        },
+        {
+          "cert_depth": 6,
+          "nodes": 9,
+          "phase": "first",
+          "pos_id": "atlas_full_oa-9b4b787c7f1dcf98",
+          "universe": 21,
+          "wall_us": 673.1,
+          "win": true
+        }
+      ],
+      "wall_ms": 406.2958
+    }
+  },
+  "engine_unknown_join": {
+    "forcing19": {
+      "engine_unknown": [],
+      "exact_h8_wins": 0,
+      "with_engine_row": 0
+    },
+    "grinds": {
+      "engine_unknown": [],
+      "exact_h8_wins": 0,
+      "with_engine_row": 0
+    },
+    "human_v1": {
+      "engine_unknown": [],
+      "exact_h8_wins": 94,
+      "with_engine_row": 14
+    },
+    "puzzle_v3": {
+      "engine_unknown": [],
+      "exact_h8_wins": 14,
+      "with_engine_row": 1
+    },
+    "selfplay_v1": {
+      "engine_unknown": [],
+      "exact_h8_wins": 54,
+      "with_engine_row": 2
+    }
+  },
+  "known_win_registry": {
+    "unique": 2941,
+    "with_cert_depth": 2676,
+    "without_cert_depth": 265
+  },
+  "measurement_internal_audit": {
+    "forcing19": {
+      "h4_vs_h6_loss_symmetric_difference": [],
+      "reported_nesting_mismatches": {
+        "h2_not_h6": [],
+        "h4_loss_not_h6": [],
+        "h6_loss_not_h8": [],
+        "h6_not_h8": []
+      }
+    },
+    "grinds": {
+      "h4_vs_h6_loss_symmetric_difference": [],
+      "reported_nesting_mismatches": {
+        "h2_not_h6": [],
+        "h4_loss_not_h6": [],
+        "h6_loss_not_h8": [],
+        "h6_not_h8": []
+      }
+    },
+    "human_v1": {
+      "h4_vs_h6_loss_symmetric_difference": [],
+      "reported_nesting_mismatches": {
+        "h2_not_h6": [],
+        "h4_loss_not_h6": [],
+        "h6_loss_not_h8": [],
+        "h6_not_h8": []
+      }
+    },
+    "puzzle_v3": {
+      "h4_vs_h6_loss_symmetric_difference": [],
+      "reported_nesting_mismatches": {
+        "h2_not_h6": [],
+        "h4_loss_not_h6": [],
+        "h6_loss_not_h8": [],
+        "h6_not_h8": []
+      }
+    },
+    "selfplay_v1": {
+      "h4_vs_h6_loss_symmetric_difference": [],
+      "reported_nesting_mismatches": {
+        "h2_not_h6": [],
+        "h4_loss_not_h6": [],
+        "h6_loss_not_h8": [],
+        "h6_not_h8": []
+      }
+    }
+  },
+  "specialized_vs_generic_broad_h6": {
+    "mismatches": [],
+    "pos_ids": [
+      "sp_0_p1",
+      "sp_0_p11",
+      "sp_0_p13",
+      "sp_0_p15",
+      "sp_0_p17",
+      "sp_0_p19",
+      "sp_0_p21",
+      "sp_0_p23",
+      "sp_0_p25",
+      "sp_0_p27",
+      "sp_0_p29",
+      "sp_0_p3",
+      "sp_0_p31",
+      "sp_0_p33",
+      "sp_0_p35",
+      "sp_0_p37",
+      "sp_0_p39",
+      "sp_0_p43",
+      "sp_0_p47",
+      "sp_0_p5",
+      "sp_0_p59",
+      "sp_0_p7",
+      "sp_0_p9",
+      "sp_10_p1",
+      "sp_10_p11",
+      "sp_10_p13",
+      "sp_10_p15",
+      "sp_10_p17",
+      "sp_10_p19",
+      "sp_10_p21",
+      "sp_10_p23",
+      "sp_10_p25",
+      "sp_10_p27",
+      "sp_10_p29",
+      "sp_10_p3",
+      "sp_10_p31",
+      "sp_10_p33",
+      "sp_10_p35",
+      "sp_10_p37",
+      "sp_10_p39"
+    ],
+    "positions": 40
+  },
+  "specialized_vs_generic_h6": {
+    "mismatches": [],
+    "pos_ids": [
+      "human_b81f05b4f52ddee3_p25",
+      "human_db9e61448d342d8d_p35",
+      "sp_31_p49",
+      "sp_41_p57",
+      "human_3d17d05a42459994_p25",
+      "human_3e6a7aaa8d136721_p31",
+      "human_572f17e89f6ab4b4_p63",
+      "human_5cfcb378a9dc6e84_p45",
+      "human_6e548d2127ed37cb_p25",
+      "human_92b740931483965e_p25",
+      "human_ab93c3b77edcd8c1_p57",
+      "human_b8c6422dc42a5552_p23"
+    ],
+    "positions": 12
+  },
+  "width_exhaust_comparison": {
+    "interpretation": "The known J2near wins resolve in 21/22 plies, not within 8.",
+    "known_j2near_ids": [
+      "oa-0153903c5a863630",
+      "oa-6fda812864c6d19a",
+      "oa-773ca1a59e95f4e1"
+    ],
+    "rows": [
+      {
+        "nodes": 28,
+        "phase": "first",
+        "pos_id": "oa-0153903c5a863630",
+        "universe": 8,
+        "wall_us": 332.9,
+        "win_within_8": false
+      },
+      {
+        "nodes": 30665,
+        "phase": "second",
+        "pos_id": "oa-23c6c04ad42d0904",
+        "universe": 27,
+        "wall_us": 321477.8,
+        "win_within_8": false
+      },
+      {
+        "nodes": 153,
+        "phase": "first",
+        "pos_id": "oa-611666d7d930eb1f",
+        "universe": 18,
+        "wall_us": 751.8,
+        "win_within_8": false
+      },
+      {
+        "nodes": 25,
+        "phase": "second",
+        "pos_id": "oa-6fda812864c6d19a",
+        "universe": 8,
+        "wall_us": 141.1,
+        "win_within_8": false
+      },
+      {
+        "nodes": 28,
+        "phase": "first",
+        "pos_id": "oa-773ca1a59e95f4e1",
+        "universe": 8,
+        "wall_us": 349.2,
+        "win_within_8": false
+      }
+    ],
+    "within_8_wins": 0
+  }
+}
