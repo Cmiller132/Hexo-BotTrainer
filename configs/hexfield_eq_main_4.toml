@@ -52,19 +52,26 @@ tss_solver_dual_pass = true
 tss_solver_horizon = 0
 # Horizon ladder OFF.
 tss_solver_horizon_ladder = false
-# Async solve pool: 100% leaf coverage. 8 background threads; inline_16 = 4
-# keeps the proven inline slice for the park-off fallback (park supersedes it).
+# Async solve pool: 100% leaf coverage. inline_16 = 4 keeps the proven inline
+# slice for the park-off fallback (park supersedes it).
+# MAINTENANCE RETUNE (2026-07-21, ep20, owner-ordered): epochs 1-20 measured
+# the pool pinned at its 12-worker ceiling (workers_spawned=4 dynamic adds over
+# base 8) while dropping ~35% of solve demand at the queue and bailing 76-85%
+# of parks (avg wait ~750 ms, queue-dominated). Host has 32 WSL cores at load
+# ~13 — capacity was the binding constraint, not the window. base 8->12,
+# ceiling 12->24 (auto formula equivalent: clamp(32-6, base, 24)).
 tss_solver_async = true
-tss_solver_async_threads = 8
+tss_solver_async_threads = 12
 tss_solver_async_inline_16 = 4
-tss_solver_async_threads_max = 12
+tss_solver_async_threads_max = 24
 # Wait-at-leaf parking: every gated leaf parks in the scheduler pen until its
-# verified result lands, released by a liveness bail. 300 ms per the park sweep
-# (docs/PARK_SWEEP_REPORT.md on claude/order-prior, commit a66b707a): bail
-# 12.7% -> 0.0%, decided verdicts/min +2.8%, hard consumptions +11%, throughput
-# flat — the release-binary grind tail fits inside 150-300 ms. Cap-500-specific.
+# verified result lands, released by a liveness bail. Sweep said 300 ms (bail
+# 0% on a QUIET machine, a66b707a); live trainer load measured avg wait
+# ~750 ms and 76-85% bail at 300 (queue-wait dominated). MAINTENANCE RETUNE
+# 2026-07-21 with the worker raise: 300 -> 600 ms to cover the release band;
+# validate on next-epoch telemetry (bail%, moves/min) — reversible.
 tss_solver_park = true
-tss_solver_park_timeout_ms = 300
+tss_solver_park_timeout_ms = 600
 # Zone AND-generation OFF (production A/B measured zero additional decided
 # positions; a TOML flip away if a deeper-cap corpus ever shows value).
 tss_zone = false
