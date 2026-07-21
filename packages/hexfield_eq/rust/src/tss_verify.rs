@@ -2140,7 +2140,56 @@ pub fn d6_remap_certificate(cert: &TssCertificate, symmetry: u8) -> Option<TssCe
                     g2.edges.sort_by_key(|edge| coord_key(edge.mv));
                 }
                 CertNode::FhwGateV1(gate) => {
+                    // The extension class mandates canonical order on every
+                    // transformed gate component so a D6 image reproduces the
+                    // stored-cert preflight order.
+                    let wkey = |key: WindowKey| {
+                        let a = key.coord_at(0);
+                        let b = key.coord_at(5);
+                        let smaller = if (a.q, a.r) <= (b.q, b.r) { a } else { b };
+                        (
+                            match key.axis {
+                                Axis::Q => 0u8,
+                                Axis::R => 1,
+                                Axis::QR => 2,
+                            },
+                            smaller.q,
+                            smaller.r,
+                        )
+                    };
+                    let rkey = |role: &RoleKeyV1| -> (u8, u32, u8, i16, i16, i16, i16) {
+                        match role {
+                            RoleKeyV1::ChoiceMove { node, cell } => {
+                                (0, *node, 0, 0, 0, cell.q, cell.r)
+                            }
+                            RoleKeyV1::OrCompletionMove { node, cell } => {
+                                (1, *node, 0, 0, 0, cell.q, cell.r)
+                            }
+                            RoleKeyV1::LeafEmpty {
+                                node,
+                                witness,
+                                cell,
+                            } => {
+                                let w = wkey(*witness);
+                                (2, *node, w.0, w.1, w.2, cell.q, cell.r)
+                            }
+                            RoleKeyV1::Checkpoint {
+                                gate,
+                                threat,
+                                cell,
+                            } => {
+                                let w = wkey(*threat);
+                                (3, *gate, w.0, w.1, w.2, cell.q, cell.r)
+                            }
+                        }
+                    };
                     gate.representatives.sort_by_key(|edge| coord_key(edge.mv));
+                    gate.proof.threats.sort_by_key(|k| wkey(*k));
+                    for entry in &mut gate.proof.map {
+                        entry.roles.sort_by(|a, b| rkey(&a.role).cmp(&rkey(&b.role)));
+                        entry.windows.sort_by_key(|w| wkey(w.window));
+                    }
+                    gate.proof.map.sort_by_key(|m| coord_key(m.real_reply));
                 }
                 CertNode::Loss { witnesses, .. } => {
                     witnesses.sort_by_key(|key| {

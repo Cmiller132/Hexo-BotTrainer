@@ -29,9 +29,10 @@ use crate::threats_shared;
 use crate::tss_core::ProofStatus;
 use crate::tss_verify::{
     certificate_metadata_for_group2, d6_transform_coord, validate_arena_for_group2, CertNode,
-    CertNodeId, Group2AuthorityV1, RootBinding, TssCertificate, D6_SYMMETRY_COUNT,
-    MAX_CERT_DEPTH,
+    CertNodeId, FhwEdgeClassV1, FhwKappaRowV1, FhwRoleRowV1, GuardResultV1, Group2AuthorityV1,
+    RoleKeyV1, RootBinding, TssCertificate, D6_SYMMETRY_COUNT, MAX_CERT_DEPTH,
 };
+use std::collections::HashSet;
 
 /// Hard fail-closed work/memory limits (design §3.5). Reaching any limit is
 /// rejection of the new certificate, never partial acceptance.
@@ -223,6 +224,32 @@ fn player_tag(player: Player) -> u8 {
     }
 }
 
+/// Total canonical order over a stored `RoleKeyV1` (for the stored-cert
+/// sorted-unique preflight and the finder's emission order). The Merkle digest
+/// re-sorts by encoded bytes under the `g*` frame independently.
+fn role_key_order(role: &RoleKeyV1) -> (u8, u32, u8, i16, i16, i16, i16) {
+    match role {
+        RoleKeyV1::ChoiceMove { node, cell } => (0, *node, 0, 0, 0, cell.q, cell.r),
+        RoleKeyV1::OrCompletionMove { node, cell } => (1, *node, 0, 0, 0, cell.q, cell.r),
+        RoleKeyV1::LeafEmpty {
+            node,
+            witness,
+            cell,
+        } => {
+            let w = window_sort_key(*witness);
+            (2, *node, w.0, w.1, w.2, cell.q, cell.r)
+        }
+        RoleKeyV1::Checkpoint {
+            gate,
+            threat,
+            cell,
+        } => {
+            let w = window_sort_key(*threat);
+            (3, *gate, w.0, w.1, w.2, cell.q, cell.r)
+        }
+    }
+}
+
 fn enc_authority(out: &mut Vec<u8>, authority: &Group2AuthorityV1) {
     out.extend_from_slice(&authority.defender_commit);
     enc_u64(out, authority.defender_path.len() as u64);
@@ -257,6 +284,10 @@ enum RoleId {
     ChoiceMove { node: CertNodeId, cell: CoordKey },
     OrCompletionMove { node: CertNodeId, cell: CoordKey },
     LeafEmpty { node: CertNodeId, witness: WinId, cell: CoordKey },
+    /// Checkpoint role introduced at an FHW gate: an empty of a named gate
+    /// threat, live in every strict ancestor and discharged at the gate
+    /// (clock 0 there). Matches `RoleKeyV1::Checkpoint`.
+    Checkpoint { gate: CertNodeId, threat: WinId, cell: CoordKey },
 }
 
 impl RoleId {
@@ -264,7 +295,8 @@ impl RoleId {
         match self {
             RoleId::ChoiceMove { cell, .. }
             | RoleId::OrCompletionMove { cell, .. }
-            | RoleId::LeafEmpty { cell, .. } => *cell,
+            | RoleId::LeafEmpty { cell, .. }
+            | RoleId::Checkpoint { cell, .. } => *cell,
         }
     }
 }
@@ -272,6 +304,43 @@ impl RoleId {
 /// Immutable origin bits for demanded windows (design §2.4).
 const SOURCE_TOUCHED: u8 = 0x01;
 const SOURCE_VIRGIN: u8 = 0x02;
+const SOURCE_DIRECT18: u8 = 0x04;
+// SOURCE_GATE_LOCAL_WC (0x08) is not used on this accept path: it only arises
+// for genuine NonFrontierCovered gate pairs, which are rejected before demand
+// seeding (see `reconstruct_gate`). Kept documented for the §2.4 mask grammar.
+
+/// Reconstructed FHW-T3-R forcing-gate data (design §3.3), produced during
+/// replay and consumed by the budget/clock/row/digest passes. Every field is
+/// verifier-derived from the replayed gate position `P_Q`; certificate scalars
+/// are only ever compared against these, never trusted.
+///
+/// ACCEPT-PATH NARROWING (documented, fail-closed): this verifier accepts only
+/// gates whose every real reply is `Exact` or `FrontierCovered`. Any
+/// `NonFrontierCovered` edge is rejected at reconstruction, because a sound
+/// end-to-end non-FC gate additionally requires the gate-local WC demand
+/// enumeration tied to a proven `B(C_s) >= 6` representative subtree, which
+/// cannot be positively fixture-tested in this lane. The RC/WC and charged-role
+/// classifiers are nonetheless implemented and unit-tested verifier-side (they
+/// are what a later non-FC extension recomputes, and they demonstrate the two
+/// documented design defects as verifier-side rejections).
+struct GateInfo {
+    /// Defender budget b in {1, 2}.
+    b: u8,
+    /// Validated named threat family H_Q, canonical order.
+    threats: Vec<WindowKey>,
+    /// Kernel K, sorted-unique by coord key.
+    kernel: Vec<HexCoord>,
+    /// Representatives R, sorted-unique by coord key.
+    reps: Vec<HexCoord>,
+    /// Retraction phi: real reply d -> representative s.
+    phi: HashMap<CoordKey, HexCoord>,
+    /// Representative child node per representative s.
+    rep_child: HashMap<CoordKey, CertNodeId>,
+    /// Edge class per real reply d (Exact or FrontierCovered on this path).
+    edge_class: HashMap<CoordKey, FhwEdgeClassV1>,
+    /// escape_resolution_ply = p(Q) + b + 2 (R1).
+    escape_ply: u32,
+}
 
 struct G2Context<'a> {
     cert: &'a TssCertificate,
@@ -286,19 +355,27 @@ struct G2Context<'a> {
     b_local: Vec<u32>,
     /// Subtree maximum exact leaf resolution per node.
     t_sub: Vec<u32>,
-    /// Live-role clock map per node (f_cut == r_full on gate-free trees; the
-    /// gate clauses of §3.2 are the only divergence, so one derivation serves
-    /// both sides of the required `f_cut <= r_full` inequality).
-    roles: Vec<HashMap<RoleId, u32>>,
+    /// Live-role clock map per node: `(r_full, f_cut)` per role. On gate-free
+    /// nodes the two coincide; only the FHW gate clauses of §3.2 diverge
+    /// (`r_full` takes the full `1+child` charge; `f_cut` takes
+    /// `child + epsilon`). Stored together so `f_cut <= r_full` is checked.
+    roles: Vec<HashMap<RoleId, (u32, u32)>>,
     /// Demanded windows with OR'd source bits per node (fixed point of the
-    /// ordinary propagation rules; no gate-local demands in this sub-class).
+    /// ordinary propagation rules; gate arms additionally seed the 18
+    /// direct-through-`d` windows, tagged `SOURCE_DIRECT18`).
     demands: Vec<Vec<(WindowKey, u8)>>,
-    /// Q_cut == E_full memo per (node, window); design §3.2 recurrence.
-    window_clock: HashMap<(CertNodeId, WinId), u32>,
+    /// The PAIR `(Q_cut, E_full)` memo per (node, window); design §3.2/§3.3.
+    /// On gate-free nodes the two coincide by construction; only the FHW gate
+    /// clauses diverge (`Q_cut = max{b, max_d(kappa+Q_cut(C_phi(d)))}` vs
+    /// `E_full = max{b, max_d(1+E_full(C_phi(d)))}`). Stored together so the
+    /// mandatory `Q_cut <= E_full <= B` inequality is checked on every pair.
+    window_clock: HashMap<(CertNodeId, WinId), (u32, u32)>,
     /// Derived k (0 or 1) at each Group-2 node; absent elsewhere.
     derived_k: HashMap<CertNodeId, u8>,
     /// Derived Required_FHW per Group-2 node (§3.4).
     required: HashMap<CertNodeId, Vec<HexCoord>>,
+    /// Reconstructed FHW gate data per gate node (§3.3), keyed by node id.
+    gates: HashMap<CertNodeId, GateInfo>,
     /// Fail-closed work counter.
     work: u64,
 }
@@ -393,6 +470,556 @@ fn set_contains(sorted: &[HexCoord], coord: HexCoord) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// FHW gate geometry, classifiers, and reconstruction (design §3.2/§3.3),
+// reimplemented verifier-side per the independent-derivation rule (this module
+// never shares the finder/test-module code). The RC/WC and charged-role
+// branches are implemented and unit-tested here; the ACCEPT path rejects any
+// NonFrontierCovered gate edge before those branches can grant acceptance (see
+// GateInfo), so they never license an accept in this lane.
+// ---------------------------------------------------------------------------
+
+/// Iterate the (in-range) cells of an inclusive radius-`radius` axial ball
+/// around `center`. Out-of-range offsets are dropped for RC/WC (they only
+/// shrink an intersection); FC re-derives directly and treats an out-of-range
+/// ball cell as uncovered (conservative — see `frontier_covered`).
+fn ball(center: HexCoord, radius: i32) -> Vec<HexCoord> {
+    let mut out = Vec::new();
+    for dq in -radius..=radius {
+        let r_min = (-radius).max(-dq - radius);
+        let r_max = radius.min(-dq + radius);
+        for dr in r_min..=r_max {
+            let q = i32::from(center.q) + dq;
+            let r = i32::from(center.r) + dr;
+            if let (Ok(q), Ok(r)) = (i16::try_from(q), i16::try_from(r)) {
+                out.push(HexCoord { q, r });
+            }
+        }
+    }
+    out
+}
+
+/// Verifier-side ghost `G = P_Q + s`: the gate position with one representative
+/// reply applied, plus the materialized `Lambda(G) = union B_8(x)` over
+/// occupied `x`.
+struct VGhost {
+    state: RustHexoState,
+    lambda: HashSet<CoordKey>,
+}
+
+impl VGhost {
+    fn new(gate: &RustHexoState, s: HexCoord) -> Option<Self> {
+        let mut state = gate.clone();
+        state.apply_with_delta(Placement { coord: s }).ok()?;
+        let mut lambda: HashSet<CoordKey> = HashSet::new();
+        for &occ in state.board().occupied_cells() {
+            for cell in ball(occ, 8) {
+                lambda.insert(coord_key(cell));
+            }
+        }
+        Some(Self { state, lambda })
+    }
+
+    fn in_lambda(&self, cell: HexCoord) -> bool {
+        self.lambda.contains(&coord_key(cell))
+    }
+
+    /// `GI(G)(z)`: neither occupied nor legal in `G` (design §3.2).
+    fn is_ghost_illegal(&self, z: HexCoord) -> bool {
+        self.state.board().get(z).is_none() && !self.state.board().legal_moves().contains(z)
+    }
+}
+
+/// FC predicate (design §3.3): `d == s` or every one of the 217 cells of
+/// `B_8(d)` lies in `Lambda(G)`. Conservative: any `B_8(d)` cell out of
+/// coordinate range (hence not in `Lambda`) fails FC.
+fn frontier_covered(d: HexCoord, s: HexCoord, ghost: &VGhost) -> bool {
+    if d == s {
+        return true;
+    }
+    for dq in -8i32..=8 {
+        let r_min = (-8i32).max(-dq - 8);
+        let r_max = 8i32.min(-dq + 8);
+        for dr in r_min..=r_max {
+            let q = i32::from(d.q) + dq;
+            let r = i32::from(d.r) + dr;
+            match (i16::try_from(q), i16::try_from(r)) {
+                (Ok(q), Ok(r)) if ghost.in_lambda(HexCoord { q, r }) => {}
+                _ => return false,
+            }
+        }
+    }
+    true
+}
+
+/// RC predicate (design §3.3): `GI(G) ∩ B_8(d) ∩ B_{8(k-1)}(y)` is empty (the
+/// inner ball is empty when `k == 0`).
+fn rc_pass(d: HexCoord, y: HexCoord, k: u32, ghost: &VGhost) -> Option<bool> {
+    if k == 0 {
+        return Some(true);
+    }
+    let inner_radius = 8i32.checked_mul(i32::try_from(k.checked_sub(1)?).ok()?)?;
+    let d_ball: HashSet<CoordKey> = ball(d, 8).into_iter().map(coord_key).collect();
+    let empty = !ball(y, inner_radius)
+        .into_iter()
+        .any(|z| d_ball.contains(&coord_key(z)) && ghost.is_ghost_illegal(z));
+    Some(empty)
+}
+
+/// WC predicate (design §3.3): `GI(G) ∩ B_8(d) ∩ B_{8(q-6)}(W)` is empty.
+fn wc_pass(d: HexCoord, window: WindowKey, q: u32, ghost: &VGhost) -> Option<bool> {
+    let radius = 8i32.checked_mul(i32::try_from(q.saturating_sub(6)).ok()?)?;
+    let d_ball: HashSet<CoordKey> = ball(d, 8).into_iter().map(coord_key).collect();
+    for w in window.cells() {
+        for z in ball(w, radius) {
+            if d_ball.contains(&coord_key(z)) && ghost.is_ghost_illegal(z) {
+                return Some(false);
+            }
+        }
+    }
+    Some(true)
+}
+
+/// Classify a role row for pair `(d, s)` and a live role carried by `y` with
+/// `k = f_cut(C_s, rho)` (design §3.3). Returns `(row, epsilon)` or `None` when
+/// a mandatory condition fails (carrier not avoided, or the D22-N radius fails
+/// on a charged ghost-illegal role) — fail-closed. `ghost` is required only on
+/// the NonFrontierCovered branch; the accept path passes `None` because every
+/// accepted edge is Exact/FC.
+fn classify_role(
+    edge_class: FhwEdgeClassV1,
+    d: HexCoord,
+    y: HexCoord,
+    k: u32,
+    ghost: Option<&VGhost>,
+) -> Option<(FhwRoleRowV1, u8)> {
+    if d == y {
+        return None; // every row requires d to avoid the carrier
+    }
+    match edge_class {
+        FhwEdgeClassV1::Exact | FhwEdgeClassV1::FrontierCovered => {
+            Some((FhwRoleRowV1::ExactOrFcZero, 0))
+        }
+        FhwEdgeClassV1::NonFrontierCovered => {
+            let ghost = ghost?;
+            if ghost.is_ghost_illegal(y) {
+                if rc_pass(d, y, k, ghost)? {
+                    Some((FhwRoleRowV1::NonFcRcZero, 0))
+                } else {
+                    // epsilon = 1; mandatory D22-N radius dist(d,y) > 8k.
+                    let radius = 8u32.checked_mul(k)?;
+                    if u32::from(hex_distance(d, y).unsigned_abs()) > radius {
+                        Some((FhwRoleRowV1::NonFcCharged, 1))
+                    } else {
+                        None
+                    }
+                }
+            } else {
+                Some((FhwRoleRowV1::NonFcCharged, 1))
+            }
+        }
+    }
+}
+
+/// Window geometry at the gate position `P_Q`.
+struct WindowGeomV {
+    d_alive: bool,
+    touched: bool,
+    all_empty: bool,
+    cnt_d: u32,
+}
+
+fn window_geom(gate: &RustHexoState, claimant: Player, window: WindowKey) -> WindowGeomV {
+    let defender = claimant.other();
+    let mut claimant_ct = 0u32;
+    let mut defender_ct = 0u32;
+    for cell in window.cells() {
+        match gate.board().get(cell) {
+            Some(p) if p == claimant => claimant_ct += 1,
+            Some(p) if p == defender => defender_ct += 1,
+            _ => {}
+        }
+    }
+    let d_alive = claimant_ct == 0;
+    WindowGeomV {
+        d_alive,
+        touched: d_alive && defender_ct >= 1,
+        all_empty: claimant_ct == 0 && defender_ct == 0,
+        cnt_d: defender_ct,
+    }
+}
+
+fn edge_class_tag(class: FhwEdgeClassV1) -> u8 {
+    match class {
+        FhwEdgeClassV1::Exact => 0,
+        FhwEdgeClassV1::FrontierCovered => 1,
+        FhwEdgeClassV1::NonFrontierCovered => 2,
+    }
+}
+
+fn role_row_tag(row: FhwRoleRowV1) -> u8 {
+    match row {
+        FhwRoleRowV1::ExactOrFcZero => 0,
+        FhwRoleRowV1::NonFcRcZero => 1,
+        FhwRoleRowV1::NonFcCharged => 2,
+    }
+}
+
+fn kappa_row_tag(row: FhwKappaRowV1) -> u8 {
+    match row {
+        FhwKappaRowV1::NonDAlive => 0,
+        FhwKappaRowV1::ExactOrFcNonIncident => 1,
+        FhwKappaRowV1::ExactOrFcDirect => 2,
+        FhwKappaRowV1::NonFcTouchedNonIncident => 3,
+        FhwKappaRowV1::NonFcTouchedDirect => 4,
+        FhwKappaRowV1::NonFcEmptyDirect => 5,
+        FhwKappaRowV1::NonFcEmptyNonIncidentQlt6 => 6,
+        FhwKappaRowV1::NonFcEmptyNonIncidentWcPass => 7,
+        FhwKappaRowV1::NonFcEmptyNonIncidentWcFail => 8,
+    }
+}
+
+fn guard_tag(guard: GuardResultV1) -> u8 {
+    match guard {
+        GuardResultV1::NotApplicable => 0,
+        GuardResultV1::Pass => 1,
+    }
+}
+
+/// Classify a `(d, s, W)` window row with `q = Q_cut(C_s, W)` (design §3.3's
+/// ordered, mutually exclusive table). Returns `(row, kappa, guard)` or `None`
+/// when a mandatory retained guard fails (a failed guard rejects even if the
+/// finder wrote `Pass`). `ghost` is required only on the NonFC WC branch.
+fn classify_window(
+    edge_class: FhwEdgeClassV1,
+    d: HexCoord,
+    window: WindowKey,
+    q: u32,
+    geom: &WindowGeomV,
+    ghost: Option<&VGhost>,
+) -> Option<(FhwKappaRowV1, u8, GuardResultV1)> {
+    use FhwKappaRowV1 as Row;
+    use GuardResultV1 as Guard;
+
+    if !geom.d_alive {
+        return Some((Row::NonDAlive, 0, Guard::NotApplicable));
+    }
+    let d_in = window.contains(d);
+    let exact_or_fc = matches!(
+        edge_class,
+        FhwEdgeClassV1::Exact | FhwEdgeClassV1::FrontierCovered
+    );
+    if exact_or_fc {
+        if !d_in {
+            return Some((Row::ExactOrFcNonIncident, 0, Guard::NotApplicable));
+        }
+        let guard_ok = if geom.touched {
+            geom.cnt_d.checked_add(1)?.checked_add(q)? < 6
+        } else {
+            1u32.checked_add(q)? < 6
+        };
+        return guard_ok.then_some((Row::ExactOrFcDirect, 1, Guard::Pass));
+    }
+    // non-FC
+    if geom.touched {
+        if !d_in {
+            return Some((Row::NonFcTouchedNonIncident, 0, Guard::NotApplicable));
+        }
+        let guard_ok = geom.cnt_d.checked_add(1)?.checked_add(q)? < 6;
+        return guard_ok.then_some((Row::NonFcTouchedDirect, 1, Guard::Pass));
+    }
+    // non-FC, all-empty
+    if d_in {
+        let guard_ok = 1u32.checked_add(q)? < 6;
+        return guard_ok.then_some((Row::NonFcEmptyDirect, 1, Guard::Pass));
+    }
+    if q < 6 {
+        return Some((Row::NonFcEmptyNonIncidentQlt6, 0, Guard::NotApplicable));
+    }
+    let ghost = ghost?;
+    if wc_pass(d, window, q, ghost)? {
+        return Some((Row::NonFcEmptyNonIncidentWcPass, 0, Guard::Pass));
+    }
+    let virgin_radius = 8u32.checked_mul(1u32.checked_add(q)?.checked_sub(6)?)?;
+    (window_distance(d, window) > virgin_radius)
+        .then_some((Row::NonFcEmptyNonIncidentWcFail, 1, Guard::Pass))
+}
+
+/// Exact bounded transversal of `family` (each set = a threat's empties),
+/// capped at `cap`. Returns the least `k <= cap` hitting every set, or
+/// `cap + 1` above. Empty family -> 0; a set with no empties -> `cap + 1`
+/// (unhittable). `F_Q \ d` (the sub-family not hit by `d`) is formed by the
+/// caller. Since gates use `b <= 2`, `cap = 2` is exact for every use.
+fn transversal_exact(family: &[Vec<HexCoord>], cap: u8) -> u8 {
+    if family.is_empty() {
+        return 0;
+    }
+    if family.iter().any(Vec::is_empty) {
+        return cap.saturating_add(1);
+    }
+    let mut universe: Vec<HexCoord> = Vec::new();
+    for set in family {
+        for &c in set {
+            if !universe.contains(&c) {
+                universe.push(c);
+            }
+        }
+    }
+    if cap >= 1 && universe.iter().any(|c| family.iter().all(|s| s.contains(c))) {
+        return 1;
+    }
+    if cap >= 2 {
+        for i in 0..universe.len() {
+            for j in (i + 1)..universe.len() {
+                let (a, b) = (universe[i], universe[j]);
+                if family.iter().all(|s| s.contains(&a) || s.contains(&b)) {
+                    return 2;
+                }
+            }
+        }
+    }
+    cap.saturating_add(1)
+}
+
+/// Reconstruct the FHW gate at `state` from the certificate node `gate`,
+/// entirely from the replayed position (design §3.3). Every certificate field
+/// is a claim compared against a fresh derivation. Returns the derived
+/// `GateInfo` plus the ordered representative `(move, child)` edges to recurse
+/// into. Rejects (returns `None`) on any mismatch, and — per the documented
+/// accept-path narrowing — on any NonFrontierCovered edge.
+fn reconstruct_gate(
+    state: &RustHexoState,
+    claimant: Player,
+    gate: &crate::tss_verify::FhwGateNodeV1,
+) -> Option<(GateInfo, Vec<(HexCoord, CertNodeId)>)> {
+    // Eligibility (§3.3 preamble + R2).
+    if state.current_player() == claimant
+        || state.is_terminal()
+        || matches!(state.phase(), TurnPhase::Opening)
+        || direct_own_win_now_upper(state)
+        || threats_shared::analyze(state).own_win_now
+    {
+        return None;
+    }
+    if gate.proof.schema_version != 1 || !gate.proof.authority.matches_compiled() {
+        return None;
+    }
+    let b = placements_remaining(state);
+    if !(1..=2).contains(&b) {
+        return None;
+    }
+
+    // H_Q: canonical sorted/unique; count bound; each a real A-threat.
+    let threats = &gate.proof.threats;
+    if threats.is_empty() {
+        return None;
+    }
+    let count_ok = match b {
+        1 => threats.len() == 1,
+        2 => (1..=3).contains(&threats.len()),
+        _ => false,
+    };
+    if !count_ok {
+        return None;
+    }
+    let mut previous: Option<WinId> = None;
+    let mut family: Vec<Vec<HexCoord>> = Vec::with_capacity(threats.len());
+    for &key in threats {
+        let id = win_id(key);
+        if previous.is_some_and(|prev| prev >= id) {
+            return None; // noncanonical or duplicate
+        }
+        previous = Some(id);
+        let cells = key.cells();
+        let claimant_ct = cells
+            .iter()
+            .filter(|c| state.board().get(**c) == Some(claimant))
+            .count();
+        let defender_ct = cells
+            .iter()
+            .filter(|c| state.board().get(**c) == Some(claimant.other()))
+            .count();
+        let empties = window_empty_cells(state, key);
+        if claimant_ct < 4 || defender_ct != 0 || empties.is_empty() {
+            return None;
+        }
+        family.push(empties);
+    }
+    // Exact transversal == b.
+    if transversal_exact(&family, 2) != b {
+        return None;
+    }
+
+    // K = { d in Legal : transversal(F_Q \ d) <= b-1 }.
+    let legal = sorted_legal_moves(state);
+    let mut kernel: Vec<HexCoord> = Vec::new();
+    for &d in &legal {
+        let residual: Vec<Vec<HexCoord>> = family
+            .iter()
+            .filter(|set| !set.contains(&d))
+            .cloned()
+            .collect();
+        if transversal_exact(&residual, 2) <= b.saturating_sub(1) {
+            kernel.push(d);
+        }
+    }
+    if kernel.is_empty() {
+        return None;
+    }
+    // Every kernel reply applied must be nonterminal.
+    for &d in &kernel {
+        let mut probe = state.clone();
+        let result = probe.apply_with_delta(Placement { coord: d }).ok()?.0;
+        if result.outcome.is_some() {
+            return None;
+        }
+    }
+    let kernel_set: HashSet<CoordKey> = kernel.iter().map(|c| coord_key(*c)).collect();
+
+    // R = representative moves (sorted-unique, subset K, one exact nonterminal
+    // child each, phi(s)=s).
+    let mut rep_child: HashMap<CoordKey, CertNodeId> = HashMap::new();
+    let mut reps: Vec<HexCoord> = Vec::new();
+    let mut previous: Option<CoordKey> = None;
+    let mut rep_edges: Vec<(HexCoord, CertNodeId)> = Vec::new();
+    for edge in &gate.representatives {
+        let key = coord_key(edge.mv);
+        if previous.is_some_and(|prev| prev >= key) {
+            return None; // noncanonical or duplicate representative
+        }
+        previous = Some(key);
+        if !kernel_set.contains(&key) {
+            return None; // R must be a subset of K
+        }
+        let mut probe = state.clone();
+        let result = probe.apply_with_delta(Placement { coord: edge.mv }).ok()?.0;
+        if result.outcome.is_some() {
+            return None; // representative child must be nonterminal
+        }
+        rep_child.insert(key, edge.child);
+        reps.push(edge.mv);
+        rep_edges.push((edge.mv, edge.child));
+    }
+    if reps.is_empty() {
+        return None;
+    }
+    let rep_set: HashSet<CoordKey> = reps.iter().map(|c| coord_key(*c)).collect();
+
+    // Map domain must equal K exactly; phi(d) in R; edge classes recomputed.
+    // ACCEPT NARROWING: reject any NonFrontierCovered edge.
+    if gate.proof.map.len() != kernel.len() {
+        return None;
+    }
+    let mut phi: HashMap<CoordKey, HexCoord> = HashMap::new();
+    let mut edge_class: HashMap<CoordKey, FhwEdgeClassV1> = HashMap::new();
+    let mut ghosts: HashMap<CoordKey, VGhost> = HashMap::new();
+    let mut previous: Option<CoordKey> = None;
+    for entry in &gate.proof.map {
+        let d_key = coord_key(entry.real_reply);
+        if previous.is_some_and(|prev| prev >= d_key) {
+            return None; // noncanonical or duplicate map order
+        }
+        previous = Some(d_key);
+        if !kernel_set.contains(&d_key) {
+            return None; // map domain must equal K
+        }
+        let s = entry.representative;
+        if !rep_set.contains(&coord_key(s)) {
+            return None; // phi(d) must be a representative
+        }
+        // Recompute edge class from geometry.
+        let recomputed = if entry.real_reply == s {
+            FhwEdgeClassV1::Exact
+        } else {
+            let ghost = ghosts
+                .entry(coord_key(s))
+                .or_insert(VGhost::new(state, s)?);
+            if frontier_covered(entry.real_reply, s, ghost) {
+                FhwEdgeClassV1::FrontierCovered
+            } else {
+                FhwEdgeClassV1::NonFrontierCovered
+            }
+        };
+        if recomputed != entry.edge_class {
+            return None; // stored edge class must match the derivation
+        }
+        if recomputed == FhwEdgeClassV1::NonFrontierCovered {
+            return None; // accept-path narrowing (fail-closed)
+        }
+        phi.insert(d_key, s);
+        edge_class.insert(d_key, recomputed);
+    }
+    // The map domain has exactly |K| canonical distinct d's == K.
+    if phi.len() != kernel.len() {
+        return None;
+    }
+    // phi(s) = s for every representative, realized as an Exact self-edge.
+    for &s in &reps {
+        match phi.get(&coord_key(s)) {
+            Some(mapped) if *mapped == s => {}
+            _ => return None,
+        }
+        if edge_class.get(&coord_key(s)) != Some(&FhwEdgeClassV1::Exact) {
+            return None;
+        }
+    }
+
+    // escape_resolution_ply = p(Q) + b + 2 (R1) and byte-equal to the claim.
+    let escape_ply = state
+        .placements_made()
+        .checked_add(u32::from(b))?
+        .checked_add(2)?;
+    if escape_ply != gate.proof.escape_resolution_ply {
+        return None;
+    }
+
+    let info = GateInfo {
+        b,
+        threats: threats.clone(),
+        kernel,
+        reps,
+        phi,
+        rep_child,
+        edge_class,
+        escape_ply,
+    };
+    Some((info, rep_edges))
+}
+
+/// Derive the window row for a gate pair `(d, W)` with `q = Q_cut(C_s, W)`
+/// (the representative-child Q_cut). Used by the gate window clock, the check
+/// pass, and the derived digest. `s`/edge class come from the reconstructed
+/// `GateInfo`; the ghost is not required because every accepted edge is
+/// Exact/FC.
+fn derive_gate_window_row(
+    ctx: &G2Context<'_>,
+    gate_id: CertNodeId,
+    d: HexCoord,
+    key: WindowKey,
+    child_q: u32,
+) -> Option<(FhwKappaRowV1, u8, GuardResultV1)> {
+    let info = ctx.gates.get(&gate_id)?;
+    let edge_class = *info.edge_class.get(&coord_key(d))?;
+    let state = &ctx.states[gate_id as usize];
+    let geom = window_geom(state, ctx.claimant, key);
+    classify_window(edge_class, d, key, child_q, &geom, None)
+}
+
+/// Derive the role row for a gate pair `(d, s)` and a live role carried by `y`
+/// with `k = f_cut(C_s, rho)` (the representative-child f_cut). Ghost not
+/// required on the Exact/FC accept path.
+fn derive_gate_role_row(
+    ctx: &G2Context<'_>,
+    gate_id: CertNodeId,
+    d: HexCoord,
+    y: HexCoord,
+    child_f: u32,
+) -> Option<(FhwRoleRowV1, u8)> {
+    let info = ctx.gates.get(&gate_id)?;
+    let edge_class = *info.edge_class.get(&coord_key(d))?;
+    classify_role(edge_class, d, y, child_f, None)
+}
+
+// ---------------------------------------------------------------------------
 // Top-level verification (design §3.1, narrowed as documented).
 // ---------------------------------------------------------------------------
 
@@ -428,24 +1055,13 @@ fn verify_group2_impl(
         return None;
     }
     // R1 second clause: every gate's escape deadline must individually fit
-    // the declared horizon. Gates are subsequently rejected wholesale by the
-    // narrowed class (below), so this is enforced a fortiori; the explicit
-    // loop keeps the amended rule present in code.
+    // the declared horizon.
     for node in &cert.nodes {
         if let CertNode::FhwGateV1(gate) = node {
             if gate.proof.escape_resolution_ply > cert.semantic_horizon {
                 return None;
             }
         }
-    }
-    // NARROWING: FhwGateV1 validation (§3.3) is not implemented in this
-    // session. A certificate containing any gate node rejects.
-    if cert
-        .nodes
-        .iter()
-        .any(|node| matches!(node, CertNode::FhwGateV1(_)))
-    {
-        return None;
     }
     // R2: the root position of any certificate containing a new-class node is
     // post-opening — explicit structural rule, not the accidental Z4 vacuity.
@@ -456,17 +1072,23 @@ fn verify_group2_impl(
     // Narrow-v1 structural preflight (§2.3).
     preflight_structure(cert)?;
 
-    // Bind one exact state to every node and run the per-node direct checks.
+    // Bind one exact state to every node, run the per-node direct checks, and
+    // reconstruct every FHW gate (§3.3).
     let mut ctx = build_context(state, cert)?;
 
-    // Postorder derivations: D14 B, subtree resolution T, live-role clocks.
+    // Postorder derivations: D14 B, subtree resolution T, live-role clocks
+    // (incl. gate paired f_cut + checkpoint roles).
     derive_budgets_and_roles(&mut ctx)?;
 
-    // Window demand fixed point + Q_cut/E_full evaluation.
+    // Window demand fixed point + Q_cut/E_full evaluation (incl. gate
+    // direct-18 seeds and the paired gate clock).
     derive_window_demands(&mut ctx)?;
 
     // Per-Group-2-node class rules, zone coverage, and stored-scalar equality.
     check_group2_nodes(&mut ctx)?;
+
+    // Per-gate role/window row equality + Cartesian demand completeness (§3.3).
+    check_gate_nodes(&mut ctx)?;
 
     // Digest recomputation and comparison (§2.4). Never an acceptance oracle
     // on its own — everything semantic above has already been re-derived —
@@ -526,7 +1148,61 @@ fn preflight_structure(cert: &TssCertificate) -> Option<()> {
                     indegree[edge.child as usize] = indegree[edge.child as usize].checked_add(1)?;
                 }
             }
-            CertNode::FhwGateV1(_) => return None,
+            CertNode::FhwGateV1(gate) => {
+                if gate.proof.schema_version != 1 || !gate.proof.authority.matches_compiled() {
+                    return None;
+                }
+                if gate.representatives.is_empty() {
+                    return None;
+                }
+                // Representatives canonical sorted-unique by move.
+                let mut previous: Option<CoordKey> = None;
+                for edge in &gate.representatives {
+                    let key = coord_key(edge.mv);
+                    if previous.is_some_and(|prev| prev >= key) {
+                        return None;
+                    }
+                    previous = Some(key);
+                    indegree[edge.child as usize] = indegree[edge.child as usize].checked_add(1)?;
+                }
+                // Threats canonical sorted-unique by window key.
+                let mut previous: Option<(u8, i16, i16)> = None;
+                for key in &gate.proof.threats {
+                    let sort_key = window_sort_key(*key);
+                    if previous.is_some_and(|prev| prev >= sort_key) {
+                        return None;
+                    }
+                    previous = Some(sort_key);
+                }
+                // Map canonical sorted-unique by real reply; each role list
+                // canonical by role key; each window list canonical by window
+                // key. (Full semantic checks happen after replay.)
+                let mut previous: Option<CoordKey> = None;
+                for entry in &gate.proof.map {
+                    let key = coord_key(entry.real_reply);
+                    if previous.is_some_and(|prev| prev >= key) {
+                        return None;
+                    }
+                    previous = Some(key);
+                    let mut prev_role: Option<RoleKeyV1> = None;
+                    for claim in &entry.roles {
+                        if let Some(prev) = &prev_role {
+                            if role_key_order(prev) >= role_key_order(&claim.role) {
+                                return None;
+                            }
+                        }
+                        prev_role = Some(claim.role.clone());
+                    }
+                    let mut prev_win: Option<(u8, i16, i16)> = None;
+                    for claim in &entry.windows {
+                        let sort_key = window_sort_key(claim.window);
+                        if prev_win.is_some_and(|prev| prev >= sort_key) {
+                            return None;
+                        }
+                        prev_win = Some(sort_key);
+                    }
+                }
+            }
             CertNode::Loss { witnesses, .. } => {
                 // Canonical sorted-unique witness order inside the new class.
                 let mut previous: Option<(u8, i16, i16)> = None;
@@ -570,6 +1246,7 @@ fn build_context<'a>(root: &RustHexoState, cert: &'a TssCertificate) -> Option<G
         window_clock: HashMap::new(),
         derived_k: HashMap::new(),
         required: HashMap::new(),
+        gates: HashMap::new(),
         work: 0,
     };
     // Tree replay: recursion with explicit depth cap. Each node is visited
@@ -759,7 +1436,21 @@ fn replay_node(
                 )?;
             }
         }
-        CertNode::FhwGateV1(_) => return None,
+        CertNode::FhwGateV1(gate) => {
+            // §3.3 gate reconstruction, entirely from the replayed position.
+            let (info, rep_edges) = reconstruct_gate(&state, claimant, gate)?;
+            ctx.charge(rep_edges.len() as u64)?;
+            ctx.gates.insert(id, info);
+            for (mv, child) in rep_edges {
+                let mut next = state.clone();
+                let result = next.apply_with_delta(Placement { coord: mv }).ok()?.0;
+                if result.outcome.is_some() {
+                    return None;
+                }
+                ctx.children[id as usize].push((mv, child));
+                replay_node(cert, child, next, claimant, root_stones, depth + 1, states, ctx)?;
+            }
+        }
     }
     states[id as usize] = Some(state);
     Some(())
@@ -972,11 +1663,11 @@ fn family_hitting_exceeds(witnesses: &[Vec<HexCoord>], b: u8) -> bool {
 /// Postorder pass: D14 full scalar B, subtree resolution T, and the live-role
 /// clock map (f_cut == r_full on gate-free trees, §3.2).
 fn derive_budgets_and_roles(ctx: &mut G2Context<'_>) -> Option<()> {
-    let mut roles: Vec<HashMap<RoleId, u32>> = vec![HashMap::new(); ctx.cert.nodes.len()];
+    let mut roles: Vec<HashMap<RoleId, (u32, u32)>> = vec![HashMap::new(); ctx.cert.nodes.len()];
     let mut total_roles = 0usize;
     for &id in &ctx.postorder.clone() {
         let index = id as usize;
-        let mut map: HashMap<RoleId, u32> = HashMap::new();
+        let mut map: HashMap<RoleId, (u32, u32)> = HashMap::new();
         match &ctx.cert.nodes[index] {
             CertNode::OrCompletion { mv, .. } => {
                 map.insert(
@@ -984,7 +1675,7 @@ fn derive_budgets_and_roles(ctx: &mut G2Context<'_>) -> Option<()> {
                         node: id,
                         cell: coord_key(*mv),
                     },
-                    0,
+                    (0, 0),
                 );
                 ctx.b_local[index] = 0;
             }
@@ -996,7 +1687,7 @@ fn derive_budgets_and_roles(ctx: &mut G2Context<'_>) -> Option<()> {
                             witness: win_id(*witness),
                             cell: coord_key(cell),
                         },
-                        0,
+                        (0, 0),
                     );
                 }
                 ctx.b_local[index] = 0;
@@ -1010,7 +1701,7 @@ fn derive_budgets_and_roles(ctx: &mut G2Context<'_>) -> Option<()> {
                                 witness: win_id(*key),
                                 cell: coord_key(cell),
                             },
-                            0,
+                            (0, 0),
                         );
                     }
                 }
@@ -1022,11 +1713,11 @@ fn derive_budgets_and_roles(ctx: &mut G2Context<'_>) -> Option<()> {
                         node: id,
                         cell: coord_key(*mv),
                     },
-                    0,
+                    (0, 0),
                 );
-                for (role, f) in &roles[*child as usize] {
-                    // Ordinary OR while live: pass-through.
-                    if map.insert(*role, *f).is_some() {
+                for (role, clocks) in &roles[*child as usize] {
+                    // Ordinary OR while live: pass-through (both clocks).
+                    if map.insert(*role, *clocks).is_some() {
                         return None;
                     }
                 }
@@ -1040,11 +1731,11 @@ fn derive_budgets_and_roles(ctx: &mut G2Context<'_>) -> Option<()> {
                     let child_index = *child as usize;
                     maximum_b = maximum_b.max(ctx.b_local[child_index]);
                     maximum_t = maximum_t.max(ctx.t_sub[child_index]);
-                    for (role, f) in &roles[child_index] {
-                        // Ordinary AND: 1 + child clock. In a tree each role
-                        // is reachable below exactly one child, so a repeat
+                    for (role, (r_full, f_cut)) in &roles[child_index] {
+                        // Ordinary AND: 1 + child clock for BOTH. In a tree each
+                        // role is reachable below exactly one child, so a repeat
                         // key is a structural corruption.
-                        let bumped = f.checked_add(1)?;
+                        let bumped = (r_full.checked_add(1)?, f_cut.checked_add(1)?);
                         if map.insert(*role, bumped).is_some() {
                             return None;
                         }
@@ -1053,7 +1744,81 @@ fn derive_budgets_and_roles(ctx: &mut G2Context<'_>) -> Option<()> {
                 ctx.b_local[index] = maximum_b.checked_add(1)?;
                 ctx.t_sub[index] = maximum_t;
             }
-            CertNode::FhwGateV1(_) => return None,
+            CertNode::FhwGateV1(gate) => {
+                // Clone the small data we need, then release the cert borrow.
+                let threats: Vec<WindowKey> = gate.proof.threats.clone();
+                let info = ctx.gates.get(&id)?;
+                let b = info.b;
+                let escape_ply = info.escape_ply;
+                let kernel = info.kernel.clone();
+                let phi = info.phi.clone();
+                let children = ctx.children[index].clone(); // (s_move, child_id)
+                if children.is_empty() {
+                    return None;
+                }
+                // D14 B(Q) = 1 + max_{s in R} B(C_s); require B(Q) >= b.
+                let mut maximum_b = 0u32;
+                let mut maximum_t = escape_ply;
+                for (_, child) in &children {
+                    let ci = *child as usize;
+                    maximum_b = maximum_b.max(ctx.b_local[ci]);
+                    maximum_t = maximum_t.max(ctx.t_sub[ci]);
+                }
+                let b_q = maximum_b.checked_add(1)?;
+                if b_q < u32::from(b) {
+                    return None;
+                }
+                ctx.b_local[index] = b_q;
+                ctx.t_sub[index] = maximum_t;
+                // Checkpoint roles: an empty of every named threat, clock 0,
+                // discharged at the gate.
+                for &w in &threats {
+                    for cell in window_empty_cells(&ctx.states[index], w) {
+                        let role = RoleId::Checkpoint {
+                            gate: id,
+                            threat: win_id(w),
+                            cell: coord_key(cell),
+                        };
+                        if map.insert(role, (0, 0)).is_some() {
+                            return None;
+                        }
+                    }
+                }
+                // Paired f_cut over the roles below each representative child:
+                // f_cut(Q,rho) = f_cut(C_s,rho) + max_{d: phi(d)=s} eps(d,rho).
+                for (s_move, child_id) in &children {
+                    let mapped_ds: Vec<HexCoord> = kernel
+                        .iter()
+                        .copied()
+                        .filter(|d| phi.get(&coord_key(*d)) == Some(s_move))
+                        .collect();
+                    if mapped_ds.is_empty() {
+                        return None; // every representative maps at least itself
+                    }
+                    for (role, (child_r, child_f)) in &roles[*child_id as usize] {
+                        let carrier = role.carrier();
+                        let y = HexCoord {
+                            q: carrier.0,
+                            r: carrier.1,
+                        };
+                        let mut max_eps = 0u32;
+                        for &d in &mapped_ds {
+                            let (_row, eps) = derive_gate_role_row(ctx, id, d, y, *child_f)?;
+                            max_eps = max_eps.max(u32::from(eps));
+                        }
+                        // r_full takes the full 1+child charge; f_cut takes
+                        // child + max epsilon. f_cut <= r_full holds.
+                        let r_q = child_r.checked_add(1)?;
+                        let f_q = child_f.checked_add(max_eps)?;
+                        if f_q > r_q {
+                            return None;
+                        }
+                        if map.insert(*role, (r_q, f_q)).is_some() {
+                            return None;
+                        }
+                    }
+                }
+            }
         }
         ctx.charge(map.len() as u64)?;
         total_roles = total_roles.checked_add(map.len())?;
@@ -1066,24 +1831,26 @@ fn derive_budgets_and_roles(ctx: &mut G2Context<'_>) -> Option<()> {
     Some(())
 }
 
-/// Compute Q_cut(node, W) (== E_full on gate-free trees) with memoization.
-fn window_clock(ctx: &mut G2Context<'_>, id: CertNodeId, key: WindowKey) -> Option<u32> {
+/// Compute the PAIR `(Q_cut, E_full)` at `(node, key)` with memoization
+/// (design §3.2/§3.3). On gate-free nodes the two coincide; only the FHW gate
+/// clauses diverge. Enforces `Q_cut <= E_full <= B` on every evaluated pair.
+fn window_clock(ctx: &mut G2Context<'_>, id: CertNodeId, key: WindowKey) -> Option<(u32, u32)> {
     if let Some(value) = ctx.window_clock.get(&(id, win_id(key))) {
         return Some(*value);
     }
     ctx.charge(1)?;
     let index = id as usize;
-    let value = if window_has_claimant_stone(&ctx.states[index], ctx.claimant, key) {
+    let (q_cut, e_full) = if window_has_claimant_stone(&ctx.states[index], ctx.claimant, key) {
         // Non-D-alive: permanence stop (first clause, has precedence).
-        0
+        (0, 0)
     } else {
         match &ctx.cert.nodes[index] {
-            CertNode::OrCompletion { .. } | CertNode::Win { .. } => 0,
-            CertNode::Loss { .. } => ctx.b_local[index],
+            CertNode::OrCompletion { .. } | CertNode::Win { .. } => (0, 0),
+            CertNode::Loss { .. } => (ctx.b_local[index], ctx.b_local[index]),
             CertNode::Choice { mv, child } => {
                 if key.contains(*mv) {
                     // OR placement entering W.
-                    0
+                    (0, 0)
                 } else {
                     window_clock(ctx, *child, key)?
                 }
@@ -1093,22 +1860,54 @@ fn window_clock(ctx: &mut G2Context<'_>, id: CertNodeId, key: WindowKey) -> Opti
                 if children.is_empty() {
                     return None;
                 }
-                let mut maximum = 0u32;
+                let mut max_q = 0u32;
+                let mut max_e = 0u32;
                 for (_, child) in children {
-                    maximum = maximum.max(window_clock(ctx, child, key)?);
+                    let (q, e) = window_clock(ctx, child, key)?;
+                    max_q = max_q.max(q);
+                    max_e = max_e.max(e);
                 }
-                maximum.checked_add(1)?
+                (max_q.checked_add(1)?, max_e.checked_add(1)?)
             }
-            CertNode::FhwGateV1(_) => return None,
+            CertNode::FhwGateV1(_) => gate_window_clock(ctx, id, key)?,
         }
     };
-    // Q_cut <= E_full <= B: on this gate-free class Q == E by construction;
-    // the containment in B is checked here for every evaluated pair.
-    if value > ctx.b_local[index] {
+    // Q_cut <= E_full <= B on every evaluated pair (design §3.2).
+    if q_cut > e_full || e_full > ctx.b_local[index] {
         return None;
     }
-    ctx.window_clock.insert((id, win_id(key)), value);
-    Some(value)
+    ctx.window_clock.insert((id, win_id(key)), (q_cut, e_full));
+    Some((q_cut, e_full))
+}
+
+/// Gate clause of the paired window clock (design §3.3):
+///   E_full(Q,W) = max{ b, max_{d in K} (1 + E_full(C_phi(d), W)) }
+///   Q_cut(Q,W)  = max{ b, max_{d in K} (kappa(d,W) + Q_cut(C_phi(d), W)) }
+/// The non-D-alive permanence stop was already applied by the caller.
+fn gate_window_clock(
+    ctx: &mut G2Context<'_>,
+    id: CertNodeId,
+    key: WindowKey,
+) -> Option<(u32, u32)> {
+    let b = u32::from(ctx.gates.get(&id)?.b);
+    // Child clocks first (mutable recursion), collected with the real reply.
+    let kernel = ctx.gates.get(&id)?.kernel.clone();
+    let mut child_pairs: Vec<(HexCoord, u32, u32)> = Vec::with_capacity(kernel.len());
+    for d in kernel {
+        let s = *ctx.gates.get(&id)?.phi.get(&coord_key(d))?;
+        let child = *ctx.gates.get(&id)?.rep_child.get(&coord_key(s))?;
+        let (q_child, e_child) = window_clock(ctx, child, key)?;
+        child_pairs.push((d, q_child, e_child));
+    }
+    // Now derive kappa per d (pure, immutable borrows).
+    let mut max_q = b;
+    let mut max_e = b;
+    for (d, q_child, e_child) in child_pairs {
+        let (_row, kappa, _guard) = derive_gate_window_row(ctx, id, d, key, q_child)?;
+        max_q = max_q.max(u32::from(kappa).checked_add(q_child)?);
+        max_e = max_e.max(1u32.checked_add(e_child)?);
+    }
+    Some((max_q, max_e))
 }
 
 /// Seed and propagate the ordinary window demands (§3.2): all D-alive touched
@@ -1120,6 +1919,27 @@ fn derive_window_demands(ctx: &mut G2Context<'_>) -> Option<()> {
     let mut seeds: Vec<(CertNodeId, WindowKey, u8)> = Vec::new();
     for &id in &ctx.postorder.clone() {
         let index = id as usize;
+        if matches!(ctx.cert.nodes[index], CertNode::FhwGateV1(_)) {
+            // Gate demand seeding: the 18 length-six windows through every
+            // real reply d in K (§3.2). (Incoming ordinary keys arrive by
+            // downward propagation; no gate-local WC keys on the Exact/FC
+            // accept path.)
+            let kernel = ctx.gates.get(&id)?.kernel.clone();
+            for d in kernel {
+                ctx.charge(19)?;
+                for axis in Axis::ALL {
+                    let vector = axis.vector();
+                    for offset in 0..6i16 {
+                        let start = HexCoord {
+                            q: d.q.checked_sub(vector.q.checked_mul(offset)?)?,
+                            r: d.r.checked_sub(vector.r.checked_mul(offset)?)?,
+                        };
+                        seeds.push((id, WindowKey { start, axis }, SOURCE_DIRECT18));
+                    }
+                }
+            }
+            continue;
+        }
         if !matches!(ctx.cert.nodes[index], CertNode::UniversalGroup2V1(_)) {
             continue;
         }
@@ -1219,7 +2039,9 @@ fn derive_window_demands(ctx: &mut G2Context<'_>) -> Option<()> {
                         entry.1 |= bits;
                     }
                 }
-                CertNode::Universal { .. } | CertNode::UniversalGroup2V1(_) => {
+                CertNode::Universal { .. }
+                | CertNode::UniversalGroup2V1(_)
+                | CertNode::FhwGateV1(_) => {
                     for (_, child) in ctx.children[index].clone() {
                         let entry = incoming[child as usize]
                             .entry(win_id(*key))
@@ -1227,7 +2049,6 @@ fn derive_window_demands(ctx: &mut G2Context<'_>) -> Option<()> {
                         entry.1 |= bits;
                     }
                 }
-                CertNode::FhwGateV1(_) => return None,
             }
         }
         ctx.demands[index] = rows;
@@ -1259,13 +2080,13 @@ fn check_group2_nodes(ctx: &mut G2Context<'_>) -> Option<()> {
             return None;
         }
 
-        // Z_dir and Z_seed from the live-role clocks.
+        // Z_dir and Z_seed from the live-role f_cut clocks.
         let mut required: Vec<HexCoord> = Vec::new();
         let mut carrier_f: HashMap<CoordKey, u32> = HashMap::new();
-        for (role, f) in &ctx.roles[index] {
+        for (role, (_r_full, f_cut)) in &ctx.roles[index] {
             let carrier = role.carrier();
             let slot = carrier_f.entry(carrier).or_insert(0);
-            *slot = (*slot).max(*f);
+            *slot = (*slot).max(*f_cut);
         }
         ctx.charge(carrier_f.len() as u64)?;
         for (carrier, f) in &carrier_f {
@@ -1290,7 +2111,7 @@ fn check_group2_nodes(ctx: &mut G2Context<'_>) -> Option<()> {
         // Z_touch and Z_virgin from the demanded windows at this node.
         let demands = ctx.demands[index].clone();
         for (key, _bits) in &demands {
-            let q = window_clock(ctx, id, *key)?;
+            let q = window_clock(ctx, id, *key)?.0;
             let defender_count = window_defender_count(&state, ctx.claimant.other(), *key);
             let claimant_blocked = window_has_claimant_stone(&state, ctx.claimant, *key);
             if !claimant_blocked
@@ -1331,8 +2152,127 @@ fn check_group2_nodes(ctx: &mut G2Context<'_>) -> Option<()> {
     Some(())
 }
 
+/// Convert a stored `RoleKeyV1` into the internal `RoleId` (arena node ids are
+/// shared between the two representations).
+fn role_key_to_id(role: &RoleKeyV1) -> RoleId {
+    match role {
+        RoleKeyV1::ChoiceMove { node, cell } => RoleId::ChoiceMove {
+            node: *node,
+            cell: coord_key(*cell),
+        },
+        RoleKeyV1::OrCompletionMove { node, cell } => RoleId::OrCompletionMove {
+            node: *node,
+            cell: coord_key(*cell),
+        },
+        RoleKeyV1::LeafEmpty {
+            node,
+            witness,
+            cell,
+        } => RoleId::LeafEmpty {
+            node: *node,
+            witness: win_id(*witness),
+            cell: coord_key(*cell),
+        },
+        RoleKeyV1::Checkpoint {
+            gate,
+            threat,
+            cell,
+        } => RoleId::Checkpoint {
+            gate: *gate,
+            threat: win_id(*threat),
+            cell: coord_key(*cell),
+        },
+    }
+}
+
+/// §3.3 per-gate acceptance: every stored role row and window row is recomputed
+/// from the replayed position and the representative-child clocks and compared
+/// byte-for-byte; the role domain must equal the live roles below `C_s` and the
+/// window domain must equal the exact `demands(Q)` (Cartesian `K x demands`).
+fn check_gate_nodes(ctx: &mut G2Context<'_>) -> Option<()> {
+    for &id in &ctx.postorder.clone() {
+        let index = id as usize;
+        let CertNode::FhwGateV1(gate) = &ctx.cert.nodes[index] else {
+            continue;
+        };
+        let gate = gate.clone();
+        let phi = ctx.gates.get(&id)?.phi.clone();
+        let rep_child = ctx.gates.get(&id)?.rep_child.clone();
+        let demands = ctx.demands[index].clone();
+        let demand_ids: HashSet<WinId> = demands.iter().map(|(k, _)| win_id(*k)).collect();
+        let state = ctx.states[index].clone();
+        let claimant = ctx.claimant;
+
+        for entry in &gate.proof.map {
+            let d = entry.real_reply;
+            let s = *phi.get(&coord_key(d))?;
+            if s != entry.representative {
+                return None;
+            }
+            let child = *rep_child.get(&coord_key(s))?;
+
+            // ---- Role rows: domain == live roles below C_s ----
+            let child_roles = ctx.roles[child as usize].clone();
+            ctx.charge(child_roles.len() as u64)?;
+            if entry.roles.len() != child_roles.len() {
+                return None;
+            }
+            let mut seen_roles: HashSet<RoleId> = HashSet::new();
+            for claim in &entry.roles {
+                let rid = role_key_to_id(&claim.role);
+                if !seen_roles.insert(rid) {
+                    return None; // duplicate
+                }
+                let (_child_r, child_f) = *child_roles.get(&rid)?; // real live role
+                if claim.child_f != child_f {
+                    return None;
+                }
+                let carrier = rid.carrier();
+                let y = HexCoord {
+                    q: carrier.0,
+                    r: carrier.1,
+                };
+                let (row, epsilon) = derive_gate_role_row(ctx, id, d, y, child_f)?;
+                if claim.row != row || claim.epsilon != epsilon {
+                    return None;
+                }
+            }
+
+            // ---- Window rows: domain == demands(Q) exactly (Cartesian) ----
+            ctx.charge(demands.len() as u64)?;
+            if entry.windows.len() != demand_ids.len() {
+                return None;
+            }
+            let mut seen_windows: HashSet<WinId> = HashSet::new();
+            for claim in &entry.windows {
+                let wid = win_id(claim.window);
+                if !demand_ids.contains(&wid) || !seen_windows.insert(wid) {
+                    return None; // unrequested, or duplicate, window row
+                }
+                let child_q = window_clock(ctx, child, claim.window)?.0;
+                if claim.child_q != child_q {
+                    return None;
+                }
+                let d_in = claim.window.contains(d);
+                let s_in = claim.window.contains(s);
+                if claim.d_in_window != d_in || claim.s_in_window != s_in {
+                    return None;
+                }
+                let (row, kappa, guard) =
+                    derive_gate_window_row(ctx, id, d, claim.window, child_q)?;
+                if claim.row != row || claim.kappa != kappa || claim.retained_guard != guard {
+                    return None;
+                }
+                // Sanity: window geometry recomputed from the same board.
+                let _ = window_geom(&state, claimant, claim.window);
+            }
+        }
+    }
+    Some(())
+}
+
 // ---------------------------------------------------------------------------
-// §2.4 digest recomputation (gate-free payloads).
+// §2.4 digest recomputation.
 // ---------------------------------------------------------------------------
 
 struct TransformTables {
@@ -1474,8 +2414,14 @@ fn transform_window(key: WindowKey, symmetry: u8) -> Option<WindowKey> {
 }
 
 /// Local semantic payload (§2.4): the node payload with outgoing edges and
-/// child IDs removed; stored digest fields omitted.
-fn enc_semantic_local(out: &mut Vec<u8>, node: &CertNode, symmetry: u8) -> Option<()> {
+/// child IDs removed; stored digest fields omitted. `pre_ids` (the `g*`-frame
+/// preorder ids) remap gate role-key node references.
+fn enc_semantic_local(
+    out: &mut Vec<u8>,
+    node: &CertNode,
+    symmetry: u8,
+    pre_ids: &[u32],
+) -> Option<()> {
     out.push(node_tag(node));
     match node {
         CertNode::OrCompletion {
@@ -1539,9 +2485,224 @@ fn enc_semantic_local(out: &mut Vec<u8>, node: &CertNode, symmetry: u8) -> Optio
             enc_u32(out, g2.proof.claimed_d14_budget);
             enc_u32(out, g2.proof.build_horizon);
         }
-        CertNode::FhwGateV1(_) => return None,
+        CertNode::FhwGateV1(gate) => {
+            // Complete stored gate payload (edges/child IDs removed), fully
+            // transformed and re-sorted into canonical order under this
+            // symmetry so all 12 D6 images produce identical bytes.
+            enc_u16(out, gate.proof.schema_version);
+            enc_authority(out, &gate.proof.authority);
+            let mut threats = gate
+                .proof
+                .threats
+                .iter()
+                .map(|k| transform_window(*k, symmetry))
+                .collect::<Option<Vec<_>>>()?;
+            threats.sort_by_key(|k| window_sort_key(*k));
+            enc_u64(out, threats.len() as u64);
+            for k in threats {
+                enc_window(out, k);
+            }
+            enc_u32(out, gate.proof.escape_resolution_ply);
+            let mut map_rows: Vec<(CoordKey, Vec<u8>)> = Vec::with_capacity(gate.proof.map.len());
+            for entry in &gate.proof.map {
+                let d = d6_transform_coord(entry.real_reply, symmetry)?;
+                let s = d6_transform_coord(entry.representative, symmetry)?;
+                let mut row = Vec::new();
+                enc_coord(&mut row, d);
+                enc_coord(&mut row, s);
+                row.push(edge_class_tag(entry.edge_class));
+                // Roles, transformed and re-sorted by encoded (canonical) key.
+                let mut role_rows: Vec<Vec<u8>> = Vec::with_capacity(entry.roles.len());
+                for claim in &entry.roles {
+                    let rid = role_key_to_id(&claim.role);
+                    let mut r = Vec::new();
+                    enc_role_key(&mut r, &rid, symmetry, pre_ids)?;
+                    enc_u32(&mut r, claim.child_f);
+                    r.push(role_row_tag(claim.row));
+                    r.push(claim.epsilon);
+                    role_rows.push(r);
+                }
+                role_rows.sort();
+                enc_u64(&mut row, role_rows.len() as u64);
+                for r in role_rows {
+                    row.extend_from_slice(&r);
+                }
+                // Windows, transformed and re-sorted by encoded (canonical) key.
+                let mut win_rows: Vec<Vec<u8>> = Vec::with_capacity(entry.windows.len());
+                for claim in &entry.windows {
+                    let w = transform_window(claim.window, symmetry)?;
+                    let mut r = Vec::new();
+                    enc_window(&mut r, w);
+                    enc_u32(&mut r, claim.child_q);
+                    r.push(u8::from(claim.d_in_window));
+                    r.push(u8::from(claim.s_in_window));
+                    r.push(kappa_row_tag(claim.row));
+                    r.push(claim.kappa);
+                    r.push(guard_tag(claim.retained_guard));
+                    win_rows.push(r);
+                }
+                win_rows.sort();
+                enc_u64(&mut row, win_rows.len() as u64);
+                for r in win_rows {
+                    row.extend_from_slice(&r);
+                }
+                map_rows.push((coord_key(d), row));
+            }
+            map_rows.sort_by_key(|(k, _)| *k);
+            enc_u64(out, map_rows.len() as u64);
+            for (_, row) in map_rows {
+                out.extend_from_slice(&row);
+            }
+        }
     }
     Some(())
+}
+
+/// The FhwGate derived-record class payload (§2.4). All coords/windows are
+/// transformed and every set re-sorted into canonical order under `symmetry`
+/// so the 12 D6 images produce identical derived hashes. Uses the RECOMPUTED
+/// gate values; on the Exact/FC accept path the `*_evaluated`/RC/WC bits are
+/// all false (those predicates are inapplicable to Exact/FC edges).
+fn gate_derived_class_payload(
+    ctx: &mut G2Context<'_>,
+    gate_id: CertNodeId,
+    symmetry: u8,
+    pre_ids: &[u32],
+) -> Option<Vec<u8>> {
+    let info = ctx.gates.get(&gate_id)?;
+    let b = info.b;
+    let escape = info.escape_ply;
+    let kernel = info.kernel.clone();
+    let reps = info.reps.clone();
+    let threats = info.threats.clone();
+    let phi = info.phi.clone();
+    let rep_child = info.rep_child.clone();
+    let demands = ctx.demands[gate_id as usize].clone();
+    let claimant = ctx.claimant;
+
+    // Precompute every needed child Q_cut (mutable recursion) before the
+    // immutable derivations below.
+    let mut child_qs: HashMap<(CertNodeId, WinId), u32> = HashMap::new();
+    for &d in &kernel {
+        let s = *phi.get(&coord_key(d))?;
+        let child = *rep_child.get(&coord_key(s))?;
+        for (w, _) in &demands {
+            let key = (child, win_id(*w));
+            if !child_qs.contains_key(&key) {
+                let q = window_clock(ctx, child, *w)?.0;
+                child_qs.insert(key, q);
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    out.push(2); // FhwGate
+    out.push(b);
+    // H (threats), transformed + re-sorted.
+    let mut ht = threats
+        .iter()
+        .map(|k| transform_window(*k, symmetry))
+        .collect::<Option<Vec<_>>>()?;
+    ht.sort_by_key(|k| window_sort_key(*k));
+    enc_u64(&mut out, ht.len() as u64);
+    for k in ht {
+        enc_window(&mut out, k);
+    }
+    // K, transformed + re-sorted.
+    let mut kt = kernel
+        .iter()
+        .map(|c| d6_transform_coord(*c, symmetry))
+        .collect::<Option<Vec<_>>>()?;
+    kt.sort_by_key(|c| coord_key(*c));
+    enc_u64(&mut out, kt.len() as u64);
+    for c in kt {
+        enc_coord(&mut out, c);
+    }
+    // R, transformed + re-sorted.
+    let mut rt = reps
+        .iter()
+        .map(|c| d6_transform_coord(*c, symmetry))
+        .collect::<Option<Vec<_>>>()?;
+    rt.sort_by_key(|c| coord_key(*c));
+    enc_u64(&mut out, rt.len() as u64);
+    for c in rt {
+        enc_coord(&mut out, c);
+    }
+    enc_u32(&mut out, escape);
+
+    let state = &ctx.states[gate_id as usize];
+    let mut map_rows: Vec<(CoordKey, Vec<u8>)> = Vec::with_capacity(kernel.len());
+    for &d in &kernel {
+        let s = *phi.get(&coord_key(d))?;
+        let child = *rep_child.get(&coord_key(s))?;
+        let dt = d6_transform_coord(d, symmetry)?;
+        let st = d6_transform_coord(s, symmetry)?;
+        let mut row = Vec::new();
+        enc_coord(&mut row, dt);
+        enc_coord(&mut row, st);
+        let edge_class = *ctx.gates.get(&gate_id)?.edge_class.get(&coord_key(d))?;
+        row.push(edge_class_tag(edge_class));
+        // Derived role rows over the live roles below C_s.
+        let child_roles = &ctx.roles[child as usize];
+        let mut role_rows: Vec<Vec<u8>> = Vec::with_capacity(child_roles.len());
+        for (role, (_r_full, child_f)) in child_roles {
+            let carrier = role.carrier();
+            let y = HexCoord {
+                q: carrier.0,
+                r: carrier.1,
+            };
+            let (drow, eps) = derive_gate_role_row(ctx, gate_id, d, y, *child_f)?;
+            let mut r = Vec::new();
+            enc_role_key(&mut r, role, symmetry, pre_ids)?;
+            enc_coord(&mut r, d6_transform_coord(y, symmetry)?);
+            r.push(1); // child_reachable
+            enc_u32(&mut r, *child_f);
+            r.push(0); // carrier_ghost_legal (inapplicable on Exact/FC)
+            r.push(0); // rc_evaluated
+            r.push(0); // rc_pass
+            r.push(0); // d22n_pass
+            r.push(role_row_tag(drow));
+            r.push(eps);
+            role_rows.push(r);
+        }
+        role_rows.sort();
+        enc_u64(&mut row, role_rows.len() as u64);
+        for r in role_rows {
+            row.extend_from_slice(&r);
+        }
+        // Derived window rows over demands(Q).
+        let mut win_rows: Vec<Vec<u8>> = Vec::with_capacity(demands.len());
+        for (w, _) in &demands {
+            let child_q = *child_qs.get(&(child, win_id(*w)))?;
+            let geom = window_geom(state, claimant, *w);
+            let (krow, kappa, guard) = derive_gate_window_row(ctx, gate_id, d, *w, child_q)?;
+            let mut r = Vec::new();
+            enc_window(&mut r, transform_window(*w, symmetry)?);
+            enc_u32(&mut r, child_q);
+            r.push(u8::from(geom.d_alive));
+            r.push(u8::from(geom.all_empty));
+            r.push(u8::from(w.contains(d)));
+            r.push(u8::from(w.contains(s)));
+            r.push(0); // wc_evaluated (inapplicable on Exact/FC)
+            r.push(0); // wc_pass
+            r.push(kappa_row_tag(krow));
+            r.push(kappa);
+            r.push(guard_tag(guard));
+            win_rows.push(r);
+        }
+        win_rows.sort();
+        enc_u64(&mut row, win_rows.len() as u64);
+        for r in win_rows {
+            row.extend_from_slice(&r);
+        }
+        map_rows.push((coord_key(dt), row));
+    }
+    map_rows.sort_by_key(|(k, _)| *k);
+    enc_u64(&mut out, map_rows.len() as u64);
+    for (_, row) in map_rows {
+        out.extend_from_slice(&row);
+    }
+    Some(out)
 }
 
 struct DigestTables {
@@ -1565,7 +2726,12 @@ fn build_digest_tables(ctx: &mut G2Context<'_>) -> Option<DigestTables> {
             ctx.charge(4)?;
             // Semantic Merkle value.
             let mut payload = Vec::new();
-            enc_semantic_local(&mut payload, &ctx.cert.nodes[index], symmetry)?;
+            enc_semantic_local(
+                &mut payload,
+                &ctx.cert.nodes[index],
+                symmetry,
+                &transforms.pre_ids[g],
+            )?;
             let children = &transforms.sorted_children[g][index];
             enc_u64(&mut payload, children.len() as u64);
             for (mv, child) in children {
@@ -1583,7 +2749,7 @@ fn build_digest_tables(ctx: &mut G2Context<'_>) -> Option<DigestTables> {
             enc_u32(&mut record, ctx.cert.semantic_horizon);
             // Role rows.
             let mut role_rows: Vec<Vec<u8>> = Vec::with_capacity(ctx.roles[index].len());
-            for (role, f) in &ctx.roles[index] {
+            for (role, (r_full, f_cut)) in &ctx.roles[index] {
                 let mut row = Vec::new();
                 enc_role_key(&mut row, role, symmetry, &transforms.pre_ids[g])?;
                 let carrier = role.carrier();
@@ -1597,8 +2763,8 @@ fn build_digest_tables(ctx: &mut G2Context<'_>) -> Option<DigestTables> {
                         symmetry,
                     )?,
                 );
-                enc_u32(&mut row, *f); // r_full
-                enc_u32(&mut row, *f); // f_cut (equal on gate-free trees)
+                enc_u32(&mut row, *r_full); // r_full
+                enc_u32(&mut row, *f_cut); // f_cut (== r_full off gates)
                 role_rows.push(row);
             }
             role_rows.sort();
@@ -1609,12 +2775,12 @@ fn build_digest_tables(ctx: &mut G2Context<'_>) -> Option<DigestTables> {
             // Demand rows.
             let mut demand_rows: Vec<Vec<u8>> = Vec::with_capacity(ctx.demands[index].len());
             for (key, bits) in ctx.demands[index].clone() {
-                let clock = window_clock(ctx, id, key)?;
+                let (q_cut, e_full) = window_clock(ctx, id, key)?;
                 let mut row = Vec::new();
                 enc_window(&mut row, transform_window(key, symmetry)?);
                 row.push(bits);
-                enc_u32(&mut row, clock); // E_full
-                enc_u32(&mut row, clock); // Q_cut (equal on gate-free trees)
+                enc_u32(&mut row, e_full); // E_full
+                enc_u32(&mut row, q_cut); // Q_cut (== E_full off gates)
                 demand_rows.push(row);
             }
             demand_rows.sort();
@@ -1622,7 +2788,19 @@ fn build_digest_tables(ctx: &mut G2Context<'_>) -> Option<DigestTables> {
             for row in demand_rows {
                 record.extend_from_slice(&row);
             }
-            // Derived class payload.
+            // Derived class payload. The gate payload needs the mutable window
+            // clock, so it is precomputed before the immutable match below.
+            let gate_payload: Option<Vec<u8>> =
+                if matches!(ctx.cert.nodes[index], CertNode::FhwGateV1(_)) {
+                    Some(gate_derived_class_payload(
+                        ctx,
+                        id,
+                        symmetry,
+                        &transforms.pre_ids[g],
+                    )?)
+                } else {
+                    None
+                };
             match &ctx.cert.nodes[index] {
                 CertNode::UniversalGroup2V1(_) => {
                     record.push(1); // OrdinaryGroup2
@@ -1639,7 +2817,9 @@ fn build_digest_tables(ctx: &mut G2Context<'_>) -> Option<DigestTables> {
                         enc_coord(&mut record, cell);
                     }
                 }
-                CertNode::FhwGateV1(_) => return None,
+                CertNode::FhwGateV1(_) => {
+                    record.extend_from_slice(gate_payload.as_ref()?);
+                }
                 _ => record.push(0), // Other
             }
             let mut payload = record;
@@ -1700,18 +2880,27 @@ fn enc_role_key(
         } => {
             out.push(2);
             enc_u32(out, *pre_ids.get(*node as usize)?);
-            let key = WindowKey {
-                start: HexCoord {
-                    q: witness.1,
-                    r: witness.2,
-                },
-                axis: match witness.0 {
-                    0 => Axis::Q,
-                    1 => Axis::R,
-                    2 => Axis::QR,
-                    _ => return None,
-                },
-            };
+            let key = win_id_to_window(*witness)?;
+            enc_window(out, transform_window(key, symmetry)?);
+            enc_coord(
+                out,
+                d6_transform_coord(
+                    HexCoord {
+                        q: cell.0,
+                        r: cell.1,
+                    },
+                    symmetry,
+                )?,
+            );
+        }
+        RoleId::Checkpoint {
+            gate,
+            threat,
+            cell,
+        } => {
+            out.push(3);
+            enc_u32(out, *pre_ids.get(*gate as usize)?);
+            let key = win_id_to_window(*threat)?;
             enc_window(out, transform_window(key, symmetry)?);
             enc_coord(
                 out,
@@ -1726,6 +2915,19 @@ fn enc_role_key(
         }
     }
     Some(())
+}
+
+/// Rebuild a `WindowKey` from its stored `WinId` tuple `(axis_tag, q, r)`.
+fn win_id_to_window(id: WinId) -> Option<WindowKey> {
+    Some(WindowKey {
+        start: HexCoord { q: id.1, r: id.2 },
+        axis: match id.0 {
+            0 => Axis::Q,
+            1 => Axis::R,
+            2 => Axis::QR,
+            _ => return None,
+        },
+    })
 }
 
 fn lexicographic_min(candidates: Vec<Vec<u8>>) -> Option<Vec<u8>> {
@@ -1860,10 +3062,10 @@ fn compute_required_only(ctx: &mut G2Context<'_>, id: CertNodeId) -> Option<Vec<
     let stones = state.board().occupied_cells();
     let mut required: Vec<HexCoord> = Vec::new();
     let mut carrier_f: HashMap<CoordKey, u32> = HashMap::new();
-    for (role, f) in &ctx.roles[index] {
+    for (role, (_r_full, f_cut)) in &ctx.roles[index] {
         let carrier = role.carrier();
         let slot = carrier_f.entry(carrier).or_insert(0);
-        *slot = (*slot).max(*f);
+        *slot = (*slot).max(*f_cut);
     }
     for (carrier, f) in &carrier_f {
         let cell = HexCoord {
@@ -1883,7 +3085,7 @@ fn compute_required_only(ctx: &mut G2Context<'_>, id: CertNodeId) -> Option<Vec<
     }
     let demands = ctx.demands[index].clone();
     for (key, _bits) in &demands {
-        let q = window_clock(ctx, id, *key)?;
+        let q = window_clock(ctx, id, *key)?.0;
         let defender_count = window_defender_count(&state, ctx.claimant.other(), *key);
         let claimant_blocked = window_has_claimant_stone(&state, ctx.claimant, *key);
         if !claimant_blocked && defender_count >= 1 && defender_count.checked_add(q)? >= 6 {
@@ -1968,7 +3170,23 @@ fn copy_subtree(
                     proof: g2.proof.clone(),
                 }))
             }
-            CertNode::FhwGateV1(_) => return None,
+            CertNode::FhwGateV1(gate) => {
+                // Unfold the representative subtrees; canonicalize the
+                // representative edges. The proof (threats/map/escape) is
+                // preserved; the finalizer fills the map rows.
+                let mut new_reps = Vec::with_capacity(gate.representatives.len());
+                for edge in &gate.representatives {
+                    new_reps.push(crate::tss_verify::CertEdge {
+                        mv: edge.mv,
+                        child: copy(arena, edge.child, nodes, depth + 1)?,
+                    });
+                }
+                new_reps.sort_by_key(|edge| coord_key(edge.mv));
+                CertNode::FhwGateV1(Box::new(crate::tss_verify::FhwGateNodeV1 {
+                    representatives: new_reps,
+                    proof: gate.proof.clone(),
+                }))
+            }
         };
         let new_id = u32::try_from(nodes.len()).ok()?;
         nodes.push(copied);
@@ -2076,6 +3294,126 @@ pub(crate) fn finder_finalize_group2(
             let (plan, summary) = plans.get(&index)?;
             g2.proof.child_plan_sha256 = *plan;
             g2.proof.finder_summary_sha256 = *summary;
+        }
+    }
+    Some(out)
+}
+
+/// Reverse of `role_key_to_id`: rebuild a stored `RoleKeyV1` from the internal
+/// `RoleId` (used by the gate-row filler that produces positive fixtures).
+fn id_to_role_key(role: &RoleId) -> Option<RoleKeyV1> {
+    Some(match role {
+        RoleId::ChoiceMove { node, cell } => RoleKeyV1::ChoiceMove {
+            node: *node,
+            cell: HexCoord { q: cell.0, r: cell.1 },
+        },
+        RoleId::OrCompletionMove { node, cell } => RoleKeyV1::OrCompletionMove {
+            node: *node,
+            cell: HexCoord { q: cell.0, r: cell.1 },
+        },
+        RoleId::LeafEmpty {
+            node,
+            witness,
+            cell,
+        } => RoleKeyV1::LeafEmpty {
+            node: *node,
+            witness: win_id_to_window(*witness)?,
+            cell: HexCoord { q: cell.0, r: cell.1 },
+        },
+        RoleId::Checkpoint {
+            gate,
+            threat,
+            cell,
+        } => RoleKeyV1::Checkpoint {
+            gate: *gate,
+            threat: win_id_to_window(*threat)?,
+            cell: HexCoord { q: cell.0, r: cell.1 },
+        },
+    })
+}
+
+/// Finder helper: given a certificate whose `FhwGateV1` nodes carry a complete
+/// map SKELETON (correct `real_reply`/`representative`/`edge_class` per K, but
+/// empty role/window lists), fill every gate map's role and window rows from the
+/// verifier's own derivation. Used to construct positive fixtures for the
+/// accept path (the rows are redundant claims recomputed and byte-compared at
+/// verification; the finalizer fills them from the shared derivation, exactly
+/// as the finder would). Returns `None` if the skeleton does not reconstruct.
+pub(crate) fn finder_fill_gate_rows(
+    state: &RustHexoState,
+    cert: &TssCertificate,
+) -> Option<TssCertificate> {
+    let mut ctx = build_context(state, cert)?;
+    derive_budgets_and_roles(&mut ctx)?;
+    derive_window_demands(&mut ctx)?;
+
+    // Collect the derived rows for every gate node, then rebuild the cert.
+    let mut new_maps: HashMap<usize, Vec<crate::tss_verify::FhwMapV1>> = HashMap::new();
+    for &id in &ctx.postorder.clone() {
+        let index = id as usize;
+        if !matches!(ctx.cert.nodes[index], CertNode::FhwGateV1(_)) {
+            continue;
+        }
+        let phi = ctx.gates.get(&id)?.phi.clone();
+        let rep_child = ctx.gates.get(&id)?.rep_child.clone();
+        let edge_class = ctx.gates.get(&id)?.edge_class.clone();
+        let kernel = ctx.gates.get(&id)?.kernel.clone();
+        let demands = ctx.demands[index].clone();
+        let mut maps: Vec<crate::tss_verify::FhwMapV1> = Vec::with_capacity(kernel.len());
+        for d in kernel {
+            let s = *phi.get(&coord_key(d))?;
+            let child = *rep_child.get(&coord_key(s))?;
+            let cls = *edge_class.get(&coord_key(d))?;
+            // Role rows over the live roles below C_s.
+            let child_roles = ctx.roles[child as usize].clone();
+            let mut roles: Vec<crate::tss_verify::FhwRoleClaimV1> = Vec::new();
+            for (role, (_r, child_f)) in &child_roles {
+                let carrier = role.carrier();
+                let y = HexCoord {
+                    q: carrier.0,
+                    r: carrier.1,
+                };
+                let (row, epsilon) = derive_gate_role_row(&ctx, id, d, y, *child_f)?;
+                roles.push(crate::tss_verify::FhwRoleClaimV1 {
+                    role: id_to_role_key(role)?,
+                    child_f: *child_f,
+                    row,
+                    epsilon,
+                });
+            }
+            roles.sort_by(|a, b| role_key_order(&a.role).cmp(&role_key_order(&b.role)));
+            // Window rows over demands(Q).
+            let mut windows: Vec<crate::tss_verify::FhwWindowClaimV1> = Vec::new();
+            for (w, _) in &demands {
+                let child_q = window_clock(&mut ctx, child, *w)?.0;
+                let (row, kappa, guard) = derive_gate_window_row(&ctx, id, d, *w, child_q)?;
+                windows.push(crate::tss_verify::FhwWindowClaimV1 {
+                    window: *w,
+                    child_q,
+                    d_in_window: w.contains(d),
+                    s_in_window: w.contains(s),
+                    row,
+                    kappa,
+                    retained_guard: guard,
+                });
+            }
+            windows.sort_by(|a, b| window_sort_key(a.window).cmp(&window_sort_key(b.window)));
+            maps.push(crate::tss_verify::FhwMapV1 {
+                real_reply: d,
+                representative: s,
+                edge_class: cls,
+                roles,
+                windows,
+            });
+        }
+        maps.sort_by(|a, b| coord_key(a.real_reply).cmp(&coord_key(b.real_reply)));
+        new_maps.insert(index, maps);
+    }
+
+    let mut out = cert.clone();
+    for (index, node) in out.nodes.iter_mut().enumerate() {
+        if let CertNode::FhwGateV1(gate) = node {
+            gate.proof.map = new_maps.remove(&index)?;
         }
     }
     Some(out)
@@ -2685,5 +4023,539 @@ mod tests {
                 "symmetry {symmetry} image must verify (stored digests are D6-invariant)"
             );
         }
+    }
+
+    // ----- Verifier-side FHW gate machinery (§3.2/§3.3) unit tests -----
+    // These mirror the finder's classifier tests but exercise the INDEPENDENT
+    // verifier-side reimplementation (transversal_exact, VGhost, FC/GI/RC/WC,
+    // classify_role, classify_window), including the two documented design
+    // defects realized as verifier-side rejections.
+
+    fn cluster_state() -> RustHexoState {
+        let mut state = RustHexoState::new();
+        let moves = [
+            (0, 0),
+            (1, 0),
+            (2, 0),
+            (3, 0),
+            (0, 1),
+            (1, 1),
+            (2, 1),
+            (3, 1),
+            (0, 2),
+        ];
+        for (q, r) in moves {
+            apply_placement(&mut state, Placement { coord: HexCoord::new(q, r) })
+                .unwrap_or_else(|e| panic!("cluster move ({q},{r}) illegal: {e:?}"));
+        }
+        state
+    }
+
+    fn cluster_ghost() -> VGhost {
+        VGhost::new(&cluster_state(), HexCoord::new(4, 0)).expect("ghost")
+    }
+
+    fn win(start: (i16, i16), axis: Axis) -> WindowKey {
+        WindowKey {
+            start: HexCoord::new(start.0, start.1),
+            axis,
+        }
+    }
+
+    fn geom(d_alive: bool, touched: bool, all_empty: bool, cnt_d: u32) -> WindowGeomV {
+        WindowGeomV {
+            d_alive,
+            touched,
+            all_empty,
+            cnt_d,
+        }
+    }
+
+    #[test]
+    fn transversal_exact_small_families() {
+        let empty: Vec<Vec<HexCoord>> = vec![];
+        assert_eq!(transversal_exact(&empty, 3), 0);
+        let one = vec![vec![HexCoord::new(0, 0), HexCoord::new(1, 0)]];
+        assert_eq!(transversal_exact(&one, 3), 1);
+        let common = vec![
+            vec![HexCoord::new(0, 0), HexCoord::new(1, 0)],
+            vec![HexCoord::new(0, 0), HexCoord::new(5, 5)],
+        ];
+        assert_eq!(transversal_exact(&common, 3), 1);
+        let disjoint = vec![
+            vec![HexCoord::new(0, 0), HexCoord::new(1, 0)],
+            vec![HexCoord::new(5, 5), HexCoord::new(6, 5)],
+        ];
+        assert_eq!(transversal_exact(&disjoint, 3), 2);
+        let three = vec![
+            vec![HexCoord::new(0, 0)],
+            vec![HexCoord::new(5, 5)],
+            vec![HexCoord::new(9, 0)],
+        ];
+        assert_eq!(transversal_exact(&three, 2), 3); // "> 2"
+    }
+
+    #[test]
+    fn fc_and_gi_predicates() {
+        let ghost = cluster_ghost();
+        let d = HexCoord::new(1, 0);
+        assert!(frontier_covered(d, d, &ghost)); // d == s is Exact/FC
+        assert!(!frontier_covered(HexCoord::new(40, 0), HexCoord::new(4, 0), &ghost));
+        assert!(ghost.is_ghost_illegal(HexCoord::new(40, 0)));
+        assert!(!ghost.is_ghost_illegal(HexCoord::new(4, 1)));
+        assert!(!ghost.is_ghost_illegal(HexCoord::new(0, 0))); // occupied
+    }
+
+    #[test]
+    fn role_rows_exact_fc_and_rc_zero() {
+        let ghost = cluster_ghost();
+        let d = HexCoord::new(1, 0);
+        let y = HexCoord::new(5, 0);
+        assert_eq!(
+            classify_role(FhwEdgeClassV1::Exact, d, y, 3, None),
+            Some((FhwRoleRowV1::ExactOrFcZero, 0))
+        );
+        assert_eq!(
+            classify_role(FhwEdgeClassV1::FrontierCovered, d, y, 3, None),
+            Some((FhwRoleRowV1::ExactOrFcZero, 0))
+        );
+        // Carrier avoidance: d == y rejects.
+        assert_eq!(classify_role(FhwEdgeClassV1::Exact, d, d, 3, None), None);
+        // Non-FC ghost-illegal carrier, k=0 => RC passes => NonFcRcZero.
+        let yi = HexCoord::new(40, 0);
+        assert!(ghost.is_ghost_illegal(yi));
+        assert_eq!(
+            classify_role(FhwEdgeClassV1::NonFrontierCovered, d, yi, 0, Some(&ghost)),
+            Some((FhwRoleRowV1::NonFcRcZero, 0))
+        );
+        // Non-FC ghost-legal carrier => conservative charged, eps 1.
+        let yl = HexCoord::new(4, 1);
+        assert!(!ghost.is_ghost_illegal(yl));
+        assert_eq!(
+            classify_role(FhwEdgeClassV1::NonFrontierCovered, d, yl, 2, Some(&ghost)),
+            Some((FhwRoleRowV1::NonFcCharged, 1))
+        );
+    }
+
+    #[test]
+    fn defect_charged_via_ghost_illegal_rc_fail_is_unrealizable() {
+        // DEFECT 1 (from the closure report): RC fails => dist(d,y)<=8k, which
+        // contradicts the mandatory D22-N guard dist(d,y)>8k. So a charged row
+        // via a ghost-illegal RC-fail carrier is never accepted — it REJECTS.
+        let ghost = cluster_ghost();
+        let y = HexCoord::new(40, 0); // ghost-illegal
+        let d = HexCoord::new(35, 0); // within 8 of y
+        let out = classify_role(FhwEdgeClassV1::NonFrontierCovered, d, y, 1, Some(&ghost));
+        assert_eq!(out, None, "unrealizable charged-via-illegal claim must reject");
+    }
+
+    #[test]
+    fn window_rows_exact_fc_paths() {
+        // Exact/FC window rows never consult the ghost (None is passed).
+        let w = win((10, 0), Axis::Q); // cells (10,0)..(15,0)
+        // NonDAlive.
+        let g = geom(false, false, false, 0);
+        assert_eq!(
+            classify_window(FhwEdgeClassV1::Exact, HexCoord::new(10, 0), w, 3, &g, None),
+            Some((FhwKappaRowV1::NonDAlive, 0, GuardResultV1::NotApplicable))
+        );
+        // ExactOrFcNonIncident.
+        let g = geom(true, false, true, 0);
+        assert_eq!(
+            classify_window(FhwEdgeClassV1::FrontierCovered, HexCoord::new(0, 0), w, 4, &g, None),
+            Some((FhwKappaRowV1::ExactOrFcNonIncident, 0, GuardResultV1::NotApplicable))
+        );
+        // ExactOrFcDirect touched: guard cnt_d+1+q<6 passes at q=2, fails at q=3.
+        let touched = geom(true, true, false, 2);
+        let d = HexCoord::new(12, 0);
+        assert_eq!(
+            classify_window(FhwEdgeClassV1::Exact, d, w, 2, &touched, None),
+            Some((FhwKappaRowV1::ExactOrFcDirect, 1, GuardResultV1::Pass))
+        );
+        assert_eq!(
+            classify_window(FhwEdgeClassV1::Exact, d, w, 3, &touched, None),
+            None
+        );
+        // ExactOrFcDirect all-empty: 1+q<6 passes at q=4, fails at q=5.
+        let empty = geom(true, false, true, 0);
+        assert_eq!(
+            classify_window(FhwEdgeClassV1::FrontierCovered, d, w, 4, &empty, None),
+            Some((FhwKappaRowV1::ExactOrFcDirect, 1, GuardResultV1::Pass))
+        );
+        assert_eq!(
+            classify_window(FhwEdgeClassV1::FrontierCovered, d, w, 5, &empty, None),
+            None
+        );
+    }
+
+    #[test]
+    fn window_rows_non_fc_and_wc() {
+        let state = cluster_state();
+        let ghost = VGhost::new(&state, HexCoord::new(4, 0)).unwrap();
+        // NonFcEmptyNonIncidentQlt6.
+        let w = win((10, 0), Axis::Q);
+        let empty = geom(true, false, true, 0);
+        assert_eq!(
+            classify_window(
+                FhwEdgeClassV1::NonFrontierCovered,
+                HexCoord::new(0, 0),
+                w,
+                5,
+                &empty,
+                Some(&ghost)
+            ),
+            Some((FhwKappaRowV1::NonFcEmptyNonIncidentQlt6, 0, GuardResultV1::NotApplicable))
+        );
+        // WcPass at q=6 with a window whose cells are legal (near cluster).
+        let w2 = win((4, 2), Axis::Q);
+        for c in w2.cells() {
+            assert!(!ghost.is_ghost_illegal(c));
+        }
+        let d2 = HexCoord::new(2, 2);
+        assert!(!w2.contains(d2));
+        assert_eq!(
+            classify_window(FhwEdgeClassV1::NonFrontierCovered, d2, w2, 6, &empty, Some(&ghost)),
+            Some((FhwKappaRowV1::NonFcEmptyNonIncidentWcPass, 0, GuardResultV1::Pass))
+        );
+    }
+
+    #[test]
+    fn defect_wc_fail_leaf_is_unrealizable_with_passing_guard() {
+        // DEFECT 2: on the non-FC/all-empty/nonincident/q>=6 branch, WC fail =>
+        // dist(d,W)<=8(q-5), contradicting the N-virgin guard dist(d,W)>8(q-5).
+        // So the WcFail leaf is never accepted with a passing guard: the result
+        // is WcPass or a rejection, never a passing WcFail row.
+        let state = cluster_state();
+        let ghost = VGhost::new(&state, HexCoord::new(4, 0)).unwrap();
+        let d = HexCoord::new(10, 0);
+        let w = win((11, 0), Axis::Q); // dist(d,W)=1
+        let empty = geom(true, false, true, 0);
+        let out = classify_window(FhwEdgeClassV1::NonFrontierCovered, d, w, 7, &empty, Some(&ghost));
+        assert!(
+            matches!(
+                out,
+                None | Some((FhwKappaRowV1::NonFcEmptyNonIncidentWcPass, _, _))
+            ),
+            "WcFail must not be accepted with a passing guard; got {out:?}"
+        );
+    }
+
+    // ----- End-to-end positive gate fixture + mutation battery -----
+    // A hand-built double-threat gate: defender P0 to move (SecondStone, b=1);
+    // claimant P1 holds two disjoint count-4 windows U (the named gate threat)
+    // and V. K = E(U) = {(4,1),(5,1)}; each K reply blocks U, after which P1
+    // wins via V (a Win leaf, count 4 / budget 2). An all-Exact gate (R = K)
+    // that exercises reconstruction, checkpoint roles, paired clocks, the
+    // Cartesian window demand, role/window rows, and escape horizon.
+
+    /// The 16-move prefix reaching P0-to-move SecondStone with the two threats.
+    const GATE_MOVES: [(i16, i16); 16] = [
+        (0, 0),   // 1  P0 opening
+        (0, 1),   // 2  P1 U
+        (1, 1),   // 3  P1 U
+        (-1, 0),  // 4  P0
+        (-1, -1), // 5  P0
+        (2, 1),   // 6  P1 U
+        (3, 1),   // 7  P1 U  (U = (0,1)..(3,1), empties (4,1),(5,1))
+        (0, -1),  // 8  P0
+        (-2, 0),  // 9  P0
+        (0, 3),   // 10 P1 V
+        (1, 3),   // 11 P1 V
+        (-2, -1), // 12 P0
+        (1, -2),  // 13 P0
+        (2, 3),   // 14 P1 V
+        (3, 3),   // 15 P1 V  (V = (0,3)..(3,3), empties (4,3),(5,3))
+        (2, -2),  // 16 P0
+    ];
+
+    fn gate_position() -> RustHexoState {
+        let mut state = RustHexoState::new();
+        for &(q, r) in &GATE_MOVES {
+            apply_placement(&mut state, Placement { coord: HexCoord::new(q, r) })
+                .unwrap_or_else(|e| panic!("gate move ({q},{r}) illegal: {e:?}"));
+        }
+        state
+    }
+
+    /// Build the accepting gate certificate (skeleton + filled rows).
+    fn accepted_gate_cert() -> (RustHexoState, TssCertificate) {
+        let state = gate_position();
+        assert_eq!(state.current_player(), Player::Player0, "defender to move");
+        assert!(matches!(state.phase(), TurnPhase::SecondStone { .. }), "b=1");
+        let u = win((0, 1), Axis::Q);
+        let v = win((0, 3), Axis::Q);
+        // Sanity: U/V are P1 count-4 windows with 0 P0 stones.
+        let p1_count = |w: WindowKey| {
+            w.cells()
+                .iter()
+                .filter(|c| state.board().get(**c) == Some(Player::Player1))
+                .count()
+        };
+        assert_eq!(p1_count(u), 4, "U must be a P1 count-4 window");
+        assert_eq!(p1_count(v), 4, "V must be a P1 count-4 window");
+
+        let placements = state.placements_made();
+        let escape = placements + 1 + 2; // p(Q) + b + 2
+        let win_resolution = placements + 1 + 2; // after s: placements+1, +2 to win
+        let horizon = escape.max(win_resolution);
+
+        // Win leaves proving P1 wins via V after each K reply.
+        let win_leaf = || CertNode::Win {
+            witness: v,
+            count: 4,
+            budget: 2,
+            resolution_ply: win_resolution,
+        };
+        let u1 = HexCoord::new(4, 1);
+        let u2 = HexCoord::new(5, 1);
+        let skeleton_map = |d: HexCoord| crate::tss_verify::FhwMapV1 {
+            real_reply: d,
+            representative: d,
+            edge_class: FhwEdgeClassV1::Exact,
+            roles: Vec::new(),
+            windows: Vec::new(),
+        };
+        let gate = CertNode::FhwGateV1(Box::new(crate::tss_verify::FhwGateNodeV1 {
+            representatives: vec![
+                CertEdge { mv: u1, child: 1 },
+                CertEdge { mv: u2, child: 2 },
+            ],
+            proof: FhwGateProofV1 {
+                schema_version: 1,
+                authority: Group2AuthorityV1::compiled(),
+                threats: vec![u],
+                escape_resolution_ply: escape,
+                map: vec![skeleton_map(u1), skeleton_map(u2)],
+            },
+        }));
+        let cert = TssCertificate {
+            root: RootBinding::from_state(&state),
+            claimant: Player::Player1,
+            root_node: 0,
+            nodes: vec![gate, win_leaf(), win_leaf()],
+            semantic_horizon: horizon,
+        };
+        let filled =
+            finder_fill_gate_rows(&state, &cert).expect("gate skeleton must reconstruct + fill");
+        (state, filled)
+    }
+
+    #[test]
+    fn gate_certificate_reconstructs_and_verifies() {
+        let (state, cert) = accepted_gate_cert();
+        // The reconstruction found exactly K = {(4,1),(5,1)} with two Exact
+        // self-edges.
+        let CertNode::FhwGateV1(gate) = &cert.nodes[0] else {
+            panic!("root must be the gate");
+        };
+        assert_eq!(gate.proof.map.len(), 2, "|K| == 2");
+        assert!(gate
+            .proof
+            .map
+            .iter()
+            .all(|m| m.edge_class == FhwEdgeClassV1::Exact));
+        // Every map entry carries the Cartesian window domain (all equal).
+        let domain: std::collections::HashSet<_> = gate.proof.map[0]
+            .windows
+            .iter()
+            .map(|w| window_sort_key(w.window))
+            .collect();
+        assert!(!domain.is_empty(), "direct-18 demands present");
+        for m in &gate.proof.map {
+            let d: std::collections::HashSet<_> =
+                m.windows.iter().map(|w| window_sort_key(w.window)).collect();
+            assert_eq!(d, domain, "Cartesian K x demands: identical window domain");
+        }
+        // Strict acceptance under the extension policy; rejection under legacy.
+        assert!(
+            Group2Verifier.verify(&state, &cert, ProofStatus::Loss),
+            "the constructed gate certificate must verify"
+        );
+        assert!(!TssVerifier.verify(&state, &cert, ProofStatus::Loss));
+        assert!(!Group2Verifier.verify(&state, &cert, ProofStatus::Win));
+    }
+
+    #[test]
+    fn gate_mutation_battery_rejects() {
+        let (state, cert) = accepted_gate_cert();
+        let reject = |label: &str, mutated: &TssCertificate| {
+            assert!(
+                !Group2Verifier.verify(&state, mutated, ProofStatus::Loss),
+                "gate mutation {label} must reject"
+            );
+        };
+        macro_rules! with_gate {
+            ($m:ident, $g:ident, $body:block) => {{
+                if let CertNode::FhwGateV1($g) = &mut $m.nodes[0] {
+                    $body
+                }
+            }};
+        }
+
+        // schema version.
+        let mut m = cert.clone();
+        with_gate!(m, g, {
+            g.proof.schema_version = 2;
+        });
+        reject("schema_version", &m);
+
+        // authority byte.
+        let mut m = cert.clone();
+        with_gate!(m, g, {
+            g.proof.authority.fhw_sha256[0] ^= 0x01;
+        });
+        reject("authority_sha", &m);
+
+        // escape horizon: below p(Q)+b+2.
+        let mut m = cert.clone();
+        with_gate!(m, g, {
+            g.proof.escape_resolution_ply -= 1;
+        });
+        reject("escape_ply", &m);
+
+        // threat window tamper (H_Q no longer a real A-threat / tau != b).
+        let mut m = cert.clone();
+        with_gate!(m, g, {
+            g.proof.threats[0] = win((9, 9), Axis::Q);
+        });
+        reject("threat_window", &m);
+
+        // K-domain: drop one map entry (map domain != K).
+        let mut m = cert.clone();
+        with_gate!(m, g, {
+            g.proof.map.pop();
+        });
+        reject("map_domain_short", &m);
+
+        // representative move tamper (R no longer subset of K).
+        let mut m = cert.clone();
+        with_gate!(m, g, {
+            g.representatives[0].mv = HexCoord::new(9, 9);
+        });
+        reject("representative_move", &m);
+
+        // edge class flip (Exact -> FrontierCovered contradicts geometry).
+        let mut m = cert.clone();
+        with_gate!(m, g, {
+            g.proof.map[0].edge_class = FhwEdgeClassV1::FrontierCovered;
+        });
+        reject("edge_class", &m);
+
+        // role row tamper.
+        let mut m = cert.clone();
+        if let CertNode::FhwGateV1(g) = &mut m.nodes[0] {
+            if let Some(r) = g.proof.map[0].roles.first_mut() {
+                r.epsilon ^= 1;
+            }
+        }
+        reject("role_epsilon", &m);
+
+        // role child_f tamper.
+        let mut m = cert.clone();
+        if let CertNode::FhwGateV1(g) = &mut m.nodes[0] {
+            if let Some(r) = g.proof.map[0].roles.first_mut() {
+                r.child_f += 1;
+            }
+        }
+        reject("role_child_f", &m);
+
+        // window kappa tamper.
+        let mut m = cert.clone();
+        if let CertNode::FhwGateV1(g) = &mut m.nodes[0] {
+            if let Some(w) = g.proof.map[0].windows.first_mut() {
+                w.kappa ^= 1;
+            }
+        }
+        reject("window_kappa", &m);
+
+        // window child_q tamper.
+        let mut m = cert.clone();
+        if let CertNode::FhwGateV1(g) = &mut m.nodes[0] {
+            if let Some(w) = g.proof.map[0].windows.first_mut() {
+                w.child_q += 1;
+            }
+        }
+        reject("window_child_q", &m);
+
+        // drop a window row (Cartesian incomplete).
+        let mut m = cert.clone();
+        if let CertNode::FhwGateV1(g) = &mut m.nodes[0] {
+            g.proof.map[0].windows.pop();
+        }
+        reject("window_domain_short", &m);
+
+        // representative child tamper: point at the wrong leaf (loss instead).
+        let mut m = cert.clone();
+        m.nodes[1] = CertNode::Loss {
+            witnesses: vec![win((0, 3), Axis::Q)],
+            resolution_ply: cert.semantic_horizon,
+        };
+        reject("representative_child_swapped_to_loss", &m);
+
+        // horizon below derived T.
+        let mut m = cert.clone();
+        m.semantic_horizon -= 1;
+        reject("semantic_horizon", &m);
+
+        // claimant flip.
+        let mut m = cert.clone();
+        m.claimant = m.claimant.other();
+        reject("claimant_flip", &m);
+
+        // duplicate representative / map entry.
+        let mut m = cert.clone();
+        if let CertNode::FhwGateV1(g) = &mut m.nodes[0] {
+            g.proof.map[1] = g.proof.map[0].clone();
+        }
+        reject("duplicate_map_entry", &m);
+    }
+
+    #[test]
+    fn gate_certificate_is_d6_invariant() {
+        let (_, cert) = accepted_gate_cert();
+        for symmetry in 0..D6_SYMMETRY_COUNT {
+            let transformed_state = {
+                let mut s = RustHexoState::new();
+                for &(q, r) in &GATE_MOVES {
+                    let coord = d6_transform_coord(HexCoord::new(q, r), symmetry).expect("range");
+                    apply_placement(&mut s, Placement { coord }).expect("legal");
+                }
+                s
+            };
+            let transformed_cert = d6_remap_certificate(&cert, symmetry).expect("remap");
+            assert!(
+                Group2Verifier.verify(&transformed_state, &transformed_cert, ProofStatus::Loss),
+                "gate symmetry {symmetry} image must verify"
+            );
+        }
+    }
+
+    #[test]
+    fn gate_with_nonfrontiercovered_edge_rejects() {
+        // Accept-path narrowing: if a map entry claims NonFrontierCovered, the
+        // reconstruction rejects (the non-FC end-to-end path is fail-closed).
+        let (state, cert) = accepted_gate_cert();
+        let mut m = cert.clone();
+        if let CertNode::FhwGateV1(g) = &mut m.nodes[0] {
+            g.proof.map[0].edge_class = FhwEdgeClassV1::NonFrontierCovered;
+        }
+        assert!(!Group2Verifier.verify(&state, &m, ProofStatus::Loss));
+    }
+
+    #[test]
+    fn window_geom_is_exact() {
+        // Both incidence bits and touched/all-empty derive from the board.
+        let state = cluster_state();
+        // (0,0) is P0-occupied, (1,0)/(2,0)/(3,0) are P1. Window (0,0)-(5,0).
+        let w = win((0, 0), Axis::Q);
+        // claimant = P0: window has P0 stone at (0,0) => non-D-alive.
+        let g = window_geom(&state, Player::Player0, w);
+        assert!(!g.d_alive);
+        // claimant = P1: (0,0) is P0 => defender(P0) present, no P1 => but P1 is
+        // claimant; window has P1 at (1,0),(2,0),(3,0) => claimant present =>
+        // non-D-alive for P1 too. Use a fully empty far window for all-empty.
+        let far = win((20, 0), Axis::Q);
+        let g2 = window_geom(&state, Player::Player1, far);
+        assert!(g2.d_alive && g2.all_empty && !g2.touched);
     }
 }
