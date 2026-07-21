@@ -349,3 +349,70 @@ Consequences:
   h16 bench (139.0), the +60 Elo side of the V2 trade. Bench-window note:
   unbounded deep_calls 11,950 vs h16's 20,712 at similar moves/min —
   unbounded spends more budget per call (grind class), park absorbs it.
+
+## 8. 2026-07-21 overnight session — main_4 deployment + G2 v2 chain (this
+   copy on claude/main4-integration is now the CANONICAL notes; the
+   order-prior copy is frozen at a874e4c7)
+
+- **main_4 LAUNCHED** (~03:53Z) from claude/main4-integration: weights-only
+  warm start from main_3 ep90, cosine LR 2e-4→2e-5/150+floor, solver =
+  cap 500 + dual_pass + unbounded + wide + park 300 ms + async 8 + guards.
+  Epochs 1-20: deep_verify_failed=0 throughout; ~10-15k proven wins +
+  15-24k proven losses consumed per epoch (loss stream live, loss backups
+  outweigh win backups ≈3.3:1). Launch traps fixed: manifest at
+  packages/hexfield_eq/Cargo.toml (not rust/); WSL needs rustup cargo
+  1.95 (~/.cargo/bin — distro 1.75 fails lockfile v4); infra packages
+  (hexo_utils/_engine/_models) resolve from the resume-run-crash-fdef2b
+  worktree (built .so live only there) via INFRA_TREE split in the
+  supervisor (4a30c8f7).
+- **PARK SWEEP (a66b707a, order-prior): 300 ms adopted.** Bench (release
+  .so, sha-pinned, 7 arms): bail 12.7%→0.0% at 300, decided verdicts/min
+  +2.8%, throughput flat 75-300, narrower strictly bad. **LIVE-LOAD
+  CAVEAT (MEASURED, epochs 1-20): under full trainer load bail runs
+  76-85%, avg wait ~750 ms — the bench's 0% was selfplay-only; the train
+  pass changes solve latency.** Async pool saturation is the bigger
+  signal: async_dropped ≈55% of enqueued, stale ≈58%, workers_spawned=4
+  (of 8 configured). OPEN TUNING ITEM: async capacity first (workers/
+  queue), window second; decide with one paired measurement, not blind.
+- **VALUE-SIGNAL AUDIT (6d8adc2f):** consumption path WIN/LOSS symmetric
+  end-to-end (leaf mint, consume gate, guards, hard_z). New counters
+  deep_win_backups/deep_loss_backups split the consumed stream at the
+  single chokepoint. Flagged-not-changed: root-loss scalar (no move to
+  force), win-only zero-mass recovery.
+- **TSS→TRAINING TELEMETRY (epoch 20 snapshot):** 16,283 moves; proof
+  rows 4,396 (27%), sharpened 3,391 (20.8%), win_rows 2,390 +
+  loss_only_rows 1,560 (the brand-new class); win_retained_mass 0.265
+  pre-sharpen vs gumbel_win_retained 0.751 post — the solver modification
+  of policy targets is HEAVY. Search side: 671,599 leaf verdict hits,
+  263k hard backups (6.4% of 4.1M), 392k memo hits, root injection 1.2%,
+  forced-defense 18.6% of moves, proof_disagreements 55 (tiny).
+- **INTERNALIZATION (instrument 8e8ce68d on v1-soak; SET pin 523e0783,
+  683 certified positions):** main_3 curve = value-only learning (WIN
+  sign-disagree 28.6%@ep25 → 11.3%@ep90 → 17-19% late decay; policy
+  top-1 FLAT ~55% all run; loss values perfect from ep25). **main_4
+  BREAKS THE POLICY PLATEAU: ep10 top-1 65.1% / mass 0.548 / WIN
+  sign-disagree 3.0%; ep20 66.8% / 0.563 / 3.6%** (vs ep90-init ~59.5%/
+  0.48/14.0 on the selfplay cohort). Caveats: fresh-optimizer + LR reset
+  is a confound for the speed of the jump (not the plateau-break itself —
+  main_3 trained with TSS sharpen and stayed flat); set is main_3-anchor
+  derived (in-distribution for the solver).
+- **G2 v2 CHAIN — CLOSED THIS PHASE, DO-NOT-ADOPT at production config
+  (claude/g2-cert through 4f87b893):** accept path (Exact/FC) hostile-
+  reviewed SOUND (0 critical, 2 hostile tests added); FC positive fixture
+  discharged A1; production emission + wide-PN port BUILT (representative-
+  only child materialization solves the DefenderPair grammar mismatch =
+  design §5 "largest unknown"); dual-materialize + strict self-verify
+  firewall; flag-off bit-identical. A/B ×2 (6,462 positions): parity
+  PERFECT, vf=0 both arms, **firing=0** — the frozen verifier's no-mixing
+  class rule (compact H_Q bound; 214/918 ThreatCountOutOfRange) blocks
+  whole-cert gating on real wide proofs. **Adoption boundary = verifier
+  amendment admitting mixed legacy+gate certificates**
+  (G2V2_WIDEPN_REPORT.md §5) → requires a fresh hostile-review round
+  (trusted-base change). Node-level applicability is real (525/704
+  reductive closures on the corpus); cert-level composition is the wall.
+  Suite 250/0/37. G2 stays OFF in main_4.
+- **Branch topology now:** claude/main4-integration = consolidate-main +
+  order-prior + g2-cert@7d6e5f1b + main_4 config/scripts (THE production
+  branch, main_4 runs from it). claude/g2-cert continued past the merge
+  point (accept path → wide-PN port, 4f87b893) — fold into a future
+  integration round together with the amendment decision.
