@@ -6554,10 +6554,12 @@ impl<'store> WidePnSearch<'store> {
     fn evaluate_wide_pair_at_gate(
         &self,
         gate: &WideTurnGate,
+        first_windows: Option<&[u32]>,
         first: HexCoord,
         second: HexCoord,
     ) -> Option<(WidePnChildResult, WidePnPrior)> {
-        let (result, prior) = gate.evaluate_pair(first, second, self.semantic_horizon)?;
+        let (result, prior) =
+            gate.evaluate_pair(first_windows, first, second, self.semantic_horizon)?;
         #[cfg(test)]
         let prior = if self.live_ge3_seed {
             let started = Instant::now();
@@ -6653,9 +6655,36 @@ impl<'store> WidePnSearch<'store> {
         // whole double loop is stateless — zero engine applies.
         let mut second_coords: Vec<HexCoord> = Vec::new();
         let mut second_seen: HashSet<HexCoord> = HashSet::new();
+        let mut pair_allow: Vec<(i16, i16)> = Vec::new();
+        let mut pair_counts: Vec<((i16, i16), u8)> = Vec::new();
+        let mut defender_allow: Vec<HexCoord> = Vec::new();
         for first_candidate in &first_candidates {
             let first_width_tier = wide_candidate_width_tier(first_candidate);
             let first = first_candidate.coord;
+            // Exact family-size prefilter (see `pair_prefilter`): pairs it
+            // skips are precisely `evaluate_pair` `None`s (empty or
+            // single-window families), so children are byte-identical to the
+            // unfiltered enumeration.
+            let allow_all = gate.pair_prefilter(first, &mut pair_counts, &mut pair_allow);
+            // Exact defender tier (see `defender_second_constraint`): with an
+            // unhit defender >=4 window, only the <=2 intersection cells can
+            // survive `defender_win_now`; an empty intersection rejects the
+            // whole first. Skips are exactly `evaluate_pair` `None`s.
+            let defender_constrained = gate.defender_second_constraint(first, &mut defender_allow);
+            // Whole-first skips: every pair through `first` is provably a
+            // `None` evaluation — generation itself is dead work. The
+            // reveal-prefix study keeps the historical full enumeration
+            // so its per-zone bookkeeping stays complete.
+            if !observe_reveal_prefix
+                && ((!allow_all && pair_allow.is_empty())
+                    || (defender_constrained && defender_allow.is_empty()))
+            {
+                continue;
+            }
+            // Windows through `first` (hoisted out of the per-pair
+            // evaluation; `evaluate_pair` historically re-looked this up for
+            // every second).
+            let first_windows = gate.windows_by_cell.get(&first).map(Vec::as_slice);
             #[cfg(test)]
             let mut reveal_second_elapsed = 0u64;
             {
@@ -6712,11 +6741,21 @@ impl<'store> WidePnSearch<'store> {
                 } else {
                     0
                 };
+                // Exact skips: outside the family allow set OR the defender
+                // intersection the pair is provably a `None` evaluation (the
+                // only side effects are the test-gated closure timers).
+                if defender_constrained && !defender_allow.contains(&second) {
+                    continue;
+                }
+                if !allow_all && pair_allow.binary_search(&raw_coord_key(second)).is_err() {
+                    continue;
+                }
                 // Stateless classification from the turn-start window
                 // snapshot: no engine applies in the pair double loop.
                 #[cfg(test)]
                 let evaluation_started = self.closure_counters.then(Instant::now);
-                let evaluated = self.evaluate_wide_pair_at_gate(&gate, first, second);
+                let evaluated =
+                    self.evaluate_wide_pair_at_gate(&gate, first_windows, first, second);
                 #[cfg(test)]
                 if let Some(started) = evaluation_started {
                     let elapsed = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
@@ -9141,13 +9180,24 @@ struct WidePairWindow {
 /// defender's post-pair threat family is exactly the windows through the two
 /// placed stones that reach count >=4.
 struct WideTurnGate {
-    /// For each empty cell: the claimant-pure count>=2 windows holding it.
-    windows_by_cell: HashMap<HexCoord, Vec<WidePairWindow>>,
-    /// For each empty cell: the claimant-pure count-1 windows holding it.
-    /// After a first stone in such a window its other empties join the
-    /// count>=2 second-ply universe; stored separately so pair evaluation
-    /// never scans them.
-    weak_windows_by_cell: HashMap<HexCoord, Vec<WidePairWindow>>,
+    /// Every claimant-pure count>=2 window, in board window-entry scan order.
+    /// Stored once; the per-cell maps hold indices, so gate construction never
+    /// clones a window per empty cell.
+    windows: Vec<WidePairWindow>,
+    /// Every claimant-pure count-1 window, same order discipline.
+    weak_windows: Vec<WidePairWindow>,
+    /// For each empty cell: indices into `windows` of the count>=2 windows
+    /// holding it (scan order — identical to the historical per-cell clones).
+    windows_by_cell: HashMap<HexCoord, Vec<u32>>,
+    /// For each empty cell: indices into `weak_windows` of the count-1
+    /// windows holding it. After a first stone in such a window its other
+    /// empties join the count>=2 second-ply universe; stored separately so
+    /// pair evaluation never scans them.
+    weak_windows_by_cell: HashMap<HexCoord, Vec<u32>>,
+    /// Indices into `windows` of every claimant count>=3 window: the windows
+    /// that reach count>=4 from one new stone. Drives the exact pair
+    /// prefilter (`pair_prefilter`).
+    c3_windows: Vec<u32>,
     /// Empties of every live defender >=4 window (the hit/block sets).
     defender_threats: Vec<Vec<HexCoord>>,
     #[cfg(test)]
@@ -9158,8 +9208,11 @@ struct WideTurnGate {
 
 impl WideTurnGate {
     fn build(state: &RustHexoState, claimant: Player) -> Self {
-        let mut windows_by_cell: HashMap<HexCoord, Vec<WidePairWindow>> = HashMap::new();
-        let mut weak_windows_by_cell: HashMap<HexCoord, Vec<WidePairWindow>> = HashMap::new();
+        let mut windows: Vec<WidePairWindow> = Vec::new();
+        let mut weak_windows: Vec<WidePairWindow> = Vec::new();
+        let mut windows_by_cell: HashMap<HexCoord, Vec<u32>> = HashMap::new();
+        let mut weak_windows_by_cell: HashMap<HexCoord, Vec<u32>> = HashMap::new();
+        let mut c3_windows: Vec<u32> = Vec::new();
         let mut defender_threats = Vec::new();
         #[cfg(test)]
         let mut live_claimant_windows = Vec::new();
@@ -9170,35 +9223,149 @@ impl WideTurnGate {
             let count = entry.count(owner);
             if owner == claimant {
                 if count >= 1 {
-                    let empties = entry.empty_cells();
                     let window = WidePairWindow {
                         key: entry.key(),
                         strength: count,
-                        empties: empties.clone(),
+                        empties: entry.empty_cells(),
                     };
                     #[cfg(test)]
                     live_claimant_windows.push(window.clone());
-                    let sink = if count >= 2 {
-                        &mut windows_by_cell
+                    let (store, sink) = if count >= 2 {
+                        (&mut windows, &mut windows_by_cell)
                     } else {
-                        &mut weak_windows_by_cell
+                        (&mut weak_windows, &mut weak_windows_by_cell)
                     };
-                    for &cell in &empties {
-                        sink.entry(cell).or_default().push(window.clone());
+                    let index = u32::try_from(store.len()).expect("window index fits u32");
+                    if count >= 3 {
+                        c3_windows.push(index);
                     }
+                    for &cell in &window.empties {
+                        sink.entry(cell).or_default().push(index);
+                    }
+                    store.push(window);
                 }
             } else if count >= 4 {
                 defender_threats.push(entry.empty_cells());
             }
         }
         Self {
+            windows,
+            weak_windows,
             windows_by_cell,
             weak_windows_by_cell,
+            c3_windows,
             defender_threats,
             #[cfg(test)]
             live_claimant_windows,
             start_placements: state.placements_made(),
         }
+    }
+
+    /// Exact pair prefilter over `evaluate_pair`'s outcome. The pair family
+    /// has size k1 + j(second) + c(second), where k1 = count>=3 windows
+    /// through `first` (second-independent), j = count-2 windows through both
+    /// stones (2+1+1 reaches four), and c = count>=3 windows through `second`
+    /// not containing `first`. `evaluate_pair` returns `None` whenever the
+    /// family is EMPTY (its first gate) — and also whenever the family is a
+    /// SINGLE window, because a lone post-pair window always keeps at least
+    /// one empty (no count>=4 window exists at generation, so strength<=3,
+    /// and a strength-3 joint window retains 3-2=1 empties), making its
+    /// min hitting set exactly 1: neither the `mhs.is_none()` nor the
+    /// `mhs == Some(2)` arm fires. Acceptance therefore requires family
+    /// size >= 2.
+    ///
+    /// With k1 >= 2 every second already meets the bound — returns true, no
+    /// filtering. Otherwise fills `allow` with the sorted keys of exactly
+    /// the seconds with k1 + j + c >= 2: every skipped pair is a proven
+    /// `None` evaluation.
+    fn pair_prefilter(
+        &self,
+        first: HexCoord,
+        counts: &mut Vec<((i16, i16), u8)>,
+        allow: &mut Vec<(i16, i16)>,
+    ) -> bool {
+        counts.clear();
+        allow.clear();
+        let mut k1 = 0u8;
+        let first_list = self.windows_by_cell.get(&first);
+        if let Some(list) = first_list {
+            for &index in list {
+                if self.windows[index as usize].strength >= 3 {
+                    k1 = k1.saturating_add(1);
+                }
+            }
+        }
+        if k1 >= 2 {
+            return true;
+        }
+        // Joint contributions: count-2 windows through `first` reach four
+        // exactly when `second` is one of their other empties. (Count>=3
+        // windows through `first` are already in k1 and contribute the same
+        // single family entry with or without jointness.)
+        if let Some(list) = first_list {
+            for &index in list {
+                let window = &self.windows[index as usize];
+                if window.strength == 2 {
+                    for &cell in &window.empties {
+                        if cell != first {
+                            counts.push((raw_coord_key(cell), 1));
+                        }
+                    }
+                }
+            }
+        }
+        // Own count>=3 windows of `second`, excluding those through `first`
+        // (evaluate_pair's second pass skips windows containing `first`;
+        // those windows are exactly the k1 set).
+        for &index in &self.c3_windows {
+            let window = &self.windows[index as usize];
+            if window.empties.contains(&first) {
+                continue;
+            }
+            for &cell in &window.empties {
+                counts.push((raw_coord_key(cell), 1));
+            }
+        }
+        counts.sort_unstable_by_key(|&(key, _)| key);
+        let need = 2u8.saturating_sub(k1);
+        let mut cursor = 0usize;
+        while cursor < counts.len() {
+            let key = counts[cursor].0;
+            let mut sum = 0u8;
+            while cursor < counts.len() && counts[cursor].0 == key {
+                sum = sum.saturating_add(counts[cursor].1);
+                cursor += 1;
+            }
+            if sum >= need {
+                allow.push(key);
+            }
+        }
+        false
+    }
+
+    /// Exact defender-threat second-stone constraint over `evaluate_pair`'s
+    /// `defender_win_now` check. Returns true when at least one live defender
+    /// >=4 window misses `first`; `allow` then holds the intersection of
+    /// those windows' empties (each has <=2, so the intersection has <=2) —
+    /// exactly the seconds that hit every unhit threat. Any other second
+    /// leaves an unhit defender window and `evaluate_pair` returns `None`
+    /// via `defender_win_now`; an empty intersection therefore rejects every
+    /// pair through `first`.
+    fn defender_second_constraint(&self, first: HexCoord, allow: &mut Vec<HexCoord>) -> bool {
+        allow.clear();
+        let mut constrained = false;
+        for set in &self.defender_threats {
+            if set.contains(&first) {
+                continue;
+            }
+            if !constrained {
+                constrained = true;
+                allow.extend(set.iter().copied());
+            } else {
+                allow.retain(|cell| set.contains(cell));
+            }
+        }
+        constrained
     }
 
     #[cfg(test)]
@@ -9235,7 +9402,8 @@ impl WideTurnGate {
         seen.insert(first);
         if let Some(list) = self.windows_by_cell.get(&first) {
             let mut promoted: Vec<(u8, HexCoord)> = Vec::new();
-            for window in list {
+            for &index in list {
+                let window = &self.windows[index as usize];
                 for &cell in &window.empties {
                     if cell != first {
                         promoted.push((window.strength, cell));
@@ -9258,7 +9426,8 @@ impl WideTurnGate {
         }
         if let Some(list) = self.weak_windows_by_cell.get(&first) {
             let mut fresh: Vec<HexCoord> = Vec::new();
-            for window in list {
+            for &index in list {
+                let window = &self.weak_windows[index as usize];
                 for &cell in &window.empties {
                     if !seen.contains(&cell) {
                         fresh.push(cell);
@@ -9288,6 +9457,7 @@ impl WideTurnGate {
     ///   `completed_turn_prior` numbers derived from the same family.
     fn evaluate_pair(
         &self,
+        first_windows: Option<&[u32]>,
         first: HexCoord,
         second: HexCoord,
         semantic_horizon: u32,
@@ -9295,9 +9465,12 @@ impl WideTurnGate {
         // The claimant windows reaching >=4 once the pair is placed, with
         // their post-pair empties. A window through both stones is collected
         // once (from the `first` list; the `second` pass skips it).
+        // `first_windows` is the caller-hoisted `windows_by_cell` list for
+        // `first` (one lookup per first instead of one per pair).
         let mut family: Vec<(WindowKey, Vec<HexCoord>)> = Vec::new();
-        if let Some(list) = self.windows_by_cell.get(&first) {
-            for window in list {
+        if let Some(list) = first_windows {
+            for &index in list {
+                let window = &self.windows[index as usize];
                 let joint = window.empties.contains(&second);
                 if window.strength + 1 + u8::from(joint) >= 4 {
                     family.push((
@@ -9313,7 +9486,8 @@ impl WideTurnGate {
             }
         }
         if let Some(list) = self.windows_by_cell.get(&second) {
-            for window in list {
+            for &index in list {
+                let window = &self.windows[index as usize];
                 if window.empties.contains(&first) {
                     continue;
                 }
@@ -11344,6 +11518,107 @@ mod tests {
         d6_remap_certificate, d6_transform_coord, TssVerifier, D6_SYMMETRY_COUNT,
     };
     use hexo_engine::{apply_placement, WindowStore};
+
+    /// Wall sub-attribution of pair generation at the production leaf shape
+    /// (cap 500, 256 KiB TT, unbounded horizon, leaf profile + dual pass) over
+    /// the frozen 160-position human cohort. Timing-only instrument for the
+    /// candidate-generation optimization rounds; no assertion on behavior.
+    #[test]
+    #[ignore = "closure-debt profile of the production engine on the human cohort"]
+    fn tss_closure_profile_human_prod() {
+        std::env::set_var("TSS_CLOSURE_COUNTERS", "1");
+        let path = std::env::var("TSS_RESIDUE_HUMAN_POSITIONS").unwrap_or_else(|_| {
+            "E:/Hexo-BotTrainer-hexgt/.claude/worktrees/group2-zones/.codex-group2-shadow/human_positions.txt".to_owned()
+        });
+        let text = std::fs::read_to_string(&path).expect("read human positions");
+        let mut positions = Vec::new();
+        for raw in text.lines() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((_id, encoded)) = line.split_once(';') else {
+                continue;
+            };
+            let mut state = RustHexoState::new();
+            let mut legal = true;
+            for token in encoded.split_whitespace() {
+                let Some((q, r)) = token.split_once(',') else {
+                    legal = false;
+                    break;
+                };
+                let (Ok(q), Ok(r)) = (q.parse::<i16>(), r.parse::<i16>()) else {
+                    legal = false;
+                    break;
+                };
+                if apply_placement(&mut state, Placement { coord: HexCoord { q, r } }).is_err() {
+                    legal = false;
+                    break;
+                }
+            }
+            if legal && !state.is_terminal() {
+                positions.push(state);
+            }
+        }
+        assert!(positions.len() >= 150, "human cohort short: {}", positions.len());
+        let caps = SolveCaps {
+            node_cap: 500,
+            tt_bytes_cap: 256 << 10,
+            semantic_horizon: u32::MAX,
+        };
+        let mut total = crate::tss_core::ClosureDebtStats::default();
+        let mut solve_wall = 0u64;
+        let mut nodes = 0u64;
+        for state in &positions {
+            let mut solver = TssSolver::default();
+            solver.configure_leaf_profile();
+            solver.set_dual_pass(true);
+            let started = std::time::Instant::now();
+            let result = solver.solve(state, &caps);
+            solve_wall = solve_wall
+                .saturating_add(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX));
+            nodes += result.stats.nodes;
+            let d = result.stats.closure_debt;
+            total.pairs_evaluated += d.pairs_evaluated;
+            total.pairs_accepted += d.pairs_accepted;
+            total.pairs_retained += d.pairs_retained;
+            total.pair_generation_nanos += d.pair_generation_nanos;
+            total.gate_build_nanos += d.gate_build_nanos;
+            total.second_candidate_nanos += d.second_candidate_nanos;
+            total.pair_evaluation_nanos += d.pair_evaluation_nanos;
+            total.dedup_nanos += d.dedup_nanos;
+        }
+        let pg = total.pair_generation_nanos.max(1);
+        let residual = total
+            .pair_generation_nanos
+            .saturating_sub(total.gate_build_nanos)
+            .saturating_sub(total.second_candidate_nanos)
+            .saturating_sub(total.pair_evaluation_nanos)
+            .saturating_sub(total.dedup_nanos);
+        println!(
+            "CLOSURE_PROFILE positions={} nodes={} solve_wall_ms={:.1} pair_gen_ms={:.1} ({:.1}% of wall)",
+            positions.len(),
+            nodes,
+            solve_wall as f64 / 1e6,
+            total.pair_generation_nanos as f64 / 1e6,
+            100.0 * total.pair_generation_nanos as f64 / solve_wall.max(1) as f64,
+        );
+        println!(
+            "  gate_build {:.1}% | second_candidates {:.1}% | pair_evaluation {:.1}% | dedup {:.1}% | residual(first-cands+prefilter+loop) {:.1}%",
+            100.0 * total.gate_build_nanos as f64 / pg as f64,
+            100.0 * total.second_candidate_nanos as f64 / pg as f64,
+            100.0 * total.pair_evaluation_nanos as f64 / pg as f64,
+            100.0 * total.dedup_nanos as f64 / pg as f64,
+            100.0 * residual as f64 / pg as f64,
+        );
+        println!(
+            "  pairs evaluated={} accepted={} retained={}  ns/pair_eval={:.0}",
+            total.pairs_evaluated,
+            total.pairs_accepted,
+            total.pairs_retained,
+            total.pair_evaluation_nanos as f64 / total.pairs_evaluated.max(1) as f64,
+        );
+    }
 
     fn replay(coords: &[(i16, i16)]) -> RustHexoState {
         let mut state = RustHexoState::new();
