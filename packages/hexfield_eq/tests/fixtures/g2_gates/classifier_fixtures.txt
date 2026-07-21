@@ -1,0 +1,29 @@
+# G2 FHW gate positive-fixture manifest (v1)
+# schema: one record per line: <class> <name> <property>=<value> ...
+#
+# All rows are the exact classifier outputs the accept path will recompute
+# (design §3.3 tables). "q" = Q_cut(C_s,W), "k" = f_cut(C_s,rho): in fixtures
+# these are supplied inputs (a proven representative subtree provides them for a
+# real gate; that provenance is the documented out-of-lane boundary).
+
+kappa NonDAlive realized=yes edge=exact d_in=any note=window_carries_claimant_stone
+kappa ExactOrFcNonIncident realized=yes edge=fc d_in=false q=4 kappa=0 guard=NotApplicable
+kappa ExactOrFcDirect realized=yes edge=exact d_in=true touched=true q=2 cnt_d=2 kappa=1 guard=Pass
+kappa ExactOrFcDirect realized=yes edge=fc d_in=true all_empty=true q=4 kappa=1 guard=Pass
+kappa NonFcTouchedNonIncident realized=yes edge=nonfc touched=true d_in=false q=3 kappa=0 guard=NotApplicable
+kappa NonFcTouchedDirect realized=yes edge=nonfc touched=true d_in=true q=2 cnt_d=2 kappa=1 guard=Pass
+kappa NonFcEmptyDirect realized=yes edge=nonfc all_empty=true d_in=true q=3 kappa=1 guard=Pass
+kappa NonFcEmptyNonIncidentQlt6 realized=yes edge=nonfc all_empty=true d_in=false q=5 kappa=0 guard=NotApplicable
+kappa NonFcEmptyNonIncidentWcPass realized=yes edge=nonfc all_empty=true d_in=false q=6 wc=pass kappa=0 guard=Pass
+kappa NonFcEmptyNonIncidentWcFail realized=no reason=triangle_inequality_contradiction detail=WC_fail_witness_forces_dist(d,W)<=8(q-5)_but_N-virgin_guard_requires_>8(q-5)_so_only_rejection_is_reachable
+
+role ExactOrFcZero realized=yes edge=exact epsilon=0
+role ExactOrFcZero realized=yes edge=fc epsilon=0
+role NonFcRcZero realized=yes edge=nonfc ghost_illegal=yes k=0 rc=pass epsilon=0
+role NonFcCharged realized=yes edge=nonfc ghost_legal=yes epsilon=1 note=conservative_charged_no_D22N_required
+role NonFcCharged-via-ghost-illegal realized=no reason=triangle_inequality_contradiction detail=RC_fail_witness_forces_dist(d,y)<=8k_but_D22N_guard_requires_>8k
+
+incidence dd_out_ss_out realized=yes d_in=false s_in=false
+incidence dd_out_ss_in realized=yes d_in=false s_in=true
+incidence dd_in_ss_out realized=yes d_in=true s_in=false
+incidence dd_in_ss_in realized=yes d_in=true s_in=true

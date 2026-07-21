@@ -53,6 +53,11 @@ mod tss_spare_corpus;
 #[cfg(test)]
 mod tss_k_reply_shadow;
 
+// Finder-side FHW gate closure builder (design §5). Test-only: not compiled
+// into the production binary, so flag-off bit-identity holds by construction.
+#[cfg(test)]
+mod tss_g2_gate_finder;
+
 #[cfg(test)]
 mod tss_turn_quotient_hunt;
 
