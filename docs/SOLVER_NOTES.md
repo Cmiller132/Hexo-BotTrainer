@@ -484,3 +484,29 @@ Consequences:
   NOT park (net eval immediately, solve lands in memo for later
   descent-stops), threat-parked solves keep priority. Needs a
   two-tier enqueue (priority flag) — design item, not yet built.
+
+- **2026-07-21 ALL-LEAVES STRICT MODE BUILT+BENCH-GATED (owner-ordered:
+  "all leaves evaluated by the solver and only then sent to the gpu",
+  single-tier queue, no routine bail).** New flag `tss_solver_all_leaves`
+  (default OFF; tree.rs drops the has_threats gate on both deep-leaf
+  routes; plumbed config.py -> overrides -> Divergences; suite 217/0
+  flag-off). Strict ordering = park mode + all_leaves + park timeout at
+  the 5000 ms validation ceiling (emergency valve for pool failure —
+  solves are node-capped so waiting is bounded work; the pipeline hides
+  solve latency behind other simulations' GPU batches). Bench A/B at
+  production shape (256g/256v, ep90, 12/24 workers, new P7 engine):
+  enqueues 75,387 -> 298,540 (3.96x, quiet solves self-terminate),
+  **drops 0 / bails 0 / vf 0**, mean park wait 2.8 ms; throughput 426.5
+  -> 384.0 moves/min (**-10%**); per decision: WIN backups 10.0 -> 29.7
+  (**3x**), total proof backups 30.7 -> 42.0 (+37%), loss backups
+  20.6 -> 12.2 (down — quiet-leaf proofs are win-heavy and the extra
+  early wins re-shape search; watch the loss stream on live epochs).
+  Cost precedent: the ep20 retune was KEPT at -16% pace for 2.5x yield,
+  so -10% for 3x wins + strict solver-first semantics is inside the
+  owner's stated trade. **main_4 config FLIPPED (all_leaves=true, park
+  5000) — takes effect at relaunch; validate first epochs: park_bailed
+  ==0, async_dropped==0, deep_win/loss_backups, moves/min, vf==0.**
+  Bench-only caveat: no concurrent train pass; live CPU contention is
+  the reason the emergency valve exists. Curiosity (non-blocking):
+  park_wait_ms_max 6,084 > the 5,000 deadline with bails=0 — drain-pass
+  granularity at move tail; bail is liveness-only, not soundness.

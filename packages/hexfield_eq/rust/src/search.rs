@@ -3440,6 +3440,7 @@ const KNOWN_DIVERGENCE_KEYS: &[&str] = &[
     "tss_solver_async_threads",
     "tss_solver_async_threads_max",
     "tss_solver_park",
+    "tss_solver_all_leaves",
     "tss_solver_park_timeout_ms",
     "tss_solver_async_inline_16",
     "tss_zone",
@@ -3605,6 +3606,9 @@ fn resolve_divergences(
         }
         if let Some(v) = overrides.get_item("tss_solver_park_timeout_ms")? {
             dv.tss_solver_park_timeout_ms = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("tss_solver_all_leaves")? {
+            dv.tss_solver_all_leaves = v.extract()?;
         }
         if let Some(v) = overrides.get_item("tss_solver_async_inline_16")? {
             let inline: u32 = v.extract()?;

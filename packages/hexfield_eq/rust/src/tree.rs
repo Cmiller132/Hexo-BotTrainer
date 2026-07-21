@@ -198,6 +198,12 @@ pub struct Divergences {
     /// the scheduler until their verified result arrives or the bail deadline
     /// expires. Requires `tss_solver_async` and is default-off.
     pub tss_solver_park: bool,
+    /// Solve EVERY leaf, not just threat-bearing ones: drops the
+    /// `has_threats` gate on the deep-solver leaf routes, so quiet leaves
+    /// also solve (park mode: solver-first, GPU eval only on release).
+    /// Candidate-free quiet solves self-terminate in ~0.1 ms, so the pool
+    /// absorbs the extra request volume; default-off.
+    pub tss_solver_all_leaves: bool,
     /// Per-leaf parking bail deadline in milliseconds.
     pub tss_solver_park_timeout_ms: u32,
     /// Hybrid inline tier under the async flag: gated leaves whose
@@ -289,6 +295,7 @@ impl Divergences {
             tss_solver_async_threads: 8,
             tss_solver_async_threads_max: 0,
             tss_solver_park: false,
+            tss_solver_all_leaves: false,
             tss_solver_park_timeout_ms: 100,
             tss_solver_async_inline_16: 0,
             tss_zone: false,
@@ -1442,7 +1449,7 @@ impl RustSearch {
         if mode == 0 || !self.tss_enabled {
             return TssLeafRoute::Miss;
         }
-        if !state.board().windows().has_threats() {
+        if !self.divergences.tss_solver_all_leaves && !state.board().windows().has_threats() {
             return TssLeafRoute::Miss;
         }
         if ((hash & 0xF) as u32) >= self.divergences.tss_solver_sample_16 {
@@ -1561,7 +1568,7 @@ impl RustSearch {
         if mode == 0 || !self.tss_enabled {
             return None;
         }
-        if !state.board().windows().has_threats() {
+        if !self.divergences.tss_solver_all_leaves && !state.board().windows().has_threats() {
             return None;
         }
         if ((hash & 0xF) as u32) >= self.divergences.tss_solver_sample_16 {

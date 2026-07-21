@@ -68,10 +68,19 @@ tss_solver_async_threads_max = 24
 # verified result lands, released by a liveness bail. Sweep said 300 ms (bail
 # 0% on a QUIET machine, a66b707a); live trainer load measured avg wait
 # ~750 ms and 76-85% bail at 300 (queue-wait dominated). MAINTENANCE RETUNE
-# 2026-07-21 with the worker raise: 300 -> 600 ms to cover the release band;
-# validate on next-epoch telemetry (bail%, moves/min) — reversible.
+# 2026-07-21 with the worker raise: 300 -> 600 ms to cover the release band.
+# STRICT MODE (owner-ordered 2026-07-21, with all_leaves below): timeout at
+# the 5000 ms validation ceiling = emergency-only valve (pool failure), not a
+# routine escape — bench measured 0 bails at 298,540 all-leaves parks with
+# mean wait 2.8 ms. Watch park_bailed==0 on live epochs.
 tss_solver_park = true
-tss_solver_park_timeout_ms = 600
+tss_solver_park_timeout_ms = 5000
+# ALL-LEAVES strict solver-first ordering (owner-ordered 2026-07-21): every
+# leaf — quiet included — routes through the deep solver; only completed
+# Unknowns release to the GPU eval. Bench A/B vs threat-gated: 384.0 vs
+# 426.5 moves/min (-10%), WIN backups/decision 10.0 -> 29.7 (3x), total
+# proof backups/decision +37%, drops=bails=0, vf=0.
+tss_solver_all_leaves = true
 # Zone AND-generation OFF (production A/B measured zero additional decided
 # positions; a TOML flip away if a deeper-cap corpus ever shows value).
 tss_zone = false

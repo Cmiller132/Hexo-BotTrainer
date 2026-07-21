@@ -119,6 +119,10 @@ class SelfplayConfig:
     # bail timeout expires. Requires tss_solver_async. The select loop itself
     # never blocks, so unrelated leaves keep flowing while a solve is pending.
     tss_solver_park: bool = False
+    # Solve EVERY leaf (drop the has_threats gate): quiet leaves also route
+    # through the deep solver — under park mode this is strict
+    # solver-before-GPU ordering for the whole tree. Default off.
+    tss_solver_all_leaves: bool = False
     # Per-leaf liveness backstop for parking (Rust validates 1..=5000 ms).
     tss_solver_park_timeout_ms: int = 100
     # Hybrid inline tier under async: gated leaves with (hash & 0xF) below
@@ -637,6 +641,7 @@ def build_divergence_overrides(
         "tss_solver_async_threads": int(sp.tss_solver_async_threads),
         "tss_solver_async_threads_max": int(sp.tss_solver_async_threads_max),
         "tss_solver_park": bool(sp.tss_solver_park),
+        "tss_solver_all_leaves": bool(sp.tss_solver_all_leaves),
         "tss_solver_park_timeout_ms": int(sp.tss_solver_park_timeout_ms),
         "tss_solver_async_inline_16": int(sp.tss_solver_async_inline_16),
         "tss_zone": bool(sp.tss_zone),
