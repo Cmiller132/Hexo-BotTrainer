@@ -147,7 +147,7 @@ The following invariants hold at all times:
 
 ## 3. Consumption semantics
 
-### 3.1 Modes and policy
+### 3.1 Modes and policy (amended per R1)
 
 Replace the current boolean concept with an explicit search mode:
 
@@ -166,10 +166,16 @@ search.
 
 Today's reported group2-enabled, post-search-only wide behavior is called
 <code>EmitLegacy</code> in this design; it is a regression lane, not the
-future FullControl. The consumption A/B is invalid until FullControl exists. Its
-control is <code>Verify</code>, with the same certificate grammar and verifier
-policy as treatment; only omission during search differs. A separate
-<code>Off</code>/<code>EmitLegacy</code> lane must reproduce its own historical
+future FullControl. The causal consumption A/B is invalid until FullControl
+exists. Its control is <code>Verify</code>, with the same certificate grammar and
+verifier policy as treatment; only omission during search differs. That causal
+comparison is not an adoption comparison. Deployed <code>Off</code> is an
+economic comparator as well as a parity lane. Before Consume can replace Off
+for any exact profile, either FullControl MUST already have passed its own
+adoption/Pareto bar and be the live baseline for that profile, or Consume MUST
+pass the outer all-work Consume-versus-Off deployment gate in sections 6.2,
+6.3, and 6.5. A separate <code>Off</code>/<code>EmitLegacy</code> lane must
+reproduce its own historical
 search status, node ledger, every legacy result field, and canonical legacy
 <code>TssCertificate</code> bytes. This identity claim does not cover the
 whole exported telemetry blob: only explicitly predeclared build/mode stamps
@@ -179,6 +185,14 @@ stamp does not alter canonical legacy certificate bytes. Before the Consume
 comparison, FullControl must also
 reproduce every Off decision at the same hard cap and status; it may
 legitimately add coverage, but a lost Off decision blocks the campaign.
+
+Historical structural “never-decides-less” is retired for Consume at finite
+cap. Section 6.4's pointwise inclusion is a frozen-campaign requirement, not a
+universal theorem about unseen production traffic. No document or telemetry
+MUST restate it as a universal production guarantee. If zero unseen-production
+loss remains an owner invariant, deployment MUST use an explicit online guard
+such as dual-run comparison with automatic rollback; without that guard the
+universal claim is prohibited.
 
 ### 3.2 Exact eligibility
 
@@ -924,13 +938,24 @@ claimants, D6 transforms, mixed node kind, and injected producer failure.
 
 ## 6. Pre-registered promotion bar
 
-### 6.1 Freeze rule
+### 6.1 Freeze rule (amended per R2)
 
 Thresholds may be adjusted only before the evaluation manifest is frozen.
 After any arm's result is observed, a threshold, corpus, root parser, flag,
 counter definition, exclusion, or machine setting change creates a new
 campaign identifier and requires both arms to be rerun. Failed campaigns stay
 reported.
+
+Discovery and adoption are separate campaigns. Shadow, sizing, scheduler, and
+limit work MUST consume only visible discovery manifests. Adoption MUST use a
+root holdout whose results have remained unavailable, or an escrowed holdout
+whose results remain unavailable, until the producer, scheduler, limits,
+analysis code, and campaign manifest are frozen. Any root observed by either
+shadow is discovery data forever and MUST NOT later supply adoption evidence.
+The existing deterministic dev/holdout labels do not preserve blindness if a
+full set is used by step zero; in that case a new untouched adoption holdout is
+mandatory. Every failed or abandoned discovery and adoption campaign remains
+published.
 
 The manifest binds:
 
@@ -947,9 +972,12 @@ The manifest binds:
   wall-run order;
 - definitions of node, verified decision, local fallback, closure occurrence, and
   verifier failure; and
-- scripts and formulas that produce every table.
+- scripts and formulas that produce every table;
+- discovery/adoption role, holdout escrow record, and release time; and
+- source game/sequence or atlas-family cluster identity, production weight,
+  inclusion probability, and the frozen cluster-resampling procedure.
 
-### 6.2 Fixed operating points
+### 6.2 Fixed operating points (amended per R1 and R2)
 
 The mandatory promotion cells are:
 
@@ -960,6 +988,16 @@ The mandatory promotion cells are:
 2. **Atlas-50k:** a genuine production-atlas root manifest at hard combined
    cap 50,000, supplied by the owner and frozen as canonical state bytes before
    either result is observed.
+3. **Production-500:** the actual persistent batched trainer path, with its
+   deployed cap 500, production TT/cache lifetime, batch construction, and
+   production traffic weights. This is mandatory before cap-500 or default
+   enablement unless FullControl has already passed its own adoption/Pareto bar
+   and is the live baseline for this exact profile.
+
+Labeling-2k and Atlas-50k authorize, at most, a scope-limited offline 2k/50k
+feature. Until Production-500 passes, Consume MUST NOT be enabled at cap 500
+or by default. This limitation preserves section 1.3's non-goal: the design
+does not claim a cap-500 gain before measuring it.
 
 No current cited artifact identifies the production Atlas-50k root list; the
 old A5 source gate explicitly says its frozen opening-atlas family is absent.
@@ -971,6 +1009,12 @@ requires a sample, the owner must pre-register the source snapshot,
 stratification fields, sample size, and random seed without consulting
 Group-2 eligibility or either arm's result. The manifest publishes included
 and excluded canonical root digests; no post-result replacement is allowed.
+It also publishes every stratum's production weight and root/family inclusion
+probability. Root totals remain the production estimand, but estimates and
+confidence intervals MUST apply those weights and sample at the independent
+atlas-family cluster. A complete Atlas is mandatory for a complete-atlas
+claim. Otherwise the owner MUST attest the sampling frame and the claim MUST
+be limited to that sampled frame.
 
 The residue instrument's **Human160-50k** roots run at cap 50,000 as a
 mandatory deep diagnostic, and at cap 2,000 as a bridge. They carry the
@@ -999,7 +1043,7 @@ for the hard cap. Dedicated Loss strata use the same frozen engine settings.
 Any different deep production profile must be named
 and frozen before evaluation, not selected after seeing results.
 
-### 6.3 Arms and accounting
+### 6.3 Arms and accounting (amended per R1, R2, and R6)
 
 Run paired roots from fresh caches:
 
@@ -1007,10 +1051,12 @@ Run paired roots from fresh caches:
   materialization and strict verifier enabled.
 - **Treatment:** <code>Consume</code>, including all speculative closure,
   local Full fallback, and strict verification inside the same hard cap.
-- **Legacy control:** <code>Off</code>, used for search/status, node-ledger,
-  legacy-field, and canonical legacy-certificate parity (subject only to the
-  declared build/mode stamp exception above), not to hide materializer cost
-  from the primary comparison.
+- **Deployment control:** <code>Off</code>, used both for search/status,
+  node-ledger, legacy-field, and canonical legacy-certificate parity (subject
+  only to the declared build/mode stamp exception above) and for the outer
+  all-work adoption comparison when FullControl is not already the live
+  baseline for the exact profile. Off MUST NOT be dismissed as parity-only or
+  used to hide materializer cost from either comparison.
 
 The economic node counter is exact <code>SolveStats.nodes</code>, the same
 ledger enforced by the hard cap. It includes the one examined root plus every
@@ -1046,18 +1092,31 @@ reported as coverage rather than denominator credit. Also report conventional
 arm-specific NPD and nodes restricted to <code>D0</code> as secondary
 diagnostics. Do not average per-cohort or per-root ratios. Report fixed-root
 totals, each named cohort, Win/Loss/Unknown classes, newly decided roots, local
-fallback roots, and the consumed-site distribution. Use paired cluster
-bootstrap over root pairs, with campaign-fixed seed and method, to compute the
-95% lower confidence bound for the fixed-denominator aggregate ratio. Raw
-deterministic counts remain authoritative.
+fallback roots, and the consumed-site distribution. Use a paired cluster
+bootstrap over independent source game/sequence or atlas-family clusters,
+never individual root pairs, with campaign-fixed seed and method, to compute
+the 95% lower confidence bound for the fixed-denominator aggregate ratio.
+Apply predeclared production weights and inverse inclusion probabilities to
+stratified Atlas estimates. Raw deterministic counts remain authoritative for
+a complete census.
 
-### 6.4 Correctness gate: KILL
+End-to-end wall and CPU start before persistent batch intake and end only
+after scheduling, derivation, materialization, strict verification, and result
+publication. Report aggregate batch throughput plus per-root p50, p90, p99,
+and max latency. Peak memory is the maximum process resident/committed memory
+over the complete persistent batch, including shared caches and all concurrent
+roots; it is not an average of per-root peaks. Confidence and resampling use
+the same game/family cluster unit as node economics.
+
+### 6.4 Correctness gate: KILL (amended per R1)
 
 Coverage is pointwise, not aggregate:
 <code>Decided_Off subseteq Decided_FullControl subseteq Decided_Consume</code>,
 and status is equal on every inherited member. One added decision cannot
 compensate for one lost decision at either seam. FullControl qualification is
-read before Consume economics.
+read before Consume economics. This is a strong frozen-campaign replacement
+for the retired historical structural claim; it MUST NOT be extrapolated to a
+universal guarantee on unseen production roots.
 
 Any one of the following kills Consume promotion and blocks further economics
 interpretation:
@@ -1088,7 +1147,7 @@ treatment-only decision blocks promotion; it is not counted as corroborated.
 Correctness KILL means disable the feature and investigate. It cannot be
 converted into an economics miss or waived by aggregate parity.
 
-### 6.5 Economics gate: target and floor
+### 6.5 Economics and adoption gate: target and floor (amended per R1 and R6)
 
 The pre-registered nodes/decision target is:
 
@@ -1117,9 +1176,16 @@ The rationale is deliberately conservative:
 
 Secondary economics requirements are:
 
-- total wall divided by the same fixed <code>|D0|</code> denominator has a
-  positive paired reduction at both primary cells and at least 5% at
-  Atlas-50k;
+- Labeling-2k aggregate batch throughput, CPU per fixed-denominator decision,
+  and wall per fixed-denominator decision each improve by at least 5%, with a
+  paired cluster 95% lower confidence bound greater than zero for each metric;
+- total wall divided by the same fixed <code>|D0|</code> denominator improves by
+  at least 5% at Atlas-50k, with a paired cluster 95% lower confidence bound
+  greater than zero;
+- treatment p90 and p99 latency are no worse than 1.05 times control and max
+  latency is no worse than 1.10 times control in every mandatory cell; these
+  tail guards may be replaced only by a pre-freeze owner statement that
+  aggregate batch throughput is the sole operational objective;
 - peak memory is no worse than 1.10 times control;
 - local fallback rate, derivation wall, verifier wall, and closure-plan bytes are all
   reported and included; and
@@ -1139,6 +1205,22 @@ determinism.
 Human160-50k must independently show at least 5% wall reduction and at least
 5% fixed-denominator node reduction so the residue claim and the actual atlas
 claim cannot mask one another.
+
+Before adoption for an exact profile, one and only one boundary MUST hold:
+
+1. FullControl has already passed its own adoption/Pareto bar and is the live
+   baseline for that exact cap, TT/cache, batching, and traffic profile; or
+2. Consume passes an outer all-work comparison against deployed Off on that
+   exact profile. The outer gate requires pointwise Off coverage/status
+   preservation, at least 10% all-root node reduction, at least 5% aggregate
+   batch-throughput, CPU/decision, and wall/decision improvement, positive
+   paired-cluster 95% lower confidence bounds for those three end-to-end
+   metrics, and the same tail and memory guards above.
+
+Production-500 MUST use the actual persistent batched trainer path. A
+fresh-cache per-root run remains a causal diagnostic and cannot satisfy this
+deployment gate. If neither boundary holds, the result is
+<code>KEEP-FLAGGED-OFF</code> even when Consume beats Verify.
 
 Missing a secondary economics requirement is also
 <code>KEEP-FLAGGED-OFF</code>. The flag stays available only for further
@@ -1204,7 +1286,7 @@ later FC-positive advisory, which was discharged. The same economic outcome
 is plausible here even at 50k: a large category-level wall share can coexist
 with very few plan-complete, theorem-admitted, cost-dominant sites.
 
-### 7.2 Step zero: FullControl root-support upper bound
+### 7.2 Step zero: FullControl root-support upper bound (amended per R2-R5)
 
 There is no rigorous pre-FullControl counterfactual in the current native-wide
 trace: it refuses the unforced node before producing Full children, and a
@@ -1218,15 +1300,18 @@ useful FullControl baseline exists and before Open/Closed Consume scheduling
 or a second theorem implementation is built. This preliminary
 <code>FullControlShadow</code> is search-only/non-minting: shared Group-2
 helpers may classify telemetry but cannot emit acceptance evidence or a hard
-Group-2 certificate. It is not promotion-grade <code>Verify</code>. On exact Labeling-2k,
-Human160-50k, and owner-frozen Atlas-50k, a behavior-preserving FullControl
-shadow records only:
+Group-2 certificate. It is not promotion-grade <code>Verify</code>. It runs on
+visible discovery manifests only; any manifest exposed here is forever barred
+from adoption evidence. On exact Labeling-2k, Human160-50k, and owner-frozen
+Atlas-50k discovery frames, a behavior-preserving FullControl shadow records
+only:
 
 - exact node-local eligibility and first failure at the actual future Consume
   hook;
 - whether each root reaches at least one eligible **or indeterminate**
-  occurrence; telemetry work/memory/overflow or any incomplete classification
-  is indeterminate, never a negative;
+  occurrence; telemetry work/memory/overflow, classifier disagreement, an
+  unaudited negative path, or any incomplete classification is indeterminate,
+  never a negative;
 - <code>|L|</code>, <code>|Seed|</code>, and root/occurrence identities; and
 - the root's total <code>SolveStats.nodes</code> and end-to-end wall.
 
@@ -1236,7 +1321,16 @@ build/mode stamps are compared separately, and no <code>S*</code> is derived.
 Let <code>E</code> be the roots
 that reach at least one eligible or indeterminate occurrence. With
 deterministic identical prefixes, a root outside <code>E</code> has only exact
-negative classifications and no point at which Consume can diverge. Even
+negative classifications and no point at which Consume can diverge. A
+kill-grade negative is permitted only for the exact future hook and frozen
+classifier version after an audited conservative over-approximation,
+exhaustive and golden eligibility-boundary tests, one-sided defect injection,
+and independent review of the negative implementation or checker establish a
+no-false-negative contract. Shared producer/verifier semantic helpers alone
+cannot certify a negative. If any requirement is absent, the occurrence is
+indeterminate. If a later producer finds an eligible occurrence in an earlier
+<code>E</code>-complement root, the screen and every decision derived from it
+are invalid and MUST be rerun. Even
 granting zero cost to every root in <code>E</code>, the maximum possible
 reductions are:
 
@@ -1255,10 +1349,19 @@ must be exact and <code>U_nodes</code> uses shadow-off
 but take per-root times from three matched, balanced-order shadow-off runs so
 instrument overhead on non-E roots cannot shrink the ratio. Freeze a
 one-sided 95% upper-confidence procedure and any conservative A/A overhead
-correction before running. If exact <code>U_nodes &lt; 5%</code> at
-Labeling-2k, Atlas-50k, or mandatory Human160-50k, stop. For wall, stop only if
-the one-sided 95% **upper** bound on <code>U_wall</code> is below 5% at
-Atlas-50k or Human160-50k. The bound cannot promote the feature.
+correction before running. For complete deterministic manifests, exact
+<code>U_nodes &lt; 10%</code> at **both** Labeling-2k and Atlas-50k is the
+decisive Consume-v1 KILL: the promotion target is then impossible at both
+primary points. Equality at 10% does not kill, but it supplies no promotion
+evidence. For a sampled Atlas, the one-sided cluster 95% population upper
+bound, with production weights and inclusion probabilities, MUST be below 10%
+to kill that point; equality does not kill. Human160 retains its independent
+5% node threshold: exact (or sampled-frame upper bound) below 5% kills, while
+equality only passes this screen. For wall, stop only if the one-sided 95%
+**upper** bound on <code>U_wall</code> is below the downstream wall target: 5%
+at Labeling-2k, Atlas-50k, or Human160-50k after R6. No lower confidence bound
+can rescue a ceiling below its downstream point target. The bound cannot
+promote the feature.
 
 Only if that screen passes, run a **plan-complete
 FullControlShadow-PC** before Consume scheduling. It may estimate provisional
@@ -1269,6 +1372,23 @@ be used only for this non-minting economic telemetry. Promotion-grade
 <code>Verify</code> still waits for the independent producer. This shadow is
 an estimate, not a proof of savings; unresolved sites receive maximally
 optimistic treatment.
+
+Before it runs, freeze a dominated-interval union over FullControl expansions
+so nested eligible sites are counted once. Define
+<code>PC_nodes_max</code> as unioned FullControl nodes that could disappear,
+minus every observed speculative, closure, and fallback solver node that must
+remain, divided by all-root FullControl nodes. Define
+<code>PC_wall_max</code> and <code>PC_cpu_max</code> analogously from unioned
+interval work after subtracting measured scheduling, derivation,
+materialization, strict-verification, fallback, and persistent-batch costs.
+Unknown costs are assigned zero and unresolved intervals are assigned their
+entire possible saving, which is maximally optimistic. Peak closure and batch
+memory use their most favorable measured bound. The screen KILLS if this
+optimistic ceiling is below any corresponding section-6.5 point target, if a
+one-sided cluster 95% upper bound is below the target for a sampled frame, or
+if even the favorable memory/tail bound violates its guard. Equality does not
+kill. Passing cannot promote, waive a lower-confidence promotion floor, or
+authorize Consume; it only permits the owner to consider the next build stage.
 
 The 40.46% residue remains a separate direct-block check: saving 5% total wall
 solely by deleting that measured generation block would require eliminating
@@ -1286,6 +1406,40 @@ The fresh hostile review attacks this list first. A gap is closed only by
 theorem, independent implementation evidence, or a frozen test/report—not by
 removing it from prose.
 
+### 8.1 Composition audit (amended per R1-R6)
+
+“Contained” means fail-closed for hard truth. “Partial” identifies a remaining
+decision or economics composition defect even when the strict verifier still
+prevents false truth.
+
+| GAP | Composition and disposition after amendment |
+|---|---|
+| C01 | **Contained for semantics; adoption guarded with C20 by R1.** FullControl remains a prerequisite causal control, while deployed Off is now an economic comparator and Production-500/default enablement has an outer gate. |
+| C02 | **Contained as a one-sided decision screen with C06/C19 by R2-R5.** The 10% primary ceiling, certified negatives, discovery/adoption split, and PC rule are explicit; passing cannot promote. |
+| C03 | **Contained.** Occurrence-local regimes, exact context stabilization, permanent Full fencing, and unfolded certificates prohibit unsafe DAG sharing. |
+| C04 | **Contained/open implementation blocker.** Open is never Proven, cached, or materialized; unresolved final work becomes remaining-budget Full or Unknown. |
+| C05 | **Contained.** One worker remains mandatory until schedule-independent byte identity is proved. |
+| C06 | **Contained for truth and kill decisions with C02 by R4.** Promotion uses independent implementations; a shadow negative additionally requires a no-false-negative certification or becomes indeterminate. |
+| C07 | **Contained by scope.** NonFC FHW rejects; only the separately admitted compact-T6 seam may run. |
+| C08 | **Contained.** The first complete plan is immutable; inability to close opens Full. |
+| C09 | **Contained for truth and frozen coverage; adoption guarded by R1.** Fresh claimant legs and one ledger remain mandatory, while frozen inclusion is not called a universal theorem. |
+| C10 | **Contained/open implementation blocker.** Fresh per-leg arenas, complete mode clearing, explicit resume binding, and no persistent G2 fragments remain mandatory. |
+| C11 | **Contained by explicit stop.** CE23 absence blocks promotion. |
+| C12 | **Contained.** Closure/resource/memory failure opens Full when publishable or returns Unknown. |
+| C13 | **Contained relative to the pinned trusted base.** Independent reconstruction and small-board/D6 tests remain mandatory; engine/formal correspondence remains explicit. |
+| C14 | **Contained by nonclaim.** Full scalar and clock obligations remain unchanged. |
+| C15 | **Contained by language restriction.** D17, SR, commutation, legacy zones, relabeling, and arbitrary mixing reject. |
+| C16 | **Contained with C03.** No G2 closure sharing, exact stabilization, unfolding, and per-occurrence rederivation remain mandatory. |
+| C17 | **Contained.** Digests establish identity only; semantic preimages are independently derived. |
+| C18 | **Contained/open implementation blocker.** Runtime state is in-memory v3 only and unknown tags reject. |
+| C19 | **Contained for campaign causality with C02/C23 by R2/R5.** Discovery roots cannot become adoption evidence; family clusters, weights, and the PC decision function are frozen. |
+| C20 | **Contained for adoption with C01 by R1/R6.** Same-cap all-work accounting, the Off outer gate, and confidence-bounded CPU/throughput/wall/tail/memory floors prevent a net-negative replacement. |
+| C21 | **Contained/open implementation-evidence blocker.** Closed PN remains only a candidate until standalone strict replay accepts it. |
+| C22 | **Contained.** Stable categories, absolute reconciliation, and unexplained-drift failure remain mandatory. |
+| C23 | **Contained as a scope gate with C19 by R2.** Complete-Atlas claims require the complete Atlas; samples require owner-attested frames, production weights, family clusters, and scope-limited claims. |
+
+### 8.2 Fail-closed defaults
+
 This list carries forward all thirteen gaps from the original extension
 design: imported lambda-one/authority (C13), wire format (C18), economics
 (C02/C19), broader mixed histories (C15), scalar clocks and slack (C14),
@@ -1294,18 +1448,25 @@ engine/formal correspondence (C13), digest limits (C17), alternative frozen
 plans (C08), and stale empirical pins (C19/C23). The consume-specific gaps are
 added rather than replacing them.
 
-1. **GAP C01 — target full-unforced route.** Native wide PN currently
+1. **GAP C01 — target full-unforced route and adoption boundary (amended per
+   R1).** Native wide PN currently
    immediately refutes non-implicit unforced defender nodes, while the narrow
    fallback may use a legacy zone. Neither is the exact <code>Full(P)</code>
    specified here. Section 3.2.1 normatively chooses lazy nested
    single-placement Universals, including terminal FirstStone and dynamic
    SecondStone legality. **Default:** no Consume A/B until that Uniform
-   FullControl exists and passes exhaustive pair-phase tests.
+   FullControl exists and passes exhaustive pair-phase tests. Beating that
+   control does not establish adoption: FullControl MUST already be the live
+   baseline for the exact profile or Consume MUST also pass the outer all-work
+   Off gate, including Production-500 before cap-500/default enablement.
 
-2. **GAP C02 — deep eligible prevalence.** No current report measures
+2. **GAP C02 — deep eligible prevalence (amended per R2-R5).** No current report measures
    plan-complete unforced <code>S*</code> sites at cap 2k or 50k. Forced-gate
    firing cannot answer it. **Default:** run step zero; if its optimistic
-   upper bound misses the floor, kill the build.
+   upper bound misses the applicable 10% primary or 5% Human160 target, kill
+   the build. Discovery roots are not adoption roots, negatives require R4
+   certification, and FullControlShadow-PC uses the preregistered optimistic
+   pass/fail rule in section 7.2.
 
 3. **GAP C03 — context-sufficient closure identity.** The exact minimal set
    of incoming role/window obligations needed to share a gated transposition
@@ -1326,11 +1487,13 @@ added rather than replacing them.
    uses one thread in evaluation and production until schedule-independent
    canonical selection is demonstrated byte-identical and hostile-reviewed.
 
-6. **GAP C06 — independent producer.** Current production finder and verifier
+6. **GAP C06 — independent producer and shadow negatives (amended per R4).** Current production finder and verifier
    share semantic helpers. **Default:** shared code may run only Off, Shadow,
    or the historical EmitLegacy regression lane. Promotion Verify/FullControl
    and Consume both use the independent producer; shared semantic code cannot
-   control an edge or produce their acceptance evidence.
+   control an edge or produce their acceptance evidence. A shared-helper
+   shadow result cannot certify an ineligible occurrence; without the audited
+   no-false-negative contract and independent checker it is indeterminate.
 
 7. **GAP C07 — NonFrontierCovered support.** Theory material exists beyond
    the presently admitted Exact/FC verifier class, but no enabled
@@ -1343,12 +1506,14 @@ added rather than replacing them.
    first complete plan is immutable; if it cannot close, use Full. Never
    reselect to force acceptance.
 
-9. **GAP C09 — dual and finite-cap coverage.** Consume ordering and fallback
+9. **GAP C09 — dual and finite-cap coverage (amended per R1).** Consume ordering and fallback
    can spend a hard cap differently from FullControl, and current dual
    allowance is dynamic leftover rather than a fixed second budget.
    **Default:** one combined ledger, remaining-budget local fallback, no
    outside-cap rescue, dedicated Loss tests, and any lost FullControl decision
-   is KILL. No work is hidden or refunded.
+   is KILL. No work is hidden or refunded. Pointwise inclusion is a
+   frozen-campaign gate, not a universal production theorem; any zero-loss
+   invariant on unseen roots requires an explicit online guard.
 
 10. **GAP C10 — cache and resume persistence.** Current wide local keys and
     resume bindings omit Consume semantics; persistent caches intentionally
@@ -1401,18 +1566,20 @@ added rather than replacing them.
    class is a distinct post-materialization telemetry field and never a TT or
    resume key.
 
-19. **GAP C19 — empirical pins and causality.** The 6,462 cap-500 results are
+19. **GAP C19 — empirical pins and causality (amended per R2/R5).** The 6,462 cap-500 results are
    current, but deep manifests are not yet frozen. The 40.46% wall share is
    not a node share, and the roughly one-percent forced-gate root rate is not
    unforced consume prevalence. **Default:** make no gain forecast and no
-   promotion decision until static shadow, plan-complete shadow, frozen deep
-   A/B, and residue reconciliation.
+   promotion decision until discovery shadows, the preregistered plan-complete
+   kill screen, an untouched/escrowed family-clustered adoption A/B, and
+   residue reconciliation. Any shadow-exposed root is never adoption evidence.
 
-20. **GAP C20 — fallback coverage versus economics.** Local Full fallback can
+20. **GAP C20 — fallback coverage versus end-to-end economics (amended per R1/R6).** Local Full fallback can
     change capped order and consume the remaining allowance after speculative
     work. **Default:** use the same hard cap in both arms, count all work, KILL
     on any lost FullControl decision, and otherwise keep the feature flagged
-    off unless it clears every economic floor.
+    off unless it clears every node, clustered CPU/throughput/wall, tail,
+    persistent-batch memory, and applicable Off-adoption floor.
 
 21. **GAP C21 — materialization independence from search state.** Current
     post-search materialization can reconstruct a proof, but no consumed native
@@ -1427,13 +1594,15 @@ added rather than replacing them.
     definitions, publish reconciliation, and treat unexplained drift as an
     economics failure.
 
-23. **GAP C23 — production Atlas-50k manifest.** Human-160 is a residue
+23. **GAP C23 — production Atlas-50k manifest (amended per R2).** Human-160 is a residue
     diagnostic, not an identified production atlas, and the earlier A5 source
     gate records the opening-atlas manifest as absent. **Default:** the owner
-    must supply and freeze canonical Atlas-50k roots before either arm runs;
-    Human160 cannot substitute, and default promotion remains blocked.
+    must supply and freeze canonical Atlas-50k roots before either adoption arm
+    runs; Human160 cannot substitute. A sample requires an owner-attested
+    frame, family clusters, production weights and inclusion probabilities, and
+    can support only a scope-limited claim. Default promotion remains blocked.
 
-## 9. Owner gate and required next action
+## 9. Owner gate and required next action (amended per R1, R2, and R5)
 
 The next action is a **fresh hostile review of this design**, beginning with
 section 8 and the counterexamples in section 5. No source implementation is
@@ -1441,15 +1610,21 @@ authorized before that review and the owner's disposition of every
 fail-closed default.
 
 If the review passes, the owner may authorize only the independently useful
-FullControl baseline plus non-minting FullControlShadow instrumentation. The
-root-support kill screen then runs. A passing screen permits the
-plan-complete non-minting shadow; neither shadow is Consume or
-promotion-grade Verify.
+FullControl baseline plus non-minting FullControlShadow instrumentation on
+visible discovery roots. The root-support kill screen then runs under the R3
+threshold and R4 negative contract. A passing screen permits the plan-complete
+non-minting shadow under its R5 one-sided kill rule; neither shadow is Consume,
+promotion-grade Verify, or adoption evidence.
 
 Only if those economics screens pass may the owner separately authorize the
 independent producer and Consume state machine. That implementation receives
 its own hostile review and remains flagged off until the full correctness,
-promotion, and post-landing residue gates pass.
+promotion, and post-landing residue gates pass on an untouched or escrowed
+adoption holdout using game/family clusters and production weights. Default or
+cap-500 enablement additionally requires Production-500 and the R1 Off
+adoption boundary unless FullControl is already the adopted live baseline for
+that exact profile. A frozen-campaign coverage pass MUST NOT be advertised as
+universal never-decides-less on unseen production traffic.
 
 ## 10. Evidence read for this design
 

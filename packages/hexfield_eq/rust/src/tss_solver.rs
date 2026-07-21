@@ -6326,6 +6326,17 @@ impl<'store> WidePnSearch<'store> {
                 && analysis.opp_threat_count > 0
                 && !analysis.own_win_now
                 && analysis.min_hitting_set == Some(analysis.b);
+            #[cfg(test)]
+            if implicit_dispatch {
+                crate::tss_g2_step_zero::observe_forced();
+            } else {
+                // The existing producer predicate supplies positive telemetry
+                // only. Its negatives are forced indeterminate by the R4
+                // step-zero sink, so they cannot shrink the kill numerator.
+                crate::tss_g2_step_zero::observe_unforced(
+                    group2_finder_preconditions(state, self.claimant, &analysis),
+                );
+            }
             if !implicit_dispatch {
                 self.entries[id].node = WidePnNode::Refuted;
                 self.refresh(id);

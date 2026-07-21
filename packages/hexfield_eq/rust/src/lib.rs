@@ -67,6 +67,11 @@ mod tss_pn_init_hunt;
 #[cfg(test)]
 mod tss_leaf_surface_hunt;
 
+// Fixed G2 consume step-zero measurement. The module and every solver hook are
+// absent from non-test builds; it cannot alter the default path.
+#[cfg(test)]
+mod tss_g2_step_zero;
+
 #[cfg(feature = "python")]
 mod cache;
 #[cfg(feature = "python")]
