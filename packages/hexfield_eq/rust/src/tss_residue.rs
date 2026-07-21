@@ -1525,6 +1525,116 @@ mod campaign {
     }
 
     #[test]
+    #[ignore = "production-shaped human residue campaign (main_4 leaf profile: cap 500, 256 KiB TT, unbounded horizon)"]
+    fn tss_residue_human_prod_gate() {
+        let path = output_path("human_prod");
+        initialize_output(&path);
+        let (positions, skipped) = load_human_positions();
+        assert_eq!(
+            positions.len() + skipped.len(),
+            160,
+            "human cohort line-count drift"
+        );
+        let selected = std::env::var("TSS_RESIDUE_ID").ok();
+        for reason in &skipped {
+            eprintln!("RESIDUE_HUMAN_SKIP {reason}");
+        }
+        for (id, state) in positions {
+            if selected
+                .as_ref()
+                .is_some_and(|ids| !ids.split(',').any(|wanted| wanted == id))
+            {
+                continue;
+            }
+            let (report, _) = measure_job(
+                "human_prod",
+                &id,
+                &state,
+                SolveCaps {
+                    node_cap: 500,
+                    tt_bytes_cap: 256 << 10,
+                    semantic_horizon: u32::MAX,
+                },
+                "leaf_prod_unbounded",
+                WidthOptions::vcf_pair_complete(),
+            );
+            append_report(&path, &report);
+        }
+        println!(
+            "RESIDUE_OUTPUT {} skipped={}",
+            path.display(),
+            skipped.len()
+        );
+    }
+
+    #[test]
+    #[ignore = "closure-debt sub-profile of pair generation at the production leaf shape"]
+    fn tss_closure_profile_human_prod() {
+        // Sub-attribution INSIDE A_OR_GEN: gate build vs first candidates vs
+        // second candidates vs pair evaluation vs dedup, summed over the
+        // 160-position human cohort at the main_4 leaf shape (cap 500,
+        // 256 KiB TT, unbounded horizon). Timing-only; no behavior change.
+        std::env::set_var("TSS_CLOSURE_COUNTERS", "1");
+        let (positions, _skipped) = load_human_positions();
+        let caps = SolveCaps {
+            node_cap: 500,
+            tt_bytes_cap: 256 << 10,
+            semantic_horizon: u32::MAX,
+        };
+        let mut total = crate::tss_core::ClosureDebtStats::default();
+        let mut solve_wall = 0u64;
+        let mut nodes = 0u64;
+        for (_id, state) in &positions {
+            let mut solver = TssSolver::default();
+            solver.set_width_options(WidthOptions::vcf_pair_complete());
+            let started = Instant::now();
+            let result = solver.solve(state, &caps);
+            solve_wall = solve_wall
+                .saturating_add(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX));
+            nodes += result.stats.nodes;
+            let d = result.stats.closure_debt;
+            total.pairs_evaluated += d.pairs_evaluated;
+            total.pairs_accepted += d.pairs_accepted;
+            total.pairs_retained += d.pairs_retained;
+            total.pair_generation_nanos += d.pair_generation_nanos;
+            total.gate_build_nanos += d.gate_build_nanos;
+            total.second_candidate_nanos += d.second_candidate_nanos;
+            total.pair_evaluation_nanos += d.pair_evaluation_nanos;
+            total.dedup_nanos += d.dedup_nanos;
+        }
+        let pg = total.pair_generation_nanos.max(1);
+        let residual = total
+            .pair_generation_nanos
+            .saturating_sub(total.gate_build_nanos)
+            .saturating_sub(total.second_candidate_nanos)
+            .saturating_sub(total.pair_evaluation_nanos)
+            .saturating_sub(total.dedup_nanos);
+        println!(
+            "CLOSURE_PROFILE positions={} nodes={} solve_wall_ms={:.1} pair_gen_ms={:.1} ({:.1}% of wall)",
+            positions.len(),
+            nodes,
+            solve_wall as f64 / 1e6,
+            total.pair_generation_nanos as f64 / 1e6,
+            100.0 * total.pair_generation_nanos as f64 / solve_wall.max(1) as f64,
+        );
+        println!(
+            "  gate_build {:.1}% | second_candidates {:.1}% | pair_evaluation {:.1}% | dedup {:.1}% | residual(first-cands+loop) {:.1}%",
+            100.0 * total.gate_build_nanos as f64 / pg as f64,
+            100.0 * total.second_candidate_nanos as f64 / pg as f64,
+            100.0 * total.pair_evaluation_nanos as f64 / pg as f64,
+            100.0 * total.dedup_nanos as f64 / pg as f64,
+            100.0 * residual as f64 / pg as f64,
+        );
+        println!(
+            "  pairs evaluated={} accepted={} retained={}  ns/pair_eval={:.0}",
+            total.pairs_evaluated,
+            total.pairs_accepted,
+            total.pairs_retained,
+            total.pair_evaluation_nanos as f64 / total.pairs_evaluated.max(1) as f64,
+        );
+    }
+
+    #[test]
     #[ignore = "matched disabled/enabled A/A gate; full frozen profiles are intentionally expensive"]
     fn tss_residue_overhead_gate() {
         let overhead_path = output_path("overhead");
