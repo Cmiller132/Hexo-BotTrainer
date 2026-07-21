@@ -13,12 +13,14 @@
 //! failed restricted attack is never interpreted as a proof for the opponent.
 
 use std::cmp::Reverse;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasherDefault, Hasher};
 use std::mem::size_of;
 use std::sync::Arc;
 
 #[cfg(test)]
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 #[cfg(test)]
 use std::rc::Rc;
 use std::time::Instant;
@@ -57,6 +59,7 @@ impl SolveOrdering {
             Self::Prior => "prior",
         }
     }
+
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1469,6 +1472,8 @@ impl TssSolver {
             .current_bytes
             .saturating_add(self.fragment_store.current_bytes);
         let fragment_store = fragments_enabled.then_some(&self.fragment_store);
+        #[cfg(test)]
+        let setup_started = Instant::now();
         let mut search = WidePnSearch::new_with_width(
             claimant,
             state.placements_made(),
@@ -1483,7 +1488,19 @@ impl TssSolver {
         search.lazy_frontier = lazy_frontier;
         search.ordering_hints = ordering_hints.cloned();
         let root = search.insert_root(state);
+        #[cfg(test)]
+        WIDE_SETUP_NANOS.fetch_add(
+            u64::try_from(setup_started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        #[cfg(test)]
+        let search_started = Instant::now();
         search.run(state, root);
+        #[cfg(test)]
+        WIDE_SEARCH_NANOS.fetch_add(
+            u64::try_from(search_started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         #[cfg(test)]
         search.finalize_ordering_study();
         #[cfg(test)]
@@ -1641,6 +1658,15 @@ impl TssSolver {
         if let Some(telemetry) = search.quotient_telemetry.take() {
             let report = telemetry.finish(&search.entries, &search.by_position, search.tt_hits);
             LAST_QUOTIENT_REPORT.with(|slot| *slot.borrow_mut() = Some(report));
+        }
+        #[cfg(test)]
+        {
+            let memo = search.generation_memo.borrow();
+            GENERATION_MEMO_LOOKUPS.fetch_add(
+                memo.lookups,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            GENERATION_MEMO_HITS.fetch_add(memo.hits, std::sync::atomic::Ordering::Relaxed);
         }
         drop(search);
         // The solved attempt root was queued first; admit it last so a direct-
@@ -2460,6 +2486,10 @@ static WIDE_REFRESH_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 #[cfg(test)]
 static WIDE_INSERT_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(test)]
+static WIDE_SETUP_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+static WIDE_SEARCH_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
 static WIDE_ZONE_ORDER_CONTEXTS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 #[cfg(test)]
@@ -2469,6 +2499,21 @@ static WIDE_ZONE_ORDER_CONTEXT_NANOS: std::sync::atomic::AtomicU64 =
 static WIDE_ZONE_ORDER_KEYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(test)]
 static WIDE_ZONE_ORDER_KEY_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+static SECOND_CANDIDATE_CALLS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+static SECOND_CANDIDATE_REFERENCE_GROWTHS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+static SECOND_CANDIDATE_OPTIMIZED_GROWTHS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+static GENERATION_MEMO_LOOKUPS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+static GENERATION_MEMO_HITS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 /// Temporary hot-path attribution for the corpus harness: accumulated wall
@@ -2510,6 +2555,42 @@ pub(crate) fn wide_gen_profile() -> (u64, u64, u64, u64, u64, u64) {
         WIDE_REFRESH_NANOS.load(std::sync::atomic::Ordering::Relaxed) / 1_000_000,
         WIDE_INSERT_NANOS.load(std::sync::atomic::Ordering::Relaxed) / 1_000_000,
     )
+}
+
+#[cfg(test)]
+fn wide_solve_phase_profile() -> (u64, u64) {
+    (
+        WIDE_SETUP_NANOS.load(std::sync::atomic::Ordering::Relaxed) / 1_000_000,
+        WIDE_SEARCH_NANOS.load(std::sync::atomic::Ordering::Relaxed) / 1_000_000,
+    )
+}
+
+#[cfg(test)]
+fn second_candidate_allocation_profile() -> (u64, u64, u64) {
+    (
+        SECOND_CANDIDATE_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+        SECOND_CANDIDATE_REFERENCE_GROWTHS.load(std::sync::atomic::Ordering::Relaxed),
+        SECOND_CANDIDATE_OPTIMIZED_GROWTHS.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn generation_memo_profile() -> (u64, u64) {
+    (
+        GENERATION_MEMO_LOOKUPS.load(std::sync::atomic::Ordering::Relaxed),
+        GENERATION_MEMO_HITS.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+#[cfg(test)]
+fn second_candidate_reference_for_ab() -> bool {
+    static VALUE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("TSS_SECOND_CANDIDATES_REFERENCE")
+            .ok()
+            .as_deref()
+            == Some("1")
+    })
 }
 
 /// (context builds, retained-child keys, context nanos, key nanos) accumulated
@@ -3358,7 +3439,7 @@ impl WidePositionKey {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct WideDefenderPair {
     first: HexCoord,
     second: HexCoord,
@@ -3366,7 +3447,7 @@ struct WideDefenderPair {
     final_prior: WidePnPrior,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct WideDirectedDefenderPair {
     first: HexCoord,
     second: HexCoord,
@@ -3377,7 +3458,7 @@ struct WideDirectedDefenderPair {
     retained_prior: Option<WidePnPrior>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct WideDefenderPairPlan {
     /// The exact K2 kernel, in the ordinary canonical defender order.
     kernel: Vec<HexCoord>,
@@ -3391,7 +3472,7 @@ struct WideDefenderPairPlan {
 /// pair must have the reverse direction with the identical final position.
 /// Any unsupported shape is reported to the caller, which falls back to the
 /// ordinary ordered defender expansion rather than dropping a reply.
-fn forced_defender_pair_plan(
+fn forced_defender_pair_plan_dynamic(
     state: &mut RustHexoState,
     claimant: Player,
 ) -> Option<WideDefenderPairPlan> {
@@ -3544,6 +3625,112 @@ fn forced_defender_pair_plan(
         return None;
     }
     Some(WideDefenderPairPlan { kernel, pairs })
+}
+
+/// Stateless K2 plan for the exact rank-two boundary licensed in
+/// `RESEARCH_DIVERGENCE_1.md` section 3. The guards are intentionally
+/// redundant with the cover construction: if the live opponent family is
+/// not nonempty, rank <= 2, tau=2, and free of a defender win-now, the caller
+/// falls back to the dynamic reference above.
+fn forced_defender_pair_plan_direct(
+    state: &RustHexoState,
+    claimant: Player,
+) -> Option<WideDefenderPairPlan> {
+    if state.current_player() == claimant || !matches!(state.phase(), TurnPhase::FirstStone) {
+        return None;
+    }
+    let analysis = threats::analyze(state);
+    if analysis.b != 2
+        || analysis.opp_threat_count == 0
+        || analysis.own_win_now
+        || analysis.min_hitting_set != Some(2)
+    {
+        return None;
+    }
+
+    let family = state
+        .board()
+        .windows()
+        .live_threat_entries()
+        .filter_map(|(owner, entry)| (owner == claimant).then(|| entry.empty_cells()))
+        .collect::<Vec<_>>();
+    if family.is_empty() || family.iter().any(|edge| !(1..=2).contains(&edge.len())) {
+        return None;
+    }
+
+    // Preserve the reference kernel's canonical order exactly. Membership is
+    // the union of the directly enumerated minimum covers; presentation order
+    // remains independent of the cover enumeration below.
+    let mut kernel = extendable_hit_kernel_for_family(&family, 2);
+    let root_frame = canonical_frame(state);
+    kernel.sort_by_key(|coord| canonical_coord_key(root_frame, *coord));
+    kernel.dedup();
+    if kernel.is_empty() || kernel.len() > 4 {
+        return None;
+    }
+
+    let shared_prior = WidePnPrior {
+        pn: pn_from_fork_degree(attacker_fork_degree(state, claimant)),
+        dn: 1,
+    };
+    let mut pairs = Vec::new();
+    for left in 0..kernel.len() {
+        for right in (left + 1)..kernel.len() {
+            let x = kernel[left];
+            let y = kernel[right];
+            if !family
+                .iter()
+                .all(|edge| edge.contains(&x) || edge.contains(&y))
+            {
+                continue;
+            }
+            let (first, second) = if raw_coord_key(x) < raw_coord_key(y) {
+                (x, y)
+            } else {
+                (y, x)
+            };
+            pairs.push(WideDefenderPair {
+                first,
+                second,
+                final_key: WidePositionKey::for_defender_pair(state, claimant, &[first, second]),
+                final_prior: shared_prior,
+            });
+        }
+    }
+    if pairs.is_empty() || pairs.len() > 4 {
+        return None;
+    }
+    let kernel_rank = kernel
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(rank, coord)| (coord, rank))
+        .collect::<HashMap<_, _>>();
+    pairs.sort_by_key(|pair| {
+        let first_rank = kernel_rank[&pair.first];
+        let second_rank = kernel_rank[&pair.second];
+        (first_rank.min(second_rank), first_rank.max(second_rank))
+    });
+    Some(WideDefenderPairPlan { kernel, pairs })
+}
+
+fn forced_defender_pair_plan(
+    state: &mut RustHexoState,
+    claimant: Player,
+) -> Option<WideDefenderPairPlan> {
+    if let Some(direct) = forced_defender_pair_plan_direct(state, claimant) {
+        #[cfg(debug_assertions)]
+        {
+            let reference = forced_defender_pair_plan_dynamic(state, claimant);
+            assert_eq!(
+                reference.as_ref(),
+                Some(&direct),
+                "stateless K2 plan diverged from the dynamic reference"
+            );
+        }
+        return Some(direct);
+    }
+    forced_defender_pair_plan_dynamic(state, claimant)
 }
 
 /// Conservative retained-byte charge for one exact-key TT index entry.  PN
@@ -4038,6 +4225,10 @@ struct WidePnSearch<'store> {
     /// first eager admission's prior/depth and lets a selected attacker thunk
     /// recover that transposed state without pre-linking an arena/TT entry.
     deferred_by_position: HashMap<WidePositionKey, WideDeferredPosition>,
+    /// Exact window-substructure cache shared by attacker OR generations in
+    /// this search. Keys include both occupancy masks, so a position delta
+    /// invalidates precisely the windows it changes.
+    generation_memo: RefCell<WindowGenerationMemo>,
     fragment_store: Option<&'store ProvenFragmentStore>,
     fragment_lookups: u64,
     fragment_hits: u64,
@@ -4361,6 +4552,7 @@ impl<'store> WidePnSearch<'store> {
             entries: Vec::new(),
             by_position: HashMap::new(),
             deferred_by_position: HashMap::new(),
+            generation_memo: RefCell::new(WindowGenerationMemo::default()),
             fragment_store,
             fragment_lookups: 0,
             fragment_hits: 0,
@@ -6586,7 +6778,10 @@ impl<'store> WidePnSearch<'store> {
         let closure_started = self.closure_counters.then(Instant::now);
         #[cfg(test)]
         let gate_started = self.closure_counters.then(Instant::now);
-        let gate = WideTurnGate::build(state, self.claimant);
+        let gate = {
+            let mut memo = self.generation_memo.borrow_mut();
+            WideTurnGate::build_memoized(state, self.claimant, &mut memo)
+        };
         #[cfg(test)]
         let observe_ordering_study = self.ordering_study;
         #[cfg(test)]
@@ -6639,26 +6834,40 @@ impl<'store> WidePnSearch<'store> {
         let mut accepted = 0u64;
         #[cfg(test)]
         let mut retained = 0u64;
-        let first_candidates = ordered_threat_creating_moves_with_width(
-            state,
-            self.claimant,
-            WidthOptions::vcf_pair_complete(),
-        );
+        #[cfg(debug_assertions)]
+        {
+            let reference = ordered_threat_creating_moves_with_width(
+                state,
+                self.claimant,
+                WidthOptions::vcf_pair_complete(),
+            );
+            assert_eq!(
+                gate.first_candidates, reference,
+                "single-scan first-candidate index diverged from the reference"
+            );
+        }
+        let first_candidates = &gate.first_candidates;
         // Freeze urgency at the turn-start position. A block cell can disappear
         // from the second-stone candidate metadata after the other coordinate is
         // played, but the unordered pair still contains that original block.
-        let defender_blocks = turn_start_defender_blocks(&first_candidates);
+        let defender_blocks = turn_start_defender_blocks(first_candidates);
         let mut children = Vec::new();
         let mut seen_pairs = HashSet::new();
         // No claimant >=4 window exists here (win-now nodes leaf before
         // generation), so a lone first stone can never complete six: the
         // whole double loop is stateless — zero engine applies.
         let mut second_coords: Vec<HexCoord> = Vec::new();
-        let mut second_seen: HashSet<HexCoord> = HashSet::new();
+        let mut second_seen: CoordSet = CoordSet::default();
+        let mut second_promoted: Vec<(u8, HexCoord)> = Vec::new();
+        let mut second_fresh: Vec<HexCoord> = Vec::new();
+        #[cfg(test)]
+        let mut reference_second_coords: Vec<HexCoord> = Vec::new();
+        #[cfg(test)]
+        let mut reference_second_seen: HashSet<HexCoord> = HashSet::new();
         let mut pair_allow: Vec<(i16, i16)> = Vec::new();
-        let mut pair_counts: Vec<((i16, i16), u8)> = Vec::new();
+        let mut pair_counts: Vec<((i16, i16), i16)> = Vec::new();
         let mut defender_allow: Vec<HexCoord> = Vec::new();
-        for first_candidate in &first_candidates {
+        for first_candidate in first_candidates {
             let first_width_tier = wide_candidate_width_tier(first_candidate);
             let first = first_candidate.coord;
             // Exact family-size prefilter (see `pair_prefilter`): pairs it
@@ -6692,12 +6901,58 @@ impl<'store> WidePnSearch<'store> {
                 let _regen_timer = WideGenTimer::start(&WIDE_GEN_PRIOR_NANOS);
                 #[cfg(test)]
                 let second_started = self.closure_counters.then(Instant::now);
-                gate.second_candidates(
-                    first,
-                    &first_candidates,
-                    &mut second_coords,
-                    &mut second_seen,
-                );
+                #[cfg(test)]
+                let force_reference = second_candidate_reference_for_ab();
+                #[cfg(not(test))]
+                let force_reference = false;
+                let optimized_growths = if force_reference {
+                    #[cfg(test)]
+                    {
+                        gate.second_candidates_reference(
+                            first,
+                            first_candidates,
+                            &mut second_coords,
+                            &mut reference_second_seen,
+                        )
+                    }
+                    #[cfg(not(test))]
+                    {
+                        unreachable!()
+                    }
+                } else {
+                    gate.second_candidates(
+                        first,
+                        first_candidates,
+                        &mut second_coords,
+                        &mut second_seen,
+                        &mut second_promoted,
+                        &mut second_fresh,
+                    )
+                };
+                #[cfg(test)]
+                if self.closure_counters && !force_reference {
+                    let reference_growths = gate.second_candidates_reference(
+                        first,
+                        first_candidates,
+                        &mut reference_second_coords,
+                        &mut reference_second_seen,
+                    );
+                    assert_eq!(
+                        second_coords, reference_second_coords,
+                        "optimized second candidates diverged from HashSet reference"
+                    );
+                    SECOND_CANDIDATE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    SECOND_CANDIDATE_REFERENCE_GROWTHS.fetch_add(
+                        reference_growths,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    SECOND_CANDIDATE_OPTIMIZED_GROWTHS.fetch_add(
+                        optimized_growths,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                }
+                #[cfg(not(test))]
+                let _ = optimized_growths;
                 #[cfg(test)]
                 if let Some(started) = second_started {
                     let elapsed = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
@@ -8917,7 +9172,7 @@ fn turn_forces_small_defender_reply(state: &RustHexoState, claimant: Player) -> 
             && analysis.min_hitting_set == Some(analysis.b))
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Candidate {
     coord: HexCoord,
     /// Maximum pre-placement stone count among active claimant windows that
@@ -9163,13 +9418,113 @@ fn ordered_threat_creating_moves_with_width(
     candidates
 }
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct WindowGenerationMemoKey {
+    key: WindowKey,
+    player0_mask: u8,
+    player1_mask: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CompactEmpties {
+    cells: [HexCoord; 5],
+    len: u8,
+}
+
+impl CompactEmpties {
+    fn from_entry(entry: hexo_engine::WindowEntry) -> Self {
+        let mut cells = [HexCoord::ZERO; 5];
+        let mut len = 0usize;
+        let mask = entry.empty_mask();
+        for index in 0..6u8 {
+            if mask & (1 << index) != 0 {
+                debug_assert!(len < cells.len(), "active window has at least one stone");
+                cells[len] = entry.key().coord_at(index);
+                len += 1;
+            }
+        }
+        Self {
+            cells,
+            len: len as u8,
+        }
+    }
+
+    fn iter(&self) -> std::slice::Iter<'_, HexCoord> {
+        self.cells[..self.len as usize].iter()
+    }
+
+    fn contains(&self, cell: &HexCoord) -> bool {
+        self.iter().any(|candidate| candidate == cell)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct WindowGenerationMemoSlot {
+    key: WindowGenerationMemoKey,
+    empties: CompactEmpties,
+}
+
+struct WindowGenerationMemo {
+    slots: Vec<Option<WindowGenerationMemoSlot>>,
+    lookups: u64,
+    hits: u64,
+}
+
+impl Default for WindowGenerationMemo {
+    fn default() -> Self {
+        Self {
+            slots: Vec::new(),
+            lookups: 0,
+            hits: 0,
+        }
+    }
+}
+
+impl WindowGenerationMemo {
+    const SLOT_COUNT: usize = 32_768;
+
+    fn empties(&mut self, entry: hexo_engine::WindowEntry) -> CompactEmpties {
+        let key = WindowGenerationMemoKey {
+            key: entry.key(),
+            player0_mask: entry.mask(Player::Player0),
+            player1_mask: entry.mask(Player::Player1),
+        };
+        if self.slots.is_empty() {
+            self.slots.resize(Self::SLOT_COUNT, None);
+        }
+        let axis = u64::from(key.key.axis.index());
+        let packed = u64::from(key.key.start.q as u16)
+            | (u64::from(key.key.start.r as u16) << 16)
+            | (axis << 32)
+            | (u64::from(key.player0_mask) << 40)
+            | (u64::from(key.player1_mask) << 48);
+        let mixed = packed.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ (packed >> 29);
+        let index = mixed as usize & (Self::SLOT_COUNT - 1);
+        self.lookups = self.lookups.saturating_add(1);
+        if let Some(cached) = self.slots[index].filter(|slot| slot.key == key) {
+            self.hits = self.hits.saturating_add(1);
+            #[cfg(debug_assertions)]
+            {
+                debug_assert_eq!(cached.empties, CompactEmpties::from_entry(entry));
+            }
+            return cached.empties;
+        }
+        let fresh = CompactEmpties::from_entry(entry);
+        self.slots[index] = Some(WindowGenerationMemoSlot {
+            key,
+            empties: fresh,
+        });
+        fresh
+    }
+}
+
 /// One claimant-pure count>=2 window as seen from a candidate empty cell:
 /// the immutable turn-start facts needed to evaluate any pair through it.
 #[derive(Clone)]
 struct WidePairWindow {
     key: WindowKey,
     strength: u8,
-    empties: Vec<HexCoord>,
+    empties: CompactEmpties,
 }
 
 /// Turn-start snapshot for stateless wide pair classification. Valid only at
@@ -9180,6 +9535,10 @@ struct WidePairWindow {
 /// defender's post-pair threat family is exactly the windows through the two
 /// placed stones that reach count >=4.
 struct WideTurnGate {
+    /// Pair-complete first-stone candidates built during the same window scan
+    /// as the gate. This avoids immediately rescanning WindowStore and
+    /// rebuilding the same per-cell index in `attack_pair_children`.
+    first_candidates: Vec<Candidate>,
     /// Every claimant-pure count>=2 window, in board window-entry scan order.
     /// Stored once; the per-cell maps hold indices, so gate construction never
     /// clones a window per empty cell.
@@ -9198,22 +9557,73 @@ struct WideTurnGate {
     /// that reach count>=4 from one new stone. Drives the exact pair
     /// prefilter (`pair_prefilter`).
     c3_windows: Vec<u32>,
+    /// Sorted per-cell incidence counts for `c3_windows`. Pair prefiltering
+    /// starts from this index and subtracts only the first-incident windows,
+    /// instead of rescanning every count-three window for every first stone.
+    c3_degree: Vec<((i16, i16), u8)>,
+    c3_max_degree: u8,
     /// Empties of every live defender >=4 window (the hit/block sets).
-    defender_threats: Vec<Vec<HexCoord>>,
+    defender_threats: Vec<CompactEmpties>,
     #[cfg(test)]
     live_claimant_windows: Vec<WidePairWindow>,
     /// `placements_made` at turn start.
     start_placements: u32,
 }
 
+/// Deterministic low-cost hasher for the tiny, solve-local coordinate set in
+/// `second_candidates`. `HexCoord` hashes its two i16 fields; the fallback
+/// byte path keeps the implementation correct if that representation changes.
+#[derive(Default)]
+struct CoordHasher(u64);
+
+impl Hasher for CoordHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 = (self.0.rotate_left(5) ^ u64::from(byte))
+                .wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+    }
+
+    fn write_i16(&mut self, value: i16) {
+        self.0 = (self.0.rotate_left(5) ^ u64::from(value as u16))
+            .wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+type CoordSet = HashSet<HexCoord, BuildHasherDefault<CoordHasher>>;
+
 impl WideTurnGate {
     fn build(state: &RustHexoState, claimant: Player) -> Self {
+        Self::build_inner(state, claimant, None)
+    }
+
+    fn build_memoized(
+        state: &RustHexoState,
+        claimant: Player,
+        memo: &mut WindowGenerationMemo,
+    ) -> Self {
+        Self::build_inner(state, claimant, Some(memo))
+    }
+
+    fn build_inner(
+        state: &RustHexoState,
+        claimant: Player,
+        mut memo: Option<&mut WindowGenerationMemo>,
+    ) -> Self {
+        debug_assert!(matches!(state.phase(), TurnPhase::FirstStone));
         let mut windows: Vec<WidePairWindow> = Vec::new();
         let mut weak_windows: Vec<WidePairWindow> = Vec::new();
         let mut windows_by_cell: HashMap<HexCoord, Vec<u32>> = HashMap::new();
         let mut weak_windows_by_cell: HashMap<HexCoord, Vec<u32>> = HashMap::new();
         let mut c3_windows: Vec<u32> = Vec::new();
         let mut defender_threats = Vec::new();
+        let mut first_candidates = Vec::<Candidate>::new();
+        let mut first_candidate_index = HashMap::<HexCoord, usize>::new();
+        let mut claimant_threat_count = 0usize;
         #[cfg(test)]
         let mut live_claimant_windows = Vec::new();
         for entry in state.board().windows().entries() {
@@ -9226,10 +9636,50 @@ impl WideTurnGate {
                     let window = WidePairWindow {
                         key: entry.key(),
                         strength: count,
-                        empties: entry.empty_cells(),
+                        empties: memo
+                            .as_deref_mut()
+                            .map(|memo| memo.empties(entry))
+                            .unwrap_or_else(|| CompactEmpties::from_entry(entry)),
                     };
                     #[cfg(test)]
                     live_claimant_windows.push(window.clone());
+                    if count >= 4 {
+                        claimant_threat_count += 1;
+                    }
+                    if count >= 2 {
+                        for &coord in window.empties.iter() {
+                            let created = (count == 3).then(|| {
+                                window
+                                    .empties
+                                    .iter()
+                                    .copied()
+                                    .filter(|empty| *empty != coord)
+                                    .collect::<Vec<_>>()
+                            });
+                            if let Some(&slot) = first_candidate_index.get(&coord) {
+                                let candidate = &mut first_candidates[slot];
+                                candidate.strength = candidate.strength.max(count);
+                                if count == 2 {
+                                    candidate.pair_start_degree += 1;
+                                }
+                                if let Some(created) = created {
+                                    candidate.created_threats.push(created);
+                                }
+                            } else {
+                                first_candidate_index.insert(coord, first_candidates.len());
+                                first_candidates.push(Candidate {
+                                    coord,
+                                    strength: count,
+                                    priority_class: u8::MAX,
+                                    child_threats: 0,
+                                    defender_block: false,
+                                    pair_start_degree: usize::from(count == 2),
+                                    own_proximity: i16::MAX,
+                                    created_threats: created.into_iter().collect(),
+                                });
+                            }
+                        }
+                    }
                     let (store, sink) = if count >= 2 {
                         (&mut windows, &mut windows_by_cell)
                     } else {
@@ -9239,21 +9689,111 @@ impl WideTurnGate {
                     if count >= 3 {
                         c3_windows.push(index);
                     }
-                    for &cell in &window.empties {
+                    for &cell in window.empties.iter() {
                         sink.entry(cell).or_default().push(index);
                     }
                     store.push(window);
                 }
             } else if count >= 4 {
-                defender_threats.push(entry.empty_cells());
+                let empties = memo
+                    .as_deref_mut()
+                    .map(|memo| memo.empties(entry))
+                    .unwrap_or_else(|| CompactEmpties::from_entry(entry));
+                for &coord in empties.iter() {
+                    if let Some(&slot) = first_candidate_index.get(&coord) {
+                        first_candidates[slot].defender_block = true;
+                    } else {
+                        first_candidate_index.insert(coord, first_candidates.len());
+                        first_candidates.push(Candidate {
+                            coord,
+                            strength: 0,
+                            priority_class: u8::MAX,
+                            child_threats: 0,
+                            defender_block: true,
+                            pair_start_degree: 0,
+                            own_proximity: i16::MAX,
+                            created_threats: Vec::new(),
+                        });
+                    }
+                }
+                defender_threats.push(empties);
             }
         }
+        let claimant_stones = state
+            .board()
+            .occupied_cells()
+            .iter()
+            .copied()
+            .filter(|coord| state.board().get(*coord) == Some(claimant))
+            .collect::<Vec<_>>();
+        for candidate in &mut first_candidates {
+            candidate.child_threats = claimant_threat_count + candidate.created_threats.len();
+            if candidate.strength <= 2 {
+                candidate.own_proximity = claimant_stones
+                    .iter()
+                    .map(|&coord| hex_distance(candidate.coord, coord))
+                    .min()
+                    .unwrap_or(i16::MAX);
+            }
+            candidate.priority_class = if candidate.defender_block && candidate.strength < 4 {
+                1
+            } else if candidate.strength >= 4 {
+                0
+            } else {
+                2
+            };
+        }
+        if first_candidates.len() > 1 {
+            let frame = canonical_frame(state);
+            first_candidates.sort_by_key(|item| {
+                let width_tier = wide_candidate_width_tier(item);
+                let canonical = canonical_coord_key(frame, item.coord);
+                (
+                    width_tier,
+                    if width_tier == 0 { item.priority_class } else { 0 },
+                    Reverse(if width_tier == 0 {
+                        item.child_threats
+                    } else {
+                        item.pair_start_degree
+                    }),
+                    Reverse(if width_tier == 0 { item.strength } else { 0 }),
+                    0usize,
+                    if width_tier == 0 {
+                        0
+                    } else {
+                        item.own_proximity
+                    },
+                    canonical.0,
+                    canonical.1,
+                )
+            });
+        }
+        let mut c3_degree_by_cell = HashMap::<HexCoord, u8>::new();
+        for &index in &c3_windows {
+            for &cell in windows[index as usize].empties.iter() {
+                let degree = c3_degree_by_cell.entry(cell).or_insert(0);
+                *degree = degree.saturating_add(1);
+            }
+        }
+        let mut c3_degree = c3_degree_by_cell
+            .into_iter()
+            .map(|(cell, degree)| (raw_coord_key(cell), degree))
+            .collect::<Vec<_>>();
+        c3_degree.sort_unstable_by_key(|&(key, _)| key);
+        let c3_max_degree = c3_degree
+            .iter()
+            .map(|&(_, degree)| degree)
+            .max()
+            .unwrap_or(0);
         Self {
+            first_candidates,
             windows,
             weak_windows,
             windows_by_cell,
             weak_windows_by_cell,
             c3_windows,
+            c3_degree,
+            c3_max_degree,
             defender_threats,
             #[cfg(test)]
             live_claimant_windows,
@@ -9281,7 +9821,7 @@ impl WideTurnGate {
     fn pair_prefilter(
         &self,
         first: HexCoord,
-        counts: &mut Vec<((i16, i16), u8)>,
+        counts: &mut Vec<((i16, i16), i16)>,
         allow: &mut Vec<(i16, i16)>,
     ) -> bool {
         counts.clear();
@@ -9298,6 +9838,17 @@ impl WideTurnGate {
         if k1 >= 2 {
             return true;
         }
+        // A defender-only first has no joint contribution. If no cell is in
+        // two count-three windows, every pair leaves a singleton family and
+        // is an exact `None`; reject the first before any window scan.
+        if first_list.is_none() && self.c3_max_degree < 2 {
+            return false;
+        }
+        counts.extend(
+            self.c3_degree
+                .iter()
+                .map(|&(key, degree)| (key, i16::from(degree))),
+        );
         // Joint contributions: count-2 windows through `first` reach four
         // exactly when `second` is one of their other empties. (Count>=3
         // windows through `first` are already in k1 and contribute the same
@@ -9306,7 +9857,7 @@ impl WideTurnGate {
             for &index in list {
                 let window = &self.windows[index as usize];
                 if window.strength == 2 {
-                    for &cell in &window.empties {
+                    for &cell in window.empties.iter() {
                         if cell != first {
                             counts.push((raw_coord_key(cell), 1));
                         }
@@ -9314,26 +9865,27 @@ impl WideTurnGate {
                 }
             }
         }
-        // Own count>=3 windows of `second`, excluding those through `first`
-        // (evaluate_pair's second pass skips windows containing `first`;
-        // those windows are exactly the k1 set).
-        for &index in &self.c3_windows {
-            let window = &self.windows[index as usize];
-            if window.empties.contains(&first) {
-                continue;
-            }
-            for &cell in &window.empties {
-                counts.push((raw_coord_key(cell), 1));
+        // Remove the globally indexed count-three incidences through `first`:
+        // evaluate_pair collects those windows from the first list (the k1
+        // term) and deliberately skips them in its second pass.
+        if let Some(list) = first_list {
+            for &index in list {
+                let window = &self.windows[index as usize];
+                if window.strength >= 3 {
+                    for &cell in window.empties.iter() {
+                        counts.push((raw_coord_key(cell), -1));
+                    }
+                }
             }
         }
         counts.sort_unstable_by_key(|&(key, _)| key);
-        let need = 2u8.saturating_sub(k1);
+        let need = i16::from(2u8.saturating_sub(k1));
         let mut cursor = 0usize;
         while cursor < counts.len() {
             let key = counts[cursor].0;
-            let mut sum = 0u8;
+            let mut sum = 0i16;
             while cursor < counts.len() && counts[cursor].0 == key {
-                sum = sum.saturating_add(counts[cursor].1);
+                sum += counts[cursor].1;
                 cursor += 1;
             }
             if sum >= need {
@@ -9395,8 +9947,77 @@ impl WideTurnGate {
         first: HexCoord,
         turn_start: &[Candidate],
         out: &mut Vec<HexCoord>,
+        seen: &mut CoordSet,
+        promoted: &mut Vec<(u8, HexCoord)>,
+        fresh: &mut Vec<HexCoord>,
+    ) -> u64 {
+        let capacities = (
+            out.capacity(),
+            seen.capacity(),
+            promoted.capacity(),
+            fresh.capacity(),
+        );
+        out.clear();
+        seen.clear();
+        promoted.clear();
+        fresh.clear();
+        seen.insert(first);
+        if let Some(list) = self.windows_by_cell.get(&first) {
+            for &index in list {
+                let window = &self.windows[index as usize];
+                for &cell in window.empties.iter() {
+                    if cell != first {
+                        promoted.push((window.strength, cell));
+                    }
+                }
+            }
+            promoted.sort_by_key(|&(strength, cell)| (Reverse(strength), raw_coord_key(cell)));
+            for &(_, cell) in promoted.iter() {
+                if seen.insert(cell) {
+                    out.push(cell);
+                }
+            }
+        }
+        for candidate in turn_start {
+            if seen.insert(candidate.coord) {
+                out.push(candidate.coord);
+            }
+        }
+        if let Some(list) = self.weak_windows_by_cell.get(&first) {
+            for &index in list {
+                let window = &self.weak_windows[index as usize];
+                for &cell in window.empties.iter() {
+                    if !seen.contains(&cell) {
+                        fresh.push(cell);
+                    }
+                }
+            }
+            fresh.sort_by_key(|&cell| raw_coord_key(cell));
+            for &cell in fresh.iter() {
+                if seen.insert(cell) {
+                    out.push(cell);
+                }
+            }
+        }
+        u64::from(out.capacity() != capacities.0)
+            + u64::from(seen.capacity() != capacities.1)
+            + u64::from(promoted.capacity() != capacities.2)
+            + u64::from(fresh.capacity() != capacities.3)
+    }
+
+    /// Historical allocation/hashing path retained as the test oracle for
+    /// the reusable-scratch/fixed-hasher implementation above.
+    #[cfg(test)]
+    fn second_candidates_reference(
+        &self,
+        first: HexCoord,
+        turn_start: &[Candidate],
+        out: &mut Vec<HexCoord>,
         seen: &mut HashSet<HexCoord>,
-    ) {
+    ) -> u64 {
+        let out_capacity = out.capacity();
+        let seen_capacity = seen.capacity();
+        let mut local_growths = 0u64;
         out.clear();
         seen.clear();
         seen.insert(first);
@@ -9404,7 +10025,7 @@ impl WideTurnGate {
             let mut promoted: Vec<(u8, HexCoord)> = Vec::new();
             for &index in list {
                 let window = &self.windows[index as usize];
-                for &cell in &window.empties {
+                for &cell in window.empties.iter() {
                     if cell != first {
                         promoted.push((window.strength, cell));
                     }
@@ -9413,6 +10034,7 @@ impl WideTurnGate {
             // Strongest promotions first; deterministic within a strength
             // class by raw coordinate order.
             promoted.sort_by_key(|&(strength, cell)| (Reverse(strength), raw_coord_key(cell)));
+            local_growths += u64::from(!promoted.is_empty());
             for (_, cell) in promoted {
                 if seen.insert(cell) {
                     out.push(cell);
@@ -9428,19 +10050,23 @@ impl WideTurnGate {
             let mut fresh: Vec<HexCoord> = Vec::new();
             for &index in list {
                 let window = &self.weak_windows[index as usize];
-                for &cell in &window.empties {
+                for &cell in window.empties.iter() {
                     if !seen.contains(&cell) {
                         fresh.push(cell);
                     }
                 }
             }
             fresh.sort_by_key(|&cell| raw_coord_key(cell));
+            local_growths += u64::from(!fresh.is_empty());
             for cell in fresh {
                 if seen.insert(cell) {
                     out.push(cell);
                 }
             }
         }
+        local_growths
+            + u64::from(out.capacity() != out_capacity)
+            + u64::from(seen.capacity() != seen_capacity)
     }
 
     /// Classify the attacker turn (first, second) exactly as the reference
@@ -16124,5 +16750,157 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn generation_memo_hits_unchanged_windows_and_invalidates_on_mask_delta() {
+        let mut state = replay(&[(0, 0), (0, 8), (2, 7)]);
+        let entry = state
+            .board()
+            .windows()
+            .entries()
+            .find(|entry| entry.active_player().is_some() && entry.empty_mask() != 0)
+            .expect("fixture has an active incomplete window");
+        let key = entry.key();
+        let first_empty = entry.empty_cells()[0];
+        let before_masks = (entry.mask(Player::Player0), entry.mask(Player::Player1));
+        let mut memo = WindowGenerationMemo::default();
+        let expected = CompactEmpties::from_entry(entry);
+        assert_eq!(memo.empties(entry), expected);
+        assert_eq!(memo.empties(entry), expected);
+        assert_eq!((memo.lookups, memo.hits), (2, 1));
+
+        apply_placement(&mut state, Placement { coord: first_empty }).unwrap();
+        let changed = state
+            .board()
+            .windows()
+            .entry(key)
+            .expect("window remains represented");
+        assert_ne!(
+            before_masks,
+            (changed.mask(Player::Player0), changed.mask(Player::Player1))
+        );
+        assert_eq!(memo.empties(changed), CompactEmpties::from_entry(changed));
+        assert_eq!((memo.lookups, memo.hits), (3, 1));
+    }
+
+    /// Frozen production-shape identity/timing gate used by the candidate-
+    /// generation rounds. `TSS_IDENTITY_OUT` receives stable rows containing
+    /// status, node count, and a digest of the complete certificate Debug
+    /// representation; timing is printed separately and never enters it.
+    #[test]
+    #[ignore = "full 6,443-position production-shape identity battery"]
+    fn tss_frozen_identity_battery() {
+        fn parse_jsonl_state(line: &str) -> (String, RustHexoState) {
+            let id_start = line.find("\"pos_id\": \"").expect("pos_id")
+                + "\"pos_id\": \"".len();
+            let id_end = line[id_start..].find('"').map(|n| id_start + n).expect("pos_id end");
+            let id = line[id_start..id_end].to_owned();
+            let moves_start = line.find("\"moves\": [").expect("moves")
+                + "\"moves\": [".len();
+            let moves_end = line[moves_start..]
+                .find("], \"pos_id\"")
+                .map(|n| moves_start + n + 1)
+                .expect("moves end");
+            let bytes = line[moves_start..moves_end].as_bytes();
+            let mut numbers = Vec::<i16>::new();
+            let mut cursor = 0usize;
+            while cursor < bytes.len() {
+                if bytes[cursor] == b'-' || bytes[cursor].is_ascii_digit() {
+                    let start = cursor;
+                    cursor += 1;
+                    while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+                        cursor += 1;
+                    }
+                    numbers.push(line[moves_start + start..moves_start + cursor]
+                        .parse().expect("i16 coordinate"));
+                } else {
+                    cursor += 1;
+                }
+            }
+            assert_eq!(numbers.len() % 2, 0, "{id}: q/r pairs");
+            let mut state = RustHexoState::new();
+            for pair in numbers.chunks_exact(2) {
+                apply_placement(&mut state, Placement {
+                    coord: HexCoord::new(pair[0], pair[1]),
+                }).unwrap_or_else(|error| panic!("{id}: replay failed: {error}"));
+            }
+            (id, state)
+        }
+
+        fn fnv1a(bytes: &[u8]) -> u64 {
+            let mut hash = 0xcbf2_9ce4_8422_2325u64;
+            for &byte in bytes {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            hash
+        }
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let caps = SolveCaps {
+            node_cap: 500,
+            tt_bytes_cap: 256 << 10,
+            semantic_horizon: u32::MAX,
+        };
+        let mut solver = TssSolver::default();
+        solver.configure_leaf_profile();
+        solver.set_dual_pass(true);
+        let mut stable = String::new();
+        let mut count = 0usize;
+        let mut nodes = 0u64;
+        let mut solve_nanos = 0u64;
+        let battery_started = Instant::now();
+        for set in ["human_v1", "selfplay_v1", "puzzle_v3"] {
+            let path = root.join(format!("../../scripts/tss_harness/sets/{set}.jsonl"));
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+            for line in text.lines().filter(|line| !line.trim().is_empty()) {
+                let (id, state) = parse_jsonl_state(line);
+                let started = Instant::now();
+                let result = solver.solve_goal(&state, &caps, SolveGoal::Both);
+                solve_nanos = solve_nanos.saturating_add(
+                    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX));
+                if result.status == ProofStatus::Unknown {
+                    assert!(result.cert.is_none(), "{id}: Unknown carried certificate");
+                } else {
+                    let cert = result.cert.as_ref()
+                        .unwrap_or_else(|| panic!("{id}: decided result lacks certificate"));
+                    assert!(TssVerifier.verify(&state, cert, result.status), "{id}: verifier");
+                }
+                let cert_hash = fnv1a(format!("{:?}", result.cert).as_bytes());
+                use std::fmt::Write as _;
+                writeln!(stable, "{set}\t{id}\t{:?}\t{}\t{cert_hash:016x}",
+                    result.status, result.stats.nodes).expect("identity row");
+                count += 1;
+                nodes = nodes.saturating_add(result.stats.nodes);
+            }
+        }
+        assert_eq!(count, 6_443, "frozen battery cardinality");
+        let digest = fnv1a(stable.as_bytes());
+        if let Ok(path) = std::env::var("TSS_IDENTITY_OUT") {
+            std::fs::write(&path, stable)
+                .unwrap_or_else(|error| panic!("write identity output {path}: {error}"));
+        }
+        println!(
+            "IDENTITY_DONE positions={count} nodes={nodes} solve_wall_s={:.3} battery_wall_s={:.3} digest={digest:016x}",
+            solve_nanos as f64 / 1e9, battery_started.elapsed().as_secs_f64());
+        let (second_calls, reference_growths, optimized_growths) =
+            second_candidate_allocation_profile();
+        println!(
+            "SECOND_ALLOC_DONE calls={second_calls} reference_growth_events={reference_growths} optimized_growth_events={optimized_growths}"
+        );
+        let (memo_lookups, memo_hits) = generation_memo_profile();
+        println!(
+            "GENERATION_MEMO_DONE lookups={memo_lookups} hits={memo_hits} hit_rate_pct={:.3}",
+            100.0 * memo_hits as f64 / memo_lookups.max(1) as f64,
+        );
+        let (pair_ms, defender_ms, regen_ms, expand_ms, refresh_ms, insert_ms) =
+            wide_gen_profile();
+        println!(
+            "GEN_PROFILE pair_ms={pair_ms} defender_ms={defender_ms} regen_ms={regen_ms} expand_ms={expand_ms} refresh_ms={refresh_ms} insert_ms={insert_ms}"
+        );
+        let (setup_ms, search_ms) = wide_solve_phase_profile();
+        println!("SOLVE_PHASE_PROFILE setup_ms={setup_ms} search_ms={search_ms}");
     }
 }

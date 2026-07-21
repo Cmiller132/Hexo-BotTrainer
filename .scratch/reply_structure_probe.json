@@ -1,0 +1,6307 @@
+{
+  "forcing_lines": {
+    "attacker_turns": 91,
+    "component_hist": {
+      "1": 45,
+      "2": 37,
+      "3": 8,
+      "4": 1
+    },
+    "pair_boundary_checks": 192,
+    "pair_boundary_violations": [],
+    "positions": 14,
+    "split_tau2_turns": [
+      {
+        "component_common_hits": [
+          2,
+          2
+        ],
+        "component_sizes": [
+          2,
+          1
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "0hz3hty",
+        "kernel": 4,
+        "minimum_pairs": 4,
+        "placements": [
+          [
+            5,
+            3
+          ],
+          [
+            5,
+            5
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 0,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          2,
+          2
+        ],
+        "component_sizes": [
+          1,
+          1
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "0hz3hty",
+        "kernel": 4,
+        "minimum_pairs": 4,
+        "placements": [
+          [
+            8,
+            4
+          ],
+          [
+            8,
+            6
+          ]
+        ],
+        "tau": 2,
+        "threats": 2,
+        "turn": 2,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          2,
+          1
+        ],
+        "component_sizes": [
+          1,
+          2
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "0l4291i_live",
+        "kernel": 3,
+        "minimum_pairs": 2,
+        "placements": [
+          [
+            2,
+            4
+          ],
+          [
+            9,
+            -5
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 2,
+        "universe": 5
+      },
+      {
+        "component_common_hits": [
+          2,
+          2
+        ],
+        "component_sizes": [
+          1,
+          1
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "0l4291i_live",
+        "kernel": 4,
+        "minimum_pairs": 4,
+        "placements": [
+          [
+            9,
+            -1
+          ],
+          [
+            13,
+            -1
+          ]
+        ],
+        "tau": 2,
+        "threats": 2,
+        "turn": 3,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          1,
+          1
+        ],
+        "component_sizes": [
+          2,
+          1
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "0l4291i_live",
+        "kernel": 2,
+        "minimum_pairs": 1,
+        "placements": [
+          [
+            2,
+            6
+          ],
+          [
+            2,
+            7
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 4,
+        "universe": 3
+      },
+      {
+        "component_common_hits": [
+          2,
+          2
+        ],
+        "component_sizes": [
+          1,
+          1
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "acly7kb",
+        "kernel": 4,
+        "minimum_pairs": 4,
+        "placements": [
+          [
+            2,
+            -6
+          ],
+          [
+            3,
+            -6
+          ]
+        ],
+        "tau": 2,
+        "threats": 2,
+        "turn": 0,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          2,
+          2
+        ],
+        "component_sizes": [
+          1,
+          1
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "g2xx6wl",
+        "kernel": 4,
+        "minimum_pairs": 4,
+        "placements": [
+          [
+            -17,
+            11
+          ],
+          [
+            -8,
+            8
+          ]
+        ],
+        "tau": 2,
+        "threats": 2,
+        "turn": 0,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          2,
+          2
+        ],
+        "component_sizes": [
+          1,
+          1
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "jnzzmcm",
+        "kernel": 4,
+        "minimum_pairs": 4,
+        "placements": [
+          [
+            -3,
+            5
+          ],
+          [
+            2,
+            5
+          ]
+        ],
+        "tau": 2,
+        "threats": 2,
+        "turn": 0,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          2,
+          2
+        ],
+        "component_sizes": [
+          1,
+          1
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "jnzzmcm",
+        "kernel": 4,
+        "minimum_pairs": 4,
+        "placements": [
+          [
+            -3,
+            4
+          ],
+          [
+            -3,
+            7
+          ]
+        ],
+        "tau": 2,
+        "threats": 2,
+        "turn": 1,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          2,
+          2
+        ],
+        "component_sizes": [
+          1,
+          1
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "jnzzmcm",
+        "kernel": 4,
+        "minimum_pairs": 4,
+        "placements": [
+          [
+            -4,
+            2
+          ],
+          [
+            0,
+            -2
+          ]
+        ],
+        "tau": 2,
+        "threats": 2,
+        "turn": 4,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          2,
+          2
+        ],
+        "component_sizes": [
+          1,
+          1
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "lz60mfb",
+        "kernel": 4,
+        "minimum_pairs": 4,
+        "placements": [
+          [
+            0,
+            -3
+          ],
+          [
+            1,
+            -4
+          ]
+        ],
+        "tau": 2,
+        "threats": 2,
+        "turn": 1,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          2,
+          2
+        ],
+        "component_sizes": [
+          1,
+          1
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "lz60mfb",
+        "kernel": 4,
+        "minimum_pairs": 4,
+        "placements": [
+          [
+            -2,
+            -1
+          ],
+          [
+            2,
+            -6
+          ]
+        ],
+        "tau": 2,
+        "threats": 2,
+        "turn": 3,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          1,
+          1
+        ],
+        "component_sizes": [
+          2,
+          2
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "lz60mfb",
+        "kernel": 2,
+        "minimum_pairs": 1,
+        "placements": [
+          [
+            -1,
+            -4
+          ],
+          [
+            0,
+            -4
+          ]
+        ],
+        "tau": 2,
+        "threats": 4,
+        "turn": 4,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          2,
+          2
+        ],
+        "component_sizes": [
+          1,
+          1
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "lz60mfb",
+        "kernel": 4,
+        "minimum_pairs": 4,
+        "placements": [
+          [
+            5,
+            5
+          ],
+          [
+            8,
+            1
+          ]
+        ],
+        "tau": 2,
+        "threats": 2,
+        "turn": 10,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          1,
+          2
+        ],
+        "component_sizes": [
+          2,
+          1
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "xsnfyll",
+        "kernel": 3,
+        "minimum_pairs": 2,
+        "placements": [
+          [
+            -1,
+            -1
+          ],
+          [
+            1,
+            -5
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 0,
+        "universe": 5
+      },
+      {
+        "component_common_hits": [
+          1,
+          1
+        ],
+        "component_sizes": [
+          1,
+          2
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "zrugh2x",
+        "kernel": 2,
+        "minimum_pairs": 1,
+        "placements": [
+          [
+            1,
+            -8
+          ],
+          [
+            2,
+            -8
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 2,
+        "universe": 3
+      },
+      {
+        "component_common_hits": [
+          2,
+          2
+        ],
+        "component_sizes": [
+          1,
+          1
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "zrugh2x",
+        "kernel": 4,
+        "minimum_pairs": 4,
+        "placements": [
+          [
+            1,
+            -4
+          ],
+          [
+            2,
+            -5
+          ]
+        ],
+        "tau": 2,
+        "threats": 2,
+        "turn": 4,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          2,
+          2
+        ],
+        "component_sizes": [
+          1,
+          1
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "zrugh2x",
+        "kernel": 4,
+        "minimum_pairs": 4,
+        "placements": [
+          [
+            1,
+            -5
+          ],
+          [
+            1,
+            -3
+          ]
+        ],
+        "tau": 2,
+        "threats": 2,
+        "turn": 5,
+        "universe": 4
+      }
+    ],
+    "tau_hist": {
+      "2": 63,
+      "None": 28
+    },
+    "turns": [
+      {
+        "component_common_hits": [
+          2,
+          2
+        ],
+        "component_sizes": [
+          2,
+          1
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "0hz3hty",
+        "kernel": 4,
+        "minimum_pairs": 4,
+        "placements": [
+          [
+            5,
+            3
+          ],
+          [
+            5,
+            5
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 0,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "0hz3hty",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            7,
+            3
+          ],
+          [
+            8,
+            2
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 1,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          2,
+          2
+        ],
+        "component_sizes": [
+          1,
+          1
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "0hz3hty",
+        "kernel": 4,
+        "minimum_pairs": 4,
+        "placements": [
+          [
+            8,
+            4
+          ],
+          [
+            8,
+            6
+          ]
+        ],
+        "tau": 2,
+        "threats": 2,
+        "turn": 2,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          2,
+          0
+        ],
+        "component_sizes": [
+          1,
+          4
+        ],
+        "component_taus": [
+          1,
+          2
+        ],
+        "components": 2,
+        "id": "0hz3hty",
+        "kernel": 0,
+        "minimum_pairs": 0,
+        "placements": [
+          [
+            8,
+            5
+          ],
+          [
+            8,
+            8
+          ]
+        ],
+        "tau": null,
+        "threats": 5,
+        "turn": 3,
+        "universe": 6
+      },
+      {
+        "component_common_hits": [
+          1,
+          0
+        ],
+        "component_sizes": [
+          2,
+          1
+        ],
+        "component_taus": [
+          1,
+          null
+        ],
+        "components": 2,
+        "id": "0hz3hty",
+        "kernel": 0,
+        "minimum_pairs": 0,
+        "placements": [
+          [
+            7,
+            8
+          ],
+          [
+            9,
+            8
+          ]
+        ],
+        "tau": null,
+        "threats": 3,
+        "turn": 4,
+        "universe": 2
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "0l4291i_live",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            1,
+            5
+          ],
+          [
+            2,
+            5
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 0,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "0l4291i_live",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            11,
+            -2
+          ],
+          [
+            11,
+            -1
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 1,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          2,
+          1
+        ],
+        "component_sizes": [
+          1,
+          2
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "0l4291i_live",
+        "kernel": 3,
+        "minimum_pairs": 2,
+        "placements": [
+          [
+            2,
+            4
+          ],
+          [
+            9,
+            -5
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 2,
+        "universe": 5
+      },
+      {
+        "component_common_hits": [
+          2,
+          2
+        ],
+        "component_sizes": [
+          1,
+          1
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "0l4291i_live",
+        "kernel": 4,
+        "minimum_pairs": 4,
+        "placements": [
+          [
+            9,
+            -1
+          ],
+          [
+            13,
+            -1
+          ]
+        ],
+        "tau": 2,
+        "threats": 2,
+        "turn": 3,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          1,
+          1
+        ],
+        "component_sizes": [
+          2,
+          1
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "0l4291i_live",
+        "kernel": 2,
+        "minimum_pairs": 1,
+        "placements": [
+          [
+            2,
+            6
+          ],
+          [
+            2,
+            7
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 4,
+        "universe": 3
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "0l4291i_live",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            12,
+            0
+          ],
+          [
+            14,
+            -2
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 5,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "0l4291i_live",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            12,
+            -2
+          ],
+          [
+            13,
+            -2
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 6,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          2,
+          0
+        ],
+        "component_sizes": [
+          1,
+          3
+        ],
+        "component_taus": [
+          1,
+          2
+        ],
+        "components": 2,
+        "id": "0l4291i_live",
+        "kernel": 0,
+        "minimum_pairs": 0,
+        "placements": [
+          [
+            9,
+            1
+          ],
+          [
+            10,
+            0
+          ]
+        ],
+        "tau": null,
+        "threats": 4,
+        "turn": 7,
+        "universe": 6
+      },
+      {
+        "component_common_hits": [
+          0,
+          1
+        ],
+        "component_sizes": [
+          1,
+          2
+        ],
+        "component_taus": [
+          null,
+          1
+        ],
+        "components": 2,
+        "id": "0l4291i_live",
+        "kernel": 0,
+        "minimum_pairs": 0,
+        "placements": [
+          [
+            13,
+            0
+          ],
+          [
+            14,
+            0
+          ]
+        ],
+        "tau": null,
+        "threats": 3,
+        "turn": 8,
+        "universe": 2
+      },
+      {
+        "component_common_hits": [
+          2,
+          2
+        ],
+        "component_sizes": [
+          1,
+          1
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "acly7kb",
+        "kernel": 4,
+        "minimum_pairs": 4,
+        "placements": [
+          [
+            2,
+            -6
+          ],
+          [
+            3,
+            -6
+          ]
+        ],
+        "tau": 2,
+        "threats": 2,
+        "turn": 0,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          4
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "acly7kb",
+        "kernel": 3,
+        "minimum_pairs": 2,
+        "placements": [
+          [
+            3,
+            -7
+          ],
+          [
+            3,
+            -4
+          ]
+        ],
+        "tau": 2,
+        "threats": 4,
+        "turn": 1,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          2,
+          0
+        ],
+        "component_sizes": [
+          1,
+          3
+        ],
+        "component_taus": [
+          1,
+          2
+        ],
+        "components": 2,
+        "id": "acly7kb",
+        "kernel": 0,
+        "minimum_pairs": 0,
+        "placements": [
+          [
+            0,
+            -4
+          ],
+          [
+            1,
+            -4
+          ]
+        ],
+        "tau": null,
+        "threats": 4,
+        "turn": 2,
+        "universe": 6
+      },
+      {
+        "component_common_hits": [
+          0,
+          1
+        ],
+        "component_sizes": [
+          1,
+          2
+        ],
+        "component_taus": [
+          null,
+          1
+        ],
+        "components": 2,
+        "id": "acly7kb",
+        "kernel": 0,
+        "minimum_pairs": 0,
+        "placements": [
+          [
+            1,
+            -5
+          ],
+          [
+            4,
+            -8
+          ]
+        ],
+        "tau": null,
+        "threats": 3,
+        "turn": 3,
+        "universe": 2
+      },
+      {
+        "component_common_hits": [
+          2,
+          2
+        ],
+        "component_sizes": [
+          1,
+          1
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "g2xx6wl",
+        "kernel": 4,
+        "minimum_pairs": 4,
+        "placements": [
+          [
+            -17,
+            11
+          ],
+          [
+            -8,
+            8
+          ]
+        ],
+        "tau": 2,
+        "threats": 2,
+        "turn": 0,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "g2xx6wl",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            -8,
+            5
+          ],
+          [
+            -7,
+            4
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 1,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "g2xx6wl",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            -8,
+            6
+          ],
+          [
+            -8,
+            7
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 2,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "g2xx6wl",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            -7,
+            5
+          ],
+          [
+            -6,
+            5
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 3,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          2,
+          2,
+          2
+        ],
+        "component_sizes": [
+          1,
+          1,
+          1
+        ],
+        "component_taus": [
+          1,
+          1,
+          1
+        ],
+        "components": 3,
+        "id": "g2xx6wl",
+        "kernel": 0,
+        "minimum_pairs": 0,
+        "placements": [
+          [
+            -7,
+            6
+          ],
+          [
+            -7,
+            7
+          ]
+        ],
+        "tau": null,
+        "threats": 3,
+        "turn": 4,
+        "universe": 6
+      },
+      {
+        "component_common_hits": [
+          0,
+          1
+        ],
+        "component_sizes": [
+          1,
+          1
+        ],
+        "component_taus": [
+          null,
+          1
+        ],
+        "components": 2,
+        "id": "g2xx6wl",
+        "kernel": 0,
+        "minimum_pairs": 0,
+        "placements": [
+          [
+            -5,
+            4
+          ],
+          [
+            -4,
+            3
+          ]
+        ],
+        "tau": null,
+        "threats": 2,
+        "turn": 5,
+        "universe": 1
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "hu01jk4",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            7,
+            -8
+          ],
+          [
+            7,
+            -7
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 0,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "hu01jk4",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            6,
+            -7
+          ],
+          [
+            8,
+            -9
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 1,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "hu01jk4",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            8,
+            -7
+          ],
+          [
+            9,
+            -7
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 2,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "hu01jk4",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            8,
+            -8
+          ],
+          [
+            8,
+            -6
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 3,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          2,
+          2,
+          2
+        ],
+        "component_sizes": [
+          1,
+          1,
+          1
+        ],
+        "component_taus": [
+          1,
+          1,
+          1
+        ],
+        "components": 3,
+        "id": "hu01jk4",
+        "kernel": 0,
+        "minimum_pairs": 0,
+        "placements": [
+          [
+            9,
+            -6
+          ],
+          [
+            9,
+            -5
+          ]
+        ],
+        "tau": null,
+        "threats": 3,
+        "turn": 4,
+        "universe": 6
+      },
+      {
+        "component_common_hits": [
+          0,
+          1
+        ],
+        "component_sizes": [
+          1,
+          2
+        ],
+        "component_taus": [
+          null,
+          1
+        ],
+        "components": 2,
+        "id": "hu01jk4",
+        "kernel": 0,
+        "minimum_pairs": 0,
+        "placements": [
+          [
+            10,
+            -6
+          ],
+          [
+            11,
+            -6
+          ]
+        ],
+        "tau": null,
+        "threats": 3,
+        "turn": 5,
+        "universe": 2
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "jh7yo7y",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            2,
+            3
+          ],
+          [
+            3,
+            3
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 0,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "jh7yo7y",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            1,
+            4
+          ],
+          [
+            3,
+            2
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 1,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "jh7yo7y",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            3,
+            1
+          ],
+          [
+            3,
+            4
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 2,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "jh7yo7y",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            0,
+            4
+          ],
+          [
+            2,
+            4
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 3,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          2,
+          2,
+          0
+        ],
+        "component_sizes": [
+          2,
+          1,
+          3
+        ],
+        "component_taus": [
+          1,
+          1,
+          2
+        ],
+        "components": 3,
+        "id": "jh7yo7y",
+        "kernel": 0,
+        "minimum_pairs": 0,
+        "placements": [
+          [
+            2,
+            1
+          ],
+          [
+            2,
+            2
+          ]
+        ],
+        "tau": null,
+        "threats": 6,
+        "turn": 4,
+        "universe": 8
+      },
+      {
+        "component_common_hits": [
+          0,
+          0,
+          2
+        ],
+        "component_sizes": [
+          1,
+          1,
+          1
+        ],
+        "component_taus": [
+          null,
+          null,
+          1
+        ],
+        "components": 3,
+        "id": "jh7yo7y",
+        "kernel": 0,
+        "minimum_pairs": 0,
+        "placements": [
+          [
+            0,
+            2
+          ],
+          [
+            1,
+            2
+          ]
+        ],
+        "tau": null,
+        "threats": 3,
+        "turn": 5,
+        "universe": 2
+      },
+      {
+        "component_common_hits": [
+          2,
+          2
+        ],
+        "component_sizes": [
+          1,
+          1
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "jnzzmcm",
+        "kernel": 4,
+        "minimum_pairs": 4,
+        "placements": [
+          [
+            -3,
+            5
+          ],
+          [
+            2,
+            5
+          ]
+        ],
+        "tau": 2,
+        "threats": 2,
+        "turn": 0,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          2,
+          2
+        ],
+        "component_sizes": [
+          1,
+          1
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "jnzzmcm",
+        "kernel": 4,
+        "minimum_pairs": 4,
+        "placements": [
+          [
+            -3,
+            4
+          ],
+          [
+            -3,
+            7
+          ]
+        ],
+        "tau": 2,
+        "threats": 2,
+        "turn": 1,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "jnzzmcm",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            -1,
+            2
+          ],
+          [
+            0,
+            1
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 2,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "jnzzmcm",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            -3,
+            1
+          ],
+          [
+            -2,
+            1
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 3,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          2,
+          2
+        ],
+        "component_sizes": [
+          1,
+          1
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "jnzzmcm",
+        "kernel": 4,
+        "minimum_pairs": 4,
+        "placements": [
+          [
+            -4,
+            2
+          ],
+          [
+            0,
+            -2
+          ]
+        ],
+        "tau": 2,
+        "threats": 2,
+        "turn": 4,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          2,
+          2,
+          2
+        ],
+        "component_sizes": [
+          1,
+          1,
+          1
+        ],
+        "component_taus": [
+          1,
+          1,
+          1
+        ],
+        "components": 3,
+        "id": "jnzzmcm",
+        "kernel": 0,
+        "minimum_pairs": 0,
+        "placements": [
+          [
+            0,
+            -3
+          ],
+          [
+            1,
+            -3
+          ]
+        ],
+        "tau": null,
+        "threats": 3,
+        "turn": 5,
+        "universe": 6
+      },
+      {
+        "component_common_hits": [
+          0,
+          1
+        ],
+        "component_sizes": [
+          1,
+          2
+        ],
+        "component_taus": [
+          null,
+          1
+        ],
+        "components": 2,
+        "id": "jnzzmcm",
+        "kernel": 0,
+        "minimum_pairs": 0,
+        "placements": [
+          [
+            2,
+            -3
+          ],
+          [
+            3,
+            -3
+          ]
+        ],
+        "tau": null,
+        "threats": 3,
+        "turn": 6,
+        "universe": 2
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "lz60mfb",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            1,
+            -5
+          ],
+          [
+            2,
+            -5
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 0,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          2,
+          2
+        ],
+        "component_sizes": [
+          1,
+          1
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "lz60mfb",
+        "kernel": 4,
+        "minimum_pairs": 4,
+        "placements": [
+          [
+            0,
+            -3
+          ],
+          [
+            1,
+            -4
+          ]
+        ],
+        "tau": 2,
+        "threats": 2,
+        "turn": 1,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "lz60mfb",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            0,
+            -2
+          ],
+          [
+            2,
+            -4
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 2,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          2,
+          2
+        ],
+        "component_sizes": [
+          1,
+          1
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "lz60mfb",
+        "kernel": 4,
+        "minimum_pairs": 4,
+        "placements": [
+          [
+            -2,
+            -1
+          ],
+          [
+            2,
+            -6
+          ]
+        ],
+        "tau": 2,
+        "threats": 2,
+        "turn": 3,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          1,
+          1
+        ],
+        "component_sizes": [
+          2,
+          2
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "lz60mfb",
+        "kernel": 2,
+        "minimum_pairs": 1,
+        "placements": [
+          [
+            -1,
+            -4
+          ],
+          [
+            0,
+            -4
+          ]
+        ],
+        "tau": 2,
+        "threats": 4,
+        "turn": 4,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "lz60mfb",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            -1,
+            -3
+          ],
+          [
+            10,
+            0
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 5,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "lz60mfb",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            9,
+            0
+          ],
+          [
+            11,
+            0
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 6,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "lz60mfb",
+        "kernel": 3,
+        "minimum_pairs": 2,
+        "placements": [
+          [
+            10,
+            1
+          ],
+          [
+            10,
+            2
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 7,
+        "universe": 3
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "lz60mfb",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            8,
+            3
+          ],
+          [
+            9,
+            2
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 8,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "lz60mfb",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            7,
+            2
+          ],
+          [
+            8,
+            2
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 9,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          2,
+          2
+        ],
+        "component_sizes": [
+          1,
+          1
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "lz60mfb",
+        "kernel": 4,
+        "minimum_pairs": 4,
+        "placements": [
+          [
+            5,
+            5
+          ],
+          [
+            8,
+            1
+          ]
+        ],
+        "tau": 2,
+        "threats": 2,
+        "turn": 10,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          2,
+          0
+        ],
+        "component_sizes": [
+          1,
+          3
+        ],
+        "component_taus": [
+          1,
+          2
+        ],
+        "components": 2,
+        "id": "lz60mfb",
+        "kernel": 0,
+        "minimum_pairs": 0,
+        "placements": [
+          [
+            7,
+            1
+          ],
+          [
+            9,
+            1
+          ]
+        ],
+        "tau": null,
+        "threats": 4,
+        "turn": 11,
+        "universe": 6
+      },
+      {
+        "component_common_hits": [
+          1,
+          0,
+          1
+        ],
+        "component_sizes": [
+          2,
+          1,
+          2
+        ],
+        "component_taus": [
+          1,
+          null,
+          1
+        ],
+        "components": 3,
+        "id": "lz60mfb",
+        "kernel": 0,
+        "minimum_pairs": 0,
+        "placements": [
+          [
+            6,
+            4
+          ],
+          [
+            7,
+            3
+          ]
+        ],
+        "tau": null,
+        "threats": 5,
+        "turn": 12,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          1,
+          2
+        ],
+        "component_sizes": [
+          2,
+          1
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "xsnfyll",
+        "kernel": 3,
+        "minimum_pairs": 2,
+        "placements": [
+          [
+            -1,
+            -1
+          ],
+          [
+            1,
+            -5
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 0,
+        "universe": 5
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "xsnfyll",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            -1,
+            -3
+          ],
+          [
+            -1,
+            -2
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 1,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          1,
+          0
+        ],
+        "component_sizes": [
+          2,
+          3
+        ],
+        "component_taus": [
+          1,
+          2
+        ],
+        "components": 2,
+        "id": "xsnfyll",
+        "kernel": 0,
+        "minimum_pairs": 0,
+        "placements": [
+          [
+            -2,
+            -2
+          ],
+          [
+            0,
+            -4
+          ]
+        ],
+        "tau": null,
+        "threats": 5,
+        "turn": 2,
+        "universe": 7
+      },
+      {
+        "component_common_hits": [
+          1,
+          0
+        ],
+        "component_sizes": [
+          2,
+          1
+        ],
+        "component_taus": [
+          1,
+          null
+        ],
+        "components": 2,
+        "id": "xsnfyll",
+        "kernel": 0,
+        "minimum_pairs": 0,
+        "placements": [
+          [
+            2,
+            -6
+          ],
+          [
+            3,
+            -7
+          ]
+        ],
+        "tau": null,
+        "threats": 3,
+        "turn": 3,
+        "universe": 2
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "zrugh2x",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            6,
+            -11
+          ],
+          [
+            7,
+            -11
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 0,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "zrugh2x",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            3,
+            -8
+          ],
+          [
+            5,
+            -10
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 1,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          1,
+          1
+        ],
+        "component_sizes": [
+          1,
+          2
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "zrugh2x",
+        "kernel": 2,
+        "minimum_pairs": 1,
+        "placements": [
+          [
+            1,
+            -8
+          ],
+          [
+            2,
+            -8
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 2,
+        "universe": 3
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "zrugh2x",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            3,
+            -7
+          ],
+          [
+            3,
+            -6
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 3,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          2,
+          2
+        ],
+        "component_sizes": [
+          1,
+          1
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "zrugh2x",
+        "kernel": 4,
+        "minimum_pairs": 4,
+        "placements": [
+          [
+            1,
+            -4
+          ],
+          [
+            2,
+            -5
+          ]
+        ],
+        "tau": 2,
+        "threats": 2,
+        "turn": 4,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          2,
+          2
+        ],
+        "component_sizes": [
+          1,
+          1
+        ],
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "id": "zrugh2x",
+        "kernel": 4,
+        "minimum_pairs": 4,
+        "placements": [
+          [
+            1,
+            -5
+          ],
+          [
+            1,
+            -3
+          ]
+        ],
+        "tau": 2,
+        "threats": 2,
+        "turn": 5,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          2,
+          0
+        ],
+        "component_sizes": [
+          1,
+          3
+        ],
+        "component_taus": [
+          1,
+          2
+        ],
+        "components": 2,
+        "id": "zrugh2x",
+        "kernel": 0,
+        "minimum_pairs": 0,
+        "placements": [
+          [
+            -3,
+            -4
+          ],
+          [
+            0,
+            -5
+          ]
+        ],
+        "tau": null,
+        "threats": 4,
+        "turn": 6,
+        "universe": 6
+      },
+      {
+        "component_common_hits": [
+          0,
+          1
+        ],
+        "component_sizes": [
+          1,
+          2
+        ],
+        "component_taus": [
+          null,
+          1
+        ],
+        "components": 2,
+        "id": "zrugh2x",
+        "kernel": 0,
+        "minimum_pairs": 0,
+        "placements": [
+          [
+            -2,
+            -4
+          ],
+          [
+            -1,
+            -4
+          ]
+        ],
+        "tau": null,
+        "threats": 3,
+        "turn": 7,
+        "universe": 2
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "strongloss_a_prefix6",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            -3,
+            3
+          ],
+          [
+            1,
+            5
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 0,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "strongloss_a_prefix6",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            -1,
+            6
+          ],
+          [
+            0,
+            5
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 1,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "strongloss_a_prefix6",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            -2,
+            5
+          ],
+          [
+            -1,
+            5
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 2,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          2,
+          0
+        ],
+        "component_sizes": [
+          1,
+          3
+        ],
+        "component_taus": [
+          1,
+          2
+        ],
+        "components": 2,
+        "id": "strongloss_a_prefix6",
+        "kernel": 0,
+        "minimum_pairs": 0,
+        "placements": [
+          [
+            -1,
+            3
+          ],
+          [
+            -1,
+            4
+          ]
+        ],
+        "tau": null,
+        "threats": 4,
+        "turn": 3,
+        "universe": 6
+      },
+      {
+        "component_common_hits": [
+          2,
+          1,
+          0,
+          1
+        ],
+        "component_sizes": [
+          1,
+          2,
+          1,
+          2
+        ],
+        "component_taus": [
+          1,
+          1,
+          null,
+          1
+        ],
+        "components": 4,
+        "id": "strongloss_a_prefix6",
+        "kernel": 0,
+        "minimum_pairs": 0,
+        "placements": [
+          [
+            -2,
+            3
+          ],
+          [
+            0,
+            3
+          ]
+        ],
+        "tau": null,
+        "threats": 6,
+        "turn": 4,
+        "universe": 6
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "strongloss_b_prefix8",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            0,
+            -2
+          ],
+          [
+            2,
+            -3
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 0,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "strongloss_b_prefix8",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            -1,
+            0
+          ],
+          [
+            0,
+            -1
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 1,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0,
+          2
+        ],
+        "component_sizes": [
+          3,
+          1
+        ],
+        "component_taus": [
+          2,
+          1
+        ],
+        "components": 2,
+        "id": "strongloss_b_prefix8",
+        "kernel": 0,
+        "minimum_pairs": 0,
+        "placements": [
+          [
+            0,
+            -3
+          ],
+          [
+            2,
+            -1
+          ]
+        ],
+        "tau": null,
+        "threats": 4,
+        "turn": 2,
+        "universe": 6
+      },
+      {
+        "component_common_hits": [
+          0,
+          1
+        ],
+        "component_sizes": [
+          1,
+          2
+        ],
+        "component_taus": [
+          null,
+          1
+        ],
+        "components": 2,
+        "id": "strongloss_b_prefix8",
+        "kernel": 0,
+        "minimum_pairs": 0,
+        "placements": [
+          [
+            2,
+            0
+          ],
+          [
+            2,
+            1
+          ]
+        ],
+        "tau": null,
+        "threats": 3,
+        "turn": 3,
+        "universe": 2
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "hayes_20260712_turn16",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            6,
+            -5
+          ],
+          [
+            6,
+            -3
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 0,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "hayes_20260712_turn16",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            -6,
+            4
+          ],
+          [
+            -5,
+            4
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 1,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          4
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "hayes_20260712_turn16",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            -4,
+            3
+          ],
+          [
+            -3,
+            2
+          ]
+        ],
+        "tau": 2,
+        "threats": 4,
+        "turn": 2,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "hayes_20260712_turn16",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            -6,
+            2
+          ],
+          [
+            -5,
+            2
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 3,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "hayes_20260712_turn16",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            -7,
+            3
+          ],
+          [
+            -5,
+            1
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 4,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0,
+          0
+        ],
+        "component_sizes": [
+          3,
+          3
+        ],
+        "component_taus": [
+          2,
+          2
+        ],
+        "components": 2,
+        "id": "hayes_20260712_turn16",
+        "kernel": 0,
+        "minimum_pairs": 0,
+        "placements": [
+          [
+            -6,
+            3
+          ],
+          [
+            -5,
+            3
+          ]
+        ],
+        "tau": null,
+        "threats": 6,
+        "turn": 5,
+        "universe": 8
+      },
+      {
+        "component_common_hits": [
+          1,
+          0,
+          2
+        ],
+        "component_sizes": [
+          2,
+          1,
+          1
+        ],
+        "component_taus": [
+          1,
+          null,
+          1
+        ],
+        "components": 3,
+        "id": "hayes_20260712_turn16",
+        "kernel": 0,
+        "minimum_pairs": 0,
+        "placements": [
+          [
+            -5,
+            5
+          ],
+          [
+            -5,
+            6
+          ]
+        ],
+        "tau": null,
+        "threats": 4,
+        "turn": 6,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "hayes_20260712_placement31",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            6,
+            -5
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 0,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "hayes_20260712_placement31",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            -6,
+            4
+          ],
+          [
+            -5,
+            4
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 1,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          4
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "hayes_20260712_placement31",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            -4,
+            3
+          ],
+          [
+            -3,
+            2
+          ]
+        ],
+        "tau": 2,
+        "threats": 4,
+        "turn": 2,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "hayes_20260712_placement31",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            -6,
+            2
+          ],
+          [
+            -5,
+            2
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 3,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0
+        ],
+        "component_sizes": [
+          3
+        ],
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "id": "hayes_20260712_placement31",
+        "kernel": 4,
+        "minimum_pairs": 3,
+        "placements": [
+          [
+            -7,
+            3
+          ],
+          [
+            -5,
+            1
+          ]
+        ],
+        "tau": 2,
+        "threats": 3,
+        "turn": 4,
+        "universe": 4
+      },
+      {
+        "component_common_hits": [
+          0,
+          0
+        ],
+        "component_sizes": [
+          3,
+          3
+        ],
+        "component_taus": [
+          2,
+          2
+        ],
+        "components": 2,
+        "id": "hayes_20260712_placement31",
+        "kernel": 0,
+        "minimum_pairs": 0,
+        "placements": [
+          [
+            -6,
+            3
+          ],
+          [
+            -5,
+            3
+          ]
+        ],
+        "tau": null,
+        "threats": 6,
+        "turn": 5,
+        "universe": 8
+      },
+      {
+        "component_common_hits": [
+          1,
+          0,
+          2
+        ],
+        "component_sizes": [
+          2,
+          1,
+          1
+        ],
+        "component_taus": [
+          1,
+          null,
+          1
+        ],
+        "components": 3,
+        "id": "hayes_20260712_placement31",
+        "kernel": 0,
+        "minimum_pairs": 0,
+        "placements": [
+          [
+            -5,
+            5
+          ],
+          [
+            -5,
+            6
+          ]
+        ],
+        "tau": null,
+        "threats": 4,
+        "turn": 6,
+        "universe": 4
+      }
+    ]
+  },
+  "human": {
+    "affine_nontrivial_positions": [],
+    "b2_tau1_positions": [
+      {
+        "affine_stabilizers": 1,
+        "atomic_cover_children": 581,
+        "budget": 2,
+        "common_hits": 1,
+        "component_taus": [
+          1
+        ],
+        "components": 1,
+        "dead": 0,
+        "directed_new_cover_pairs": 0,
+        "id": "human_be91a1257de6b9e5_p39",
+        "inert": 45,
+        "legal": 581,
+        "legal_orbits": 581,
+        "ordered_full_turns": 336980,
+        "phase": "first",
+        "root_legal_cover_pairs": 581,
+        "sequential_cover_leaves": 1162,
+        "split_cover_pairs": 1,
+        "stones": 39,
+        "tau": 1,
+        "threats": 2
+      },
+      {
+        "affine_stabilizers": 1,
+        "atomic_cover_children": 882,
+        "budget": 2,
+        "common_hits": 2,
+        "component_taus": [
+          1
+        ],
+        "components": 1,
+        "dead": 0,
+        "directed_new_cover_pairs": 51,
+        "id": "human_43197e14fbd8e676_p25",
+        "inert": 9,
+        "legal": 417,
+        "legal_orbits": 417,
+        "ordered_full_turns": 173472,
+        "phase": "first",
+        "root_legal_cover_pairs": 831,
+        "sequential_cover_leaves": 1713,
+        "split_cover_pairs": 0,
+        "stones": 25,
+        "tau": 1,
+        "threats": 1
+      },
+      {
+        "affine_stabilizers": 1,
+        "atomic_cover_children": 977,
+        "budget": 2,
+        "common_hits": 2,
+        "component_taus": [
+          1
+        ],
+        "components": 1,
+        "dead": 0,
+        "directed_new_cover_pairs": 0,
+        "id": "human_e2915b3d3fb4138f_p15",
+        "inert": 26,
+        "legal": 490,
+        "legal_orbits": 490,
+        "ordered_full_turns": 239610,
+        "phase": "first",
+        "root_legal_cover_pairs": 977,
+        "sequential_cover_leaves": 1954,
+        "split_cover_pairs": 0,
+        "stones": 15,
+        "tau": 1,
+        "threats": 1
+      },
+      {
+        "affine_stabilizers": 1,
+        "atomic_cover_children": 726,
+        "budget": 2,
+        "common_hits": 2,
+        "component_taus": [
+          1
+        ],
+        "components": 1,
+        "dead": 0,
+        "directed_new_cover_pairs": 37,
+        "id": "human_027e0514a0aa45b6_p21",
+        "inert": 2,
+        "legal": 346,
+        "legal_orbits": 346,
+        "ordered_full_turns": 119370,
+        "phase": "first",
+        "root_legal_cover_pairs": 689,
+        "sequential_cover_leaves": 1415,
+        "split_cover_pairs": 0,
+        "stones": 21,
+        "tau": 1,
+        "threats": 1
+      },
+      {
+        "affine_stabilizers": 1,
+        "atomic_cover_children": 423,
+        "budget": 2,
+        "common_hits": 1,
+        "component_taus": [
+          1
+        ],
+        "components": 1,
+        "dead": 0,
+        "directed_new_cover_pairs": 0,
+        "id": "human_a515c0d5643037fe_p39",
+        "inert": 7,
+        "legal": 423,
+        "legal_orbits": 423,
+        "ordered_full_turns": 178506,
+        "phase": "first",
+        "root_legal_cover_pairs": 423,
+        "sequential_cover_leaves": 846,
+        "split_cover_pairs": 1,
+        "stones": 39,
+        "tau": 1,
+        "threats": 2
+      }
+    ],
+    "b2_tau2_positions": [
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_29b71d87b0ffcc45_p15",
+        "inert": 15,
+        "kernel": 4,
+        "legal": 423,
+        "legal_orbits": 423,
+        "minimum_pairs": 3,
+        "phase": "first",
+        "stones": 15,
+        "tau": 2,
+        "threats": 3,
+        "universe": 4
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_133d1b998e02c9cc_p33",
+        "inert": 2,
+        "kernel": 4,
+        "legal": 410,
+        "legal_orbits": 410,
+        "minimum_pairs": 3,
+        "phase": "first",
+        "stones": 33,
+        "tau": 2,
+        "threats": 3,
+        "universe": 4
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_bdfad306c1e759a7_p95",
+        "inert": 39,
+        "kernel": 4,
+        "legal": 703,
+        "legal_orbits": 703,
+        "minimum_pairs": 3,
+        "phase": "first",
+        "stones": 95,
+        "tau": 2,
+        "threats": 3,
+        "universe": 4
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_a27d9c23cf7835fe_p63",
+        "inert": 65,
+        "kernel": 4,
+        "legal": 665,
+        "legal_orbits": 665,
+        "minimum_pairs": 3,
+        "phase": "first",
+        "stones": 63,
+        "tau": 2,
+        "threats": 3,
+        "universe": 4
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "dead": 0,
+        "id": "human_a27d9c23cf7835fe_p75",
+        "inert": 75,
+        "kernel": 4,
+        "legal": 715,
+        "legal_orbits": 715,
+        "minimum_pairs": 4,
+        "phase": "first",
+        "stones": 75,
+        "tau": 2,
+        "threats": 2,
+        "universe": 4
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_642bf84793500e21_p17",
+        "inert": 9,
+        "kernel": 4,
+        "legal": 369,
+        "legal_orbits": 369,
+        "minimum_pairs": 3,
+        "phase": "first",
+        "stones": 17,
+        "tau": 2,
+        "threats": 3,
+        "universe": 4
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_d8d452fd216d03f7_p13",
+        "inert": 5,
+        "kernel": 4,
+        "legal": 325,
+        "legal_orbits": 325,
+        "minimum_pairs": 3,
+        "phase": "first",
+        "stones": 13,
+        "tau": 2,
+        "threats": 3,
+        "universe": 4
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_eb74c63244add853_p23",
+        "inert": 8,
+        "kernel": 4,
+        "legal": 392,
+        "legal_orbits": 392,
+        "minimum_pairs": 3,
+        "phase": "first",
+        "stones": 23,
+        "tau": 2,
+        "threats": 3,
+        "universe": 4
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_2442140419361ddf_p65",
+        "inert": 84,
+        "kernel": 4,
+        "legal": 724,
+        "legal_orbits": 724,
+        "minimum_pairs": 3,
+        "phase": "first",
+        "stones": 65,
+        "tau": 2,
+        "threats": 3,
+        "universe": 4
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_054e9efadeb4b0de_p27",
+        "inert": 26,
+        "kernel": 4,
+        "legal": 490,
+        "legal_orbits": 490,
+        "minimum_pairs": 3,
+        "phase": "first",
+        "stones": 27,
+        "tau": 2,
+        "threats": 3,
+        "universe": 4
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_e3459642188470f5_p21",
+        "inert": 10,
+        "kernel": 4,
+        "legal": 378,
+        "legal_orbits": 378,
+        "minimum_pairs": 3,
+        "phase": "first",
+        "stones": 21,
+        "tau": 2,
+        "threats": 3,
+        "universe": 4
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_992a9a0a43391991_p15",
+        "inert": 13,
+        "kernel": 4,
+        "legal": 445,
+        "legal_orbits": 445,
+        "minimum_pairs": 3,
+        "phase": "first",
+        "stones": 15,
+        "tau": 2,
+        "threats": 3,
+        "universe": 4
+      }
+    ],
+    "dead_fraction_all_legal": 0.00018785894476947023,
+    "dead_spare_child_count": 8,
+    "dead_spare_dead": {
+      "max": 0,
+      "median": 0,
+      "min": 0,
+      "n": 8,
+      "p90": 0,
+      "sum": 0
+    },
+    "dead_spare_fraction": 0.0,
+    "dead_spare_legal": {
+      "max": 580,
+      "median": 450,
+      "min": 355,
+      "n": 8,
+      "p90": 580,
+      "sum": 3590
+    },
+    "inert_fraction_all_legal": 0.049755783371799686,
+    "input": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\group2-zones\\.codex-group2-shadow\\human_positions.txt",
+    "pair_boundary_checks": 37,
+    "pair_boundary_violations": [],
+    "positions": 160,
+    "positions_with_dead": 9,
+    "root_dead": {
+      "max": 3,
+      "median": 0,
+      "min": 0,
+      "n": 160,
+      "p90": 0,
+      "sum": 14
+    },
+    "root_inert": {
+      "max": 145,
+      "median": 13,
+      "min": 0,
+      "n": 160,
+      "p90": 54,
+      "sum": 3708
+    },
+    "root_legal": {
+      "max": 938,
+      "median": 428,
+      "min": 314,
+      "n": 160,
+      "p90": 632,
+      "sum": 74524
+    },
+    "rows": [
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_be91a1257de6b9e5_p36",
+        "inert": 27,
+        "legal": 579,
+        "legal_orbits": 579,
+        "phase": "second",
+        "stones": 36,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          1
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_be91a1257de6b9e5_p39",
+        "inert": 45,
+        "legal": 581,
+        "legal_orbits": 581,
+        "phase": "first",
+        "stones": 39,
+        "tau": 1,
+        "threats": 2
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_3298a9790d893d53_p29",
+        "inert": 5,
+        "legal": 413,
+        "legal_orbits": 413,
+        "phase": "first",
+        "stones": 29,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_3298a9790d893d53_p31",
+        "inert": 7,
+        "legal": 415,
+        "legal_orbits": 415,
+        "phase": "first",
+        "stones": 31,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_5965b6bfc16c87f4_p76",
+        "inert": 66,
+        "legal": 658,
+        "legal_orbits": 658,
+        "phase": "second",
+        "stones": 76,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "dead": 1,
+        "id": "human_5965b6bfc16c87f4_p87",
+        "inert": 81,
+        "legal": 697,
+        "legal_orbits": 697,
+        "phase": "first",
+        "stones": 87,
+        "tau": 2,
+        "threats": 4
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_da5c88bfc9487586_p45",
+        "inert": 18,
+        "legal": 522,
+        "legal_orbits": 522,
+        "phase": "first",
+        "stones": 45,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_da5c88bfc9487586_p46",
+        "inert": 18,
+        "legal": 522,
+        "legal_orbits": 522,
+        "phase": "second",
+        "stones": 46,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_499240aa9ca306f9_p19",
+        "inert": 20,
+        "legal": 484,
+        "legal_orbits": 484,
+        "phase": "first",
+        "stones": 19,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_499240aa9ca306f9_p24",
+        "inert": 24,
+        "legal": 528,
+        "legal_orbits": 528,
+        "phase": "second",
+        "stones": 24,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_29b71d87b0ffcc45_p15",
+        "inert": 15,
+        "legal": 423,
+        "legal_orbits": 423,
+        "phase": "first",
+        "stones": 15,
+        "tau": 2,
+        "threats": 3
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [
+          1
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_29b71d87b0ffcc45_p20",
+        "inert": 18,
+        "legal": 442,
+        "legal_orbits": 442,
+        "phase": "second",
+        "stones": 20,
+        "tau": 1,
+        "threats": 1
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_133d1b998e02c9cc_p22",
+        "inert": 3,
+        "legal": 363,
+        "legal_orbits": 363,
+        "phase": "second",
+        "stones": 22,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_133d1b998e02c9cc_p33",
+        "inert": 2,
+        "legal": 410,
+        "legal_orbits": 410,
+        "phase": "first",
+        "stones": 33,
+        "tau": 2,
+        "threats": 3
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_a6ee2ac321a6d7ce_p37",
+        "inert": 37,
+        "legal": 525,
+        "legal_orbits": 525,
+        "phase": "first",
+        "stones": 37,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_a6ee2ac321a6d7ce_p63",
+        "inert": 34,
+        "legal": 562,
+        "legal_orbits": 562,
+        "phase": "first",
+        "stones": 63,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_51c3cecc5a8cb7c6_p18",
+        "inert": 4,
+        "legal": 348,
+        "legal_orbits": 348,
+        "phase": "second",
+        "stones": 18,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          1,
+          2
+        ],
+        "components": 2,
+        "dead": 0,
+        "id": "human_51c3cecc5a8cb7c6_p23",
+        "inert": 5,
+        "legal": 357,
+        "legal_orbits": 357,
+        "phase": "first",
+        "stones": 23,
+        "tau": null,
+        "threats": 4
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_efc0863d7a94f55c_p18",
+        "inert": 3,
+        "legal": 347,
+        "legal_orbits": 347,
+        "phase": "second",
+        "stones": 18,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_efc0863d7a94f55c_p36",
+        "inert": 11,
+        "legal": 419,
+        "legal_orbits": 419,
+        "phase": "second",
+        "stones": 36,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_dd071139c46bc0d9_p15",
+        "inert": 7,
+        "legal": 383,
+        "legal_orbits": 383,
+        "phase": "first",
+        "stones": 15,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_dd071139c46bc0d9_p16",
+        "inert": 6,
+        "legal": 382,
+        "legal_orbits": 382,
+        "phase": "second",
+        "stones": 16,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_bdfad306c1e759a7_p82",
+        "inert": 15,
+        "legal": 535,
+        "legal_orbits": 535,
+        "phase": "second",
+        "stones": 82,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_bdfad306c1e759a7_p95",
+        "inert": 39,
+        "legal": 703,
+        "legal_orbits": 703,
+        "phase": "first",
+        "stones": 95,
+        "tau": 2,
+        "threats": 3
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_cdc7a2b51d8ca0ee_p18",
+        "inert": 26,
+        "legal": 466,
+        "legal_orbits": 466,
+        "phase": "second",
+        "stones": 18,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [
+          1
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_cdc7a2b51d8ca0ee_p34",
+        "inert": 32,
+        "legal": 496,
+        "legal_orbits": 496,
+        "phase": "second",
+        "stones": 34,
+        "tau": 1,
+        "threats": 1
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_9aa08c4dbcaa5f2f_p25",
+        "inert": 28,
+        "legal": 468,
+        "legal_orbits": 468,
+        "phase": "first",
+        "stones": 25,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_9aa08c4dbcaa5f2f_p41",
+        "inert": 36,
+        "legal": 540,
+        "legal_orbits": 540,
+        "phase": "first",
+        "stones": 41,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_a4532c7aabf166ea_p15",
+        "inert": 4,
+        "legal": 332,
+        "legal_orbits": 332,
+        "phase": "first",
+        "stones": 15,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 1,
+        "id": "human_a4532c7aabf166ea_p61",
+        "inert": 45,
+        "legal": 597,
+        "legal_orbits": 597,
+        "phase": "first",
+        "stones": 61,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_0b39ea1a6c8eee20_p53",
+        "inert": 15,
+        "legal": 479,
+        "legal_orbits": 479,
+        "phase": "first",
+        "stones": 53,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 2,
+        "id": "human_0b39ea1a6c8eee20_p198",
+        "inert": 88,
+        "legal": 896,
+        "legal_orbits": 896,
+        "phase": "second",
+        "stones": 198,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [
+          1
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_a07f3ba889c3db0c_p12",
+        "inert": 9,
+        "legal": 369,
+        "legal_orbits": 369,
+        "phase": "second",
+        "stones": 12,
+        "tau": 1,
+        "threats": 1
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_a07f3ba889c3db0c_p21",
+        "inert": 13,
+        "legal": 397,
+        "legal_orbits": 397,
+        "phase": "first",
+        "stones": 21,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          1
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_43197e14fbd8e676_p25",
+        "inert": 9,
+        "legal": 417,
+        "legal_orbits": 417,
+        "phase": "first",
+        "stones": 25,
+        "tau": 1,
+        "threats": 1
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_43197e14fbd8e676_p48",
+        "inert": 26,
+        "legal": 522,
+        "legal_orbits": 522,
+        "phase": "second",
+        "stones": 48,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          1
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_e2915b3d3fb4138f_p15",
+        "inert": 26,
+        "legal": 490,
+        "legal_orbits": 490,
+        "phase": "first",
+        "stones": 15,
+        "tau": 1,
+        "threats": 1
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_e2915b3d3fb4138f_p28",
+        "inert": 34,
+        "legal": 522,
+        "legal_orbits": 522,
+        "phase": "second",
+        "stones": 28,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_0193f7dcd7c86b85_p31",
+        "inert": 3,
+        "legal": 371,
+        "legal_orbits": 371,
+        "phase": "first",
+        "stones": 31,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_0193f7dcd7c86b85_p96",
+        "inert": 50,
+        "legal": 618,
+        "legal_orbits": 618,
+        "phase": "second",
+        "stones": 96,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_a27d9c23cf7835fe_p63",
+        "inert": 65,
+        "legal": 665,
+        "legal_orbits": 665,
+        "phase": "first",
+        "stones": 63,
+        "tau": 2,
+        "threats": 3
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "dead": 0,
+        "id": "human_a27d9c23cf7835fe_p75",
+        "inert": 75,
+        "legal": 715,
+        "legal_orbits": 715,
+        "phase": "first",
+        "stones": 75,
+        "tau": 2,
+        "threats": 2
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_be25941940d75580_p15",
+        "inert": 1,
+        "legal": 321,
+        "legal_orbits": 321,
+        "phase": "first",
+        "stones": 15,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_be25941940d75580_p16",
+        "inert": 1,
+        "legal": 321,
+        "legal_orbits": 321,
+        "phase": "second",
+        "stones": 16,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_4b05edfe9dbb7ee6_p16",
+        "inert": 34,
+        "legal": 458,
+        "legal_orbits": 458,
+        "phase": "second",
+        "stones": 16,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_4b05edfe9dbb7ee6_p26",
+        "inert": 43,
+        "legal": 499,
+        "legal_orbits": 499,
+        "phase": "second",
+        "stones": 26,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_642bf84793500e21_p17",
+        "inert": 9,
+        "legal": 369,
+        "legal_orbits": 369,
+        "phase": "first",
+        "stones": 17,
+        "tau": 2,
+        "threats": 3
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [
+          1
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_642bf84793500e21_p18",
+        "inert": 9,
+        "legal": 377,
+        "legal_orbits": 377,
+        "phase": "second",
+        "stones": 18,
+        "tau": 1,
+        "threats": 1
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_d8d452fd216d03f7_p13",
+        "inert": 5,
+        "legal": 325,
+        "legal_orbits": 325,
+        "phase": "first",
+        "stones": 13,
+        "tau": 2,
+        "threats": 3
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [
+          1
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_d8d452fd216d03f7_p18",
+        "inert": 7,
+        "legal": 359,
+        "legal_orbits": 359,
+        "phase": "second",
+        "stones": 18,
+        "tau": 1,
+        "threats": 1
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_dfe326b3a79a4ea1_p14",
+        "inert": 8,
+        "legal": 368,
+        "legal_orbits": 368,
+        "phase": "second",
+        "stones": 14,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_dfe326b3a79a4ea1_p68",
+        "inert": 122,
+        "legal": 938,
+        "legal_orbits": 938,
+        "phase": "second",
+        "stones": 68,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_66c9943c482203d7_p12",
+        "inert": 12,
+        "legal": 452,
+        "legal_orbits": 452,
+        "phase": "second",
+        "stones": 12,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_66c9943c482203d7_p19",
+        "inert": 19,
+        "legal": 483,
+        "legal_orbits": 483,
+        "phase": "first",
+        "stones": 19,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_f4527f814c42f2f7_p13",
+        "inert": 2,
+        "legal": 322,
+        "legal_orbits": 322,
+        "phase": "first",
+        "stones": 13,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [
+          1,
+          1
+        ],
+        "components": 2,
+        "dead": 0,
+        "id": "human_f4527f814c42f2f7_p20",
+        "inert": 1,
+        "legal": 337,
+        "legal_orbits": 337,
+        "phase": "second",
+        "stones": 20,
+        "tau": 2,
+        "threats": 2
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_d1d95fa516d95a25_p12",
+        "inert": 16,
+        "legal": 392,
+        "legal_orbits": 392,
+        "phase": "second",
+        "stones": 12,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [
+          1
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_d1d95fa516d95a25_p30",
+        "inert": 31,
+        "legal": 463,
+        "legal_orbits": 463,
+        "phase": "second",
+        "stones": 30,
+        "tau": 1,
+        "threats": 2
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_cfe864fc1a09d028_p16",
+        "inert": 16,
+        "legal": 496,
+        "legal_orbits": 496,
+        "phase": "second",
+        "stones": 16,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [
+          1
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_cfe864fc1a09d028_p44",
+        "inert": 32,
+        "legal": 592,
+        "legal_orbits": 592,
+        "phase": "second",
+        "stones": 44,
+        "tau": 1,
+        "threats": 1
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_c77600999ef0c953_p38",
+        "inert": 20,
+        "legal": 444,
+        "legal_orbits": 444,
+        "phase": "second",
+        "stones": 38,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_c77600999ef0c953_p41",
+        "inert": 25,
+        "legal": 473,
+        "legal_orbits": 473,
+        "phase": "first",
+        "stones": 41,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_9314f31319b844aa_p24",
+        "inert": 25,
+        "legal": 441,
+        "legal_orbits": 441,
+        "phase": "second",
+        "stones": 24,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_9314f31319b844aa_p27",
+        "inert": 25,
+        "legal": 449,
+        "legal_orbits": 449,
+        "phase": "first",
+        "stones": 27,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_c11ffd8c499bd2e8_p14",
+        "inert": 14,
+        "legal": 446,
+        "legal_orbits": 446,
+        "phase": "second",
+        "stones": 14,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_c11ffd8c499bd2e8_p16",
+        "inert": 15,
+        "legal": 447,
+        "legal_orbits": 447,
+        "phase": "second",
+        "stones": 16,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_9b2d6722d2dc8ce4_p94",
+        "inert": 142,
+        "legal": 878,
+        "legal_orbits": 878,
+        "phase": "second",
+        "stones": 94,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [
+          1
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_9b2d6722d2dc8ce4_p114",
+        "inert": 137,
+        "legal": 937,
+        "legal_orbits": 937,
+        "phase": "second",
+        "stones": 114,
+        "tau": 1,
+        "threats": 1
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_2d19928a0e9f2f2e_p13",
+        "inert": 2,
+        "legal": 314,
+        "legal_orbits": 314,
+        "phase": "first",
+        "stones": 13,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_2d19928a0e9f2f2e_p21",
+        "inert": 6,
+        "legal": 374,
+        "legal_orbits": 374,
+        "phase": "first",
+        "stones": 21,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_8b1c4e971a2cf514_p13",
+        "inert": 10,
+        "legal": 370,
+        "legal_orbits": 370,
+        "phase": "first",
+        "stones": 13,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_8b1c4e971a2cf514_p26",
+        "inert": 15,
+        "legal": 399,
+        "legal_orbits": 399,
+        "phase": "second",
+        "stones": 26,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_eba794b452ff55b0_p56",
+        "inert": 47,
+        "legal": 591,
+        "legal_orbits": 591,
+        "phase": "second",
+        "stones": 56,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_eba794b452ff55b0_p58",
+        "inert": 54,
+        "legal": 598,
+        "legal_orbits": 598,
+        "phase": "second",
+        "stones": 58,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_0050604fa6a55d61_p12",
+        "inert": 6,
+        "legal": 358,
+        "legal_orbits": 358,
+        "phase": "second",
+        "stones": 12,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_0050604fa6a55d61_p27",
+        "inert": 20,
+        "legal": 428,
+        "legal_orbits": 428,
+        "phase": "first",
+        "stones": 27,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_fe3ffa0933af690c_p20",
+        "inert": 2,
+        "legal": 370,
+        "legal_orbits": 370,
+        "phase": "second",
+        "stones": 20,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_fe3ffa0933af690c_p25",
+        "inert": 8,
+        "legal": 400,
+        "legal_orbits": 400,
+        "phase": "first",
+        "stones": 25,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_9c11845dc29f55d9_p30",
+        "inert": 3,
+        "legal": 387,
+        "legal_orbits": 387,
+        "phase": "second",
+        "stones": 30,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_9c11845dc29f55d9_p41",
+        "inert": 10,
+        "legal": 418,
+        "legal_orbits": 418,
+        "phase": "first",
+        "stones": 41,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [
+          1
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_9e41091cfd1b19d0_p18",
+        "inert": 6,
+        "legal": 350,
+        "legal_orbits": 350,
+        "phase": "second",
+        "stones": 18,
+        "tau": 1,
+        "threats": 1
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_9e41091cfd1b19d0_p31",
+        "inert": 3,
+        "legal": 379,
+        "legal_orbits": 379,
+        "phase": "first",
+        "stones": 31,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 2,
+        "id": "human_a9e193e51ba69c2c_p89",
+        "inert": 26,
+        "legal": 570,
+        "legal_orbits": 570,
+        "phase": "first",
+        "stones": 89,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 2,
+        "id": "human_a9e193e51ba69c2c_p96",
+        "inert": 34,
+        "legal": 586,
+        "legal_orbits": 586,
+        "phase": "second",
+        "stones": 96,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [
+          1
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_13fd0f3bb72cf2a4_p14",
+        "inert": 9,
+        "legal": 385,
+        "legal_orbits": 385,
+        "phase": "second",
+        "stones": 14,
+        "tau": 1,
+        "threats": 1
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          2,
+          1
+        ],
+        "components": 2,
+        "dead": 0,
+        "id": "human_13fd0f3bb72cf2a4_p47",
+        "inert": 12,
+        "legal": 484,
+        "legal_orbits": 484,
+        "phase": "first",
+        "stones": 47,
+        "tau": null,
+        "threats": 4
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_eb74c63244add853_p23",
+        "inert": 8,
+        "legal": 392,
+        "legal_orbits": 392,
+        "phase": "first",
+        "stones": 23,
+        "tau": 2,
+        "threats": 3
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_eb74c63244add853_p34",
+        "inert": 10,
+        "legal": 418,
+        "legal_orbits": 418,
+        "phase": "second",
+        "stones": 34,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_027e0514a0aa45b6_p15",
+        "inert": 3,
+        "legal": 331,
+        "legal_orbits": 331,
+        "phase": "first",
+        "stones": 15,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          1
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_027e0514a0aa45b6_p21",
+        "inert": 2,
+        "legal": 346,
+        "legal_orbits": 346,
+        "phase": "first",
+        "stones": 21,
+        "tau": 1,
+        "threats": 1
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_a4feec1337a8570d_p20",
+        "inert": 16,
+        "legal": 400,
+        "legal_orbits": 400,
+        "phase": "second",
+        "stones": 20,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [
+          1
+        ],
+        "components": 1,
+        "dead": 1,
+        "id": "human_a4feec1337a8570d_p138",
+        "inert": 133,
+        "legal": 933,
+        "legal_orbits": 933,
+        "phase": "second",
+        "stones": 138,
+        "tau": 1,
+        "threats": 1
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_b5bfa0cdcfe9b56b_p12",
+        "inert": 4,
+        "legal": 340,
+        "legal_orbits": 340,
+        "phase": "second",
+        "stones": 12,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          1,
+          2
+        ],
+        "components": 2,
+        "dead": 0,
+        "id": "human_b5bfa0cdcfe9b56b_p21",
+        "inert": 4,
+        "legal": 356,
+        "legal_orbits": 356,
+        "phase": "first",
+        "stones": 21,
+        "tau": null,
+        "threats": 4
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_358babad930adab0_p29",
+        "inert": 10,
+        "legal": 402,
+        "legal_orbits": 402,
+        "phase": "first",
+        "stones": 29,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_358babad930adab0_p30",
+        "inert": 10,
+        "legal": 410,
+        "legal_orbits": 410,
+        "phase": "second",
+        "stones": 30,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_3d91081b3356ed17_p13",
+        "inert": 4,
+        "legal": 340,
+        "legal_orbits": 340,
+        "phase": "first",
+        "stones": 13,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_3d91081b3356ed17_p45",
+        "inert": 5,
+        "legal": 429,
+        "legal_orbits": 429,
+        "phase": "first",
+        "stones": 45,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_a515c0d5643037fe_p24",
+        "inert": 7,
+        "legal": 375,
+        "legal_orbits": 375,
+        "phase": "second",
+        "stones": 24,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          1
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_a515c0d5643037fe_p39",
+        "inert": 7,
+        "legal": 423,
+        "legal_orbits": 423,
+        "phase": "first",
+        "stones": 39,
+        "tau": 1,
+        "threats": 2
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_2442140419361ddf_p22",
+        "inert": 24,
+        "legal": 464,
+        "legal_orbits": 464,
+        "phase": "second",
+        "stones": 22,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_2442140419361ddf_p65",
+        "inert": 84,
+        "legal": 724,
+        "legal_orbits": 724,
+        "phase": "first",
+        "stones": 65,
+        "tau": 2,
+        "threats": 3
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_fb87a4dc2e3b15f9_p14",
+        "inert": 6,
+        "legal": 422,
+        "legal_orbits": 422,
+        "phase": "second",
+        "stones": 14,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_fb87a4dc2e3b15f9_p26",
+        "inert": 10,
+        "legal": 450,
+        "legal_orbits": 450,
+        "phase": "second",
+        "stones": 26,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_bbdce53d470eb3fa_p16",
+        "inert": 9,
+        "legal": 353,
+        "legal_orbits": 353,
+        "phase": "second",
+        "stones": 16,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_bbdce53d470eb3fa_p34",
+        "inert": 30,
+        "legal": 478,
+        "legal_orbits": 478,
+        "phase": "second",
+        "stones": 34,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_eb80339fce963cd0_p15",
+        "inert": 1,
+        "legal": 329,
+        "legal_orbits": 329,
+        "phase": "first",
+        "stones": 15,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [
+          1
+        ],
+        "components": 1,
+        "dead": 1,
+        "id": "human_eb80339fce963cd0_p76",
+        "inert": 28,
+        "legal": 580,
+        "legal_orbits": 580,
+        "phase": "second",
+        "stones": 76,
+        "tau": 1,
+        "threats": 1
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_a2e7270cdc766d6b_p27",
+        "inert": 47,
+        "legal": 535,
+        "legal_orbits": 535,
+        "phase": "first",
+        "stones": 27,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_a2e7270cdc766d6b_p30",
+        "inert": 48,
+        "legal": 552,
+        "legal_orbits": 552,
+        "phase": "second",
+        "stones": 30,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_e89b43dff91c54d4_p40",
+        "inert": 14,
+        "legal": 446,
+        "legal_orbits": 446,
+        "phase": "second",
+        "stones": 40,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_e89b43dff91c54d4_p44",
+        "inert": 17,
+        "legal": 465,
+        "legal_orbits": 465,
+        "phase": "second",
+        "stones": 44,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_054e9efadeb4b0de_p26",
+        "inert": 19,
+        "legal": 475,
+        "legal_orbits": 475,
+        "phase": "second",
+        "stones": 26,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_054e9efadeb4b0de_p27",
+        "inert": 26,
+        "legal": 490,
+        "legal_orbits": 490,
+        "phase": "first",
+        "stones": 27,
+        "tau": 2,
+        "threats": 3
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_953af7d227bcf30b_p16",
+        "inert": 2,
+        "legal": 354,
+        "legal_orbits": 354,
+        "phase": "second",
+        "stones": 16,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_953af7d227bcf30b_p20",
+        "inert": 2,
+        "legal": 354,
+        "legal_orbits": 354,
+        "phase": "second",
+        "stones": 20,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_8f0d3b4f406e75ea_p22",
+        "inert": 6,
+        "legal": 366,
+        "legal_orbits": 366,
+        "phase": "second",
+        "stones": 22,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 3,
+        "id": "human_8f0d3b4f406e75ea_p145",
+        "inert": 112,
+        "legal": 848,
+        "legal_orbits": 848,
+        "phase": "first",
+        "stones": 145,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_839fee4ea8f55074_p16",
+        "inert": 10,
+        "legal": 354,
+        "legal_orbits": 354,
+        "phase": "second",
+        "stones": 16,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_839fee4ea8f55074_p23",
+        "inert": 8,
+        "legal": 368,
+        "legal_orbits": 368,
+        "phase": "first",
+        "stones": 23,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_7ad553bc2045435e_p46",
+        "inert": 39,
+        "legal": 599,
+        "legal_orbits": 599,
+        "phase": "second",
+        "stones": 46,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_7ad553bc2045435e_p63",
+        "inert": 48,
+        "legal": 632,
+        "legal_orbits": 632,
+        "phase": "first",
+        "stones": 63,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_3c45a619389fe192_p14",
+        "inert": 7,
+        "legal": 367,
+        "legal_orbits": 367,
+        "phase": "second",
+        "stones": 14,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_3c45a619389fe192_p27",
+        "inert": 12,
+        "legal": 452,
+        "legal_orbits": 452,
+        "phase": "first",
+        "stones": 27,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_7e89733a5b0a6462_p35",
+        "inert": 30,
+        "legal": 478,
+        "legal_orbits": 478,
+        "phase": "first",
+        "stones": 35,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_7e89733a5b0a6462_p85",
+        "inert": 57,
+        "legal": 641,
+        "legal_orbits": 641,
+        "phase": "first",
+        "stones": 85,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_a73618587e1b457a_p19",
+        "inert": 0,
+        "legal": 328,
+        "legal_orbits": 328,
+        "phase": "first",
+        "stones": 19,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_a73618587e1b457a_p25",
+        "inert": 3,
+        "legal": 371,
+        "legal_orbits": 371,
+        "phase": "first",
+        "stones": 25,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_412c19cb67925840_p12",
+        "inert": 0,
+        "legal": 320,
+        "legal_orbits": 320,
+        "phase": "second",
+        "stones": 12,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          1,
+          2
+        ],
+        "components": 2,
+        "dead": 0,
+        "id": "human_412c19cb67925840_p21",
+        "inert": 1,
+        "legal": 345,
+        "legal_orbits": 345,
+        "phase": "first",
+        "stones": 21,
+        "tau": null,
+        "threats": 4
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_9790adbbfeea6c17_p23",
+        "inert": 9,
+        "legal": 385,
+        "legal_orbits": 385,
+        "phase": "first",
+        "stones": 23,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_9790adbbfeea6c17_p24",
+        "inert": 8,
+        "legal": 384,
+        "legal_orbits": 384,
+        "phase": "second",
+        "stones": 24,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_5599a561f5cc1c31_p23",
+        "inert": 7,
+        "legal": 367,
+        "legal_orbits": 367,
+        "phase": "first",
+        "stones": 23,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_5599a561f5cc1c31_p35",
+        "inert": 9,
+        "legal": 401,
+        "legal_orbits": 401,
+        "phase": "first",
+        "stones": 35,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_36f75d6edb6ad61d_p12",
+        "inert": 4,
+        "legal": 340,
+        "legal_orbits": 340,
+        "phase": "second",
+        "stones": 12,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_36f75d6edb6ad61d_p19",
+        "inert": 2,
+        "legal": 354,
+        "legal_orbits": 354,
+        "phase": "first",
+        "stones": 19,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_68211e3b7824963f_p14",
+        "inert": 9,
+        "legal": 361,
+        "legal_orbits": 361,
+        "phase": "second",
+        "stones": 14,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_68211e3b7824963f_p20",
+        "inert": 19,
+        "legal": 411,
+        "legal_orbits": 411,
+        "phase": "second",
+        "stones": 20,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_deb7f916131eb2e3_p17",
+        "inert": 1,
+        "legal": 353,
+        "legal_orbits": 353,
+        "phase": "first",
+        "stones": 17,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_deb7f916131eb2e3_p18",
+        "inert": 2,
+        "legal": 354,
+        "legal_orbits": 354,
+        "phase": "second",
+        "stones": 18,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_e3459642188470f5_p21",
+        "inert": 10,
+        "legal": 378,
+        "legal_orbits": 378,
+        "phase": "first",
+        "stones": 21,
+        "tau": 2,
+        "threats": 3
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_e3459642188470f5_p23",
+        "inert": 15,
+        "legal": 407,
+        "legal_orbits": 407,
+        "phase": "first",
+        "stones": 23,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_b5a3a4cbd0f46e0f_p30",
+        "inert": 13,
+        "legal": 453,
+        "legal_orbits": 453,
+        "phase": "second",
+        "stones": 30,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_b5a3a4cbd0f46e0f_p34",
+        "inert": 13,
+        "legal": 453,
+        "legal_orbits": 453,
+        "phase": "second",
+        "stones": 34,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_e907698fe77e7bd4_p38",
+        "inert": 9,
+        "legal": 425,
+        "legal_orbits": 425,
+        "phase": "second",
+        "stones": 38,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_e907698fe77e7bd4_p55",
+        "inert": 16,
+        "legal": 472,
+        "legal_orbits": 472,
+        "phase": "first",
+        "stones": 55,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [
+          2
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_992a9a0a43391991_p15",
+        "inert": 13,
+        "legal": 445,
+        "legal_orbits": 445,
+        "phase": "first",
+        "stones": 15,
+        "tau": 2,
+        "threats": 3
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [
+          1
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_992a9a0a43391991_p20",
+        "inert": 16,
+        "legal": 464,
+        "legal_orbits": 464,
+        "phase": "second",
+        "stones": 20,
+        "tau": 1,
+        "threats": 2
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [
+          1
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_1d264d1fc1740dc5_p14",
+        "inert": 0,
+        "legal": 328,
+        "legal_orbits": 328,
+        "phase": "second",
+        "stones": 14,
+        "tau": 1,
+        "threats": 1
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [
+          1
+        ],
+        "components": 1,
+        "dead": 0,
+        "id": "human_1d264d1fc1740dc5_p62",
+        "inert": 12,
+        "legal": 484,
+        "legal_orbits": 484,
+        "phase": "second",
+        "stones": 62,
+        "tau": 1,
+        "threats": 1
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_6c5e4caecb4afcbd_p39",
+        "inert": 15,
+        "legal": 487,
+        "legal_orbits": 487,
+        "phase": "first",
+        "stones": 39,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 1,
+        "id": "human_6c5e4caecb4afcbd_p110",
+        "inert": 124,
+        "legal": 852,
+        "legal_orbits": 852,
+        "phase": "second",
+        "stones": 110,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_034fc0e7865e419f_p19",
+        "inert": 9,
+        "legal": 409,
+        "legal_orbits": 409,
+        "phase": "first",
+        "stones": 19,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_034fc0e7865e419f_p24",
+        "inert": 27,
+        "legal": 459,
+        "legal_orbits": 459,
+        "phase": "second",
+        "stones": 24,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_6e975e05d184d013_p33",
+        "inert": 61,
+        "legal": 605,
+        "legal_orbits": 605,
+        "phase": "first",
+        "stones": 33,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_6e975e05d184d013_p75",
+        "inert": 145,
+        "legal": 889,
+        "legal_orbits": 889,
+        "phase": "first",
+        "stones": 75,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_0edfddad25701692_p35",
+        "inert": 31,
+        "legal": 503,
+        "legal_orbits": 503,
+        "phase": "first",
+        "stones": 35,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_0edfddad25701692_p41",
+        "inert": 28,
+        "legal": 516,
+        "legal_orbits": 516,
+        "phase": "first",
+        "stones": 41,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 2,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_66caead67ef3fc4e_p15",
+        "inert": 10,
+        "legal": 418,
+        "legal_orbits": 418,
+        "phase": "first",
+        "stones": 15,
+        "tau": 0,
+        "threats": 0
+      },
+      {
+        "affine_stabilizers": 1,
+        "budget": 1,
+        "component_taus": [],
+        "components": 0,
+        "dead": 0,
+        "id": "human_66caead67ef3fc4e_p18",
+        "inert": 10,
+        "legal": 426,
+        "legal_orbits": 426,
+        "phase": "second",
+        "stones": 18,
+        "tau": 0,
+        "threats": 0
+      }
+    ],
+    "threat_component_hist": {
+      "1": 32,
+      "2": 6
+    },
+    "threatened_positions": 38
+  }
+}
