@@ -25,6 +25,8 @@ evidence.
 | R6 | 2.5, 2.6, 3.3, 4.3, 4.4, 6 | Adds externally selected hard limits for regenerated semantic work, state retention, CPU/wall, and heap; the one-million-stone allowance is removed. |
 | R7 | 2.6, 3.3, 4.4, 6, 7 | Gates producer and end-to-end cost, uses causal size/work denominators, requires competitive baselines and held-out tails, and withdraws the unpinned node estimate. |
 | R8 | 2.1, 2.5, 4.1, 4.3, 6 | Restricts acceptance to a checked D6-safe coordinate closure and binds ruleset, coordinate, and semantic versions into root identity and the typed result. |
+| R2-1 | 1.3, 2.4, 2.6, 3.1, 3.2, 4.2, 6 | Defines one authoritative `RefuteLeafExactEligibleV1` conjunction for production, self-verification, and gating, including all root, profile, strict-cap, constructor, and exact-expansion premises. |
+| R2-2 | 2.1, 4.2, 4.3, 6 | Freezes the byte preimage of `root_semantic_sha256`, defines failure counters as ordered-occurrence counts, states their sum identities, and requires independent digest/counter goldens. |
 
 ## 1. Claim semantics
 
@@ -174,7 +176,7 @@ boundary. A producer or verifier resource limit causes `Unsupported`/rejection;
 it is never a logical leaf. The currently authorized leaf-only v1 cut does not
 consume the PN arena and therefore cannot confuse a shallow zero with evidence.
 
-### 1.3 Theorem layers — amended per R1, R4
+### 1.3 Theorem layers — amended per R1, R4, R2-1
 
 **HYPOTHESIS — Lean targets only.** The following layers are distinct and MUST
 not be stated as one theorem:
@@ -190,8 +192,9 @@ not be stated as one theorem:
    answer as the model checker on the same literal bytes, policy, root, and
    reachability token. Until this exists, `refuteCertV1_accepts...` may name
    model acceptance only, not executed Rust acceptance.
-4. `producerLeafV1_materializes_accepted`: an eligible exact-empty producer
-   emits bytes accepted by the checker. A future
+4. `producerLeafV1_materializes_accepted`: a producer satisfying the complete
+   `RefuteLeafExactEligibleV1` predicate of section 2.4 emits bytes accepted by
+   the checker. A future
    `widePnStructuralSupport_materializes...` is a separate producer
    completeness theorem, not part of the semantic capstone.
 
@@ -201,7 +204,7 @@ authorized by this design.
 
 ## 2. Certificate grammar
 
-### 2.1 Logical tree and literal wire form — amended per R1, R2, R4, R8
+### 2.1 Logical tree and literal wire form — amended per R1, R2, R4, R8, R2-2
 
 **HYPOTHESIS — closed logical grammar.** The polarity dual of the constructor
 table is:
@@ -278,18 +281,87 @@ Trailer := payload_sha256[32]
 
 No bytes may follow the trailer. Owner/player encodings are
 `0 = Player0`, `1 = Player1`; these are wire values, not Rust discriminants.
-`root_semantic_sha256` hashes the
-canonical sequence
+Each `fail_*` payload field counts **ordered occurrences in `U(P)`**, not
+quotient classes. If a guarded two-member commuting quotient fails for reason
+`x`, its two ordered members contribute two to `fail_x`; a sole-orientation
+class contributes one. Let `classes_x` be the independently regenerated number
+of failing quotient classes of reason `x`, and define analogous occurrence and
+class counts for `ClaimantCompletion`, `ClaimantTactical`, and `TightPair`.
+For every fully regenerated root:
 
 ```text
-(ruleset, coordinate, class, wire/profile,
- sorted stones, mover, full phase payload, placements_made, nonterminal=true)
+Q = fail_no_new + fail_defender_first + fail_loose_0 + fail_loose_1
+    + completion_occurrences + claimant_tactical_occurrences
+    + tight_pair_occurrences
+
+quotient_class_count = classes_no_new + classes_defender_first
+    + classes_loose_0 + classes_loose_1 + classes_completion
+    + classes_claimant_tactical + classes_tight_pair
+
+Q = sum over regenerated quotient classes C of |C|,
+quotient_class_count = sum over those classes C of 1, and |C| is 1 or 2.
 ```
 
-and is part of proof identity. The payload hash detects corruption only. Exact
-decoded fields, root binding, policy, reachability token, and regeneration are
-authoritative. Unknown enum values, tags, versions, or noncanonical encodings
-MUST be rejected.
+For an eligible leaf the three positive/tight occurrence counts are zero, so
+the four serialized `fail_*` values sum exactly to `q_count`; the four derived
+failing-class counts, which are not serialized, sum exactly to
+`quotient_class_count`. No payload count controls enumeration.
+
+**HYPOTHESIS — exact root-digest preimage.** `root_semantic_sha256` is
+`SHA-256(RootSemanticPreimageV1)` over the following concatenation, with no
+padding, alignment, implicit string terminator, or omitted length other than
+the bytes explicitly shown:
+
+```text
+RootSemanticPreimageV1 :=
+  domain[25] = ASCII "HXRFLV1:ROOT-SEMANTIC:V1\0"
+  ruleset_u16_le
+  coordinate_u16_le
+  class_u16_le
+  wire_u16_le                         // equals Header.format_u16
+  profile_u16_le
+  root_stone_count_uvar               // shortest-form unsigned LEB128
+  root_stones[root_stone_count]       // each q_i16_le, r_i16_le, owner_u8
+  mover_u8
+  phase_tag_u8
+  phase_payload
+  placements_made_u32_le
+  terminal_u8
+  claimant_u8
+
+phase_payload :=
+  empty                               // phase_tag 0 = Opening
+  empty                               // phase_tag 1 = FirstStone
+  first_q_i16_le, first_r_i16_le      // phase_tag 2 = SecondStone { first }
+```
+
+The 25 domain bytes are exactly hexadecimal
+`48 58 52 46 4c 56 31 3a 52 4f 4f 54 2d 53 45 4d 41 4e 54 49 43 3a 56 31 00`.
+Every `_u16_le` is exactly two bytes and `_u32_le` exactly four bytes. Every
+`_i16_le` is the exact two-byte little-endian two's-complement representation.
+The unsigned LEB128 count emits low-order seven-bit groups first, sets the high
+bit on every nonfinal byte, clears it on the final byte, and forbids redundant
+zero groups. It counts stones, not bytes; it is followed immediately by exactly
+`root_stone_count` five-byte stone records and has no separate array byte-length
+field. All one-byte enums are exactly one byte. `phase_payload` has no length
+prefix: its length is zero, zero, or four bytes as determined solely by the
+preceding phase tag.
+
+The v1 leaf admits only `ruleset=1`, `coordinate=1`, `class=1`, `wire=1`,
+`profile=1`, `phase_tag=1` with its zero-byte payload, `terminal=0`, and
+`claimant=mover`; the other phase encodings above freeze what “full phase
+payload” means and do not enable those phases in this wire. Stone order and all
+numeric/player encodings are exactly the literal-header encodings. The digest
+preimage is a **separate canonical encoding assembled from strictly decoded
+header values**, not a literal contiguous or noncontiguous subset of the header:
+it prepends the domain, spells out the wire value represented by `format_u16`,
+omits magic, the digest itself, and `payload_len`, and includes no payload or
+trailer bytes.
+
+The semantic digest is part of proof identity. The payload hash detects
+corruption only. Exact decoded fields, root binding, policy, reachability token,
+and regeneration are authoritative. Unknown enum values, tags, versions, or
+noncanonical encodings MUST be rejected.
 
 **HYPOTHESIS — future full-tree wire constraint.** A later format MUST use
 backward-only node IDs, canonical raw ordering, the typed logical tags above,
@@ -433,7 +505,7 @@ an atomic search `DefenderPair` is never proof evidence.
 Group-2, ranked zones, FHW gates, substitute replies, certificate-relative
 zones, and unforced-turn quotients are outside the class and MUST reject.
 
-### 2.4 Closed negative leaves — amended per R2, R4
+### 2.4 Closed negative leaves — amended per R2, R4, R2-1
 
 **HYPOTHESIS.** The state/polarity acceptance matrix is exhaustive:
 
@@ -448,8 +520,64 @@ zones, and unforced-turn quotients are outside the class and MUST reject.
 
 Unknown tags or reasons reject. `tau>b` at a nonclaimant state is claimant
 tactical and is absent from this negative table. `NoAdmissibleFirstTurn` is the
-sole compact v1 leaf because it is definitionally the exact expansion with an
-empty admitted set. The verifier reruns that expansion under the work limits.
+sole compact v1 leaf because its exact premises are the closed row above and
+the authoritative conjunction below. The verifier reruns the complete expansion
+under the work limits.
+
+**HYPOTHESIS — one authoritative leaf eligibility predicate.** The following
+named conjunction is the only meaning of producer eligibility, producer
+self-verification eligibility, and the section 6 leaf-eligibility promise. The
+arguments `policy`, `profile`, `expansions`, and `node_cap` are trusted
+solve-local inputs, not artifact-selected limits:
+
+```text
+RefuteLeafExactEligibleV1(
+    P, A, reachable, policy, profile, expansions, node_cap) :=
+  ruleset = HexoConnect6/Opening1-Then2/Win6/LegalRadius8/I16/V1
+  and coordinate = AxialQR/D6SafeClosure/V1
+  and class = VcfPairComplete/EqualityDispatch/V1
+  and wire = RefuteLeafExact/V1
+  and ReachableRootV1(P, ruleset)
+  and reachable is the trusted token for that exact P and ruleset
+  and P is post-opening and nonterminal
+  and P's stones are raw-lexicographically sorted, duplicate-free, valid i16
+      coordinates paired with closed owner values, and bind exactly to the
+      literal root header
+  and P.phase() = FirstStone with the complete zero-byte phase payload
+  and A = P.current_player() = P.mover()
+  and nextPly = P.placements_made() + 1 without overflow
+  and D6ClosedV1 holds for the root and every coordinate encountered by the
+      complete regeneration below
+  and policy is a caller-selected OfflinePolicyV1 at or below every section
+      2.5 compiled ceiling, and regeneration stays within every selected
+      count, allocation, state-byte, heap, CPU, and wall limit
+  and profile = LeafNaturalWidthExhaustExactV1, meaning ordinary search reports
+      natural width exhaustion after all staged reopens and bottom-up PN
+      refreshes, semantic_horizon = u32::MAX, the exact v1 width options were
+      used, and Header.profile_u16 = 1; this is eligibility metadata and does
+      not assert a Structural plan or supply logical leaf evidence
+  and node_cap is the externally selected solve cap
+  and expansions < node_cap
+  and the earlier ClaimantTerminal constructor is absent
+  and not OwnWinNow_A(P,2)
+  and not ForcedLoss_A(P,2)
+  and producer-side direct regeneration completely constructs T(P), every
+      G1(P,a), every S(P,a), all Q ordered occurrences of U(P), the guarded
+      quotient classes, both ordered members of every two-member class, every
+      prefix/full replay, and every disposition under section 2.2
+  and completion_occurrences = 0
+  and claimant_tactical_occurrences = 0
+  and tight_pair_occurrences = 0.
+```
+
+The last three zeroes, after complete regeneration, imply that every ordered
+occurrence has one of the four failing dispositions and hence that the admitted
+set is empty. “The admitted set is empty” is only a derived description after
+all conjuncts above have been established; it MUST NOT stand alone as a synonym
+for `RefuteLeafExactEligibleV1`. In particular, an empty admitted set does not
+override `ForcedLoss_A(P,2)`, an earlier claimant-positive constructor, a
+profile mismatch, `expansions >= node_cap`, or a policy/D6 failure. None of
+those cases enables a different v1 leaf tag.
 
 `NoJointCarrier` is removed from full-tree v1 and the fallback. It may be
 reconsidered only in a new class/wire version after a present model theorem,
@@ -521,7 +649,7 @@ budget returns `UnsupportedPolicyBudget`; malformed structure returns
 `Rejected`. Neither result is a semantic negative leaf. Valid-but-hostile and
 malformed inputs MUST terminate deterministically within the selected budget.
 
-### 2.6 Size and work model — amended per R6, R7
+### 2.6 Size and work model — amended per R6, R7, R2-1
 
 **HYPOTHESIS.** Required causal metrics are:
 
@@ -556,8 +684,10 @@ MUST be no more than 110% of that baseline on every root and in aggregate. A
 future full-tree format MUST be smaller than a compact, competently implemented
 stored-support representation with the same root and semantic keys both in
 aggregate and on every named gate witness. On a common exact-empty root it MUST
-emit the leaf-v1 representation byte-for-byte instead of a larger tree. An
-intentionally verbose baseline is inadmissible.
+emit the leaf-v1 representation byte-for-byte instead of a larger tree; here
+“exact-empty” means that every semantic conjunct of
+`RefuteLeafExactEligibleV1`, not merely an empty admitted set, has been
+rederived. An intentionally verbose baseline is inadmissible.
 
 ## 3. Producer
 
@@ -573,16 +703,32 @@ allocation, ordering, statistic, cache entry, digest, or output byte. `emit`
 does no work until ordinary search terminates and cheap root/profile/policy
 eligibility succeeds. It then performs independent producer-side exact
 enumeration. The side artifact has its own type; ordinary status remains
-`Unknown`. Producer self-verification uses the public independent entry point,
-and rejection only drops the artifact and records isolated telemetry.
+`Unknown`. Only a root satisfying `RefuteLeafExactEligibleV1` enters producer
+self-verification through the public independent entry point, and rejection
+only drops the artifact and records isolated telemetry.
 
-### 3.2 Eligibility and future full-tree support — amended per R3
+### 3.2 Eligibility and future full-tree support — amended per R3, R2-1
 
-**HYPOTHESIS — leaf v1.** Eligibility requires the exact root conditions,
-natural-exhaust profile marker, `expansions < node_cap`, policy preflight, and a
-producer enumeration whose admitted pair set is empty. It does not rely on an
-arena zero. Exact counts are encoded, the independent verifier is invoked, and
-bytes are emitted only on acceptance.
+**HYPOTHESIS — leaf v1.** A producer is eligible if and only if the complete
+`RefuteLeafExactEligibleV1(P,A,reachable,policy,profile,expansions,node_cap)`
+conjunction in section 2.4 holds. An empty admitted set alone is insufficient.
+The predicate includes the literal root/reachability/phase/claimant/D6/policy
+premises, the declared natural-exhaust exact profile, strict
+`expansions < node_cap`, absence of all earlier root constructors, and complete
+`U` regeneration with zero completion, claimant-tactical, and `TightPair`
+occurrences. It does not rely on an arena zero.
+
+Exact occurrence and quotient counts are encoded. Producer self-verification
+MUST first re-establish that same named conjunction from its solve-local
+eligibility context and then invoke the public independent verifier; this
+two-part result, not verifier acceptance in isolation, is “self-verifies” in
+the producer and section 6 promises. A false semantic conjunct returns a typed
+`NotRefuteLeafExactSemantic(reason)`; a profile mismatch returns
+`IneligibleLeafProfile`; `expansions >= node_cap` returns
+`IneligibleNodeCap`; and a selected-policy overrun returns
+`UnsupportedPolicyBudget`. Bytes are emitted only when the named conjunction
+and public verification both succeed. These typed results are non-evidence and
+do not authorize another leaf tag.
 
 **HYPOTHESIS — mandatory algorithm before any full-tree version.** A full-tree
 producer MUST first compute a bottom-up memoized classification keyed by exact
@@ -719,25 +865,31 @@ shared. Producer semantic normalization/decoding may not be shared unless the
 literal decoder is separately modeled, golden-tested, and approved in the
 call-graph review.
 
-### 4.2 Re-derivation obligations — amended per R1, R2, R4, R5
+### 4.2 Re-derivation obligations — amended per R1, R2, R4, R5, R2-1, R2-2
 
 **HYPOTHESIS.** After strict decoding, version/policy checks, reachable-token
 validation, D6 preflight, and exact root binding, the verifier MUST:
 
-1. Build its private direct board from canonical stones and enumerate/deduplicate
+1. Rebuild `RootSemanticPreimageV1` byte-for-byte under section 2.1, hash it,
+   and require exact equality with `root_semantic_sha256`; a typed tuple hash,
+   native struct serialization, or hashing a convenient header slice is invalid.
+2. Build its private direct board from canonical stones and enumerate/deduplicate
    literal `(axis,start)` windows; it MUST not read an incremental window store.
-2. Reconstruct exact `T`, every `G1/S`, ordered `U/Q`, quotient class, pair
+3. Reconstruct exact `T`, every `G1/S`, ordered `U/Q`, quotient class, pair
    family, terminal prefix, defender precedence, `tau` case, and total
    disposition under section 2.2 while charging work before execution.
-3. Prove that there is no claimant terminal/own-win-now constructor and no
-   opponent-forced-tactical leaf misclassification before accepting
-   `NoAdmissibleFirstTurn`.
-4. Require an empty admitted set and exact equality of `T/Q/class/failure`
-   telemetry with redundant payload counts. A producer count never limits the
-   verifier loop.
-5. Cross-check every engine placement, phase transition, semantic successor,
+4. Prove that there is no claimant terminal constructor, no `OwnWinNow_A(P,2)`,
+   and `not ForcedLoss_A(P,2)` before accepting `NoAdmissibleFirstTurn`.
+5. Require complete classification of all `Q` ordered occurrences and zero
+   completion, claimant-tactical, and `TightPair` occurrences. “Empty admitted
+   set” alone is not an acceptance test.
+6. Require exact equality of `T/Q/quotient-class/disposition` telemetry and all
+   redundant payload counts. Each `fail_*` is checked as an ordered-occurrence
+   count; its two sum identities and the distinct derived class-count identity
+   in section 2.1 MUST hold. A producer count never limits the verifier loop.
+7. Cross-check every engine placement, phase transition, semantic successor,
    and terminal result against the private direct state.
-6. Conclude `BoundaryFreeNo` using the closed matrix, then use the model soundness
+8. Conclude `BoundaryFreeNo` using the closed matrix, then use the model soundness
    and clock-lifting layers; it MUST NOT appeal to search exhaustion.
 
 Before a future full-tree version, the same arm must additionally derive exact
@@ -745,13 +897,22 @@ Before a future full-tree version, the same arm must additionally derive exact
 and reject claimant-positive constructors at every state. The future work does
 not broaden leaf-v1 acceptance.
 
-Tests MUST include independent golden vectors from a third simple oracle and
-one-sided defect injection: omit a weak promotion in only one implementation,
-retain one stale defender window, flip each `tau` case, corrupt
-`SecondStone.first`, and change only one transition/terminal result. Seeded
+Tests MUST include independent golden vectors from a third simple oracle. Each
+root-identity vector pins the literal canonical-preimage bytes in hexadecimal
+and the resulting 32 digest bytes. Counter vectors MUST separately pin (1) a
+sole-orientation failing class, where `Q=1`, `quotient_class_count=1`, and the
+selected `fail_*` value is `1`, and (2) a two-member commuting failing class,
+where `Q=2`, `quotient_class_count=1`, and the selected `fail_*` value is `2`.
+All other failing fields are zero in those focused vectors. At least one vector
+MUST combine digest and counter expectations in the same literal artifact.
+
+One-sided defect injection MUST omit a weak promotion in only one
+implementation, retain one stale defender window, flip each `tau` case, corrupt
+`SecondStone.first`, change only one transition/terminal result, alter one
+domain/preimage byte, and count a two-member quotient as one occurrence. Seeded
 producer/verifier agreement alone is insufficient.
 
-### 4.3 Enforced fail-closed rules — amended per R2, R4, R5, R6, R8
+### 4.3 Enforced fail-closed rules — amended per R2, R4, R5, R6, R8, R2-2
 
 **HYPOTHESIS.** Verification returns `Rejected` on malformed or semantically
 false input and `UnsupportedPolicyBudget` on an externally imposed resource
@@ -764,10 +925,14 @@ weaker claim. It fails on the first of:
   compatibility path;
 - root/reachable-token mismatch in stone, owner, mover, full phase payload,
   clock, claimant, terminal status, semantic digest, or D6-safe closure;
+- any nonexact `RootSemanticPreimageV1` domain, field order, numeric encoding,
+  length treatment, phase payload, or digest result;
 - unsorted/duplicate stones or pair facts, invalid owner/coordinate, illegal
   move, hidden terminal mismatch, wrong quotient orientation, or unequal direct
   and engine successor;
-- any regenerated `T/S/U/Q`, class, reason, count, or disposition mismatch;
+- any regenerated `T/S/U/Q`, class, reason, count, or disposition mismatch,
+  including treating a `fail_*` field as a quotient-class count or violating
+  either occurrence/class sum identity in section 2.1;
 - any claimant completion/terminal/tactical constructor or a false closed leaf;
 - any depth/horizon/cap/census/zone/Group-2/quotient resource tag;
 - any semantic-work, exact-state-byte, CPU, wall, or heap budget excess; or
@@ -819,7 +984,7 @@ disproof-coverage telemetry. None may become `-1`, full-game `Loss`, a forced
 opponent move, search pruning, a proof cache, or imported atlas truth. The
 executed-byte/model correspondence is a separate later proof round.
 
-## 6. Gates, NCE disposition, and kill criteria — amended per R2, R3, R5, R6, R7, R8
+## 6. Gates, NCE disposition, and kill criteria — amended per R2, R3, R5, R6, R7, R8, R2-1, R2-2
 
 **HYPOTHESIS.** Before measurements, freeze hashes/manifests for training and
 held-out cohorts, exact commands, solver flags, binary/compiler/features,
@@ -831,21 +996,54 @@ does not promise they emit.
 Every required-result cell below is a logical AND. Failure of any applicable
 gate stops the artifact cut; there is no “fail both” exception.
 
+For this section, “eligible” means the complete, identically named
+`RefuteLeafExactEligibleV1(P,A,reachable,policy,profile,expansions,node_cap)`
+conjunction in section 2.4 and nothing weaker. In particular, “empty admitted
+set” never abbreviates away the root, reachability, phase, claimant, D6,
+selected-policy, exact-profile, strict-cap, earlier-constructor, forced-loss, or
+complete-regeneration conjuncts.
+
 | gate | required result | hard stop |
 |---|---|---|
-| Leaf eligibility | Every reachable, D6-closed, policy-bounded claimant `FirstStone` root with an exactly empty admitted set emits and self-verifies; every other root returns a typed unsupported/not-empty reason. | Silent fallback, use of PN zero as evidence, or emission with a positive class. |
+| Leaf eligibility | Every root satisfying `RefuteLeafExactEligibleV1` emits and self-verifies in the exact two-part sense of section 3.2; every other root emits no bytes and returns its typed semantic, D6, policy, `IneligibleLeafProfile`, or `IneligibleNodeCap` reason. Thus a semantic leaf at a wrong profile or with `expansions >= node_cap` is explicitly ineligible. | Silent fallback, use of PN zero as evidence, emission without every named-predicate conjunct, or failure to emit after every conjunct and public verification succeed. |
 | Acceptance | Independent verifier accepts 100% of emitted training and held-out artifacts through the public entry point. | One emitted rejection. |
 | No false scope | No cap/depth/horizon/census/Group-2/zone/opening/claimant-SecondStone/root-policy failure emits. | One such emission. |
 | Class boundary | Ordinary status remains `Unknown`; no hard value, Loss, trainer backup, or full-game label is minted. | Any game-value exposure. |
 | Flag isolation | Flag-off named observables are byte-identical; enabled noneligible roots perform no semantic scan and preserve search/output identity. | Any unexplained difference or search regression. |
-| Specification | Exhaustive bounded-state oracle comparison and every R2 adversarial fixture pass; exact telemetry is recorded. | One oracle contradiction, omitted occurrence, or ambiguous orientation. |
+| Specification | Exhaustive bounded-state oracle comparison and every R2 adversarial fixture pass; exact telemetry is recorded; independent goldens pin the exact root-digest preimage/digest and the sole-orientation and two-member-quotient occurrence counters required by sections 2.1 and 4.2. | One oracle contradiction, digest/preimage mismatch, counter-unit/sum mismatch, omitted occurrence, or ambiguous orientation. |
 | Mutation | 100% rejection of root/version/policy/count/owner/phase/claimant/reply/order/checksum-only/terminal/leaf mutations and unknown tags. | One semantic mutation accepted. |
 | D6/domain | Preflight rejects unsafe roots; all twelve rebuilt images of every accepted artifact verify; original bytes fail on a distinct image. | Unsafe acceptance, failed accepted-root image, or cross-root acceptance. |
 | Semantic work | All section 2.5 counters, memory, CPU, and wall ceilings hold on valid, malformed, and hostile roots including NCE-02. | Uncharged/unbounded work, budget-selected artifact, or nondeterministic overrun. |
 | Firewall | Source and compiled transitive call graphs pass; third-oracle goldens and one-sided fault injections fail the altered implementation. | Shared semantic truth, forbidden reachable symbol, or correlated fault acceptance. |
-| Size/baselines | Causal denominators and exact bytes are reported median/p95/max/aggregate; no node proxy is used; leaf bytes are `<=110%` of the competent compact leaf baseline. Any future full tree beats the compact stored-support baseline in aggregate and on every named gate witness and uses leaf bytes on common empty roots. | Any size conjunct fails, an unpinned witness claim is used, tail/held-out data is missing, or the baseline is intentionally weak. |
+| Size/baselines | Causal denominators and exact bytes are reported median/p95/max/aggregate; no node proxy is used; leaf bytes are `<=110%` of the competent compact leaf baseline. Any future full tree beats the compact stored-support baseline in aggregate and on every named gate witness and uses leaf bytes on common roots satisfying `RefuteLeafExactEligibleV1`. | Any size conjunct fails, an unpinned witness claim is used, tail/held-out data is missing, or the baseline is intentionally weak. |
 | Replay | Every section 4.4 conjunct passes. | Any replay conjunct fails. |
 | Producer/end-to-end | Every section 3.3 absolute, relative, tail, and three-audit conjunct passes. | Any producer, enabled-workflow, or amortization conjunct fails. |
+
+The R2-1 fixture set is mandatory and does not authorize another wire tag:
+
+1. A reachable, nonterminal claimant `FirstStone` root has an empty admitted
+   set, no claimant own-win, and an opponent forced tactical construction with
+   `ForcedLoss_A(P,2)` (for example, three independently hittable defender
+   count-four families). It MUST fail `RefuteLeafExactEligibleV1`, emit no
+   bytes, and a forged tag `0x20` artifact MUST be rejected.
+2. A realizable nonterminal claimant `FirstStone` root has an empty admitted set
+   but has the earlier claimant-positive `OwnWinNow_A(P,2)` constructor. It MUST
+   fail the named predicate, emit no bytes, and a forged tag `0x20` artifact
+   MUST be rejected. Separate terminal-root coverage MUST likewise show that
+   the earlier `ClaimantTerminal` constructor cannot enter the leaf cut.
+3. A root satisfies every semantic leaf premise, including complete
+   regeneration and all three zero disposition counts, but is run (a) with a
+   profile other than `LeafNaturalWidthExhaustExactV1` and (b) with
+   `expansions == node_cap`. The cases MUST return `IneligibleLeafProfile` and
+   `IneligibleNodeCap`, respectively, emit no bytes, and perform no public
+   self-verification. The strict-cap case MUST NOT be treated as natural
+   exhaustion.
+
+The R2-2 golden set is also a gate artifact, not an implementation-generated
+snapshot: a third simple oracle independently supplies the exact preimage hex,
+digest bytes, `Q`, quotient-class count, and four `fail_*` values. It includes
+both counter shapes fixed in section 4.2 and is checked unchanged by producer,
+verifier, and model-codec tests.
 
 **HYPOTHESIS — explicit counterexample closure.** None of the eight review
 counterexamples is accepted residual risk:
