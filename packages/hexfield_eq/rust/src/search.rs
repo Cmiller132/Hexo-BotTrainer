@@ -5119,6 +5119,7 @@ pub fn hexfield_eq_deep_solve_batch(
         let mut derived_t = 0u32;
         let mut zn = 0u32;
         let mut g2n = 0u32;
+        let mut gate_n = 0u32;
         if let Some(cert) = &solved.cert {
             for node in &cert.nodes {
                 match node {
@@ -5132,7 +5133,7 @@ pub fn hexfield_eq_deep_solve_batch(
                     CertNode::Universal { zone, .. } => zn += u32::from(zone.is_some()),
                     CertNode::Choice { .. } => {}
                     CertNode::UniversalGroup2V1(_) => g2n += 1,
-                    CertNode::FhwGateV1(_) => {}
+                    CertNode::FhwGateV1(_) => gate_n += 1,
                 }
             }
         }
@@ -5153,6 +5154,7 @@ pub fn hexfield_eq_deep_solve_batch(
         d.set_item("deep_kb_death", counters.deep_kb_death)?;
         d.set_item("zone_nodes", zn)?;
         d.set_item("group2_nodes", g2n)?;
+        d.set_item("gate_nodes", gate_n)?;
         set_solve_stats(&d, &verified.stats)?;
         out.append(d)?;
     }

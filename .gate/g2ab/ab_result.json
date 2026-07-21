@@ -1,0 +1,111 @@
+{
+  "config": {
+    "node_cap": 500,
+    "goal": "both",
+    "horizon": 0,
+    "ladder": false,
+    "zone": false,
+    "wide": true,
+    "dual_pass": true,
+    "loss_reserve": 0
+  },
+  "cohorts": {
+    "selfplay_v1": {
+      "n": 3255,
+      "coverage_off": {
+        "win": 189,
+        "loss": 68
+      },
+      "coverage_on": {
+        "win": 189,
+        "loss": 68
+      },
+      "decided_off": 257,
+      "decided_on": 257,
+      "nodes_per_decision_off": 80.9,
+      "nodes_per_decision_on": 80.9,
+      "gate_positions": 0,
+      "gate_nodes": 0,
+      "gate_firing_rate": 0.0,
+      "group2_zone_positions": 0,
+      "verify_failed_off": 0,
+      "verify_failed_on": 0
+    },
+    "human_v1": {
+      "n": 2720,
+      "coverage_off": {
+        "win": 393,
+        "loss": 334
+      },
+      "coverage_on": {
+        "win": 393,
+        "loss": 334
+      },
+      "decided_off": 727,
+      "decided_on": 727,
+      "nodes_per_decision_off": 55.2,
+      "nodes_per_decision_on": 55.2,
+      "gate_positions": 0,
+      "gate_nodes": 0,
+      "gate_firing_rate": 0.0,
+      "group2_zone_positions": 0,
+      "verify_failed_off": 0,
+      "verify_failed_on": 0
+    },
+    "puzzle_v3": {
+      "n": 468,
+      "coverage_off": {
+        "win": 118,
+        "loss": 110
+      },
+      "coverage_on": {
+        "win": 118,
+        "loss": 110
+      },
+      "decided_off": 228,
+      "decided_on": 228,
+      "nodes_per_decision_off": 181.7,
+      "nodes_per_decision_on": 181.7,
+      "gate_positions": 0,
+      "gate_nodes": 0,
+      "gate_firing_rate": 0.0,
+      "group2_zone_positions": 0,
+      "verify_failed_off": 0,
+      "verify_failed_on": 0
+    },
+    "forcing_corpus": {
+      "n": 19,
+      "coverage_off": {
+        "win": 3,
+        "loss": 2
+      },
+      "coverage_on": {
+        "win": 3,
+        "loss": 2
+      },
+      "decided_off": 5,
+      "decided_on": 5,
+      "nodes_per_decision_off": 107.8,
+      "nodes_per_decision_on": 107.8,
+      "gate_positions": 0,
+      "gate_nodes": 0,
+      "gate_firing_rate": 0.0,
+      "group2_zone_positions": 0,
+      "verify_failed_off": 0,
+      "verify_failed_on": 0
+    }
+  },
+  "gates": {
+    "parity_fail_count": 0,
+    "parity_fail": [],
+    "verify_failed_total_off": 0,
+    "verify_failed_total_on": 0,
+    "cross_verification": {
+      "checked": 0,
+      "agree": 0,
+      "mismatch": []
+    },
+    "gate_positions_total": 0,
+    "gate_nodes_total": 0
+  }
+}

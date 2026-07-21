@@ -3201,6 +3201,179 @@ fn copy_subtree(
 /// strict tree, (3) fill `claimed_d14_budget`, `build_horizon`, and both
 /// digests from the same derivations the verifier replays. Returns None when
 /// the certificate cannot be brought into the narrow class.
+/// The structural FHW gate a production finder can emit at a forced defender
+/// node: the named threat family, the escape deadline, the representative set
+/// `R ⊆ K`, and the classified map (`(d, s, edge_class)` for every `d ∈ K`,
+/// domain sorted). Role/window rows are NOT here — the finalizer fills them
+/// from the proven representative subtrees.
+#[derive(Clone, Debug)]
+pub(crate) struct FhwGateSkeleton {
+    pub threats: Vec<WindowKey>,
+    pub escape_resolution_ply: u32,
+    /// Sorted-unique representative moves (`R ⊆ K`).
+    pub representatives: Vec<HexCoord>,
+    /// `(real_reply d, representative s, edge_class)` for every `d ∈ K`, sorted
+    /// by `d`. Every edge is `Exact`, or `FrontierCovered` when `allow_fc`.
+    pub map: Vec<(HexCoord, HexCoord, FhwEdgeClassV1)>,
+}
+
+/// Production finder-side FHW structural closure at `state` for `claimant`
+/// (design §3.3 / §5.3). Reuses the verifier's own geometry so the emitted
+/// skeleton is, by construction, exactly what `reconstruct_gate` recomputes.
+///
+/// Returns `None` (⇒ the caller falls back to the legacy full-coverage path)
+/// unless the gate closes with EVERY edge class in the enabled set: `Exact`
+/// always, `FrontierCovered` only when `allow_fc`. A `NonFrontierCovered` edge
+/// always yields `None`. This never emits a certificate; the in-process
+/// self-verify at the solver's finalize boundary remains the soundness firewall.
+pub(crate) fn finder_build_fhw_gate(
+    state: &RustHexoState,
+    claimant: Player,
+    semantic_horizon: u32,
+    allow_fc: bool,
+) -> Option<FhwGateSkeleton> {
+    // Eligibility mirrors `reconstruct_gate` (§3.3 preamble + R2) exactly.
+    if state.current_player() == claimant
+        || state.is_terminal()
+        || matches!(state.phase(), TurnPhase::Opening)
+        || direct_own_win_now_upper(state)
+        || threats_shared::analyze(state).own_win_now
+    {
+        return None;
+    }
+    let b = placements_remaining(state);
+    if !(1..=2).contains(&b) {
+        return None;
+    }
+
+    // H_Q: every claimant count-4 window with zero defender stones and a
+    // nonempty empty-set, canonical sorted-unique, count-bounded (b=1 ⇒ 1;
+    // b=2 ⇒ 1..=3, keeping |K| ≤ 6).
+    let defender = claimant.other();
+    let mut threat_list: Vec<(WindowKey, Vec<HexCoord>)> = Vec::new();
+    for entry in state.board().windows().entries() {
+        if entry.count(claimant) >= 4 && entry.count(defender) == 0 {
+            let empties = entry.empty_cells();
+            if !empties.is_empty() {
+                threat_list.push((entry.key(), empties));
+            }
+        }
+    }
+    threat_list.sort_by_key(|(k, _)| win_id(*k));
+    threat_list.dedup_by_key(|(k, _)| win_id(*k));
+    if threat_list.is_empty() {
+        return None;
+    }
+    let count_ok = match b {
+        1 => threat_list.len() == 1,
+        2 => (1..=3).contains(&threat_list.len()),
+        _ => false,
+    };
+    if !count_ok {
+        return None;
+    }
+    let family: Vec<Vec<HexCoord>> = threat_list.iter().map(|(_, e)| e.clone()).collect();
+    if transversal_exact(&family, 2) != b {
+        return None;
+    }
+
+    // K = { d ∈ Legal : transversal(F_Q \ d) ≤ b-1 }.
+    let legal = sorted_legal_moves(state);
+    let mut kernel: Vec<HexCoord> = Vec::new();
+    for &d in &legal {
+        let residual: Vec<Vec<HexCoord>> =
+            family.iter().filter(|s| !s.contains(&d)).cloned().collect();
+        if transversal_exact(&residual, 2) <= b.saturating_sub(1) {
+            kernel.push(d);
+        }
+    }
+    if kernel.is_empty() {
+        return None;
+    }
+    kernel.sort_by_key(|c| coord_key(*c));
+    // Every kernel reply must be nonterminal.
+    for &d in &kernel {
+        let mut probe = state.clone();
+        let result = probe.apply_with_delta(Placement { coord: d }).ok()?.0;
+        if result.outcome.is_some() {
+            return None;
+        }
+    }
+
+    // R and phi: greedy FC-cover (only when allowed); every residue is an Exact
+    // self-edge. Ghosts are built only under `allow_fc`.
+    let mut ghosts: Vec<(HexCoord, VGhost)> = Vec::new();
+    if allow_fc {
+        for &s in &kernel {
+            if let Some(g) = VGhost::new(state, s) {
+                ghosts.push((s, g));
+            }
+        }
+    }
+    let ghost_of = |s: HexCoord| ghosts.iter().find(|(c, _)| *c == s).map(|(_, g)| g);
+
+    let mut uncovered: HashSet<CoordKey> = kernel.iter().map(|c| coord_key(*c)).collect();
+    let mut reps: Vec<HexCoord> = Vec::new();
+    let mut phi: Vec<(HexCoord, HexCoord)> = Vec::new();
+    if allow_fc {
+        for &s in &kernel {
+            if !uncovered.contains(&coord_key(s)) {
+                continue;
+            }
+            let Some(g) = ghost_of(s) else { continue };
+            reps.push(s);
+            let newly: Vec<HexCoord> = kernel
+                .iter()
+                .copied()
+                .filter(|&dp| uncovered.contains(&coord_key(dp)) && frontier_covered(dp, s, g))
+                .collect();
+            for dp in newly {
+                uncovered.remove(&coord_key(dp));
+                phi.push((dp, s));
+            }
+        }
+    }
+    for &d in &kernel {
+        if uncovered.remove(&coord_key(d)) {
+            reps.push(d);
+            phi.push((d, d));
+        }
+    }
+    reps.sort_by_key(|c| coord_key(*c));
+    reps.dedup();
+    phi.sort_by_key(|(d, _)| coord_key(*d));
+
+    // Classify every edge from geometry; reject NonFC always and FC unless
+    // enabled.
+    let mut map: Vec<(HexCoord, HexCoord, FhwEdgeClassV1)> = Vec::with_capacity(phi.len());
+    for &(d, s) in &phi {
+        let class = if d == s {
+            FhwEdgeClassV1::Exact
+        } else if allow_fc && ghost_of(s).is_some_and(|g| frontier_covered(d, s, g)) {
+            FhwEdgeClassV1::FrontierCovered
+        } else {
+            return None; // NonFC (or FC while disabled) ⇒ no gate
+        };
+        map.push((d, s, class));
+    }
+
+    // Escape deadline (R1): p(Q) + b + 2, must fit the horizon.
+    let escape_resolution_ply = state
+        .placements_made()
+        .checked_add(u32::from(b))?
+        .checked_add(2)?;
+    if escape_resolution_ply > semantic_horizon {
+        return None;
+    }
+
+    Some(FhwGateSkeleton {
+        threats: threat_list.iter().map(|(k, _)| *k).collect(),
+        escape_resolution_ply,
+        representatives: reps,
+        map,
+    })
+}
+
 pub(crate) fn finder_finalize_group2(
     state: &RustHexoState,
     cert: &TssCertificate,
@@ -3228,6 +3401,15 @@ pub(crate) fn finder_finalize_group2(
         nodes,
         semantic_horizon: cert.semantic_horizon,
     };
+    // Fill every FhwGateV1 map's role/window rows from the proven
+    // representative subtrees (the skeleton carries the correct
+    // real_reply/representative/edge_class per K; the rows are the redundant
+    // recomputed claims the verifier byte-compares). Done before the scalar and
+    // digest passes so the check pass validates the filled rows.
+    if out.nodes.iter().any(|n| matches!(n, CertNode::FhwGateV1(_))) {
+        out = finder_fill_gate_rows(state, &out)?;
+    }
+
     // Derive scalars on the unfolded tree.
     let mut ctx = build_context(state, &out)?;
     derive_budgets_and_roles(&mut ctx)?;
@@ -4268,6 +4450,110 @@ mod tests {
         (2, -2),  // 16 P0
     ];
 
+    /// Dense variant of `GATE_MOVES`: the single inert P0 scatter stone `(1,-2)`
+    /// is relocated to `(9,1)`, a defender stone on the far `+q` frontier of the
+    /// kernel. Its `B_8` ball closes the last 10 uncovered cells of `B_8((5,1))`
+    /// so that `B_8((5,1)) ⊆ Λ(P_Q + (4,1))`, i.e. the coupling
+    /// `(5,1) -> (4,1)` becomes a genuine `d != s` FrontierCovered edge. Every
+    /// other structural quantity (threats `H_Q = {U}`, kernel `K = {(4,1),(5,1)}`,
+    /// win-via-`V`, b=1, defender-to-move) is unchanged, so a single
+    /// representative `(4,1)` FC-covers the whole kernel: `R = {(4,1)} ⊊ K`.
+    const FC_GATE_MOVES: [(i16, i16); 16] = [
+        (0, 0),   // 1  P0 opening
+        (0, 1),   // 2  P1 U
+        (1, 1),   // 3  P1 U
+        (-1, 0),  // 4  P0
+        (-1, -1), // 5  P0
+        (2, 1),   // 6  P1 U
+        (3, 1),   // 7  P1 U  (U = (0,1)..(3,1), empties (4,1),(5,1))
+        (0, -1),  // 8  P0
+        (-2, 0),  // 9  P0
+        (0, 3),   // 10 P1 V
+        (1, 3),   // 11 P1 V
+        (-2, -1), // 12 P0
+        (9, 1),   // 13 P0 far-frontier coverage stone (was (1,-2))
+        (2, 3),   // 14 P1 V
+        (3, 3),   // 15 P1 V  (V = (0,3)..(3,3), empties (4,3),(5,3))
+        (2, -2),  // 16 P0
+    ];
+
+    fn fc_gate_position() -> RustHexoState {
+        let mut state = RustHexoState::new();
+        for &(q, r) in &FC_GATE_MOVES {
+            apply_placement(&mut state, Placement { coord: HexCoord::new(q, r) })
+                .unwrap_or_else(|e| panic!("fc gate move ({q},{r}) illegal: {e:?}"));
+        }
+        state
+    }
+
+    /// Build the accepting REDUCTIVE gate certificate on the dense board: one
+    /// representative `(4,1)` covering `K = {(4,1),(5,1)}` via one Exact self-edge
+    /// and one `d != s` FrontierCovered edge (`R ⊊ K`, real fanout reduction).
+    fn accepted_fc_gate_cert() -> (RustHexoState, TssCertificate) {
+        let state = fc_gate_position();
+        assert_eq!(state.current_player(), Player::Player0, "defender to move");
+        assert!(matches!(state.phase(), TurnPhase::SecondStone { .. }), "b=1");
+        let u = win((0, 1), Axis::Q);
+        let v = win((0, 3), Axis::Q);
+        let p1_count = |w: WindowKey| {
+            w.cells()
+                .iter()
+                .filter(|c| state.board().get(**c) == Some(Player::Player1))
+                .count()
+        };
+        assert_eq!(p1_count(u), 4, "U must be a P1 count-4 window");
+        assert_eq!(p1_count(v), 4, "V must be a P1 count-4 window");
+
+        let placements = state.placements_made();
+        let escape = placements + 1 + 2; // p(Q) + b + 2
+        let win_resolution = placements + 1 + 2;
+        let horizon = escape.max(win_resolution);
+
+        let win_leaf = CertNode::Win {
+            witness: v,
+            count: 4,
+            budget: 2,
+            resolution_ply: win_resolution,
+        };
+        let u1 = HexCoord::new(4, 1); // representative s
+        let u2 = HexCoord::new(5, 1); // FC-covered reply d
+        let exact = |d: HexCoord| crate::tss_verify::FhwMapV1 {
+            real_reply: d,
+            representative: d,
+            edge_class: FhwEdgeClassV1::Exact,
+            roles: Vec::new(),
+            windows: Vec::new(),
+        };
+        let fc = |d: HexCoord, s: HexCoord| crate::tss_verify::FhwMapV1 {
+            real_reply: d,
+            representative: s,
+            edge_class: FhwEdgeClassV1::FrontierCovered,
+            roles: Vec::new(),
+            windows: Vec::new(),
+        };
+        let gate = CertNode::FhwGateV1(Box::new(crate::tss_verify::FhwGateNodeV1 {
+            // Single representative: R = {(4,1)} ⊊ K = {(4,1),(5,1)}.
+            representatives: vec![CertEdge { mv: u1, child: 1 }],
+            proof: FhwGateProofV1 {
+                schema_version: 1,
+                authority: Group2AuthorityV1::compiled(),
+                threats: vec![u],
+                escape_resolution_ply: escape,
+                map: vec![exact(u1), fc(u2, u1)],
+            },
+        }));
+        let cert = TssCertificate {
+            root: RootBinding::from_state(&state),
+            claimant: Player::Player1,
+            root_node: 0,
+            nodes: vec![gate, win_leaf],
+            semantic_horizon: horizon,
+        };
+        let filled = finder_fill_gate_rows(&state, &cert)
+            .expect("reductive FC gate skeleton must reconstruct + fill");
+        (state, filled)
+    }
+
     fn gate_position() -> RustHexoState {
         let mut state = RustHexoState::new();
         for &(q, r) in &GATE_MOVES {
@@ -4373,6 +4659,357 @@ mod tests {
         );
         assert!(!TssVerifier.verify(&state, &cert, ProofStatus::Loss));
         assert!(!Group2Verifier.verify(&state, &cert, ProofStatus::Win));
+    }
+
+    /// A1 DISCHARGE: an end-to-end POSITIVE FrontierCovered certificate. The
+    /// dense board makes `(5,1) -> (4,1)` a genuine `d != s` FC coupling, so one
+    /// representative covers the whole kernel (`R = {(4,1)} ⊊ K`). The cert
+    /// verifies through the accept path, its 12 D6 images verify, and the FC
+    /// reduction is real (map has 2 entries, representatives has 1).
+    #[test]
+    fn fc_gate_certificate_reductive_reconstructs_and_verifies() {
+        let (state, cert) = accepted_fc_gate_cert();
+        let CertNode::FhwGateV1(gate) = &cert.nodes[0] else {
+            panic!("root must be the gate");
+        };
+        // Reduction: |K| = 2, |R| = 1, exactly one genuine FC (d != s) edge.
+        assert_eq!(gate.proof.map.len(), 2, "|K| == 2");
+        assert_eq!(gate.representatives.len(), 1, "|R| == 1 (reductive)");
+        let fc_edges: Vec<_> = gate
+            .proof
+            .map
+            .iter()
+            .filter(|m| m.edge_class == FhwEdgeClassV1::FrontierCovered)
+            .collect();
+        assert_eq!(fc_edges.len(), 1, "exactly one FrontierCovered coupling");
+        assert_ne!(
+            fc_edges[0].real_reply, fc_edges[0].representative,
+            "the FC edge is a genuine d != s coupling"
+        );
+        // The coupling is geometrically FC on this board.
+        let ghost = VGhost::new(&state, HexCoord::new(4, 1)).expect("ghost");
+        assert!(
+            frontier_covered(HexCoord::new(5, 1), HexCoord::new(4, 1), &ghost),
+            "precondition: (5,1)->(4,1) is geometrically FC on the dense board"
+        );
+        // Every map entry carries the same Cartesian window domain.
+        let domain: std::collections::HashSet<_> = gate.proof.map[0]
+            .windows
+            .iter()
+            .map(|w| window_sort_key(w.window))
+            .collect();
+        for m in &gate.proof.map {
+            let d: std::collections::HashSet<_> =
+                m.windows.iter().map(|w| window_sort_key(w.window)).collect();
+            assert_eq!(d, domain, "Cartesian K x demands: identical window domain");
+        }
+        // Strict acceptance under the extension policy; rejection under legacy.
+        assert!(
+            Group2Verifier.verify(&state, &cert, ProofStatus::Loss),
+            "the reductive FC gate certificate must verify"
+        );
+        assert!(!TssVerifier.verify(&state, &cert, ProofStatus::Loss));
+        assert!(!Group2Verifier.verify(&state, &cert, ProofStatus::Win));
+        // All 12 D6 images verify.
+        for symmetry in 0..D6_SYMMETRY_COUNT {
+            let transformed_state = {
+                let mut s = RustHexoState::new();
+                for &(q, r) in &FC_GATE_MOVES {
+                    let coord = d6_transform_coord(HexCoord::new(q, r), symmetry).expect("range");
+                    apply_placement(&mut s, Placement { coord }).expect("legal");
+                }
+                s
+            };
+            let transformed_cert = d6_remap_certificate(&cert, symmetry).expect("remap");
+            assert!(
+                Group2Verifier.verify(&transformed_state, &transformed_cert, ProofStatus::Loss),
+                "FC gate symmetry {symmetry} image must verify"
+            );
+        }
+    }
+
+    /// A1 MUTATION TWIN: break the FC coupling and the accept must vanish.
+    /// (a) On the SPARSE base board the same reductive cert (R = {(4,1)} claiming
+    /// (5,1) FC-covered) rejects, because the coverage stone is absent so the
+    /// verifier recomputes the coupling as NonFrontierCovered. (b) On the dense
+    /// board, relabelling the FC edge (to Exact or NonFrontierCovered) rejects,
+    /// because the recomputed geometric class no longer matches the stored byte.
+    #[test]
+    fn fc_gate_mutation_twin_rejects() {
+        let (fc_state, fc_cert) = accepted_fc_gate_cert();
+
+        // (a) Same reductive cert on the sparse base board: the coupling is
+        // geometrically non-FC there, so a single representative cannot cover
+        // the omitted reply and reconstruction rejects.
+        let base = gate_position();
+        let base_ghost = VGhost::new(&base, HexCoord::new(4, 1)).expect("ghost");
+        assert!(
+            !frontier_covered(HexCoord::new(5, 1), HexCoord::new(4, 1), &base_ghost),
+            "twin precondition: without the coverage stone the coupling is non-FC"
+        );
+        let mut twin = fc_cert.clone();
+        twin.root = RootBinding::from_state(&base);
+        assert!(
+            finder_fill_gate_rows(&base, &twin).is_none(),
+            "the reductive cert cannot even reconstruct on the sparse board"
+        );
+        assert!(
+            !Group2Verifier.verify(&base, &twin, ProofStatus::Loss),
+            "breaking the FC coupling (no coverage stone) must reject"
+        );
+
+        // (b) On the dense board, lying about the edge class rejects.
+        for bad in [FhwEdgeClassV1::Exact, FhwEdgeClassV1::NonFrontierCovered] {
+            let mut m = fc_cert.clone();
+            if let CertNode::FhwGateV1(g) = &mut m.nodes[0] {
+                for entry in g.proof.map.iter_mut() {
+                    if entry.real_reply == HexCoord::new(5, 1) {
+                        entry.edge_class = bad;
+                    }
+                }
+            }
+            assert!(
+                !Group2Verifier.verify(&fc_state, &m, ProofStatus::Loss),
+                "relabelling the FC edge as {bad:?} must reject"
+            );
+        }
+    }
+
+    /// b=2 forced defender node (P0 FirstStone) with two disjoint P1 count-4
+    /// threats (`tau == 2`). The PRODUCTION structural closure
+    /// `finder_build_fhw_gate` fires here (the b=1 fixture boards do not — they
+    /// carry two count-4 windows and so fail the b=1 count bound). On this sparse
+    /// board every edge is Exact (`R == K`), which exercises the ported
+    /// eligibility/threat/transversal/kernel logic end-to-end in production code.
+    const B2_GATE_MOVES: [(i16, i16); 15] = [
+        (0, 0),   // P0 opening
+        (0, 1),   // P1 U
+        (1, 1),   // P1 U
+        (-1, 0),  // P0
+        (-2, 0),  // P0
+        (2, 1),   // P1 U
+        (3, 1),   // P1 U  (U empties (4,1),(5,1))
+        (-1, 1),  // P0
+        (-2, 1),  // P0
+        (0, -1),  // P1 W
+        (1, -1),  // P1 W
+        (-1, -1), // P0
+        (-2, -1), // P0
+        (2, -1),  // P1 W
+        (3, -1),  // P1 W  (W empties (4,-1),(5,-1))
+    ];
+
+    fn b2_gate_position() -> RustHexoState {
+        let mut state = RustHexoState::new();
+        for &(q, r) in &B2_GATE_MOVES {
+            apply_placement(&mut state, Placement { coord: HexCoord::new(q, r) })
+                .unwrap_or_else(|e| panic!("b2 move ({q},{r}) illegal: {e:?}"));
+        }
+        state
+    }
+
+    #[test]
+    fn production_closure_fires_at_forced_b2_node() {
+        let state = b2_gate_position();
+        assert_eq!(state.current_player(), Player::Player0, "defender to move");
+        assert!(matches!(state.phase(), TurnPhase::FirstStone), "b=2");
+        let horizon = state.placements_made() + 2 + 2 + 4;
+        let skel = finder_build_fhw_gate(&state, Player::Player1, horizon, true)
+            .expect("the production closure must fire at this forced b=2 node");
+        // K = {(4,1),(5,1),(4,-1),(5,-1)}; sparse board => all Exact, R == K.
+        assert_eq!(skel.map.len(), 4, "|K| == 4");
+        assert_eq!(skel.representatives.len(), 4, "sparse => R == K (all Exact)");
+        assert!(
+            skel.map
+                .iter()
+                .all(|(_, _, c)| *c == FhwEdgeClassV1::Exact),
+            "sparse board yields only Exact edges"
+        );
+        assert_eq!(skel.escape_resolution_ply, state.placements_made() + 2 + 2);
+        // Exact-only emission produces the identical (non-reductive) closure.
+        let exact_only = finder_build_fhw_gate(&state, Player::Player1, horizon, false)
+            .expect("closure fires with FC disabled too");
+        assert_eq!(exact_only.map.len(), 4);
+        assert_eq!(exact_only.representatives.len(), 4);
+    }
+
+    fn solve_b2(group2: bool) -> crate::tss_core::DeepResult<TssCertificate> {
+        let state = b2_gate_position();
+        // Mirror the harness production profile (`harness_solver` with
+        // wide=true): leaf profile, no zone, dual pass off is irrelevant for a
+        // dedicated Loss goal.
+        let mut solver = TssSolver::default();
+        solver.configure_leaf_profile();
+        solver.set_group2(group2);
+        let caps = SolveCaps {
+            node_cap: 200_000,
+            tt_bytes_cap: 1 << 20,
+            semantic_horizon: state.placements_made() + 16,
+        };
+        solver.solve_goal(&state, &caps, SolveGoal::Loss)
+    }
+
+    /// Never-decides-less at the SOLVER emission boundary: flag-on and flag-off
+    /// reach the identical verdict on the forced b=2 node where the gate
+    /// dispatch runs. (The finalize self-verify + flag-off re-solve make this
+    /// structural; whether the gate closes and emits or falls back, the verdict
+    /// is invariant and no cert the strict verifier rejects is ever consumed.)
+    #[test]
+    fn gate_dispatch_never_decides_less_on_b2_node() {
+        let on = solve_b2(true);
+        let off = solve_b2(false);
+        assert_eq!(on.status, off.status, "flag-on must never decide differently");
+        // Any emitted extension cert must strictly verify under the extension
+        // policy (it already passed the in-process firewall to be returned).
+        let state = b2_gate_position();
+        if let Some(cert) = &on.cert {
+            if cert.nodes.iter().any(CertNode::is_group2_extension) {
+                assert!(
+                    crate::tss_core::CertVerify::verify(
+                        &crate::tss_verify::Group2Verifier,
+                        &state,
+                        cert,
+                        on.status,
+                    ),
+                    "an emitted extension cert must verify under the extension policy"
+                );
+            }
+        }
+    }
+
+    /// The solver's finalize boundary must handle gate-bearing certificates:
+    /// `finder_finalize_group2` unfolds the tree, (re-)fills every gate map's
+    /// rows from the proven subtrees, runs the check + digest passes, and the
+    /// result strictly verifies. This is the exact path a live emission takes
+    /// after compaction; exercising it here de-risks the harness A/B.
+    #[test]
+    fn finalize_handles_reductive_fc_gate_certificate() {
+        let (state, cert) = accepted_fc_gate_cert();
+        let finalized =
+            finder_finalize_group2(&state, &cert).expect("finalize must handle gate certificates");
+        // Still the reductive FC gate, and it verifies post-finalize.
+        let CertNode::FhwGateV1(gate) = &finalized.nodes[finalized.root_node as usize] else {
+            panic!("root stays a gate after finalize");
+        };
+        assert_eq!(gate.proof.map.len(), 2);
+        assert!(gate
+            .proof
+            .map
+            .iter()
+            .any(|m| m.edge_class == FhwEdgeClassV1::FrontierCovered));
+        assert!(
+            Group2Verifier.verify(&state, &finalized, ProofStatus::Loss),
+            "the finalized gate certificate must verify"
+        );
+    }
+
+    /// Narrow-path emission fixture: P0 (defender, SecondStone, b=1) faces a
+    /// single named threat U = (0,1)..(5,1) (left-blocked by P0 (-1,1), so the
+    /// threat family is EXACTLY {U}, tau = 1 = b ⇒ implicit dispatch). The
+    /// kernel is K = {(4,1),(5,1)}; the coverage stone (9,1) makes both
+    /// couplings FC, so the greedy cover picks R = {(4,1)} ⊊ K — a REDUCTIVE
+    /// gate. After the forced hit, P1 extends the two open count-3 groups
+    /// (r = 5 and r = -3 rows) to open count-4s, giving tau > 3 — a lambda-1
+    /// LOSS leaf, so the gate is the proof's ONLY forced node (no class-rule
+    /// mixing) and the solver can emit it end-to-end.
+    const NARROW_EMIT_MOVES: [(i16, i16); 20] = [
+        (0, 0),   // P0 opening
+        (0, 1),   // P1 U
+        (1, 1),   // P1 U
+        (-1, 1),  // P0 U left blocker
+        (9, 1),   // P0 FC coverage stone
+        (2, 1),   // P1 U
+        (3, 1),   // P1 U (U empties (4,1),(5,1))
+        (-3, 0),  // P0 inert
+        (-4, 0),  // P0 inert
+        (0, 5),   // P1 G1
+        (1, 5),   // P1 G1
+        (-3, -1), // P0 inert
+        (-4, -1), // P0 inert
+        (2, 5),   // P1 G1 (open count-3)
+        (0, -3),  // P1 G2
+        (2, -1),  // P0 inert
+        (3, -1),  // P0 inert
+        (1, -3),  // P1 G2
+        (2, -3),  // P1 G2 (open count-3)
+        (6, -2),  // P0 first stone of the root turn
+    ];
+
+    fn narrow_emit_position() -> RustHexoState {
+        let mut state = RustHexoState::new();
+        for &(q, r) in &NARROW_EMIT_MOVES {
+            apply_placement(&mut state, Placement { coord: HexCoord::new(q, r) })
+                .unwrap_or_else(|e| panic!("narrow-emit move ({q},{r}) illegal: {e:?}"));
+        }
+        state
+    }
+
+    fn solve_narrow_emit(group2: bool) -> crate::tss_core::DeepResult<TssCertificate> {
+        let state = narrow_emit_position();
+        assert_eq!(state.current_player(), Player::Player0, "defender to move");
+        assert!(matches!(state.phase(), TurnPhase::SecondStone { .. }), "b=1");
+        let mut solver = TssSolver::default();
+        solver.set_zone_options(ZoneSearchCaps {
+            enabled: true,
+            stale_area_filter: false,
+            count2_threshold: false,
+            pair_commutation: false,
+        });
+        solver.set_group2(group2);
+        let caps = SolveCaps {
+            node_cap: 200_000,
+            tt_bytes_cap: 1 << 20,
+            semantic_horizon: state.placements_made() + 16,
+        };
+        solver.solve_goal(&state, &caps, SolveGoal::Loss)
+    }
+
+    /// End-to-end SOLVER EMISSION on the narrow path: flag-on emits a
+    /// reductive FC `FhwGateV1` that survives finalize + the in-process strict
+    /// self-verify and is returned in the certificate; the cert re-verifies
+    /// here; flag-off decides the identical verdict with a gate-free cert
+    /// (never-decides-less at the emission boundary).
+    #[test]
+    fn solver_emits_reductive_fc_gate_on_narrow_path() {
+        let state = narrow_emit_position();
+        let on = solve_narrow_emit(true);
+        let off = solve_narrow_emit(false);
+        assert_eq!(off.status, ProofStatus::Loss, "flag-off must decide the fixture");
+        assert_eq!(on.status, ProofStatus::Loss, "flag-on must never decide less");
+        let cert = on.cert.expect("decided flag-on result carries a certificate");
+        let gate = cert
+            .nodes
+            .iter()
+            .find_map(|n| match n {
+                CertNode::FhwGateV1(g) => Some(g),
+                _ => None,
+            })
+            .expect("the flag-on certificate must contain the emitted FhwGateV1");
+        // The reductive FC shape: |K| = 2, |R| = 1, one genuine d != s FC edge.
+        assert_eq!(gate.proof.map.len(), 2, "|K| == 2");
+        assert_eq!(gate.representatives.len(), 1, "|R| == 1 (reductive)");
+        assert!(
+            gate.proof
+                .map
+                .iter()
+                .any(|m| m.edge_class == FhwEdgeClassV1::FrontierCovered
+                    && m.real_reply != m.representative),
+            "one genuine FrontierCovered coupling"
+        );
+        // The returned certificate strictly verifies (the solver already
+        // self-verified in-process; this is the independent re-check).
+        assert!(
+            Group2Verifier.verify(&state, &cert, ProofStatus::Loss),
+            "the emitted gate certificate must verify"
+        );
+        assert!(!TssVerifier.verify(&state, &cert, ProofStatus::Loss));
+        // Flag-off cert stays extension-free (bit-identity discipline).
+        assert!(!off
+            .cert
+            .expect("flag-off cert")
+            .nodes
+            .iter()
+            .any(CertNode::is_group2_extension));
     }
 
     #[test]

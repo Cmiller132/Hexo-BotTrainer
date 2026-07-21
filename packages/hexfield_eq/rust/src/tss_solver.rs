@@ -8183,6 +8183,24 @@ impl<'a> NarrowCompatSearch<'a> {
             return None;
         }
 
+        // v1 Group-2 FHW forcing gate (design §3.3 / §5.3): at an eligible
+        // FORCED (implicit-dispatch) defender node, run the structural FHW
+        // closure, prove one representative subtree per FC-cover class, and emit
+        // a reduced `FhwGateV1` in place of the full forced-reply Universal. Any
+        // failure or Unknown child falls through to the unchanged implicit-
+        // dispatch path below; the finalize-boundary self-verify (never emit a
+        // cert the strict verifier rejects) plus the flag-off re-solve keep
+        // "flag-on never decides fewer" structural.
+        if self.group2
+            && implicit_dispatch
+            && !self.emitted_dirty
+            && !matches!(state.phase(), TurnPhase::Opening)
+        {
+            if let Some(node) = self.prove_universal_fhw_gate(state, claimant, ply) {
+                return Some(node);
+            }
+        }
+
         // v1 Group-2 selector (design §2.4, gate-free sub-class): at an
         // eligible unforced node, run the exact append-only FHW closure and
         // emit `UniversalGroup2V1`. Any failure falls through to the
@@ -8407,6 +8425,75 @@ impl<'a> NarrowCompatSearch<'a> {
                     build_horizon: 0,
                     child_plan_sha256: [0u8; 32],
                     finder_summary_sha256: [0u8; 32],
+                },
+            })),
+            edge_count,
+        )
+    }
+
+    /// Structural FHW forcing-gate emission at a forced defender node. Builds
+    /// the gate skeleton (H_Q, K, R ⊊ K via FC-cover, classified map), proves
+    /// exactly one representative subtree per FC-cover class, and emits an
+    /// `FhwGateV1` whose map carries EMPTY role/window rows (the finalizer fills
+    /// them post-compaction, then a strict self-verify gates consumption). The
+    /// fanout reduction is `|R|` proven children in place of `|K|` forced
+    /// replies. Returns `None` (⇒ legacy fallback) on any closure failure,
+    /// disabled edge class, or Unknown child.
+    fn prove_universal_fhw_gate(
+        &mut self,
+        state: &mut RustHexoState,
+        claimant: Player,
+        ply: u32,
+    ) -> Option<CertNodeId> {
+        // FrontierCovered emission is enabled: A1 is discharged end-to-end by
+        // `fc_gate_certificate_reductive_reconstructs_and_verifies` (a positive
+        // `R ⊊ K` FC certificate + its 12 D6 images verify). Exact-only gates
+        // give ~0 fanout reduction, so FC is where the reduction lives.
+        const GROUP2_FHW_ALLOW_FC: bool = true;
+
+        let skel = crate::tss_verify_group2::finder_build_fhw_gate(
+            state,
+            claimant,
+            self.semantic_horizon,
+            GROUP2_FHW_ALLOW_FC,
+        )?;
+        // Prove each representative subtree; any Unknown poisons the gate.
+        let mut rep_edges: Vec<CertEdge> = Vec::with_capacity(skel.representatives.len());
+        for &s in &skel.representatives {
+            let Ok((result, delta)) = state.apply_with_delta(Placement { coord: s }) else {
+                return None;
+            };
+            if result.outcome.is_some() {
+                state.undo(delta);
+                return None;
+            }
+            let child = self.prove(state, claimant, ply.checked_add(1)?, None);
+            state.undo(delta);
+            let child = child?;
+            rep_edges.push(CertEdge { mv: s, child });
+        }
+        rep_edges.sort_by_key(|edge| raw_coord_key(edge.mv));
+        let map: Vec<crate::tss_verify::FhwMapV1> = skel
+            .map
+            .iter()
+            .map(|(d, s, cls)| crate::tss_verify::FhwMapV1 {
+                real_reply: *d,
+                representative: *s,
+                edge_class: *cls,
+                roles: Vec::new(),
+                windows: Vec::new(),
+            })
+            .collect();
+        let edge_count = rep_edges.len();
+        self.alloc_node(
+            CertNode::FhwGateV1(Box::new(crate::tss_verify::FhwGateNodeV1 {
+                representatives: rep_edges,
+                proof: crate::tss_verify::FhwGateProofV1 {
+                    schema_version: 1,
+                    authority: crate::tss_verify::Group2AuthorityV1::compiled(),
+                    threats: skel.threats,
+                    escape_resolution_ply: skel.escape_resolution_ply,
+                    map,
                 },
             })),
             edge_count,
@@ -11122,9 +11209,40 @@ fn compact_certificate_limited(
                     },
                 ))
             }
-            // Gate role rows reference arena IDs; the solver never builds
-            // gates, so compaction refuses rather than remapping partially.
-            CertNode::FhwGateV1(_) => return None,
+            CertNode::FhwGateV1(gate) => {
+                // The emitted gate map is a SKELETON: correct
+                // real_reply/representative/edge_class per K but EMPTY role and
+                // window lists (the finalizer fills the rows, whose node
+                // references are assigned on the unfolded tree post-compaction).
+                // So there are no arena IDs inside the map to remap here — only
+                // the representative subtree children.
+                if gate
+                    .proof
+                    .map
+                    .iter()
+                    .any(|m| !m.roles.is_empty() || !m.windows.is_empty())
+                {
+                    return None; // never compact an already-filled gate
+                }
+                *edge_count = edge_count.checked_add(gate.representatives.len())?;
+                if *edge_count > max_edges {
+                    return None;
+                }
+                let mut mapped_reps = Vec::with_capacity(gate.representatives.len());
+                for edge in &gate.representatives {
+                    mapped_reps.push(CertEdge {
+                        mv: edge.mv,
+                        child: copy(
+                            edge.child, arena, remap, visiting, out, edge_count, max_nodes,
+                            max_edges,
+                        )?,
+                    });
+                }
+                CertNode::FhwGateV1(Box::new(crate::tss_verify::FhwGateNodeV1 {
+                    representatives: mapped_reps,
+                    proof: gate.proof.clone(),
+                }))
+            }
         };
         visiting[index] = false;
         if out.len() >= max_nodes {
