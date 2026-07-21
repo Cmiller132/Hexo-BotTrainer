@@ -4558,4 +4558,121 @@ mod tests {
         let g2 = window_geom(&state, Player::Player1, far);
         assert!(g2.d_alive && g2.all_empty && !g2.touched);
     }
+
+    // ----- Independent hostile-review additions (accept-path attacks) -----
+
+    /// A real kernel reply (5,1) is omitted from R (only (4,1) is a
+    /// representative) and the map couples it to (4,1) with a bare
+    /// `FrontierCovered` label — the finder claims coverage that the geometry
+    /// does not support. On this sparse board `B_8((5,1))` is NOT contained in
+    /// `Lambda(P_Q + (4,1))`, so `reconstruct_gate` independently recomputes the
+    /// edge as `NonFrontierCovered` and rejects (accept-path narrowing). This is
+    /// the only end-to-end exercise of a `d != s` coupling entry: the omitted-
+    /// reply coverage cannot be faked with a bare edge-class byte.
+    #[test]
+    fn hostile_omitted_kernel_reply_bare_fc_label_rejects() {
+        let state = gate_position();
+        let u = win((0, 1), Axis::Q);
+        let v = win((0, 3), Axis::Q);
+        let placements = state.placements_made();
+        let escape = placements + 1 + 2;
+        let horizon = escape;
+        let win_leaf = CertNode::Win {
+            witness: v,
+            count: 4,
+            budget: 2,
+            resolution_ply: escape,
+        };
+        let bare = |d: HexCoord, s: HexCoord, cls: FhwEdgeClassV1| crate::tss_verify::FhwMapV1 {
+            real_reply: d,
+            representative: s,
+            edge_class: cls,
+            roles: Vec::new(),
+            windows: Vec::new(),
+        };
+        let u1 = HexCoord::new(4, 1);
+        let u2 = HexCoord::new(5, 1);
+        let gate = CertNode::FhwGateV1(Box::new(crate::tss_verify::FhwGateNodeV1 {
+            representatives: vec![CertEdge { mv: u1, child: 1 }],
+            proof: FhwGateProofV1 {
+                schema_version: 1,
+                authority: Group2AuthorityV1::compiled(),
+                threats: vec![u],
+                escape_resolution_ply: escape,
+                map: vec![
+                    bare(u1, u1, FhwEdgeClassV1::Exact),
+                    bare(u2, u1, FhwEdgeClassV1::FrontierCovered),
+                ],
+            },
+        }));
+        let cert = TssCertificate {
+            root: RootBinding::from_state(&state),
+            claimant: Player::Player1,
+            root_node: 0,
+            nodes: vec![gate, win_leaf],
+            semantic_horizon: horizon,
+        };
+        // The coupling is geometrically non-FC on this board.
+        let ghost = VGhost::new(&state, u1).expect("ghost");
+        assert!(
+            !frontier_covered(u2, u1, &ghost),
+            "precondition: (5,1)->(4,1) must be geometrically non-FC on this board"
+        );
+        // The finder cannot even reconstruct/fill a non-covered coupling.
+        assert!(
+            finder_fill_gate_rows(&state, &cert).is_none(),
+            "non-covered coupling must fail reconstruction"
+        );
+        // The verifier rejects the bare FC-labeled certificate.
+        assert!(
+            !Group2Verifier.verify(&state, &cert, ProofStatus::Loss),
+            "bare FrontierCovered label on a non-covered omitted reply must reject"
+        );
+        // Relabeling the same d != s coupling as Exact is likewise a lie and rejects.
+        let mut m = cert.clone();
+        if let CertNode::FhwGateV1(g) = &mut m.nodes[0] {
+            g.proof.map[1].edge_class = FhwEdgeClassV1::Exact;
+        }
+        assert!(
+            !Group2Verifier.verify(&state, &m, ProofStatus::Loss),
+            "Exact label on a d != s coupling must reject (recomputed class != Exact)"
+        );
+    }
+
+    /// The emitted map domain must equal the verifier-derived kernel `K`, not an
+    /// attacker-chosen legal set. Substituting a legal move that is outside `K`
+    /// for a genuine kernel reply must reject at the `K`-membership check even
+    /// though the substituted move is legal and the map length is unchanged.
+    #[test]
+    fn hostile_map_reply_outside_kernel_rejects() {
+        let state = gate_position();
+        let u1 = HexCoord::new(4, 1);
+        let u2 = HexCoord::new(5, 1);
+        // Find a legal move outside the kernel {(4,1),(5,1)}.
+        let mut legal = Vec::new();
+        state.write_legal_moves(&mut legal);
+        let outside = *legal
+            .iter()
+            .find(|c| **c != u1 && **c != u2)
+            .expect("a legal move outside the kernel must exist");
+        let (base_state, cert) = accepted_gate_cert();
+        assert_eq!(base_state.board().occupied_cells().len(), state.board().occupied_cells().len());
+        let mut m = cert.clone();
+        if let CertNode::FhwGateV1(g) = &mut m.nodes[0] {
+            // Replace a genuine kernel reply with a legal non-kernel move.
+            for entry in g.proof.map.iter_mut() {
+                if entry.real_reply == u2 {
+                    entry.real_reply = outside;
+                    entry.representative = u1;
+                }
+            }
+            g.proof
+                .map
+                .sort_by(|a, b| coord_key(a.real_reply).cmp(&coord_key(b.real_reply)));
+        }
+        assert!(
+            !Group2Verifier.verify(&state, &m, ProofStatus::Loss),
+            "a legal-but-non-kernel reply in the map domain must reject"
+        );
+    }
 }
