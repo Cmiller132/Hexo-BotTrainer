@@ -69,8 +69,11 @@ drive; ran to ~ep25 with an eval). Not a crash; checkpoints intact.**
 
 - Line: fresh-start run, weights-only warm start from main_3 ep90; cosine
   LR 2e-4→2e-5 over 150 epochs + floor. Branch `claude/main4-integration`.
-- Solver config: mode 3 (WIN+LOSS), cap 500, 256 KiB TT, unbounded
-  horizon, wide profile, `tss_solver_dual_pass=true`,
+- Solver config: mode 3 (WIN+LOSS), cap 750 (retuned from 500 on
+  2026-07-21 post-fold — REPORT_J2NEAR_CAP.md: +89 decisions under the
+  old wall; toml updated, applies at relaunch, first-epoch gates still
+  bind), 256 KiB TT, unbounded horizon, wide profile,
+  `tss_solver_dual_pass=true`,
   `tss_solver_all_leaves=true` (strict solver-first: every leaf solved
   before GPU eval; park 5000 ms = emergency valve only), async 12/24
   workers, root+interior guards on. G2 / ordering hints / loss_reserve OFF.

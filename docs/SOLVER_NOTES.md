@@ -8,7 +8,9 @@ MEASURED (verified data) / CODE-FACT (cite lines) / HYPOTHESIS / RETRACTED
 
 ## 1. Production profile (main_4 line; trainer currently stopped)
 
-`tss_solver_mode=3` (WIN+LOSS), node cap 500, 256 KiB TT, unbounded horizon
+`tss_solver_mode=3` (WIN+LOSS), node cap 750 (retuned from 500 on
+2026-07-21 after the 1.72x fold — see the cap-headroom entry in §5),
+256 KiB TT, unbounded horizon
 (`semantic_horizon=u32::MAX`), wide (`vcf_pair_complete` via
 `configure_leaf_profile`: wide + lazy frontier + interior census gate [inert
 when unbounded]), `dual_pass=true`, `all_leaves=true` (park 5000 ms
@@ -148,6 +150,30 @@ CapResumeSession promotion · GPU bench close-out.
   restores the downgraded proof + fresh preregistered A/B. Flag-off:
   6,443/6,443 archived identity; merged-tree gates 220/0/43 suite +
   digest a8c6f3ca exact + witness node counts lane-identical.
+- 2026-07-21 (cap-headroom Pareto, `cac5ef4a`; REPORT_J2NEAR_CAP.md).
+  MEASURED: wall-matched grid {500,640,750,860,1000}×{J2near off,on},
+  6,443 rows, 3 alternating reps. **Cap 750 / J2near-off adopted**
+  (`hexfield_eq_main_4.toml` retuned 500→750): archive-verdict superset
+  (all 1,212 preserved), **+89 strictly verified decisions** (57 W/32 L),
+  median solve wall 45.956 s [44.689–46.730] < old 49.96 s. Strict
+  frontier also contains cap 640 (+61 @ 38.9 s). J2near-on dominated at
+  every tested cap: downgrade row `human_41e2eece..._p11` restored only
+  at ≥860 (over wall), its five known upgrades need ≥1,111 nodes (beyond
+  cap 1,000) — retest J2near only when headroom passes ~cap 1,100. Zero
+  W/L flips, zero verifier failures, all ten arms.
+- 2026-07-21 (triage Phase B, `be4bd34a` on claude/triage-b;
+  REPORT_TRIAGE_PHASE_B.md). MEASURED: sub-root trajectory telemetry
+  (cfg-test, 34,616 snapshots over the 248 labeled grinds @cap 5k).
+  Preregistered bar passes but only as a POCKET detector: 100% precision
+  / 13.8% recall at N=100 (0 provable casualties); bar-qualified recall
+  ≤20.2% through N=500, 33.0% at N=1500; broad-recall rules ~50%
+  precision with 24–30 provable casualties. Thresholds in-sample —
+  held-out validation required before any use. Classification family
+  effectively closed; reallocation remains owner-deferred.
+- 2026-07-21 (refute-cert v1 review, `d4af5aef` on claude/refute-design).
+  Hostile review verdict SOUND-WITH-REQUIRED-CHANGES (R1–R8, 8 NCEs, 46
+  attacks); amendment lane launched same evening. Universal-polarity core
+  held.
 - 2026-07-21 (horizon research, `e1180970` on claude/deadline-ladder;
   REPORT_HORIZON_H10.md). **h=10 frontier CLOSED** (proof-ready): a
   four-stone two-cover lemma (10 shapes exhausted) makes the remote

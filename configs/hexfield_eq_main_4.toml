@@ -42,9 +42,14 @@ tss_interior_guard = true
 # mode 3 = verified WIN + hard-LOSS consumption.
 tss_solver_mode = 3
 tss_solver_root_guard = true
-# cap 500: the harness A/B decided the identical position set at caps 500/2000/
-# 8000 (extra nodes only burn CPU on Unknowns).
-tss_solver_node_cap = 500
+# cap 750 (2026-07-21 retune, REPORT_J2NEAR_CAP.md): after the 1.72x
+# generation fold, cap 750 is strictly better than the old cap-500 point —
+# all previously decided rows preserved, +89 verified decisions, median
+# solve wall 45.96s vs the old 49.96s (per-leaf wall stays under the old
+# GPU-pacing budget). First-epoch validation gates at relaunch still apply.
+# Historical: cap 500 chosen when caps 500/2000/8000 decided identical sets
+# on the pre-fold engine.
+tss_solver_node_cap = 750
 tss_solver_sample_16 = 16
 # Unused-budget dual pass for the wide Both split (R-TWOPASS-IMPL). ON for main_4.
 tss_solver_dual_pass = true
