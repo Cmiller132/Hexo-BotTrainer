@@ -160,12 +160,13 @@ DESIGN_REFUTE_CERT_V1.md uncommitted — GO conditional on v1 cut,
 
 ## 7. Live lanes (as of this writing) and build queue
 
-Live (2026-07-21 evening, acting-orchestrator session): **j2near**
-(HIGH, worktree `j2near` — free-tempo second-stone widening: impl +
-3-witness gate + matched-cap A/B, pre-registered kills); **horizon-h10**
-(xhigh, `deadline-ladder` worktree — RESEARCH-FIRST per owner ruling:
-h=10 translation-quotient theorem attempt + h≤8 bite on all 6,443 rows +
-port spec as shelf doc; no consumption builds).
+No live lanes (all five 2026-07-21 lanes exited and were gated). Landed
+this session: candidate-gen 1.72x fold `2a1bdf97`; J2near default-off
+fold `f5a5c5f0` (witness-proven, default-on blocked by preregistered
+gates — see SOLVER_NOTES); horizon R2+H10 research `e1180970` on
+claude/deadline-ladder (h=10 frontier closed); lean-shallow tss-lean
+`f4315e6`; refute-cert v1 design (refute-design worktree, GO-conditional,
+awaiting owner review go).
 
 Standing owner rulings this session: horizon = research primarily (no
 incremental-horizon ladders/consumption now); certified refutations only

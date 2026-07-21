@@ -135,3 +135,28 @@ CapResumeSession promotion · GPU bench close-out.
   (dualpass_adoption records, 1,212 certs): ≤8 = 42.5%, ≤12 = 59.3%
   (plies-vs-placements units unverified). Shelved sizing datum for any
   future horizon-consumption decision.
+- 2026-07-21 (J2near fold, `94466ead`/`f5a5c5f0`; REPORT_J2NEAR.md).
+  MEASURED: free-tempo second-stone widening landed DEFAULT-OFF. All 3
+  atlas witnesses flip UNKNOWN → strictly verified WIN (predicted
+  candidates present; child counts 19→39, 19→39, 8→12); five verified
+  non-seed upgrades (4 human @cap 2k, 1 grind @cap 50k); zero verifier
+  failures. Default-on BLOCKED by preregistered gates: one cap-500 human
+  WIN → UNKNOWN (widened branching consumed its budget), puzzle cap-2k
+  cohort median wall 1.074 > 1.05, per-row p95 wall > 1.20. Disposition:
+  `vcf_pair_j2near` / `TSS_VCF_J2NEAR` = targeted recovery tier; a future
+  default-on attempt needs an ordering/budget-reserve policy that
+  restores the downgraded proof + fresh preregistered A/B. Flag-off:
+  6,443/6,443 archived identity; merged-tree gates 220/0/43 suite +
+  digest a8c6f3ca exact + witness node counts lane-identical.
+- 2026-07-21 (horizon research, `e1180970` on claude/deadline-ladder;
+  REPORT_HORIZON_H10.md). **h=10 frontier CLOSED** (proof-ready): a
+  four-stone two-cover lemma (10 shapes exhausted) makes the remote
+  empty-board race a position-independent LOSS constant, so
+  WinWithin10 = WinWithin8 ∨ finite restricted search over the anchored
+  universe + one-window halo. 78/78 tested eligible certs caught (45
+  untested — Python runtime boundary, floors not rates); 2 genuinely new
+  depth-10 wins with witness pairs. All-phase h≤8 bite on 6,443 rows:
+  human 5.77% exact WIN + 7.39% exact LOSS; self-play 3.10%/0.52%;
+  grinds 0/0. RESEARCH-FIRST per owner ruling — port spec is a shelf
+  doc (PORT_SPEC_HORIZON_H8.md); no consumption builds. Next open wall:
+  h=12 (both players unanchored).
