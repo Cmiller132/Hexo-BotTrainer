@@ -651,10 +651,11 @@ fn tss_corpus_check() {
             );
             let (pair_ms, defender_ms, regen_ms, expand_ms, refresh_ms, insert_ms) =
                 crate::tss_solver::wide_gen_profile();
+            let (memo_lookups, memo_hits) = crate::tss_solver::generation_memo_profile();
             let (zone_contexts, zone_keys, zone_context_ns, zone_key_ns) =
                 crate::tss_solver::zone_order_profile();
             println!(
-                "GEN_PROFILE pair_ms={pair_ms} defender_ms={defender_ms} regen_ms={regen_ms} expand_ms={expand_ms} refresh_ms={refresh_ms} insert_ms={insert_ms} zone_contexts={zone_contexts} zone_keys={zone_keys} zone_context_ms={:.3} zone_key_ms={:.3}",
+                "GEN_PROFILE pair_ms={pair_ms} defender_ms={defender_ms} regen_ms={regen_ms} expand_ms={expand_ms} refresh_ms={refresh_ms} insert_ms={insert_ms} memo_lookups={memo_lookups} memo_hits={memo_hits} zone_contexts={zone_contexts} zone_keys={zone_keys} zone_context_ms={:.3} zone_key_ms={:.3}",
                 zone_context_ns as f64 / 1_000_000.0,
                 zone_key_ns as f64 / 1_000_000.0,
             );
