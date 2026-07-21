@@ -1,0 +1,55 @@
+{
+  "inputs": {
+    "human_positions_sha256": "D6B629B99084575D83E898ED90B7DF3F4E779ACAAD9C0E88D5275A6EEE57B046",
+    "forcing_positions_sha256": "89F16724483756EC8E41BA4A03009747EBB4760473A1F4BDA75121E1C261F047",
+    "forcing_lines_sha256": "A7F6D0FB6D8E1CF40354584A00CC7122190E4F2B296217496D7B83FB17CFA23D"
+  },
+  "human160": {
+    "positions": 160,
+    "legal_cells": 74524,
+    "median_legal": 428,
+    "dead_cells": 14,
+    "positions_with_dead_cells": 9,
+    "dead_fraction": 0.00018785894476947023,
+    "frontier_inert_cells": 3708,
+    "frontier_inert_fraction": 0.049755783371799686,
+    "threatened_positions": 38,
+    "b2_tau1_positions": 5,
+    "b2_tau1_common_hit_children": 8,
+    "b2_tau1_root_legal_cover_pairs": 3501,
+    "b2_tau1_directed_new_cover_pairs": 88,
+    "b2_tau1_sequential_intermediates_plus_cover_leaves": 9347,
+    "b2_tau1_atomic_cover_children": 3589,
+    "b2_tau1_atomic_to_sequential_ratio": 0.383973467422702,
+    "post_hit_legal_cells": 3590,
+    "post_hit_dead_cells": 0,
+    "eligible_b2_tau2_positions": 12,
+    "k2_pairs_checked": 37,
+    "k2_pair_theorem_violations": 0,
+    "nontrivial_affine_stabilizers": 0
+  },
+  "forcing_certificate_lines": {
+    "positions": 14,
+    "attacker_turns": 91,
+    "tau2_turns": 63,
+    "tau2_split_1_plus_1_components": 18,
+    "split_fraction_of_tau2": 0.2857142857142857,
+    "k2_pairs_checked": 192,
+    "k2_pair_theorem_violations": 0,
+    "mean_threat_universe": 3.98412698412698,
+    "mean_minimum_pairs": 3.04761904761905,
+    "mean_kernel_cells": 3.84126984126984,
+    "minimum_pair_count_histogram": {"1": 3, "2": 4, "3": 43, "4": 13},
+    "split_states_with_next_attacker_turn": 18,
+    "split_to_next_tau2": 14,
+    "split_to_next_split": 5
+  },
+  "abstract_hypergraph_exhaustion": {
+    "max_universe": 5,
+    "nonempty_families": 33861,
+    "tau2_families": 4073,
+    "split_tau2_families": 681,
+    "max_minimum_pairs": 4,
+    "violations": 0
+  }
+}

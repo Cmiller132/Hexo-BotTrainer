@@ -1,0 +1,14 @@
+{
+  "by_n": {
+    "1": {"families": 1, "tau2": 0},
+    "2": {"families": 7, "tau2": 2},
+    "3": {"families": 63, "tau2": 37},
+    "4": {"families": 1023, "tau2": 424},
+    "5": {"families": 32767, "tau2": 3610}
+  },
+  "checked_nonempty_families": 33861,
+  "split_tau2_families": 681,
+  "max_minimum_pairs": 4,
+  "tau2_families": 4073,
+  "violations": []
+}
