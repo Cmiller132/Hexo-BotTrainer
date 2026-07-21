@@ -443,3 +443,44 @@ Consequences:
   of positions). Seam hostile review + consume-mode design = the next
   trusted-base round (Codex Jul 24 or owner-authorized). tss_verify.rs
   byte-identical through the whole campaign.
+
+- **2026-07-21 P7 pair-generation prefilter round GATED `2c262e10`
+  (owner-ordered speedup lane; run STOPPED at ep23 for the work):
+  1.42x solver wall, BIT-IDENTICAL.** Attribution first (new
+  instruments, both committed): production-shape residue (cap 500,
+  256 KiB TT, unbounded, vcf_pair_complete — tss-vcf-width
+  `1b4afec2`) put A_OR_GEN at 60.5% / D_FORCED_GEN 20.4% / TT+verify
+  <1% of solve wall; closure-debt sub-profile put 43.8% of pair-gen in
+  2.66M evaluate_pair calls at 81 ns with 2.1% acceptance. Three exact
+  cuts (skips are provably None evaluations; children byte-identical):
+  family-size prefilter (empty AND single-window families — a lone
+  post-pair window always keeps an empty so mhs==1; per-second counts
+  k1+joint+c3 vs the size-2 bound, empty allow set skips the whole
+  first incl. second-generation), defender tier (unhit defender >=4
+  window ⇒ second must lie in the <=2-cell intersection of unhit
+  empties), and gate storage (windows stored once + per-cell index
+  lists — the old build cloned window+empties per empty cell; per-pair
+  first-list lookup hoisted per first). Evaluated pairs 2.66M→224k
+  (42% accept). GATES: suite 217/0 (python feature), golden digest
+  PASS, identity battery over ALL 6,443 frozen-set positions —
+  statuses and node counts byte-identical, vf=0, wall 41.1s→28.9s
+  (1.42x), max solve 138→61 ms. Latency reframe (quiet + 12-way
+  contended batteries, `_bench_solver_wall.py`): cap-500 solves are
+  NOT intrinsically slow (quiet p90 30 ms, 12-way contention only
+  1.1-1.7x inflation, TT 0.3% of wall — NOT cache-bound); live
+  hundreds-of-ms = queue wait, already retuned. Next efficiency rungs:
+  second_candidates HashSet churn (~8% wall), first-candidate
+  enumeration residual (~15%), defender-side D_FORCED_GEN (~20%),
+  cross-node generation memoization (P6 proper).
+- **2026-07-21 ALL-LEAVES MEASUREMENT (feasibility for solving quiet
+  leaves too): the threat gate leaves real coverage on the table.**
+  Of 5,975 human+selfplay set positions, 4,823 (81%) are quiet under
+  the leaf gate; production solves on the quiet cohort yield **465
+  verified WINs (9.6%), 0 losses**, vf=0, at mean 3.95 ms (p50
+  0.14 ms — no-candidate quiet solves self-terminate, the solver is
+  its own filter; p90 17 ms grind tail). CPU math: all-leaves ≈ 3.4x
+  current solve CPU at ~5x request rate — feasible with the 1.42x
+  engine + worker headroom ONLY with a park split: quiet leaves must
+  NOT park (net eval immediately, solve lands in memo for later
+  descent-stops), threat-parked solves keep priority. Needs a
+  two-tier enqueue (priority flag) — design item, not yet built.
