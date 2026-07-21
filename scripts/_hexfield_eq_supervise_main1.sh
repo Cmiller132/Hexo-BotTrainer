@@ -49,7 +49,13 @@ export SEALBOT_PATH="${SEALBOT_PATH:-/mnt/e/SealBot}"
 # in the hexgt-build venv (unlike the live lineage's venv) — carry them on
 # PYTHONPATH explicitly or the trainer entry dies at import (hexo_utils
 # ModuleNotFoundError, 2026-07-09 launch crash).
-export PYTHONPATH="$ROOT/packages/hexfield_eq/python:$ROOT/packages/hexo_train/python:$ROOT/packages/hexo_utils/python:$ROOT/packages/hexo_engine/python:$ROOT/packages/hexo_models/python:$ROOT/packages/hexo_runner/python:$ROOT/packages/dense_cnn_restnet/python:$ROOT/packages/hexo_strix/python"
+# main_4 split (2026-07-21 launch fix): hexfield_eq resolves from ROOT (the
+# merged solver tree, freshly maturin-built), but the infra packages resolve
+# from the main_3 run worktree — their native _rust extensions are built ONLY
+# there (hexo_utils/hexo_engine/hexo_models), and that tree ran main_3 for 111
+# epochs. Same split the harness bench uses. INFRA_TREE is overridable.
+INFRA_TREE="${INFRA_TREE:-/mnt/e/Hexo-BotTrainer-hexgt/.claude/worktrees/resume-run-crash-fdef2b}"
+export PYTHONPATH="$ROOT/packages/hexfield_eq/python:$INFRA_TREE/packages/hexo_train/python:$INFRA_TREE/packages/hexo_utils/python:$INFRA_TREE/packages/hexo_engine/python:$INFRA_TREE/packages/hexo_models/python:$INFRA_TREE/packages/hexo_runner/python:$INFRA_TREE/packages/dense_cnn_restnet/python:$INFRA_TREE/packages/hexo_strix/python"
 # GPU/host overlap in the self-play serve loop (bit-identical, parity-gated in
 # the main lineage; mechanism-generic). Set to 0 to fall back to sync.
 export HEXFIELD_ASYNC_EVAL="${HEXFIELD_ASYNC_EVAL:-1}"
