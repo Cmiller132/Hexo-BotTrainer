@@ -268,6 +268,35 @@ Consequences:
   (free, +288 dev losses, live loss stream); cap 2000 = OFFLINE/labeling
   operating point only. The in-game deep-solve lever is now the park
   envelope (150ms window sweep), not the cap.**
+- 2026-07-21 (late-night gates, consolidated from sibling branches —
+  this file is the CANONICAL notes copy; branch topology below):
+  - **R-LOSS-SIDE gated `a0df3c60` (branch claude/loss-side):** the 58
+    cap-500-missed atlas losses cost ≥512 dedicated nodes (median 1,064,
+    max 19,536) — unreachable at cap 500 under ANY allocation; loss-
+    probe-first rejected pre-implementation (non-resumable preprobe =
+    predictably regressive); leftover-only dual pass CONFIRMED optimal
+    (reserve-32 == reserve-0 measured); default-zero loss_reserve_nodes
+    knob + DESIGN_TSS_LOSS_SIDE.md shipped. 197/197 independent.
+  - **R-CP10 gated+pushed `32064e8` (tss-lean cp1/lean-grammar):**
+    accept⇒won capstones kernel-PROVEN for base/D17 × tree/DAG
+    (standard axioms only); negative side = NoContractWin, honestly
+    scoped. Open: FH/T6 classes, Rust-byte correspondence.
+  - **G2 v1 built+gated `2a6fc0db` (branch claude/g2-cert, from
+    loss-side):** verifier extension = 471 pure additions (LegacyOnly
+    default rejects new variants; isolated tss_verify_group2.rs);
+    gate-free class fully verified incl. R1/R2 + hostile-review
+    counterexample battery; FhwGateV1 rejects wholesale (v2 work);
+    selector demo 19 edges vs 886 legal (~46x, verified); never-
+    decides-less structural; 209/209 independent; harness group2-on
+    ALL PASS verdict-parity + truthful canary. Selector does NOT fire
+    on wide-profile fixture proofs (implicit-dispatch class = v2
+    gates); the residue 40% ceiling awaits v2. Review point: finder/
+    verifier share derivation helpers — independent reimpl follow-up.
+  - **Branch topology (merge order for consolidation):** claude/v1-soak
+    → claude/twopass-leaf → {claude/order-prior (THIS copy of notes),
+    claude/loss-side → claude/g2-cert}. Merging order-prior +
+    g2-cert lineages reunites all solver work; harness_runs archives
+    are per-branch.
 - **Batch-order dependence: MEASURED ZERO** (human dev n=2,185, forward
   vs reversed batch at cap 500: 0 verdict changes, 0 contradictions).
   The documented TT-carryover caveat affects node counts at most, not
