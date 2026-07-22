@@ -57,10 +57,13 @@ tss_interior_guard = true
 # mode 3 = verified WIN + hard-LOSS consumption.
 tss_solver_mode = 3
 tss_solver_root_guard = true
-# Cap 750, J2near OFF (owner reversal 2026-07-21 late; REPORT_J2NEAR_CAP.md —
-# J2near-on adds zero decided rows at any cap <= 1,000). Cap 750 is the
-# measured strictly-better point after the generation folds.
-tss_solver_node_cap = 750
+# Cap 1000, J2near OFF (owner ruling 2026-07-22 for main_5: raise 750->1000 for
+# more complete solver labels on the fresh capacity line. Trade: the cap-bound
+# UNKNOWN tail (~65% of solver wall at cap 750 per the main_4 bottleneck
+# diagnostic) runs ~33% longer, so epochs lengthen; the gain is the proof mass
+# between 750 and 1000 (cap-Pareto). J2near still OFF — its unique proofs need
+# 1,111-1,783 nodes, so it adds zero decided rows even at cap 1000.
+tss_solver_node_cap = 1000
 tss_solver_sample_16 = 16
 tss_solver_dual_pass = true
 # UNBOUNDED horizon (0 => semantic_horizon = u32::MAX; the node cap bounds work).
