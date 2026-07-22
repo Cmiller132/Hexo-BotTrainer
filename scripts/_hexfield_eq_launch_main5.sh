@@ -21,7 +21,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${ROOT:-$(dirname "$SCRIPT_DIR")}"
 RUNDIR=/mnt/e/Hexo-BotTrainer/runs/hexfield_eq_main_5
-PREFIT_CKPT=/mnt/e/Hexo-BotTrainer/runs/hexfield_eq_main5_prefit/cca15/checkpoint_epoch2.pt
+PREFIT_CKPT=/mnt/e/Hexo-BotTrainer/runs/hexfield_eq_main5_prefit/cca15/checkpoint_epoch1.pt
 
 set -a
 source "$ROOT/scripts/prefit_env/hexfield_eq_main5_cca15.env"
@@ -45,7 +45,7 @@ set +a
 if [[ ! -f "$PREFIT_CKPT" ]]; then
   echo "ABORT: main_5 prefit checkpoint not found:" >&2
   echo "  $PREFIT_CKPT" >&2
-  echo "  (run scripts/_hexfield_eq_main5_prefit.sh to epoch 2 first)" >&2
+  echo "  (run scripts/_hexfield_eq_main5_prefit.sh to epoch 1 first)" >&2
   exit 1
 fi
 

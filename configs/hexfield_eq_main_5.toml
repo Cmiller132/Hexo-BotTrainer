@@ -222,11 +222,11 @@ passes_per_epoch = 1
 [checkpoint]
 # FRESH-weights BC prefit off the 10 highest main_4 sample epochs
 # (scripts/_hexfield_eq_main5_prefit.sh). Owner ruling 2026-07-22: LAUNCH EARLY
-# from the epoch-2 checkpoint (3 shuffled passes — corpus globally shuffled
+# from the epoch-1 checkpoint (2 shuffled passes — corpus globally shuffled
 # across all 10 epochs, so the newest games were already seen from pass 0).
 # The prefit writes {meta,model} per-epoch checkpoints; the trainer's
 # initialize_from reads payload["model"] via warm_start_into, so this loads
 # exactly like a soak_init (weights-only warm start, fresh optimizer/window/
 # epoch). NOT resume_from.
-initialize_from = "/mnt/e/Hexo-BotTrainer/runs/hexfield_eq_main5_prefit/cca15/checkpoint_epoch2.pt"
+initialize_from = "/mnt/e/Hexo-BotTrainer/runs/hexfield_eq_main5_prefit/cca15/checkpoint_epoch1.pt"
 save_name = "latest"
