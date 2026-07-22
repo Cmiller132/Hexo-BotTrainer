@@ -12,10 +12,14 @@
 #     deliberately absent below: forward() no longer emits the component and
 #     losses.py skips it, so the key would be dead config.
 #
-# Everything else deliberately IDENTICAL to the live main_4 regime (single
-# variable: capacity), including:
-#   * LR: cosine 2e-4 -> 2e-5 over 150 epochs, then HOLD at the 2e-5 floor
-#     (see tests/test_hexfield_eq_lr_schedule.py for the pinned curve).
+# Everything else deliberately close to the live main_4 regime, with ONE
+# intentional delta beyond capacity:
+#   * LR: cosine 3e-4 -> 2e-5 over 150 epochs, then HOLD at the 2e-5 floor
+#     (owner ruling 2026-07-22: raise the START from main_4's 2e-4 to 3e-4 to
+#     move the deeper 15-block trunk faster early; same 2e-5 floor + 150-epoch
+#     horizon, so the curve converges to main_4's exactly at ep150. Every epoch
+#     the amount ABOVE the floor is 1.556x main_4's — ep0 3.0e-4, ep25 2.81e-4,
+#     ep50 2.30e-4, ep75 1.60e-4, ep100 9.0e-5, ep125 3.88e-5, ep150 2.0e-5).
 #   * Solver: mode 3, cap 750, J2near OFF, dual_pass, horizon UNBOUNDED,
 #     all-leaves strict park (5000 ms), async 12/24 — the measured post-fold
 #     production point (REPORT_J2NEAR_CAP.md; owner reversal 2026-07-21 late).
@@ -126,9 +130,10 @@ gumbel_play_prune = true
 
 [model.config.training]
 batch_rows = 256
-# main_5 LR: cosine decay 2e-4 -> 2e-5 over 150 epochs, then HOLD at 2e-5
-# (identical to main_4; the BC prefit is the warm start).
-learning_rate = 2e-4
+# main_5 LR: cosine decay 3e-4 -> 2e-5 over 150 epochs, then HOLD at 2e-5
+# (owner ruling 2026-07-22: start raised from main_4's 2e-4 for the deeper
+# trunk; same floor/horizon so it meets main_4's curve at ep150).
+learning_rate = 3e-4
 lr_schedule = "cosine"
 lr_warmup_steps = 0
 lr_final = 2e-5
