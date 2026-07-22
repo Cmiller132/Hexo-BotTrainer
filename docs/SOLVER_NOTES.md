@@ -42,6 +42,12 @@ hints / loss_reserve / fragments / zones OFF.
   cross-cap ratios are indicative). Deep F19 = attacker 35.97%, defender
   30.56%, TT 2.01% (older split). Historic pre-fold shape (A_OR_GEN
   60.5%, D_FORCED_GEN 20.4%; P7 1.42x `2c262e10`) superseded.
+  **Round-3 fold (`cc75b304`→merge `b1e7e877`) partially staled these
+  shares:** battery 38.3→32.9 s, attacker bucket share 47.3%→39.8%
+  (that lane's inclusive-bucket accounting); state make/unmake and
+  cap-bound waste are now relatively LARGER targets. Cumulative
+  bit-identical solve-wall speedup since drive start ≈ 2.0x
+  (1.72x × 1.159x).
 - **TT at cap 500 ≈ overhead but cheap** (hit/entry ≈ 0.01; measured
   probe/insert wall share 0.433% — below any removal payoff, TT-min
   KILLED in r2). Deep memory resident = WidePnSearch arena +
@@ -209,6 +215,20 @@ CapResumeSession promotion · GPU bench close-out.
   stagnation evidence + no-regression gate per triage findings). Runner-up
   defender-plan (15.77%, the with-cap-growing bucket). TT is a non-target
   (0.31%). Attack 1 is live on claude/attacker-gen-r3.
+- 2026-07-21 (attacker-gen round 3, `cc75b304` → merge `b1e7e877`;
+  REPORT_ATTACKER_GEN_R3.md). MEASURED: **1.159x end-to-end** paired-
+  median battery speedup at cap 750 (38.308→32.859 s); attacker-pair
+  bucket 1.391x (18.164→13.056 s). Stack-backed fixed-capacity post-pair
+  threat family (36-window/72-cell bounds proven from window geometry),
+  deterministic coordinate hashers, count-without-materializing release
+  gates; heap classifier kept as cfg(test) TSS_ATTACKER_PAIR_REFERENCE
+  oracle. BIT-IDENTICAL: digest a8c6f3ca exact, cap-750 zero row
+  mismatches, suites 222/0/43 + 137/0/42 (lane + independent rerun),
+  WSL Stage-0 golden 34/34 on the merged tree. GATE SIDE-FIND: the
+  hexgt-build venv's hexo_utils editable install dangled at the deleted
+  /mnt/e/Hexo-BotTrainer-hexgtfeat — a latent main_4 RELAUNCH BLOCKER;
+  reinstalled from the INFRA_TREE worktree (resume-run-crash-fdef2b) per
+  the supervisor split ruling. Cumulative solve-wall speedup ≈ 2.0x.
 - 2026-07-21 (triage Phase B, `be4bd34a` on claude/triage-b;
   REPORT_TRIAGE_PHASE_B.md). MEASURED: sub-root trajectory telemetry
   (cfg-test, 34,616 snapshots over the 248 labeled grinds @cap 5k).

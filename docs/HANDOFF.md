@@ -175,9 +175,22 @@ Live lanes (2026-07-21 evening, third round):
   R2-1/R2-2 amendments `a018befb` → narrow confirmation `af5665be`
   (CONFIRMED-CLEARED-FOR-BUILD). Full-tree is NO-GO; final adoption gate
   remains the owner's.
-- **attacker-gen-r3** (claude/attacker-gen-r3): speed round 3 on the
-  combined attacker+window+second-cand path (48.46% of wall);
-  bit-identical mandatory (digest a8c6f3ca + cap-750 row identity).
+- **horizon-r3** (claude/deadline-ladder): legality-bridge lemma
+  (within-8 rule), h≤10 universe shrink, next-rung closure (h13/14),
+  h16 feasibility read. Research-primary.
+- **lean-horizon** (E:\tss-lean): two-cover lemma, legality bridge,
+  h6 decider formalization.
+- **refute finisher** (claude/refute-build): implementing the R3-1
+  corrected Q=4 golden (design `a24c1f00`; independent recompute of
+  pinned bytes mandatory).
+
+Exited and folded: **attacker-gen-r3** (`cc75b304` → merge `b1e7e877`):
+1.159x end-to-end bit-identical, all gates incl. WSL Stage-0 34/34;
+cumulative solve-wall speedup ≈ 2.0x since drive start. RELAUNCH NOTE:
+gate uncovered + fixed a dangling hexo_utils editable install in
+hexgt-build (pointed at deleted hexgtfeat; reinstalled from INFRA_TREE
+resume-run-crash-fdef2b) — without the fix, main_4 relaunch would have
+failed at import.
 
 Exited and gated: **bottleneck-750** (`e08d9da0` on claude/j2near-profile,
 REPORT_TSS_BOTTLENECK_750.md) — the 32.85% residual is state make/unmake
