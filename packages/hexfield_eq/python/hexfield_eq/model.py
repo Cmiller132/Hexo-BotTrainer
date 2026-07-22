@@ -39,6 +39,7 @@ from .constants import (
     BIAS_ROWS,
     BIAS_TOKEN_CELL_ROW,
     BIAS_TOKEN_TOKEN_ROW,
+    CELL_Q_HEAD,
     CHANNELS,
     C_ORBIT,
     FEATURE_VERSION,
@@ -1573,6 +1574,13 @@ def infer_net_kwargs_from_state_dict(sd: dict, meta: dict | None = None) -> dict
         kwargs["reg_tok_read"] = any(
             k.startswith(("tok_reads.", "tok_reads_l.")) for k in sd
         )
+    # Per-cell Q head toggle: meta first; the state-dict key set is affirmative
+    # evidence either way (present -> on, absent -> off), so the rebuild is
+    # deterministic regardless of the loading process's env.
+    if meta.get("cell_q") is not None:
+        kwargs["cell_q"] = bool(meta["cell_q"])
+    else:
+        kwargs["cell_q"] = any(k.startswith("cell_q_") for k in sd)
     # Ray-attention mask semantics (Phase L1): meta-only (no state-dict trace —
     # the toggle is a mask-build variant); absent meta keeps the env default.
     if meta.get("ray_blockers") is not None:
@@ -1622,6 +1630,7 @@ class HexfieldNet(nn.Module):
         ray_blockers: bool | None = None,
         raytap: str | None = None,
         raytap_lut: str | None = None,
+        cell_q: bool | None = None,
     ) -> None:
         super().__init__()
         # channels/attention_heads/trunk_layout default to the module globals
@@ -1715,6 +1724,10 @@ class HexfieldNet(nn.Module):
         self._reg_tok_read = (
             REG_TOK_READ if reg_tok_read is None else bool(reg_tok_read)
         )
+        # Per-cell Q head toggle: env default, explicit kwarg for cross-arch
+        # loaders (it changes the state-dict key set, so meta-first rebuilds
+        # pass it here).
+        self._cell_q = CELL_Q_HEAD if cell_q is None else bool(cell_q)
         if self._reg_tok_read and not self._reg_lane:
             raise ValueError(
                 "reg_tok_read=True requires reg_lane=True (the cells <- tokens "
@@ -1863,9 +1876,12 @@ class HexfieldNet(nn.Module):
         self.soft_policy_expand = head_linear(c, POLICY_READ_EXPAND * c)
         self.soft_policy_head = nn.Linear(pol_w, 1)
         # Per-cell Q head (train-only): emitted in forward() only, not in serve.
-        self.cell_q_conv = HexNodeConv(c, c)
-        self.cell_q_expand = head_linear(c, POLICY_READ_EXPAND * c)
-        self.cell_q_head = nn.Linear(pol_w, VALUE_BINS)
+        # Toggle-off skips construction so the state-dict key set carries the
+        # choice and rebuilds infer it deterministically.
+        if self._cell_q:
+            self.cell_q_conv = HexNodeConv(c, c)
+            self.cell_q_expand = head_linear(c, POLICY_READ_EXPAND * c)
+            self.cell_q_head = nn.Linear(pol_w, VALUE_BINS)
         self.value_reduction = nn.Linear((NUM_TOKENS + 2) * read_w, red_out)
         self.value_head = nn.Linear(red_out, VALUE_BINS)
         self.aux_reduction = nn.Linear(4 * read_w, red_out)
@@ -1990,6 +2006,9 @@ class HexfieldNet(nn.Module):
             # state-dict key set, and KNOWN_TRUNK_LAYOUTS cannot express them.
             "reg_lane": self._reg_lane,
             "reg_tok_read": self._reg_tok_read,
+            # Per-cell Q head presence — load-bearing like the register lane
+            # toggles (changes the state-dict key set).
+            "cell_q": self._cell_q,
             # The featurizer support radius this net was built/trained under
             # (spec D-S26): a mismatch at load is a silent input-distribution
             # shift, so loaders assert it.
@@ -2553,10 +2572,11 @@ class HexfieldNet(nn.Module):
                 )
             ),
         }
-        out["cell_q"] = self._cell_q_logits(
-            self.cell_q_conv, self.cell_q_expand, self.cell_q_head,
-            cells, gather_idx, mask,
-        )
+        if self._cell_q:
+            out["cell_q"] = self._cell_q_logits(
+                self.cell_q_conv, self.cell_q_expand, self.cell_q_head,
+                cells, gather_idx, mask,
+            )
         aux = F.relu(
             self.aux_reduction(self._value_input(tokens, (2, 3), pooled, pre_tokens))
         )

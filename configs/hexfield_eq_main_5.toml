@@ -1,0 +1,220 @@
+# hexfield_eq_main_5 -- capacity scale-up line (owner ruling 2026-07-22).
+# FRESH weights, BC-prefit off the 10 highest main_4 sample epochs
+# (scripts/_hexfield_eq_main5_prefit.sh -> soak_init.pt), then initialize_from
+# that artifact. Fresh optimizer state, fresh replay window, epoch counter at 0.
+#
+# Architecture (scripts/prefit_env/hexfield_eq_main5_cca15.env — the checkpoint
+# meta remains authoritative and must match the launch environment exactly):
+#   * trunk deepened 8 -> 15 blocks, uniform CCA x5 (CCACCACCACCACCA, the
+#     KNOWN_TRUNK_LAYOUTS (10,5) shape); 192ch / D6 tie / 3 heads / v2 features /
+#     ray-tap both + additive ray7lut2 / reg lane — all unchanged from main_4.
+#   * per-cell Q head REMOVED (HEXFIELD_EQ_CELL_Q=0). q_head_weight is
+#     deliberately absent below: forward() no longer emits the component and
+#     losses.py skips it, so the key would be dead config.
+#
+# Everything else deliberately IDENTICAL to the live main_4 regime (single
+# variable: capacity), including:
+#   * LR: cosine 2e-4 -> 2e-5 over 150 epochs, then HOLD at the 2e-5 floor
+#     (see tests/test_hexfield_eq_lr_schedule.py for the pinned curve).
+#   * Solver: mode 3, cap 750, J2near OFF, dual_pass, horizon UNBOUNDED,
+#     all-leaves strict park (5000 ms), async 12/24 — the measured post-fold
+#     production point (REPORT_J2NEAR_CAP.md; owner reversal 2026-07-21 late).
+#   * soft_policy_weight 0.5 KEPT: the train-only soft head (CE against the
+#     T=2-softened improved policy) is the anti-sharpness counterweight to the
+#     Gumbel + TSS-sharpened main-policy target; main_4 telemetry shows root
+#     target entropy stable (1.63-1.69 nats, ep26-43), so no change is forced —
+#     revisit only on evidence of entropy collapse in main_5.
+# First-epoch validation gates at launch: deep_verify_failed==0, park_bailed==0,
+# async_dropped==0, worker panics 0, win AND loss backup streams live.
+
+[model]
+name = "hexfield_eq"
+module = "hexfield_eq.plugin"
+
+[model.config]
+device = "cuda"
+
+[model.config.selfplay]
+search_visits = 256
+# 100% PCR: every turn is a full move with a written Gumbel-target row.
+pcr_full_proportion = 1.0
+pcr_fast_visits = 192
+pcr_fast_temperature = 0.0
+active_games = 256
+virtual_batch_size = 96
+flush_target = 1024
+active_root_limit = 256
+max_game_plies = 256
+
+# ---- TSS deep solver: the live main_4 production profile, unchanged ----------
+tss_enabled = true
+tss_interior_guard = true
+# mode 3 = verified WIN + hard-LOSS consumption.
+tss_solver_mode = 3
+tss_solver_root_guard = true
+# Cap 750, J2near OFF (owner reversal 2026-07-21 late; REPORT_J2NEAR_CAP.md —
+# J2near-on adds zero decided rows at any cap <= 1,000). Cap 750 is the
+# measured strictly-better point after the generation folds.
+tss_solver_node_cap = 750
+tss_solver_sample_16 = 16
+tss_solver_dual_pass = true
+# UNBOUNDED horizon (0 => semantic_horizon = u32::MAX; the node cap bounds work).
+tss_solver_horizon = 0
+tss_solver_horizon_ladder = false
+# Async solve pool at the ep20-retune capacity (base 12, ceiling 24).
+tss_solver_async = true
+tss_solver_async_threads = 12
+tss_solver_async_inline_16 = 4
+tss_solver_async_threads_max = 24
+# ALL-LEAVES strict solver-first ordering with the 5000 ms emergency-only park
+# ceiling (owner-ordered 2026-07-21). Watch park_bailed==0 on live epochs.
+tss_solver_park = true
+tss_solver_park_timeout_ms = 5000
+tss_solver_all_leaves = true
+tss_zone = false
+tss_solver_j2near = false
+tss_solver_group2 = false
+tss_solver_loss_reserve_nodes = 0
+# Guard-consistent policy-target sharpening (Lever 1). Rows carry
+# target_regime=1; policy CE is NOT comparable across this boundary.
+tss_policy_target_sharpen = true
+
+cache_max_states = 262144
+nucleus_f64 = true
+lcb_z = 1.6
+clean_root_prior_cache = true
+
+# Constant c_puct, with de-contaminated target search.
+c_puct = 1.5
+visit_scaled_c_puct = true
+c_scale = 0.0
+c_base = 500.0
+root_dirichlet_noise_fraction = 0.0
+root_dirichlet_total_alpha = 10.83
+dirichlet_shaped = true
+fpu_reduction = 0.2
+root_fpu_reduction = 0.0
+forced_playout_k = 0.0
+pruned_dynamic_cpuct = true
+lazy_widening = true
+new_child_fpu = true
+widening_policy_mass = 0.95
+widening_max_children = 96
+widening_min_children = 2
+temperature = 1.0
+temperature_floor = 0.15
+temperature_halflife_plies = 20.0
+root_policy_temperature = 1.05
+policy_init_fraction = 0.35
+policy_init_avg_plies = 4.0
+policy_init_max_plies = 8
+policy_init_temperature = 1.4
+ml_two_sided = false
+ml_final_pick_band = 0.08
+export_root_prior_logits = true
+
+# Gumbel AlphaZero target regime; m=16 fits 256 visits exactly.
+gumbel_root_enabled = true
+gumbel_sequential_halving = true
+gumbel_nonroot_select = true
+gumbel_target_enabled = true
+gumbel_c_visit = 50.0
+gumbel_c_scale = 1.0
+gumbel_m = 16
+gumbel_target_min_visits = 1
+gumbel_play_prune = true
+
+[model.config.training]
+batch_rows = 256
+# main_5 LR: cosine decay 2e-4 -> 2e-5 over 150 epochs, then HOLD at 2e-5
+# (identical to main_4; the BC prefit is the warm start).
+learning_rate = 2e-4
+lr_schedule = "cosine"
+lr_warmup_steps = 0
+lr_final = 2e-5
+lr_decay_epochs = 150
+weight_decay = 1e-4
+grad_clip = 5.0
+adaptive_clip = true
+clip_c = 1.75
+clip_ema_decay = 0.99
+clip_warmup_steps = 50
+policy_weight = 1.0
+value_weight = 1.0
+opp_policy_weight = 0.25
+short_term_value_weight = 0.1
+moves_left_weight = 0.2
+# q_head_weight intentionally absent: the per-cell Q head does not exist in
+# this arch (HEXFIELD_EQ_CELL_Q=0), so the loss component is never computed.
+soft_policy_weight = 0.5
+policy_surprise_uniform_fraction = 0.5
+policy_surprise_max_weight = 8.0
+warmup_steps = 0
+shuffle_min_rows = 7000
+shuffle_keep_target_rows = 210000
+shuffle_taper_window_exponent = 0.65
+shuffle_expand_window_per_row = 0.8
+shuffle_taper_window_scale = 7000.0
+validation_fraction = 0.0
+train_samples_per_epoch = 56000
+max_train_bucket_per_new_data = 8.0
+max_train_bucket_size = 500000.0
+no_repeat_files = false
+expand_backend = "rust"
+expand_workers = 0
+policy_target = "gumbel"
+
+[model.config.evaluation]
+games_per_epoch = 16
+eval_visits = 128
+eval_every = 5
+
+[model.config.multi_stage_eval]
+enabled = true
+games_budget = 192
+every_n_epochs = 5
+full_search_visits = 512
+eval_virtual_batch_size = 32
+sealbot_share = 0.1667
+strix_share = 0.3333
+strix_weight = 1.0
+verdict_reference_lag = 5
+pool_path = "diagnostics/eval_pool.json"
+
+[model.config.multi_stage_eval.sprt]
+enabled = false
+
+[model.config.multi_stage_eval.opponents]
+sealbot_enabled = true
+strix_enabled = true
+strix_ckpt = "/mnt/e/Hexo-BotTrainer/anchors/strix/checkpoint_00237000.pt"
+strix_sims = 512
+strix_m = 16
+strix_device = "cuda"
+strix_label = "strix"
+bracket_size = 2
+# No cross-feature-width permanent anchors.
+permanent_anchors = []
+radius8_opponents = []
+
+[run]
+name = "hexfield_eq_main_5"
+output_dir = "/mnt/e/Hexo-BotTrainer/runs/hexfield_eq_main_5"
+seed = 1
+
+[loop]
+# LR floor-holds at 2e-5 after epoch 150; supervisor-driven long tail.
+epochs = 300
+
+[selfplay]
+games_per_epoch = 256
+update_checkpoint_pointer = false
+
+[train]
+passes_per_epoch = 1
+
+[checkpoint]
+# FRESH-weights BC prefit off the 10 highest main_4 sample epochs, written by
+# scripts/_hexfield_eq_main5_prefit.sh (initialize_from, NOT resume_from).
+initialize_from = "/mnt/e/Hexo-BotTrainer/runs/hexfield_eq_main5_prefit/cca15/soak_init.pt"
+save_name = "latest"
