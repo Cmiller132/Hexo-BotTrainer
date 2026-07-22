@@ -21,6 +21,10 @@ ROOTS = {
         (0, 0), (0, 1), (-1, 5), (1, 0), (4, 0),
         (1, 4), (4, 2), (5, 0), (-2, -2),
     ],
+    "q4_sole_orientation_no_new": [
+        (0, 0), (-1, 0), (6, 0), (1, 0), (2, 0),
+        (3, 5), (-1, 6), (4, 0), (5, 0),
+    ],
 }
 
 # Filled from this independent implementation and frozen for CI drift checks.
@@ -37,6 +41,60 @@ EXPECTED = {
         "t": 2, "q": 2, "classes": 1,
         "fail": [2, 0, 0, 0],
     },
+    "q4_sole_orientation_no_new": {
+        "preimage_hex": "485852464c56313a524f4f542d53454d414e5449433a5631000100010001000100010009ffff000001ffff06000100000000000100000000020000000003000500010400000000050000000006000000010101090000000001",
+        "digest_hex": "0ef6c6f1d35ff6826d655b3b11a8af537bf1be1da114034a1c7feef2adf2817c",
+        "t": 1, "q": 4, "classes": 4,
+        "fail": [4, 0, 0, 0],
+    },
+}
+
+R3_1_SEMANTIC_EXPECTED = {
+    "claimant": 1,
+    "terminal": None,
+    "live_claimant_count_ge_2": [],
+    "live_defender_count_ge_4": [
+        (0, 0, 0, 5, ((3, 0),)),
+    ],
+    "claimant_live_through_selected_a": [
+        (1, 3, 0, 1, ((3, 0), (3, 1), (3, 2), (3, 3), (3, 4))),
+    ],
+    "t": ((3, 0),),
+    "g1": {(3, 0): ((3, 1), (3, 2), (3, 3), (3, 4))},
+    "u": (
+        ((3, 0), (3, 1)),
+        ((3, 0), (3, 2)),
+        ((3, 0), (3, 3)),
+        ((3, 0), (3, 4)),
+    ),
+    "defender_threat_family": (((3, 0),),),
+    "defender_tau": 1,
+    "own_win_now_claimant_b2": False,
+    "forced_loss_claimant_b2": False,
+    "occurrence_counts": {
+        "no_new": 4,
+        "defender_first": 0,
+        "loose_0": 0,
+        "loose_1": 0,
+        "completion": 0,
+        "tactical": 0,
+        "tight": 0,
+    },
+    "class_counts": {
+        "no_new": 4,
+        "defender_first": 0,
+        "loose_0": 0,
+        "loose_1": 0,
+        "completion": 0,
+        "tactical": 0,
+        "tight": 0,
+    },
+    "classes": (
+        ((((3, 0), (3, 1)),), "no_new"),
+        ((((3, 0), (3, 2)),), "no_new"),
+        ((((3, 0), (3, 3)),), "no_new"),
+        ((((3, 0), (3, 4)),), "no_new"),
+    ),
 }
 
 
@@ -127,6 +185,21 @@ def apply(state, coord):
     return board, mover, phase, clock, terminal
 
 
+def replay(history):
+    state = ({}, 0, (0, None), 0, None)
+    for index, coord in enumerate(history, 1):
+        board, mover, phase, clock, terminal = state
+        assert terminal is None
+        assert mover == owner_at(index)
+        if phase[0] == 0:
+            assert not board and index == 1 and coord == (0, 0)
+            board = {coord: mover}
+            state = (board, 1, (1, None), 1, winner(board, coord))
+        else:
+            state = apply(state, coord)
+    return state
+
+
 def tau(family):
     if not family:
         return 0
@@ -169,10 +242,13 @@ def disposition(root, windows, claimant, a, b):
     return {0: "loose_0", 1: "loose_1", 2: "tight", 3: "tactical"}[value], False, full
 
 
-def oracle(history):
-    board = {coord: owner_at(i) for i, coord in enumerate(history, 1)}
-    claimant = mover_after(len(history))
-    root = (board, claimant, (1, None), len(history), None)
+def regenerate(history):
+    root = replay(history)
+    board, claimant, phase, clock, terminal = root
+    assert phase == (1, None)
+    assert clock == len(history)
+    assert claimant == mover_after(len(history))
+    assert terminal is None
     windows = window_keys(board)
     t_set = set()
     for key in windows:
@@ -191,7 +267,7 @@ def oracle(history):
     evaluated = {pair: disposition(root, windows, claimant, *pair) for pair in universe}
     fail_names = ("no_new", "defender_first", "loose_0", "loose_1")
     fail = [sum(value[0] == name for value in evaluated.values()) for name in fail_names]
-    classes = 0
+    classes = []
     seen = set()
     for pair in universe:
         if pair in seen:
@@ -202,8 +278,44 @@ def oracle(history):
         if rev and not value[1] and not rev[1] and value[2] == rev[2]:
             assert value[0] == rev[0]
             seen.add(reverse)
+            members = (pair, reverse)
+        else:
+            members = (pair,)
         seen.add(pair)
-        classes += 1
+        classes.append((members, value[0]))
+    occurrence_names = fail_names + ("completion", "tactical", "tight")
+    occurrence_counts = {
+        name: sum(value[0] == name for value in evaluated.values())
+        for name in occurrence_names
+    }
+    class_counts = {
+        name: sum(reason == name for _, reason in classes)
+        for name in occurrence_names
+    }
+    assert len(universe) == sum(occurrence_counts.values())
+    assert len(universe) == sum(len(members) for members, _ in classes)
+    assert len(classes) == sum(class_counts.values())
+    if not any(occurrence_counts[name] for name in ("completion", "tactical", "tight")):
+        assert len(universe) == sum(fail)
+        assert len(classes) == sum(class_counts[name] for name in fail_names)
+    return {
+        "root": root,
+        "windows": windows,
+        "t_set": t_set,
+        "universe": universe,
+        "evaluated": evaluated,
+        "fail": fail,
+        "classes": classes,
+        "occurrence_counts": occurrence_counts,
+        "class_counts": class_counts,
+    }
+
+
+def oracle(history):
+    regenerated = regenerate(history)
+    board, claimant, _, _, _ = regenerated["root"]
+    fail = regenerated["fail"]
+    classes = regenerated["classes"]
     stones = sorted((q, r, owner) for (q, r), owner in board.items())
     preimage = bytearray(DOMAIN)
     for value in (1, 1, 1, 1, 1):
@@ -217,9 +329,92 @@ def oracle(history):
     return {
         "preimage_hex": preimage.hex(),
         "digest_hex": hashlib.sha256(preimage).hexdigest(),
-        "t": len(t_set), "q": len(universe), "classes": classes,
+        "t": len(regenerated["t_set"]),
+        "q": len(regenerated["universe"]),
+        "classes": len(classes),
         "fail": fail,
     }
+
+
+def own_win_now_claimant_b2(root, windows, claimant):
+    board = root[0]
+    candidates = sorted({
+        coord
+        for key in windows
+        if live(board, key, claimant)
+        for coord in empties(board, key)
+        if legal(board, coord)
+    })
+    for a in candidates:
+        first = apply(root, a)
+        if first[4] == claimant:
+            return True
+        for b in candidates:
+            if b != a and legal(first[0], b) and apply(first, b)[4] == claimant:
+                return True
+    return False
+
+
+def r3_1_semantic_census(history):
+    regenerated = regenerate(history)
+    root = regenerated["root"]
+    board, claimant, _, _, terminal = root
+    windows = regenerated["windows"]
+    selected_a = (3, 0)
+
+    def window_record(key, player):
+        return (key[0], key[1], key[2], counts(board, key, player), empties(board, key))
+
+    live_claimant_count_ge_2 = [
+        window_record(key, claimant) for key in windows
+        if live(board, key, claimant) and counts(board, key, claimant) >= 2
+    ]
+    live_defender_count_ge_4 = [
+        window_record(key, claimant ^ 1) for key in windows
+        if live(board, key, claimant ^ 1) and counts(board, key, claimant ^ 1) >= 4
+    ]
+    claimant_live_through_selected_a = [
+        window_record(key, claimant) for key in windows
+        if selected_a in cells(key) and live(board, key, claimant)
+    ]
+    g1 = {}
+    for a in sorted(regenerated["t_set"]):
+        promoted = set()
+        for key in windows:
+            empty = empties(board, key)
+            if live(board, key, claimant) and counts(board, key, claimant) >= 1 and a in empty:
+                promoted.update(c for c in empty if c != a and legal(board, c))
+        g1[a] = tuple(sorted(promoted))
+    defender_threat_family = tuple(
+        sorted(tuple(sorted(empties(board, key))) for key in windows
+               if live(board, key, claimant ^ 1) and counts(board, key, claimant ^ 1) >= 4)
+    )
+    own_win = own_win_now_claimant_b2(root, windows, claimant)
+    census = {
+        "claimant": claimant,
+        "terminal": terminal,
+        "live_claimant_count_ge_2": live_claimant_count_ge_2,
+        "live_defender_count_ge_4": live_defender_count_ge_4,
+        "claimant_live_through_selected_a": claimant_live_through_selected_a,
+        "t": tuple(sorted(regenerated["t_set"])),
+        "g1": g1,
+        "u": tuple(regenerated["universe"]),
+        "defender_threat_family": defender_threat_family,
+        "defender_tau": tau(defender_threat_family),
+        "own_win_now_claimant_b2": own_win,
+        "forced_loss_claimant_b2": not own_win and tau(defender_threat_family) > 2,
+        "occurrence_counts": regenerated["occurrence_counts"],
+        "class_counts": regenerated["class_counts"],
+        "classes": tuple(regenerated["classes"]),
+    }
+    selected = (((3, 0), (3, 1)),)
+    selected_classes = [members for members, reason in census["classes"]
+                        if members == selected and reason == "no_new"]
+    assert len(selected_classes) == 1 and len(selected_classes[0]) == 1
+    assert len(census["u"]) == sum(census["occurrence_counts"].values())
+    assert len(census["u"]) == sum(len(members) for members, _ in census["classes"])
+    assert len(census["classes"]) == sum(census["class_counts"].values())
+    return census
 
 
 def main():
@@ -227,6 +422,8 @@ def main():
     for name, expected in EXPECTED.items():
         if expected["preimage_hex"]:
             assert actual[name] == expected, (name, actual[name], expected)
+    census = r3_1_semantic_census(ROOTS["q4_sole_orientation_no_new"])
+    assert census == R3_1_SEMANTIC_EXPECTED, (census, R3_1_SEMANTIC_EXPECTED)
     print(json.dumps(actual, sort_keys=True, indent=2))
 
 

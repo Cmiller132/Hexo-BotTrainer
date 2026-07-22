@@ -1,11 +1,11 @@
 # RefuteLeafExact/V1 build report
 
-Status: **BLOCKED**. The leaf implementation, independent verifier, fixtures,
-two realizable goldens, corpus round-trips, firewall audits, and release suites
-are present. The contract's mandatory `Q=1` golden is contradictory with its
-own frozen `T/G1/S/U` equations (proof below), so the R2-2 definition of done
-cannot be completed without changing the reviewed contract/version. No fake
-fixture or semantic workaround was introduced.
+Status: **FINISHED (prototype; not adopted)**. The leaf implementation,
+independent verifier, fixtures, three realizable goldens, corpus round-trips,
+firewall audits, and release suites are present. Amendment R3-1 resolves the
+impossible root-level `Q=1` obligation with the realizable class-level
+sole-orientation vector. The economics gates remain failed and continue to
+prohibit adoption.
 
 ## Scope and module map
 
@@ -22,9 +22,9 @@ fixture or semantic workaround was introduced.
   transition/transversal implementation, resource meter, semantic replay, and
   public typed verifier result.
 - **CODE-FACT** — `packages/hexfield_eq/rust/src/tss_refute_tests.rs`
-  (805 lines) owns R2 fixtures, golden checks, D6, mutation, corpus, discovery,
+  (891 lines) owns R2 fixtures, golden checks, D6, mutation, corpus, discovery,
   and economics harnesses.
-- **CODE-FACT** — `scripts/refute_leaf_v1_oracle.py` (234 lines) is the third
+- **CODE-FACT** — `scripts/refute_leaf_v1_oracle.py` (431 lines) is the third
   oracle. It uses only Python's standard library and imports no repository
   package.
 - **CODE-FACT** — `scripts/check_refute_verifier_firewall.py` (76 lines) checks
@@ -107,21 +107,40 @@ fixture or semantic workaround was introduced.
   `IneligibleNodeCap`. Both branches occur before semantic regeneration or
   public self-verification.
 
-### R2-2 realizable goldens
+### R2-2/R3-1 realizable goldens
 
 | root | preimage SHA-256 | T | Q | classes | fail no-new/defender/loose0/loose1 |
 |---|---|---:|---:|---:|---:|
 | `q0_corpus_0hz3hty_prefix3` | `1e0ee42712858b73e46fcfe603a6400bf29676ccb5d5921fbdb52225b26d6167` | 0 | 0 | 0 | `0/0/0/0` |
 | `q2_commuting_no_new` | `499d226e46bd418ab44e42819229b09b8ed47f31047856a059445586c73e5b0a` | 2 | 2 | 1 | `2/0/0/0` |
+| `q4_sole_orientation_no_new` | `0ef6c6f1d35ff6826d655b3b11a8af537bf1be1da114034a1c7feef2adf2817c` | 1 | 4 | 4 | `4/0/0/0` |
 
 - **MEASURED** — the Python oracle, producer, literal codec/preimage test, and
-  independent verifier agree on both rows, including full preimage hex frozen
+  independent verifier agree on all three rows, including full preimage hex frozen
   in the script and Rust test.
 - **MEASURED** — the Q2 row combines identity and counter expectations in one
   accepted literal artifact and demonstrates two ordered occurrences versus
   one quotient class.
+- **MEASURED** — independently replaying the R3-1 nine-placement history in
+  the standard-library-only oracle reproduced the design's preimage bytes and
+  digest exactly. The preimage is
+  `485852464c56313a524f4f542d53454d414e5449433a5631000100010001000100010009ffff000001ffff06000100000000000100000000020000000003000500010400000000050000000006000000010101090000000001`.
+- **MEASURED** — the same regeneration confirmed a nonterminal `FirstStone`
+  root with `A=P1`; its sole defender count-at-least-four window is axis 0,
+  start `(0,0)`, with empty `(3,0)`. No claimant-live window has count at
+  least two; the only claimant-live window through `(3,0)` is axis 1, start
+  `(3,0)`, with claimant stone `(3,5)`.
+- **MEASURED** — the oracle regenerated `T={(3,0)}`,
+  `G1={(3,1),(3,2),(3,3),(3,4)}`, the corresponding four-member ordered `U`,
+  defender threat family `{{(3,0)}}` with `tau=1`, and no
+  `ClaimantTerminal`, `OwnWinNow_A`, or `ForcedLoss_A` constructor.
+- **MEASURED** — all four occurrences are `NoNewClaimantThreat` and form four
+  singleton quotient classes. Therefore `Q=4=sum fail_*=sum_C |C|`, the four
+  failing class counts sum to `quotient_class_count=4`, and selected class
+  `{((3,0),(3,1))}` contributes exactly one occurrence; the Rust golden checks
+  the same identities through producer, codec, and independent verifier.
 
-### Mandatory Q=1 contradiction
+### Mandatory Q=1 contradiction and R3-1 resolution
 
 - **CODE-FACT** — under section 2.2, `Q=1` is impossible:
   1. If `|T| >= 2`, choose distinct `a,b in T`. Then
@@ -138,7 +157,12 @@ fixture or semantic workaround was introduced.
 - **CODE-FACT** — consequently no root can satisfy the required focused shape
   `Q=1`, `quotient_class_count=1`, selected `fail_*=1`. Creating one would
   require changing `T/G1/S/U`, legality, or the required count, which requires
-  a new reviewed version. This is the blocking design obligation.
+  a new reviewed version.
+- **CODE-FACT** — R3-1 accepts that proof and replaces only the impossible
+  root-level vector with the realizable class-level sole-orientation vector
+  above. The unchanged Q0 and Q2 identities still match their predecessor
+  values byte-for-byte; the replacement supplies the required selected
+  one-occurrence class without pretending the root itself can have `Q=1`.
 
 ### Mutation and closure results
 
@@ -158,7 +182,7 @@ fixture or semantic workaround was introduced.
 - **MEASURED** — source/import and compiled reachability firewall audits pass.
 - **HYPOTHESIS** — a future exhaustive bounded-state cross-language campaign
   would provide broader evidence than the fixed third-oracle vectors. It was
-  not treated as a substitute for the impossible mandatory Q1 golden.
+  not treated as a substitute for the fixed R2-2/R3-1 golden set.
 
 ### Real corpus leaves
 
@@ -199,8 +223,10 @@ The release harness used warmed code, a fresh solver/verifier per repetition,
 
 ## Commands and outcomes
 
-- **MEASURED — PASS** — `python scripts/refute_leaf_v1_oracle.py` (both frozen
-  realizable vectors matched).
+- **MEASURED — PASS** — `python scripts/refute_leaf_v1_oracle.py` (all three
+  frozen realizable vectors and the detailed R3-1 semantic census matched).
+- **MEASURED — PASS** — the full refute test module under the release/MSVC,
+  local-target, 32 MiB stack, and serialized settings — 9 passed, 7 ignored.
 - **MEASURED — PASS** — `cargo rustc -p hexfield_eq --lib --release --target
   x86_64-pc-windows-msvc -- --emit=llvm-ir`, followed by
   `python scripts/check_refute_verifier_firewall.py
@@ -215,18 +241,20 @@ The release harness used warmed code, a fresh solver/verifier per repetition,
   passed, 50 ignored; only seven pre-existing pyo3 deprecation warnings.
 - **MEASURED — PASS** — economics harness — three roots × 30 repetitions.
 - **MEASURED — PASS** — `git diff --check`.
-- **MEASURED — PASS** — free physical RAM preflights observed 14–15.7 GiB
-  before release builds.
+- **MEASURED — PASS** — free physical RAM preflights observed 13.07–14.89 GiB
+  before the focused and complete release test runs.
 - **CODE-FACT** — no commit was created.
 
 ## Gate disposition
 
 - **CODE-FACT** — implementation remains default-off and has no consumer.
-- **MEASURED** — realizable wire/identity/Q2, R2-1, mutation, D6, resource,
-  corpus, firewall, and release-test evidence passes.
+- **MEASURED** — realizable wire/identity, Q0/Q2/R3-1 sole-orientation,
+  occurrence/class sum identities, R2-1, mutation, D6, resource, corpus,
+  firewall, and release-test evidence passes.
 - **MEASURED** — size passes; replay and producer economics fail on the measured
   leaf cohort, as expected for a measure-only prototype and not adopted.
-- **CODE-FACT** — R2-2's mandatory Q1 vector is unsatisfiable, so the requested
-  definition of done cannot be truthfully declared complete.
+- **CODE-FACT** — R3-1 resolves the impossible Q1 gate without changing the
+  frozen semantics. The requested implementation definition of done is
+  complete; the separate failed economics gates still prohibit adoption.
 
-REFUTE_BUILD_BLOCKED
+REFUTE_BUILD_DONE

@@ -145,11 +145,53 @@ fn focused_q2_produce_verify_round_trip() {
 
 #[test]
 fn third_oracle_golden_vectors_match_codec_producer_and_verifier() {
-    let cases=[
-  (replay(&[(0,0),(5,0),(5,-1)]),"485852464c56313a524f4f542d53454d414e5449433a563100010001000100010001000300000000000500ffff0105000000010001030000000000","1e0ee42712858b73e46fcfe603a6400bf29676ccb5d5921fbdb52225b26d6167",(0,0,0,[0,0,0,0])),
-  (replay(&[(0,0),(0,1),(-1,5),(1,0),(4,0),(1,4),(4,2),(5,0),(-2,-2)]),"485852464c56313a524f4f542d53454d414e5449433a5631000100010001000100010009fefffeff00ffff05000100000000000000010001010000000001000400010400000000040002000105000000000101090000000001","499d226e46bd418ab44e42819229b09b8ed47f31047856a059445586c73e5b0a",(2,2,1,[2,0,0,0])),
- ];
-    for (state, preimage, digest, expected) in cases {
+    let cases = [
+        (
+            replay(&[(0, 0), (5, 0), (5, -1)]),
+            "485852464c56313a524f4f542d53454d414e5449433a563100010001000100010001000300000000000500ffff0105000000010001030000000000",
+            "1e0ee42712858b73e46fcfe603a6400bf29676ccb5d5921fbdb52225b26d6167",
+            (0, 0, 0, [0, 0, 0, 0]),
+            &[][..],
+            [0, 0, 0, 0],
+        ),
+        (
+            replay(&[
+                (0, 0),
+                (0, 1),
+                (-1, 5),
+                (1, 0),
+                (4, 0),
+                (1, 4),
+                (4, 2),
+                (5, 0),
+                (-2, -2),
+            ]),
+            "485852464c56313a524f4f542d53454d414e5449433a5631000100010001000100010009fefffeff00ffff05000100000000000000010001010000000001000400010400000000040002000105000000000101090000000001",
+            "499d226e46bd418ab44e42819229b09b8ed47f31047856a059445586c73e5b0a",
+            (2, 2, 1, [2, 0, 0, 0]),
+            &[2][..],
+            [1, 0, 0, 0],
+        ),
+        (
+            replay(&[
+                (0, 0),
+                (-1, 0),
+                (6, 0),
+                (1, 0),
+                (2, 0),
+                (3, 5),
+                (-1, 6),
+                (4, 0),
+                (5, 0),
+            ]),
+            "485852464c56313a524f4f542d53454d414e5449433a5631000100010001000100010009ffff000001ffff06000100000000000100000000020000000003000500010400000000050000000006000000010101090000000001",
+            "0ef6c6f1d35ff6826d655b3b11a8af537bf1be1da114034a1c7feef2adf2817c",
+            (1, 4, 4, [4, 0, 0, 0]),
+            &[1, 1, 1, 1][..],
+            [4, 0, 0, 0],
+        ),
+    ];
+    for (state, preimage, digest, expected, class_sizes, failing_class_counts) in cases {
         let produced = emit(&state);
         assert_eq!(
             hex(&root_semantic_preimage_v1(&produced.artifact.root)),
@@ -171,6 +213,50 @@ fn third_oracle_golden_vectors_match_codec_producer_and_verifier() {
             ),
             expected
         );
+        assert_eq!(encode_artifact(&produced.artifact), produced.bytes);
+        assert_eq!(
+            c.q_count,
+            c.fail_no_new + c.fail_defender_first + c.fail_loose_0 + c.fail_loose_1
+        );
+        assert_eq!(c.q_count, class_sizes.iter().sum::<u64>());
+        assert_eq!(c.quotient_class_count, class_sizes.len() as u64);
+        assert_eq!(
+            c.quotient_class_count,
+            failing_class_counts.iter().sum::<u64>()
+        );
+
+        if expected == (1, 4, 4, [4, 0, 0, 0]) {
+            let sole_classes = [
+                [((3, 0), (3, 1))],
+                [((3, 0), (3, 2))],
+                [((3, 0), (3, 3))],
+                [((3, 0), (3, 4))],
+            ];
+            let selected = sole_classes[0];
+            assert_eq!(selected, [((3, 0), (3, 1))]);
+            assert_eq!(selected.len(), 1);
+            assert_eq!(
+                failing_class_counts,
+                [
+                    selected.len() as u64 + (sole_classes.len() - 1) as u64,
+                    0,
+                    0,
+                    0
+                ]
+            );
+            assert_eq!(
+                c.fail_no_new,
+                selected.len() as u64
+                    + sole_classes[1..]
+                        .iter()
+                        .map(|class| class.len() as u64)
+                        .sum::<u64>()
+            );
+            assert!(!sole_classes
+                .iter()
+                .flatten()
+                .any(|pair| *pair == ((3, 1), (3, 0))));
+        }
         let token = ReachableRootV1::from_trusted_engine_state(&state).unwrap();
         let checked = verify_refute_leaf_exact_v1(
             &state,
