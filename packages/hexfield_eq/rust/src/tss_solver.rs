@@ -2619,6 +2619,17 @@ fn attacker_pair_reference_for_ab() -> bool {
     *VALUE.get_or_init(|| std::env::var("TSS_ATTACKER_PAIR_REFERENCE").ok().as_deref() == Some("1"))
 }
 
+#[cfg(test)]
+fn eager_attacker_pair_keys_for_ab() -> bool {
+    static VALUE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("TSS_EAGER_ATTACKER_PAIR_KEYS")
+            .ok()
+            .as_deref()
+            == Some("1")
+    })
+}
+
 /// (context builds, retained-child keys, context nanos, key nanos) accumulated
 /// since process start. Only the live flag contributes; the offline R-OS1
 /// observer is deliberately excluded.
@@ -2916,22 +2927,34 @@ struct WidePnChild {
 enum WideFutureKey {
     /// Historical attacker lazy edge: the key participates only when selected.
     OnSelection(WidePositionKey),
+    /// Attacker-pair selection-only key. The unchanged dense parent body is
+    /// shared across siblings and the full key is built only on selection.
+    OnSelectionPair {
+        template: Arc<WideAttackerPairKeyTemplate>,
+        first: HexCoord,
+        second: HexCoord,
+    },
     /// R-LF1 defender thunk: pre-selection reads virtually observe the eager
     /// entry represented by the deferred key.
     Virtual(WidePositionKey),
 }
 
 impl WideFutureKey {
-    fn key(&self) -> &WidePositionKey {
+    fn materialize(&self) -> WidePositionKey {
         match self {
-            Self::OnSelection(key) | Self::Virtual(key) => key,
+            Self::OnSelection(key) | Self::Virtual(key) => key.clone(),
+            Self::OnSelectionPair {
+                template,
+                first,
+                second,
+            } => template.completed_pair_key(*first, *second),
         }
     }
 
     fn virtual_key(&self) -> Option<&WidePositionKey> {
         match self {
             Self::Virtual(key) => Some(key),
-            Self::OnSelection(_) => None,
+            Self::OnSelection(_) | Self::OnSelectionPair { .. } => None,
         }
     }
 }
@@ -3198,6 +3221,115 @@ struct WidePositionKey {
     bytes: Box<[u8]>,
 }
 
+/// One position's coordinate-sorted occupancy, shared by all prospective
+/// pair keys generated from that position. Pair generation can retain many
+/// children; sorting the unchanged parent board for every child made dense
+/// late-game solves spend substantial time rebuilding identical prefixes.
+#[derive(Debug)]
+struct WideSortedStones {
+    stones: Vec<(i16, i16, u8)>,
+    encoded: Vec<u8>,
+    offsets: Vec<usize>,
+}
+
+/// Shared immutable parent data for selection-only attacker keys. Retained
+/// pair edges need only an `Arc` and two coordinates; the exact full key is
+/// materialized if and when that edge is selected.
+#[derive(Debug)]
+struct WideAttackerPairKeyTemplate {
+    sorted: WideSortedStones,
+    owner: u8,
+    next_player: u8,
+    placements_after: u32,
+}
+
+impl WideAttackerPairKeyTemplate {
+    fn from_state(state: &RustHexoState) -> Self {
+        debug_assert!(matches!(state.phase(), TurnPhase::FirstStone));
+        Self {
+            sorted: WideSortedStones::from_state(state),
+            owner: player_code(state.current_player()),
+            next_player: player_code(state.current_player().other()),
+            placements_after: state.placements_made().saturating_add(2),
+        }
+    }
+
+    fn completed_pair_key(&self, first: HexCoord, second: HexCoord) -> WidePositionKey {
+        let mut added = [
+            (first.q, first.r, self.owner),
+            (second.q, second.r, self.owner),
+        ];
+        added.sort_unstable();
+        let mut encoded = Vec::with_capacity(
+            self.sorted
+                .stones
+                .len()
+                .saturating_add(2)
+                .saturating_mul(3)
+                .saturating_add(12),
+        );
+        encoded.push(self.next_player);
+        push_wide_varint(&mut encoded, self.placements_after);
+        encoded.push(1); // TurnPhase::FirstStone after a completed turn.
+        encoded.push(0); // Retained Pending pairs are nonterminal.
+        self.sorted.append_with_added(&mut encoded, &added);
+        WidePositionKey {
+            bytes: encoded.into_boxed_slice(),
+        }
+    }
+}
+
+impl WideSortedStones {
+    fn from_state(state: &RustHexoState) -> Self {
+        let mut stones = state
+            .board()
+            .occupied_cells()
+            .iter()
+            .map(|&coord| {
+                (
+                    coord.q,
+                    coord.r,
+                    player_code(state.board().get(coord).expect("occupied cell has owner")),
+                )
+            })
+            .collect::<Vec<_>>();
+        stones.sort_unstable();
+        let mut encoded = Vec::with_capacity(stones.len().saturating_mul(3));
+        let mut offsets = Vec::with_capacity(stones.len().saturating_add(1));
+        for &(q, r, owner) in &stones {
+            offsets.push(encoded.len());
+            push_wide_varint(
+                &mut encoded,
+                zigzag_i16(q).saturating_mul(2) | u32::from(owner),
+            );
+            push_wide_varint(&mut encoded, zigzag_i16(r));
+        }
+        offsets.push(encoded.len());
+        Self {
+            stones,
+            encoded,
+            offsets,
+        }
+    }
+
+    /// Append the already-encoded parent occupancy with `added` merged into
+    /// the same tuple order used by `WidePositionKey::from_state`.
+    fn append_with_added(&self, out: &mut Vec<u8>, added: &[(i16, i16, u8)]) {
+        let mut base_start = 0usize;
+        for &(q, r, owner) in added {
+            // Occupied and newly placed coordinates are disjoint. `<=` also
+            // preserves the historical merge's base-before-added tie order.
+            let base_end = self.stones.partition_point(|stone| *stone <= (q, r, owner));
+            debug_assert!(base_end >= base_start, "added stones must be sorted");
+            out.extend_from_slice(&self.encoded[self.offsets[base_start]..self.offsets[base_end]]);
+            push_wide_varint(out, zigzag_i16(q).saturating_mul(2) | u32::from(owner));
+            push_wide_varint(out, zigzag_i16(r));
+            base_start = base_end;
+        }
+        out.extend_from_slice(&self.encoded[self.offsets[base_start]..]);
+    }
+}
+
 impl WidePositionKey {
     fn from_state(state: &RustHexoState) -> Self {
         let mut stones = state
@@ -3244,11 +3376,14 @@ impl WidePositionKey {
         }
     }
 
-    /// Exact nonterminal key after a legal two-stone turn. The wide attacker
-    /// pair gate is deliberately stateless, so constructing the thunk key
-    /// directly avoids cloning/applying the engine state for every retained
-    /// pair.
-    fn after_completed_pair(state: &RustHexoState, first: HexCoord, second: HexCoord) -> Self {
+    /// Historical per-child construction retained only for timing/identity
+    /// comparison with the original unoptimized late-corpus baseline.
+    #[cfg(test)]
+    fn after_completed_pair_reference(
+        state: &RustHexoState,
+        first: HexCoord,
+        second: HexCoord,
+    ) -> Self {
         debug_assert!(matches!(state.phase(), TurnPhase::FirstStone));
         let owner = player_code(state.current_player());
         let mut stones = state
@@ -3266,12 +3401,11 @@ impl WidePositionKey {
         stones.push((first.q, first.r, owner));
         stones.push((second.q, second.r, owner));
         stones.sort_unstable();
-
         let mut encoded = Vec::with_capacity(stones.len().saturating_mul(3).saturating_add(12));
         encoded.push(player_code(state.current_player().other()));
         push_wide_varint(&mut encoded, state.placements_made().saturating_add(2));
-        encoded.push(1); // TurnPhase::FirstStone after a completed turn.
-        encoded.push(0); // Retained Pending pairs are nonterminal.
+        encoded.push(1);
+        encoded.push(0);
         for (q, r, owner) in stones {
             push_wide_varint(
                 &mut encoded,
@@ -3424,41 +3558,32 @@ impl WidePositionKey {
     /// use): `state` is a forced defender FirstStone node with no live
     /// defender >=4 window, so the pair cannot complete six and the child is
     /// exactly (claimant to move, FirstStone, non-terminal).
-    fn for_defender_pair(state: &RustHexoState, claimant: Player, extra: &[HexCoord]) -> Self {
-        let mut stones = state
-            .board()
-            .occupied_cells()
-            .iter()
-            .map(|&coord| {
-                (
-                    coord.q,
-                    coord.r,
-                    player_code(state.board().get(coord).expect("occupied cell has owner")),
-                )
-            })
-            .collect::<Vec<_>>();
+    fn for_defender_pair(sorted: &WideSortedStones, claimant: Player, extra: &[HexCoord]) -> Self {
         let defender = claimant.other();
-        for &coord in extra {
-            stones.push((coord.q, coord.r, player_code(defender)));
-        }
-        stones.sort_unstable();
-        let mut encoded = Vec::with_capacity(stones.len().saturating_mul(3).saturating_add(12));
+        let owner = player_code(defender);
+        let mut added = extra
+            .iter()
+            .map(|coord| (coord.q, coord.r, owner))
+            .collect::<Vec<_>>();
+        added.sort_unstable();
+        let mut encoded = Vec::with_capacity(
+            sorted
+                .stones
+                .len()
+                .saturating_add(added.len())
+                .saturating_mul(3)
+                .saturating_add(12),
+        );
         encoded.push(player_code(claimant));
         push_wide_varint(
             &mut encoded,
-            state
-                .placements_made()
+            u32::try_from(sorted.stones.len())
+                .unwrap_or(u32::MAX)
                 .saturating_add(u32::try_from(extra.len()).unwrap_or(0)),
         );
         encoded.push(1); // TurnPhase::FirstStone
         encoded.push(0); // non-terminal
-        for (q, r, owner) in stones {
-            push_wide_varint(
-                &mut encoded,
-                zigzag_i16(q).saturating_mul(2) | u32::from(owner),
-            );
-            push_wide_varint(&mut encoded, zigzag_i16(r));
-        }
+        sorted.append_with_added(&mut encoded, &added);
         Self {
             bytes: encoded.into_boxed_slice(),
         }
@@ -3526,6 +3651,7 @@ fn forced_defender_pair_plan_dynamic(
     if kernel.is_empty() {
         return None;
     }
+    let sorted_stones = WideSortedStones::from_state(state);
     let kernel_set = kernel.iter().copied().collect::<HashSet<_>>();
 
     // One fork scan per plan: a defender pair perturbs the claimant window
@@ -3586,7 +3712,8 @@ fn forced_defender_pair_plan_dynamic(
             // child is exactly (claimant, FirstStone, non-terminal) and its
             // key is constructible without touching the engine. `second` is a
             // kernel threat-window empty, hence always a legal placement.
-            let final_key = WidePositionKey::for_defender_pair(state, claimant, &[second]);
+            let final_key =
+                WidePositionKey::for_defender_pair(&sorted_stones, claimant, &[first, second]);
             let retained_prior =
                 (raw_coord_key(first) < raw_coord_key(second)).then(|| WidePnPrior {
                     pn: shared_fork_pn,
@@ -3699,6 +3826,7 @@ fn forced_defender_pair_plan_direct(
         pn: pn_from_fork_degree(attacker_fork_degree(state, claimant)),
         dn: 1,
     };
+    let sorted_stones = WideSortedStones::from_state(state);
     let mut pairs = Vec::new();
     for left in 0..kernel.len() {
         for right in (left + 1)..kernel.len() {
@@ -3718,7 +3846,11 @@ fn forced_defender_pair_plan_direct(
             pairs.push(WideDefenderPair {
                 first,
                 second,
-                final_key: WidePositionKey::for_defender_pair(state, claimant, &[first, second]),
+                final_key: WidePositionKey::for_defender_pair(
+                    &sorted_stones,
+                    claimant,
+                    &[first, second],
+                ),
                 final_prior: shared_prior,
             });
         }
@@ -5346,7 +5478,7 @@ impl<'store> WidePnSearch<'store> {
                         let key = child
                             .future_key
                             .as_ref()
-                            .map(|future| future.key().clone())
+                            .map(WideFutureKey::materialize)
                             .unwrap_or_else(|| WidePositionKey::from_state(state));
                         debug_assert_eq!(key, WidePositionKey::from_state(state));
                         #[cfg(test)]
@@ -5429,7 +5561,7 @@ impl<'store> WidePnSearch<'store> {
                         let key = child
                             .future_key
                             .as_ref()
-                            .map(|future| future.key().clone())
+                            .map(WideFutureKey::materialize)
                             .unwrap_or_else(|| WidePositionKey::from_state(state));
                         debug_assert_eq!(key, WidePositionKey::from_state(state));
                         #[cfg(test)]
@@ -6816,6 +6948,12 @@ impl<'store> WidePnSearch<'store> {
             WideTurnGate::build_memoized(state, self.claimant, &mut memo)
         };
         #[cfg(test)]
+        let eager_pair_keys = eager_attacker_pair_keys_for_ab();
+        #[cfg(not(test))]
+        let eager_pair_keys = false;
+        let pair_key_template = (self.lazy_frontier && !eager_pair_keys)
+            .then(|| Arc::new(WideAttackerPairKeyTemplate::from_state(state)));
+        #[cfg(test)]
         let observe_ordering_study = self.ordering_study;
         #[cfg(test)]
         let observe_reveal_prefix = self.reveal_prefix_study;
@@ -7156,9 +7294,22 @@ impl<'store> WidePnSearch<'store> {
                         entry: None,
                         future_key: (self.lazy_frontier && result == WidePnChildResult::Pending)
                             .then(|| {
-                                WideFutureKey::OnSelection(WidePositionKey::after_completed_pair(
-                                    state, first, second,
-                                ))
+                                #[cfg(test)]
+                                if eager_pair_keys {
+                                    return WideFutureKey::OnSelection(
+                                        WidePositionKey::after_completed_pair_reference(
+                                            state, first, second,
+                                        ),
+                                    );
+                                }
+                                let template = pair_key_template
+                                    .as_ref()
+                                    .expect("lazy pair generation builds a key template");
+                                WideFutureKey::OnSelectionPair {
+                                    template: Arc::clone(template),
+                                    first,
+                                    second,
+                                }
                             }),
                         prior,
                         urgent_block: wide_move_contains_defender_block(mv, &defender_blocks),
@@ -17467,6 +17618,146 @@ mod tests {
             }
         }
         assert!(compared > 0, "fixture did not exercise pair classification");
+    }
+
+    #[test]
+    fn deferred_attacker_pair_keys_match_applied_states() {
+        let mut state = pair_width_first_stone_fixture();
+        let mut search = WidePnSearch::new(
+            state.current_player(),
+            state.placements_made(),
+            1_000,
+            1 << 20,
+            u32::MAX,
+            MAX_SEARCH_DEPTH,
+        );
+        search.lazy_frontier = true;
+        let children = search.attack_pair_children(&mut state, 0);
+        let mut compared = 0usize;
+        for child in children {
+            let WidePnMove::Pair(first, second) = child.mv else {
+                continue;
+            };
+            let Some(WideFutureKey::OnSelectionPair { .. }) = child.future_key.as_ref() else {
+                continue;
+            };
+            let mut applied = state.clone();
+            apply_placement(&mut applied, Placement { coord: first }).unwrap();
+            apply_placement(&mut applied, Placement { coord: second }).unwrap();
+            assert_eq!(
+                child.future_key.as_ref().unwrap().materialize(),
+                WidePositionKey::from_state(&applied),
+            );
+            compared += 1;
+        }
+        assert!(compared > 0, "fixture did not retain a pending pair key");
+    }
+
+    /// Full live late-position identity/profile gate. Stable rows include the
+    /// certificate digest and every solver counter whose parity is required
+    /// by the production harness; wall timings are reported separately.
+    #[test]
+    #[ignore = "full 7,499-position live late-corpus identity/profile battery"]
+    fn tss_live_late_identity_battery() {
+        fn fnv1a(bytes: &[u8]) -> u64 {
+            let mut hash = 0xcbf2_9ce4_8422_2325u64;
+            for &byte in bytes {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            hash
+        }
+
+        let path = std::env::var("TSS_LATE_POSITIONS")
+            .unwrap_or_else(|_| ".scratch/late_positions.jsonl".to_owned());
+        let text = std::fs::read_to_string(&path).expect("read late positions");
+        let caps = SolveCaps {
+            node_cap: 1_000,
+            tt_bytes_cap: 256 << 10,
+            semantic_horizon: u32::MAX,
+        };
+        let mut solver = TssSolver::default();
+        solver.configure_leaf_profile();
+        solver.set_dual_pass(true);
+        let mut stable = String::new();
+        let mut walls = Vec::<u64>::new();
+        let mut nodes = 0u64;
+        let mut verify_failed = 0u64;
+        let battery_started = Instant::now();
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            let row: serde_json::Value = serde_json::from_str(line).expect("late JSON row");
+            let id = row["pos_id"].as_str().expect("pos_id");
+            let mut state = RustHexoState::new();
+            for pair in row["moves"].as_array().expect("moves") {
+                let pair = pair.as_array().expect("move pair");
+                apply_placement(
+                    &mut state,
+                    Placement {
+                        coord: HexCoord::new(
+                            pair[0].as_i64().expect("q") as i16,
+                            pair[1].as_i64().expect("r") as i16,
+                        ),
+                    },
+                )
+                .unwrap_or_else(|error| panic!("{id}: replay failed: {error}"));
+            }
+            let started = Instant::now();
+            let result = solver.solve_goal(&state, &caps, SolveGoal::Both);
+            walls.push(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX));
+            let verified = match (&result.cert, result.status) {
+                (None, ProofStatus::Unknown) => true,
+                (Some(cert), status) => TssVerifier.verify(&state, cert, status),
+                _ => false,
+            };
+            verify_failed += u64::from(!verified);
+            let cert_hash = fnv1a(format!("{:?}", result.cert).as_bytes());
+            use std::fmt::Write as _;
+            writeln!(
+                stable,
+                "{id}\t{:?}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{cert_hash:016x}",
+                result.status,
+                result.stats.nodes,
+                result.stats.expansions,
+                result.stats.tt_hits,
+                result.stats.tt_entries,
+                result.stats.peak_tt_bytes,
+                result.stats.horizon_cuts,
+                result.stats.kb_death_cuts,
+                result.stats.tt_evictions,
+                result.stats.tt_admission_rejections,
+                result.stats.fragment_lookups,
+                result.stats.fragment_hits,
+                result.stats.fragment_imports,
+                result.stats.interior_gate_evaluations,
+                result.stats.interior_gate_dismissals,
+            )
+            .expect("late identity row");
+            nodes = nodes.saturating_add(result.stats.nodes);
+        }
+        assert_eq!(walls.len(), 7_499, "frozen live late-corpus cardinality");
+        assert_eq!(verify_failed, 0, "late certificate verifier failures");
+        if let Ok(path) = std::env::var("TSS_LATE_IDENTITY_OUT") {
+            std::fs::write(&path, &stable)
+                .unwrap_or_else(|error| panic!("write late identity output {path}: {error}"));
+        }
+        walls.sort_unstable();
+        let pick = |percent: usize| walls[(walls.len() - 1) * percent / 100] as f64 / 1e6;
+        let total_ms = walls.iter().map(|&value| value as f64 / 1e6).sum::<f64>();
+        let (pair_ms, defender_ms, regen_ms, expand_ms, refresh_ms, insert_ms) = wide_gen_profile();
+        println!(
+            "LATE_IDENTITY positions={} nodes={nodes} verify_failed={verify_failed} digest={:016x} total_ms={total_ms:.4} median_ms={:.4} p90_ms={:.4} p99_ms={:.4} max_ms={:.4} battery_s={:.3}",
+            walls.len(),
+            fnv1a(stable.as_bytes()),
+            pick(50),
+            pick(90),
+            pick(99),
+            walls.last().copied().unwrap_or(0) as f64 / 1e6,
+            battery_started.elapsed().as_secs_f64(),
+        );
+        println!(
+            "LATE_GEN pair_ms={pair_ms} defender_ms={defender_ms} regen_ms={regen_ms} expand_ms={expand_ms} refresh_ms={refresh_ms} insert_ms={insert_ms} pair_expand_share_pct={:.4}",
+            100.0 * pair_ms as f64 / expand_ms.max(1) as f64,
+        );
     }
 
     /// Frozen production-shape identity/timing gate used by the candidate-
