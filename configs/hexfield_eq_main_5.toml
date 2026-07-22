@@ -184,9 +184,9 @@ games_budget = 192
 every_n_epochs = 5
 # Candidate eval search visits: 256 (owner ruling 2026-07-22, down from 512) —
 # matches the selfplay search budget and roughly halves eval wall. Strix anchor
-# stays at 512 sims (strix_sims below) as the fixed deterministic zero-point;
-# the candidate-at-256-vs-strix-at-512 handicap is CONSTANT every epoch, so the
-# descriptive Elo trajectory stays internally comparable across main_5 epochs.
+# ALSO dropped to 256 (strix_sims below, owner 2026-07-22) for a symmetric
+# 256-vs-256 matched eval. Pool was empty at the change, so no prior-epoch
+# comparability was broken; strix stays the fixed 0-Elo zero-point at 256 sims.
 full_search_visits = 256
 eval_virtual_batch_size = 32
 sealbot_share = 0.1667
@@ -202,7 +202,10 @@ enabled = false
 sealbot_enabled = true
 strix_enabled = true
 strix_ckpt = "/mnt/e/Hexo-BotTrainer/anchors/strix/checkpoint_00237000.pt"
-strix_sims = 512
+# 256 sims (owner 2026-07-22): symmetric with the candidate's full_search_visits
+# for a matched 256-vs-256 eval. Strix remains the fixed deterministic 0-Elo
+# anchor, just at the lower sim budget.
+strix_sims = 256
 strix_m = 16
 strix_device = "cuda"
 strix_label = "strix"
