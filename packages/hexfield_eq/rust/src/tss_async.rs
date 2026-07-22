@@ -225,6 +225,7 @@ pub struct SolveRequest {
     pub dual_pass: bool,
     pub loss_reserve_nodes: u32,
     pub group2: bool,
+    pub j2near: bool,
 }
 
 /// A completed, already-verified solve. `hard` is `Some` only when the
@@ -581,6 +582,7 @@ fn worker_loop(
             solver.set_dual_pass(request.dual_pass);
             solver.set_loss_reserve_nodes(request.loss_reserve_nodes);
             solver.set_group2(request.group2);
+            solver.set_leaf_j2near(request.j2near);
             let solved = tss_solve_verified(
                 &request.state,
                 request.node_cap,
@@ -694,6 +696,7 @@ mod tests {
             dual_pass: false,
             loss_reserve_nodes: 0,
             group2: false,
+            j2near: false,
         }
     }
 
@@ -837,6 +840,7 @@ mod tests {
             dual_pass: false,
             loss_reserve_nodes: 0,
             group2: false,
+            j2near: false,
         }));
         let response = drain_one(&pool);
         assert_eq!(response.slot, 7);

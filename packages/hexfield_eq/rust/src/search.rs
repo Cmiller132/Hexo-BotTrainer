@@ -3451,6 +3451,7 @@ const KNOWN_DIVERGENCE_KEYS: &[&str] = &[
     "tss_solver_dual_pass",
     "tss_solver_loss_reserve_nodes",
     "tss_solver_group2",
+    "tss_solver_j2near",
     "tss_solver_horizon_ladder",
     // Fast-class Gumbel levers (main_8: PUCT Full / Gumbel Fast). These name the
     // Fast view's values; the driver's Python side folds them into the SECOND
@@ -3642,6 +3643,9 @@ fn resolve_divergences(
         }
         if let Some(v) = overrides.get_item("tss_solver_group2")? {
             dv.tss_solver_group2 = v.extract()?;
+        }
+        if let Some(v) = overrides.get_item("tss_solver_j2near")? {
+            dv.tss_solver_j2near = v.extract()?;
         }
         if let Some(v) = overrides.get_item("tss_solver_horizon_ladder")? {
             dv.tss_solver_horizon_ladder = v.extract()?;
@@ -4132,6 +4136,7 @@ fn build_search_result_payload_native(
             // per-search persistent cache; one root solve per move is cheap.
             let mut root_solver = crate::tss_solver::TssSolver::default();
             root_solver.configure_leaf_profile();
+            root_solver.set_leaf_j2near(div.solver_j2near_enabled());
             root_solver.set_dual_pass(div.tss_solver_dual_pass);
             root_solver.set_loss_reserve_nodes(div.tss_solver_loss_reserve_nodes);
             root_solver.set_group2(div.tss_solver_group2);
@@ -5792,6 +5797,38 @@ mod fallback_tests {
                 );
             });
         }
+    }
+
+    #[test]
+    fn rollout_config_resolves_j2near_width_profile() {
+        Python::initialize();
+        Python::attach(|py| {
+            let caps = SolveCaps {
+                node_cap: 500,
+                tt_bytes_cap: 256 << 10,
+                semantic_horizon: u32::MAX,
+            };
+            for (mode, configured, expected) in [
+                (3u32, Some(true), true),
+                (3u32, Some(false), false),
+                (3u32, None, false),
+                (0u32, Some(true), false),
+            ] {
+                let overrides = PyDict::new(py);
+                overrides.set_item("tss_solver_mode", mode).unwrap();
+                if let Some(j2near) = configured {
+                    overrides.set_item("tss_solver_j2near", j2near).unwrap();
+                }
+                let div = resolve_divergences(None, Some(&overrides)).unwrap();
+
+                let mut solver = TssSolver::default();
+                solver.configure_leaf_profile();
+                solver.set_leaf_j2near(div.solver_j2near_enabled());
+                let effective =
+                    solver.effective_solve_config(&caps, solver.sample_runtime_flags());
+                assert_eq!(effective.free_tempo_j2near, expected);
+            }
+        });
     }
 
     #[test]

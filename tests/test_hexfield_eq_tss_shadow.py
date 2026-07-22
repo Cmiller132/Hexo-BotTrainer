@@ -761,6 +761,19 @@ def test_loss_budget_config_plumbing():
         enabled, fast=True)["tss_solver_loss_reserve_nodes"] == 32
 
 
+def test_j2near_config_plumbing():
+    """J2near defaults off and rides both rollout divergence maps."""
+    from hexfield_eq.config import SelfplayConfig, build_divergence_overrides
+
+    defaults = build_divergence_overrides(SelfplayConfig())
+    assert defaults["tss_solver_j2near"] is False
+    enabled = SelfplayConfig(tss_solver_j2near=True)
+    rollout = build_divergence_overrides(enabled)
+    fast = build_divergence_overrides(enabled, fast=True)
+    assert rollout["tss_solver_j2near"] is True
+    assert fast["tss_solver_j2near"] is True
+
+
 def test_park_config_plumbing():
     """Parking defaults off and all three controls ride both divergence maps."""
     from hexfield_eq.config import SelfplayConfig, build_divergence_overrides

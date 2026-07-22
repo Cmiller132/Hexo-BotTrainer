@@ -766,7 +766,6 @@ pub(crate) struct SolveRuntimeFlags {
     lazy_frontier: bool,
     interior_census_gate: bool,
     k_reply_consume: bool,
-    free_tempo_j2near: bool,
 }
 
 /// Fully resolved flags and memory caps used by one `solve_goal` invocation.
@@ -954,6 +953,21 @@ impl TssSolver {
         self.width = width;
     }
 
+    /// Select the production leaf width profile. False is exactly the
+    /// historical `vcf_pair_complete` profile; true selects the named J2near
+    /// extension. Profile changes retain the standard cache-isolation rule.
+    pub(crate) fn set_leaf_j2near(&mut self, j2near: bool) {
+        self.set_width_options(if j2near {
+            WidthOptions::vcf_pair_j2near()
+        } else {
+            WidthOptions::vcf_pair_complete()
+        });
+    }
+
+    pub(crate) fn j2near_enabled(&self) -> bool {
+        self.width.free_tempo_j2near
+    }
+
     pub(crate) fn set_dual_pass(&mut self, dual_pass: bool) {
         if self.dual_pass != dual_pass {
             self.shared_tt.clear();
@@ -1031,18 +1045,6 @@ impl TssSolver {
             interior_census_gate: std::env::var_os("TSS_INTERIOR_CENSUS_GATE")
                 .is_some_and(|value| value == "1"),
             k_reply_consume: matches!(std::env::var("TSS_K_REPLY_CONSUME").as_deref(), Ok("1")),
-            free_tempo_j2near: matches!(
-                std::env::var("TSS_VCF_J2NEAR").as_deref(),
-                Ok("1")
-            ),
-        }
-    }
-
-    fn effective_width(&self, runtime: SolveRuntimeFlags) -> WidthOptions {
-        WidthOptions {
-            free_tempo_j2near: self.width.free_tempo_j2near
-                || (self.width.vcf_pair_complete && runtime.free_tempo_j2near),
-            ..self.width
         }
     }
 
@@ -1054,7 +1056,7 @@ impl TssSolver {
         caps: &SolveCaps,
         runtime: SolveRuntimeFlags,
     ) -> EffectiveSolveConfig {
-        let width = self.effective_width(runtime);
+        let width = self.width;
         let tt_bytes_cap = if self.tt_enabled {
             caps.tt_bytes_cap
         } else {
@@ -1209,7 +1211,7 @@ impl TssSolver {
         }
 
         let runtime = self.sample_runtime_flags();
-        let width = self.effective_width(runtime);
+        let width = self.width;
         let effective = self.effective_solve_config(caps, runtime);
         #[cfg(test)]
         {
@@ -12530,24 +12532,26 @@ mod tests {
     }
 
     #[test]
-    fn j2near_environment_flag_resolves_default_off_profile() {
+    fn j2near_named_profile_resolves_default_off_profile() {
         let mut solver = TssSolver::default();
-        solver.set_width_options(WidthOptions::vcf_pair_complete());
         let runtime = SolveRuntimeFlags {
             lazy_frontier: false,
             interior_census_gate: false,
             k_reply_consume: false,
-            free_tempo_j2near: true,
         };
+        let caps = SolveCaps {
+            node_cap: 500,
+            tt_bytes_cap: 256 << 10,
+            semantic_horizon: u32::MAX,
+        };
+
+        solver.set_leaf_j2near(false);
+        assert!(!solver
+            .effective_solve_config(&caps, runtime)
+            .free_tempo_j2near);
+        solver.set_leaf_j2near(true);
         assert!(solver
-            .effective_solve_config(
-                &SolveCaps {
-                    node_cap: 500,
-                    tt_bytes_cap: 256 << 10,
-                    semantic_horizon: u32::MAX,
-                },
-                runtime,
-            )
+            .effective_solve_config(&caps, runtime)
             .free_tempo_j2near);
         assert!(!WidthOptions::vcf_pair_complete().free_tempo_j2near);
         assert!(WidthOptions::vcf_pair_j2near().free_tempo_j2near);

@@ -156,6 +156,10 @@ class SelfplayConfig:
     # Group2V1 verifier policy at the Rust mint. Verdicts never change:
     # a failed Group-2 attempt re-solves cleanly with the selector off.
     tss_solver_group2: bool = False
+    # Free-tempo J2near attacker-width extension (default off). When the deep
+    # solver is enabled, selects the named vcf_pair_j2near width profile;
+    # false preserves the complete-pair profile bit-for-bit.
+    tss_solver_j2near: bool = False
     # Horizon ladder (default off): a bounded base solve that came back Unknown
     # while still depth-cut (horizon_cuts > 0) is re-solved once at 2x horizon
     # on the same solver instance. Unbounded bases skip it.
@@ -654,6 +658,7 @@ def build_divergence_overrides(
         "tss_solver_dual_pass": bool(sp.tss_solver_dual_pass),
         "tss_solver_loss_reserve_nodes": int(sp.tss_solver_loss_reserve_nodes),
         "tss_solver_group2": bool(sp.tss_solver_group2),
+        "tss_solver_j2near": bool(sp.tss_solver_j2near),
         "tss_solver_horizon_ladder": bool(sp.tss_solver_horizon_ladder),
         # Gumbel AlphaZero levers (default OFF).
         "gumbel_target": bool(sp.gumbel_target_enabled),

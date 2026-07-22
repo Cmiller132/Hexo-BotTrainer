@@ -240,6 +240,10 @@ pub struct Divergences {
     /// bit-identical to the pre-change engine; flag-on additionally selects
     /// the `Group2V1` verifier policy at the sealed mint.
     pub tss_solver_group2: bool,
+    /// Enable the free-tempo J2near attacker-width extension. This is consumed
+    /// only while the deep solver mode is nonzero; false preserves the
+    /// historical `vcf_pair_complete` leaf profile bit-for-bit.
+    pub tss_solver_j2near: bool,
     /// Horizon-ladder escalation (default off): when the base solve is Unknown
     /// with `horizon_cuts > 0`, re-solve ONCE at `2 * horizon` on the same
     /// solver instance (the shared TT replays the proven prefix). Unbounded
@@ -306,6 +310,7 @@ impl Divergences {
             tss_solver_dual_pass: false,
             tss_solver_loss_reserve_nodes: 0,
             tss_solver_group2: false,
+            tss_solver_j2near: false,
             tss_solver_horizon_ladder: false,
         }
     }
@@ -327,6 +332,10 @@ impl Divergences {
             scaled_fpu: true,
             ..Self::parity()
         }
+    }
+
+    pub(crate) fn solver_j2near_enabled(self) -> bool {
+        self.tss_solver_mode > 0 && self.tss_solver_j2near
     }
 
     /// Gumbel AlphaZero profile (Danihelka et al. 2022): starts from
@@ -613,25 +622,30 @@ pub struct TssSolverSlot(pub TssSolver);
 
 impl TssSolverSlot {
     /// A fresh (cold-cache) solver pre-configured to the campaign leaf-decided
-    /// profile (§3): wide `vcf_pair_complete`, lazy frontier + interior census
-    /// gate ON. The persistent per-search leaf solver, the root guard, and the
-    /// async workers all run this profile.
-    fn leaf_configured() -> TssSolver {
+    /// profile (§3): wide `vcf_pair_complete` or its named J2near extension,
+    /// lazy frontier + interior census gate ON. The persistent per-search leaf
+    /// solver, the root guard, and the async workers all run this profile.
+    fn leaf_configured(j2near: bool) -> TssSolver {
         let mut solver = TssSolver::default();
         solver.configure_leaf_profile();
+        solver.set_leaf_j2near(j2near);
         solver
+    }
+
+    fn for_divergences(divergences: Divergences) -> Self {
+        Self(Self::leaf_configured(divergences.solver_j2near_enabled()))
     }
 }
 
 impl Default for TssSolverSlot {
     fn default() -> Self {
-        Self(Self::leaf_configured())
+        Self(Self::leaf_configured(false))
     }
 }
 
 impl Clone for TssSolverSlot {
     fn clone(&self) -> Self {
-        Self(Self::leaf_configured())
+        Self(Self::leaf_configured(self.0.j2near_enabled()))
     }
 }
 
@@ -1169,7 +1183,7 @@ impl RustSearch {
             tss: TssCounters::default(),
             tss_deep_memo: HashMap::new(),
             tss_async: None,
-            tss_solver: TssSolverSlot::default(),
+            tss_solver: TssSolverSlot::for_divergences(divergences),
             clean_root_priors,
             active_edge_count: 0,
             max_active_edges_per_node: 0,
@@ -1190,6 +1204,9 @@ impl RustSearch {
     }
 
     pub fn set_divergences(&mut self, divergences: Divergences) {
+        self.tss_solver
+            .0
+            .set_leaf_j2near(divergences.solver_j2near_enabled());
         self.divergences = divergences;
     }
 
@@ -1508,6 +1525,7 @@ impl RustSearch {
                             dual_pass: self.divergences.tss_solver_dual_pass,
                             loss_reserve_nodes: self.divergences.tss_solver_loss_reserve_nodes,
                             group2: self.divergences.tss_solver_group2,
+                            j2near: self.divergences.solver_j2near_enabled(),
                         })
                     })
                     .flatten();
@@ -1633,6 +1651,7 @@ impl RustSearch {
                                         .divergences
                                         .tss_solver_loss_reserve_nodes,
                                     group2: self.divergences.tss_solver_group2,
+                                    j2near: self.divergences.solver_j2near_enabled(),
                                 })
                             })
                             .flatten();
