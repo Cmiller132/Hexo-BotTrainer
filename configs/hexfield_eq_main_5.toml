@@ -182,7 +182,12 @@ eval_every = 5
 enabled = true
 games_budget = 192
 every_n_epochs = 5
-full_search_visits = 512
+# Candidate eval search visits: 256 (owner ruling 2026-07-22, down from 512) —
+# matches the selfplay search budget and roughly halves eval wall. Strix anchor
+# stays at 512 sims (strix_sims below) as the fixed deterministic zero-point;
+# the candidate-at-256-vs-strix-at-512 handicap is CONSTANT every epoch, so the
+# descriptive Elo trajectory stays internally comparable across main_5 epochs.
+full_search_visits = 256
 eval_virtual_batch_size = 32
 sealbot_share = 0.1667
 strix_share = 0.3333
