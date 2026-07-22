@@ -32,6 +32,11 @@ mod tss_verify;
 // Isolated extension verifier for the v1 Group-2 certificate class
 // (.codex-g2-resolve/DESIGN_G2_CERT_EXTENSION.md). Never imports tss_solver.
 mod tss_verify_group2;
+// Default-off, leaf-only class refutation artifact. These modules have no
+// consumer and no path into ProofStatus/HardValue/TssCertificate.
+pub mod tss_refute_leaf_cert;
+pub mod tss_refute_produce;
+pub mod tss_refute_verify;
 
 // Background deep-solve pool (async rung): routes tree::tss_solve_verified
 // onto worker threads. Python-gated with tree (its counters/entry live there).
@@ -64,6 +69,9 @@ mod tss_j2near_ab;
 
 #[cfg(test)]
 mod tss_leaf_surface_hunt;
+
+#[cfg(test)]
+mod tss_refute_tests;
 
 #[cfg(feature = "python")]
 mod cache;
