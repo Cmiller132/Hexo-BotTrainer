@@ -69,10 +69,13 @@ drive; ran to ~ep25 with an eval). Not a crash; checkpoints intact.**
 
 - Line: fresh-start run, weights-only warm start from main_3 ep90; cosine
   LR 2e-4→2e-5 over 150 epochs + floor. Branch `claude/main4-integration`.
-- Solver config: mode 3 (WIN+LOSS), cap 750 (retuned from 500 on
-  2026-07-21 post-fold — REPORT_J2NEAR_CAP.md: +89 decisions under the
-  old wall; toml updated, applies at relaunch, first-epoch gates still
-  bind), 256 KiB TT, unbounded horizon, wide profile,
+- Solver config: mode 3 (WIN+LOSS), cap 1000 + `tss_solver_j2near=true`
+  (owner completeness ruling 2026-07-21, superseding the same-day cap-750
+  point — REPORT_J2NEAR_WIRE.md `80e3ea18`: J2near now a first-class
+  config key, env path deleted; cap-1000 arms measured decision-safe in
+  REPORT_J2NEAR_CAP.md, wall budget consciously relaxed to 60.5 s
+  battery; toml updated, applies at relaunch, first-epoch gates still
+  bind), 256 KiB TT, unbounded horizon, wide J2near profile,
   `tss_solver_dual_pass=true`,
   `tss_solver_all_leaves=true` (strict solver-first: every leaf solved
   before GPU eval; park 5000 ms = emergency valve only), async 12/24
@@ -163,27 +166,42 @@ DESIGN_REFUTE_CERT_V1.md uncommitted — GO conditional on v1 cut,
 
 ## 7. Live lanes (as of this writing) and build queue
 
-No live lanes (all five 2026-07-21 lanes exited and were gated). Landed
-this session: candidate-gen 1.72x fold `2a1bdf97`; J2near default-off
-fold `f5a5c5f0` (witness-proven, default-on blocked by preregistered
-gates — see SOLVER_NOTES); horizon R2+H10 research `e1180970` on
+Live lanes (2026-07-21 evening, third round):
+
+- **refute-build** (claude/refute-build, worktree refute-build):
+  RefuteLeafExact/V1 implementation. Authorization chain complete:
+  design → hostile review R1–R8 (`d4af5aef`) → amendments `305eeeb8` →
+  confirmation re-review `b8699ded` (CLEARED-WITH-REQUIRED-CHANGES) →
+  R2-1/R2-2 amendments `a018befb` → narrow confirmation `af5665be`
+  (CONFIRMED-CLEARED-FOR-BUILD). Full-tree is NO-GO; final adoption gate
+  remains the owner's.
+- **j2near-profile** (claude/j2near-profile): cap-1000/J2near-on phase
+  bottleneck profile + per-outcome wall attribution + cap curve
+  1000→2000 tracking the five known J2near-unique upgrade IDs.
+
+Landed this session: candidate-gen 1.72x fold `2a1bdf97`; J2near
+default-off fold `f5a5c5f0`; cap-750 retune `55f3c2b6` (superseded same
+day); **cap 1000 + J2near-ON production wiring `80e3ea18`** (owner
+completeness ruling: training target = most complete verified solution
+set; wall relaxed); horizon R2+H10 research `e1180970` on
 claude/deadline-ladder (h=10 frontier closed); lean-shallow tss-lean
-`f4315e6`; refute-cert v1 design (refute-design worktree, GO-conditional,
-awaiting owner review go).
+`f4315e6`; triage Phase B `be4bd34a` (pocket detector only); G2 step-zero
+screen `75f89cc8` (NOT KILL / STOP — orchestrator recommendation: drop
+for production, ceiling 9.8% at the labeling point).
 
-Standing owner rulings this session: horizon = research primarily (no
-incremental-horizon ladders/consumption now); certified refutations only
-at manageable scope (v1 cut is GO — hostile review pending owner
-go-ahead); triage split = classification now / re-allocation deferred.
+Standing owner rulings this session: completeness ruling above; horizon =
+research primarily (no incremental-horizon ladders/consumption now);
+certified refutations only at manageable scope (leaf-only cut is the
+authorized shape); triage split = classification now (closed) /
+re-allocation deferred; hostile reviews launch without waiting for owner.
 
-Queue when slots free: refute-cert hostile review (on owner go);
-sibling-certificate transplantation shadow; G2 R-item amendments + fixed
-step-zero screen (deep/labeling scope only — NOT a cap-500 lever); h6/h8
-Lean per horizon-r2 (research track); CapResumeSession promotion (kills
-fresh-ladder tax, most of the idtt latency gap); triage Phase B
-(sub-root telemetry) if classification is pursued; GPU bench close-out;
-integration round for remaining lane branches (+ order-prior `a66b707a`
-park-sweep commit).
+Queue when slots free: next speed round from the j2near-profile
+bottleneck ranking (wall recovered → cap headroom → completeness);
+node re-allocation un-deferral proposal (pocket detector as seed);
+sibling-certificate transplantation shadow; h6/h8 Lean per horizon-r2
+(research track); CapResumeSession promotion (kills fresh-ladder tax,
+most of the idtt latency gap); GPU bench close-out; integration round for
+remaining lane branches (+ order-prior `a66b707a` park-sweep commit).
 
 ## 8. Laws
 

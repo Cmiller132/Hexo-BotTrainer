@@ -8,14 +8,17 @@ MEASURED (verified data) / CODE-FACT (cite lines) / HYPOTHESIS / RETRACTED
 
 ## 1. Production profile (main_4 line; trainer currently stopped)
 
-`tss_solver_mode=3` (WIN+LOSS), node cap 750 (retuned from 500 on
-2026-07-21 after the 1.72x fold — see the cap-headroom entry in §5),
-256 KiB TT, unbounded horizon
-(`semantic_horizon=u32::MAX`), wide (`vcf_pair_complete` via
-`configure_leaf_profile`: wide + lazy frontier + interior census gate [inert
-when unbounded]), `dual_pass=true`, `all_leaves=true` (park 5000 ms
-emergency-only), async 12/24, root+interior guards. G2 / ordering hints /
-loss_reserve / fragments / zones OFF.
+`tss_solver_mode=3` (WIN+LOSS), node cap 1000 + J2near ON (owner
+completeness ruling 2026-07-21, superseding the same-day cap-750 retune —
+see the J2near-wire entry in §5; wall budget consciously relaxed:
+completeness of the verified training-target set now outranks the old
+49.96 s battery wall), 256 KiB TT, unbounded horizon
+(`semantic_horizon=u32::MAX`), wide (`vcf_pair_j2near` selected by the
+first-class `tss_solver_j2near` config key over `configure_leaf_profile`:
+wide + lazy frontier + interior census gate [inert when unbounded]),
+`dual_pass=true`, `all_leaves=true` (park 5000 ms emergency-only), async
+12/24, root+interior guards. G2 / ordering hints / loss_reserve /
+fragments / zones OFF.
 
 ## 2. Measured facts the current work stands on
 
@@ -161,6 +164,23 @@ CapResumeSession promotion · GPU bench close-out.
   at ≥860 (over wall), its five known upgrades need ≥1,111 nodes (beyond
   cap 1,000) — retest J2near only when headroom passes ~cap 1,100. Zero
   W/L flips, zero verifier failures, all ten arms.
+- 2026-07-21 (J2near production wiring + cap 1000, `80e3ea18`;
+  REPORT_J2NEAR_WIRE.md). **Cap 1000 / J2near-ON adopted** — owner
+  completeness ruling (training target = most complete verified solution
+  set; wall relaxed), superseding the same-day cap-750/J2near-off
+  disposition. `tss_solver_j2near` is now a first-class rollout key
+  (python `SelfplayConfig` → divergence map → Rust whitelist →
+  `Divergences::solver_j2near_enabled()` = key && mode>0 → inline /
+  root-guard / async-worker solvers via `set_leaf_j2near`); the
+  `TSS_VCF_J2NEAR` env path DELETED (single-path hygiene; harnesses use
+  `WidthOptions` directly). Safety at cap 1000 already MEASURED in the
+  cap-headroom grid: both arms 1,362 decided (+150 vs old archive), zero
+  downgrades/flips; on-arm wall 60.484 s [59.021–60.705]. CODE-FACT: at
+  cap 1000 the on-arm decides no row the off-arm doesn't — J2near-unique
+  proofs need 1,111–1,783 nodes; the cap curve above 1000 is being
+  measured on claude/j2near-profile. Gates: 4-case seam test, j2near unit
+  set, python-feature suite 221/0/43 + release lib 136/0/42, all repeated
+  in an independent orchestrator rerun from a cold build.
 - 2026-07-21 (triage Phase B, `be4bd34a` on claude/triage-b;
   REPORT_TRIAGE_PHASE_B.md). MEASURED: sub-root trajectory telemetry
   (cfg-test, 34,616 snapshots over the 248 labeled grinds @cap 5k).
