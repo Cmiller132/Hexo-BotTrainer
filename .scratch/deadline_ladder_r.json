@@ -1,0 +1,938 @@
+{
+  "cohorts": {
+    "forcing19": {
+      "candidates": {
+        "census_lb": {
+          "at_infinity": 0,
+          "at_infinity_pct": 0.0,
+          "at_packed_D": 0,
+          "at_packed_D_pct": 0.0,
+          "rungs": {
+            "16": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "2": {
+              "hits": 19,
+              "pct": 100.0,
+              "unknown_wall_dismissed_pct": 100.0
+            },
+            "32": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "4": {
+              "hits": 19,
+              "pct": 100.0,
+              "unknown_wall_dismissed_pct": 100.0
+            },
+            "8": {
+              "hits": 4,
+              "pct": 21.05263157894737,
+              "unknown_wall_dismissed_pct": 16.42524354087251
+            }
+          },
+          "unknown_wall_dismissed_at_D_pct": 0.0,
+          "unknown_wall_dismissed_at_infinity_pct": 0.0,
+          "unknown_wall_s": 11.805,
+          "unknown_wall_source_n": 7
+        },
+        "no_admissible_first_turn": {
+          "at_infinity": 2,
+          "at_infinity_pct": 10.526315789473685,
+          "at_packed_D": 2,
+          "at_packed_D_pct": 10.526315789473685,
+          "rungs": {
+            "16": {
+              "hits": 2,
+              "pct": 10.526315789473685,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "2": {
+              "hits": 2,
+              "pct": 10.526315789473685,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "32": {
+              "hits": 2,
+              "pct": 10.526315789473685,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "4": {
+              "hits": 2,
+              "pct": 10.526315789473685,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "8": {
+              "hits": 2,
+              "pct": 10.526315789473685,
+              "unknown_wall_dismissed_pct": 0.0
+            }
+          },
+          "unknown_wall_dismissed_at_D_pct": 0.0,
+          "unknown_wall_dismissed_at_infinity_pct": 0.0,
+          "unknown_wall_s": 11.805,
+          "unknown_wall_source_n": 7
+        },
+        "no_joint_carrier": {
+          "at_infinity": 0,
+          "at_infinity_pct": 0.0,
+          "at_packed_D": 0,
+          "at_packed_D_pct": 0.0,
+          "rungs": {
+            "16": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "2": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "32": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "4": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "8": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            }
+          },
+          "unknown_wall_dismissed_at_D_pct": 0.0,
+          "unknown_wall_dismissed_at_infinity_pct": 0.0,
+          "unknown_wall_s": 11.805,
+          "unknown_wall_source_n": 7
+        },
+        "stone_deficit_lb": {
+          "at_infinity": 0,
+          "at_infinity_pct": 0.0,
+          "at_packed_D": 0,
+          "at_packed_D_pct": 0.0,
+          "rungs": {
+            "16": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "2": {
+              "hits": 19,
+              "pct": 100.0,
+              "unknown_wall_dismissed_pct": 100.0
+            },
+            "32": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "4": {
+              "hits": 19,
+              "pct": 100.0,
+              "unknown_wall_dismissed_pct": 100.0
+            },
+            "8": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            }
+          },
+          "unknown_wall_dismissed_at_D_pct": 0.0,
+          "unknown_wall_dismissed_at_infinity_pct": 0.0,
+          "unknown_wall_s": 11.805,
+          "unknown_wall_source_n": 7
+        }
+      },
+      "n": 19,
+      "packed_surrogate_D": {
+        "max": 4294967287,
+        "min": 4294967147,
+        "p50": 4294967255,
+        "p90": 4294967283
+      },
+      "phase": {
+        "first": 18,
+        "second": 1
+      },
+      "placements": {
+        "max": 149,
+        "min": 9,
+        "p50": 41,
+        "p90": 103
+      },
+      "shallow": {
+        "h2_own_win": 0,
+        "h4_forced_loss": 2
+      },
+      "sound_deadline": {
+        "kind": "infinity",
+        "reason": "unbounded board"
+      }
+    },
+    "grinds": {
+      "candidates": {
+        "census_lb": {
+          "at_infinity": 0,
+          "at_infinity_pct": 0.0,
+          "at_packed_D": 0,
+          "at_packed_D_pct": 0.0,
+          "rungs": {
+            "16": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "2": {
+              "hits": 248,
+              "pct": 100.0,
+              "unknown_wall_dismissed_pct": 100.0
+            },
+            "32": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "4": {
+              "hits": 227,
+              "pct": 91.53225806451613,
+              "unknown_wall_dismissed_pct": 91.86826824756335
+            },
+            "8": {
+              "hits": 27,
+              "pct": 10.887096774193548,
+              "unknown_wall_dismissed_pct": 5.093654450191914
+            }
+          },
+          "unknown_wall_dismissed_at_D_pct": 0.0,
+          "unknown_wall_dismissed_at_infinity_pct": 0.0,
+          "unknown_wall_s": 599.491,
+          "unknown_wall_source_n": 191
+        },
+        "no_admissible_first_turn": {
+          "at_infinity": 0,
+          "at_infinity_pct": 0.0,
+          "at_packed_D": 0,
+          "at_packed_D_pct": 0.0,
+          "rungs": {
+            "16": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "2": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "32": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "4": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "8": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            }
+          },
+          "unknown_wall_dismissed_at_D_pct": 0.0,
+          "unknown_wall_dismissed_at_infinity_pct": 0.0,
+          "unknown_wall_s": 599.491,
+          "unknown_wall_source_n": 191
+        },
+        "no_joint_carrier": {
+          "at_infinity": 0,
+          "at_infinity_pct": 0.0,
+          "at_packed_D": 0,
+          "at_packed_D_pct": 0.0,
+          "rungs": {
+            "16": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "2": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "32": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "4": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "8": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            }
+          },
+          "unknown_wall_dismissed_at_D_pct": 0.0,
+          "unknown_wall_dismissed_at_infinity_pct": 0.0,
+          "unknown_wall_s": 599.491,
+          "unknown_wall_source_n": 191
+        },
+        "stone_deficit_lb": {
+          "at_infinity": 0,
+          "at_infinity_pct": 0.0,
+          "at_packed_D": 0,
+          "at_packed_D_pct": 0.0,
+          "rungs": {
+            "16": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "2": {
+              "hits": 248,
+              "pct": 100.0,
+              "unknown_wall_dismissed_pct": 100.0
+            },
+            "32": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "4": {
+              "hits": 227,
+              "pct": 91.53225806451613,
+              "unknown_wall_dismissed_pct": 91.86826824756335
+            },
+            "8": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            }
+          },
+          "unknown_wall_dismissed_at_D_pct": 0.0,
+          "unknown_wall_dismissed_at_infinity_pct": 0.0,
+          "unknown_wall_s": 599.491,
+          "unknown_wall_source_n": 191
+        }
+      },
+      "n": 248,
+      "packed_surrogate_D": {
+        "max": 4294967283,
+        "min": 4294967211,
+        "p50": 4294967239,
+        "p90": 4294967261
+      },
+      "phase": {
+        "first": 193,
+        "second": 55
+      },
+      "placements": {
+        "max": 85,
+        "min": 13,
+        "p50": 57,
+        "p90": 79
+      },
+      "shallow": {
+        "h2_own_win": 0,
+        "h4_forced_loss": 0
+      },
+      "sound_deadline": {
+        "kind": "infinity",
+        "reason": "unbounded board"
+      }
+    },
+    "human_v1": {
+      "candidates": {
+        "census_lb": {
+          "at_infinity": 0,
+          "at_infinity_pct": 0.0,
+          "at_packed_D": 0,
+          "at_packed_D_pct": 0.0,
+          "rungs": {
+            "16": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "2": {
+              "hits": 2701,
+              "pct": 99.30147058823529,
+              "unknown_wall_dismissed_pct": 100.0
+            },
+            "32": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "4": {
+              "hits": 2555,
+              "pct": 93.93382352941177,
+              "unknown_wall_dismissed_pct": 82.26207242133289
+            },
+            "8": {
+              "hits": 1063,
+              "pct": 39.080882352941174,
+              "unknown_wall_dismissed_pct": 10.991802119766994
+            }
+          },
+          "unknown_wall_dismissed_at_D_pct": 0.0,
+          "unknown_wall_dismissed_at_infinity_pct": 0.0,
+          "unknown_wall_s": 0.874831151,
+          "unknown_wall_source_n": 275
+        },
+        "no_admissible_first_turn": {
+          "at_infinity": 684,
+          "at_infinity_pct": 25.147058823529413,
+          "at_packed_D": 684,
+          "at_packed_D_pct": 25.147058823529413,
+          "rungs": {
+            "16": {
+              "hits": 684,
+              "pct": 25.147058823529413,
+              "unknown_wall_dismissed_pct": 0.8791956014835599
+            },
+            "2": {
+              "hits": 684,
+              "pct": 25.147058823529413,
+              "unknown_wall_dismissed_pct": 0.8791956014835599
+            },
+            "32": {
+              "hits": 684,
+              "pct": 25.147058823529413,
+              "unknown_wall_dismissed_pct": 0.8791956014835599
+            },
+            "4": {
+              "hits": 684,
+              "pct": 25.147058823529413,
+              "unknown_wall_dismissed_pct": 0.8791956014835599
+            },
+            "8": {
+              "hits": 684,
+              "pct": 25.147058823529413,
+              "unknown_wall_dismissed_pct": 0.8791956014835599
+            }
+          },
+          "unknown_wall_dismissed_at_D_pct": 0.8791956014835599,
+          "unknown_wall_dismissed_at_infinity_pct": 0.8791956014835599,
+          "unknown_wall_s": 0.874831151,
+          "unknown_wall_source_n": 275
+        },
+        "no_joint_carrier": {
+          "at_infinity": 182,
+          "at_infinity_pct": 6.6911764705882355,
+          "at_packed_D": 182,
+          "at_packed_D_pct": 6.6911764705882355,
+          "rungs": {
+            "16": {
+              "hits": 182,
+              "pct": 6.6911764705882355,
+              "unknown_wall_dismissed_pct": 0.10713701711794668
+            },
+            "2": {
+              "hits": 182,
+              "pct": 6.6911764705882355,
+              "unknown_wall_dismissed_pct": 0.10713701711794668
+            },
+            "32": {
+              "hits": 182,
+              "pct": 6.6911764705882355,
+              "unknown_wall_dismissed_pct": 0.10713701711794668
+            },
+            "4": {
+              "hits": 182,
+              "pct": 6.6911764705882355,
+              "unknown_wall_dismissed_pct": 0.10713701711794668
+            },
+            "8": {
+              "hits": 182,
+              "pct": 6.6911764705882355,
+              "unknown_wall_dismissed_pct": 0.10713701711794668
+            }
+          },
+          "unknown_wall_dismissed_at_D_pct": 0.10713701711794668,
+          "unknown_wall_dismissed_at_infinity_pct": 0.10713701711794668,
+          "unknown_wall_s": 0.874831151,
+          "unknown_wall_source_n": 275
+        },
+        "stone_deficit_lb": {
+          "at_infinity": 0,
+          "at_infinity_pct": 0.0,
+          "at_packed_D": 0,
+          "at_packed_D_pct": 0.0,
+          "rungs": {
+            "16": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "2": {
+              "hits": 2701,
+              "pct": 99.30147058823529,
+              "unknown_wall_dismissed_pct": 100.0
+            },
+            "32": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "4": {
+              "hits": 2555,
+              "pct": 93.93382352941177,
+              "unknown_wall_dismissed_pct": 82.26207242133289
+            },
+            "8": {
+              "hits": 63,
+              "pct": 2.3161764705882355,
+              "unknown_wall_dismissed_pct": 0.015589293984800044
+            }
+          },
+          "unknown_wall_dismissed_at_D_pct": 0.0,
+          "unknown_wall_dismissed_at_infinity_pct": 0.0,
+          "unknown_wall_s": 0.874831151,
+          "unknown_wall_source_n": 275
+        }
+      },
+      "n": 2720,
+      "packed_surrogate_D": {
+        "max": 4294967288,
+        "min": 4294966728,
+        "p50": 4294967272,
+        "p90": 4294967285
+      },
+      "phase": {
+        "first": 1322,
+        "second": 1398
+      },
+      "placements": {
+        "max": 568,
+        "min": 8,
+        "p50": 24,
+        "p90": 62
+      },
+      "shallow": {
+        "h2_own_win": 19,
+        "h4_forced_loss": 131
+      },
+      "sound_deadline": {
+        "kind": "infinity",
+        "reason": "unbounded board"
+      }
+    },
+    "puzzle_v3": {
+      "candidates": {
+        "census_lb": {
+          "at_infinity": 0,
+          "at_infinity_pct": 0.0,
+          "at_packed_D": 0,
+          "at_packed_D_pct": 0.0,
+          "rungs": {
+            "16": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "2": {
+              "hits": 463,
+              "pct": 98.93162393162393,
+              "unknown_wall_dismissed_pct": 100.0
+            },
+            "32": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "4": {
+              "hits": 452,
+              "pct": 96.58119658119658,
+              "unknown_wall_dismissed_pct": 100.0
+            },
+            "8": {
+              "hits": 200,
+              "pct": 42.73504273504273,
+              "unknown_wall_dismissed_pct": 44.650135690717285
+            }
+          },
+          "unknown_wall_dismissed_at_D_pct": 0.0,
+          "unknown_wall_dismissed_at_infinity_pct": 0.0,
+          "unknown_wall_s": 0.656944718,
+          "unknown_wall_source_n": 36
+        },
+        "no_admissible_first_turn": {
+          "at_infinity": 132,
+          "at_infinity_pct": 28.205128205128204,
+          "at_packed_D": 132,
+          "at_packed_D_pct": 28.205128205128204,
+          "rungs": {
+            "16": {
+              "hits": 132,
+              "pct": 28.205128205128204,
+              "unknown_wall_dismissed_pct": 0.17418360611584977
+            },
+            "2": {
+              "hits": 132,
+              "pct": 28.205128205128204,
+              "unknown_wall_dismissed_pct": 0.17418360611584977
+            },
+            "32": {
+              "hits": 132,
+              "pct": 28.205128205128204,
+              "unknown_wall_dismissed_pct": 0.17418360611584977
+            },
+            "4": {
+              "hits": 132,
+              "pct": 28.205128205128204,
+              "unknown_wall_dismissed_pct": 0.17418360611584977
+            },
+            "8": {
+              "hits": 132,
+              "pct": 28.205128205128204,
+              "unknown_wall_dismissed_pct": 0.17418360611584977
+            }
+          },
+          "unknown_wall_dismissed_at_D_pct": 0.17418360611584977,
+          "unknown_wall_dismissed_at_infinity_pct": 0.17418360611584977,
+          "unknown_wall_s": 0.656944718,
+          "unknown_wall_source_n": 36
+        },
+        "no_joint_carrier": {
+          "at_infinity": 8,
+          "at_infinity_pct": 1.7094017094017093,
+          "at_packed_D": 8,
+          "at_packed_D_pct": 1.7094017094017093,
+          "rungs": {
+            "16": {
+              "hits": 8,
+              "pct": 1.7094017094017093,
+              "unknown_wall_dismissed_pct": 0.013466886569898567
+            },
+            "2": {
+              "hits": 8,
+              "pct": 1.7094017094017093,
+              "unknown_wall_dismissed_pct": 0.013466886569898567
+            },
+            "32": {
+              "hits": 8,
+              "pct": 1.7094017094017093,
+              "unknown_wall_dismissed_pct": 0.013466886569898567
+            },
+            "4": {
+              "hits": 8,
+              "pct": 1.7094017094017093,
+              "unknown_wall_dismissed_pct": 0.013466886569898567
+            },
+            "8": {
+              "hits": 8,
+              "pct": 1.7094017094017093,
+              "unknown_wall_dismissed_pct": 0.013466886569898567
+            }
+          },
+          "unknown_wall_dismissed_at_D_pct": 0.013466886569898567,
+          "unknown_wall_dismissed_at_infinity_pct": 0.013466886569898567,
+          "unknown_wall_s": 0.656944718,
+          "unknown_wall_source_n": 36
+        },
+        "stone_deficit_lb": {
+          "at_infinity": 0,
+          "at_infinity_pct": 0.0,
+          "at_packed_D": 0,
+          "at_packed_D_pct": 0.0,
+          "rungs": {
+            "16": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "2": {
+              "hits": 463,
+              "pct": 98.93162393162393,
+              "unknown_wall_dismissed_pct": 100.0
+            },
+            "32": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "4": {
+              "hits": 452,
+              "pct": 96.58119658119658,
+              "unknown_wall_dismissed_pct": 100.0
+            },
+            "8": {
+              "hits": 4,
+              "pct": 0.8547008547008547,
+              "unknown_wall_dismissed_pct": 0.002852599234993773
+            }
+          },
+          "unknown_wall_dismissed_at_D_pct": 0.0,
+          "unknown_wall_dismissed_at_infinity_pct": 0.0,
+          "unknown_wall_s": 0.656944718,
+          "unknown_wall_source_n": 36
+        }
+      },
+      "n": 468,
+      "packed_surrogate_D": {
+        "max": 4294967289,
+        "min": 4294967147,
+        "p50": 4294967285,
+        "p90": 4294967287
+      },
+      "phase": {
+        "first": 331,
+        "second": 137
+      },
+      "placements": {
+        "max": 149,
+        "min": 7,
+        "p50": 11,
+        "p90": 59
+      },
+      "shallow": {
+        "h2_own_win": 5,
+        "h4_forced_loss": 10
+      },
+      "sound_deadline": {
+        "kind": "infinity",
+        "reason": "unbounded board"
+      }
+    },
+    "selfplay_v1": {
+      "candidates": {
+        "census_lb": {
+          "at_infinity": 0,
+          "at_infinity_pct": 0.0,
+          "at_packed_D": 0,
+          "at_packed_D_pct": 0.0,
+          "rungs": {
+            "16": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "2": {
+              "hits": 3124,
+              "pct": 95.97542242703533,
+              "unknown_wall_dismissed_pct": 99.99960145301539
+            },
+            "32": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "4": {
+              "hits": 3060,
+              "pct": 94.00921658986175,
+              "unknown_wall_dismissed_pct": 99.71961377728314
+            },
+            "8": {
+              "hits": 1830,
+              "pct": 56.22119815668203,
+              "unknown_wall_dismissed_pct": 17.114756175965038
+            }
+          },
+          "unknown_wall_dismissed_at_D_pct": 0.0,
+          "unknown_wall_dismissed_at_infinity_pct": 0.0,
+          "unknown_wall_s": 1.472850185,
+          "unknown_wall_source_n": 325
+        },
+        "no_admissible_first_turn": {
+          "at_infinity": 873,
+          "at_infinity_pct": 26.820276497695854,
+          "at_packed_D": 873,
+          "at_packed_D_pct": 26.820276497695854,
+          "rungs": {
+            "16": {
+              "hits": 873,
+              "pct": 26.820276497695854,
+              "unknown_wall_dismissed_pct": 0.4562787219258149
+            },
+            "2": {
+              "hits": 873,
+              "pct": 26.820276497695854,
+              "unknown_wall_dismissed_pct": 0.4562787219258149
+            },
+            "32": {
+              "hits": 873,
+              "pct": 26.820276497695854,
+              "unknown_wall_dismissed_pct": 0.4562787219258149
+            },
+            "4": {
+              "hits": 873,
+              "pct": 26.820276497695854,
+              "unknown_wall_dismissed_pct": 0.4562787219258149
+            },
+            "8": {
+              "hits": 873,
+              "pct": 26.820276497695854,
+              "unknown_wall_dismissed_pct": 0.4562787219258149
+            }
+          },
+          "unknown_wall_dismissed_at_D_pct": 0.4562787219258149,
+          "unknown_wall_dismissed_at_infinity_pct": 0.4562787219258149,
+          "unknown_wall_s": 1.472850185,
+          "unknown_wall_source_n": 325
+        },
+        "no_joint_carrier": {
+          "at_infinity": 482,
+          "at_infinity_pct": 14.807987711213517,
+          "at_packed_D": 482,
+          "at_packed_D_pct": 14.807987711213517,
+          "rungs": {
+            "16": {
+              "hits": 482,
+              "pct": 14.807987711213517,
+              "unknown_wall_dismissed_pct": 0.1023375639525754
+            },
+            "2": {
+              "hits": 482,
+              "pct": 14.807987711213517,
+              "unknown_wall_dismissed_pct": 0.1023375639525754
+            },
+            "32": {
+              "hits": 482,
+              "pct": 14.807987711213517,
+              "unknown_wall_dismissed_pct": 0.1023375639525754
+            },
+            "4": {
+              "hits": 482,
+              "pct": 14.807987711213517,
+              "unknown_wall_dismissed_pct": 0.1023375639525754
+            },
+            "8": {
+              "hits": 482,
+              "pct": 14.807987711213517,
+              "unknown_wall_dismissed_pct": 0.1023375639525754
+            }
+          },
+          "unknown_wall_dismissed_at_D_pct": 0.1023375639525754,
+          "unknown_wall_dismissed_at_infinity_pct": 0.1023375639525754,
+          "unknown_wall_s": 1.472850185,
+          "unknown_wall_source_n": 325
+        },
+        "stone_deficit_lb": {
+          "at_infinity": 0,
+          "at_infinity_pct": 0.0,
+          "at_packed_D": 0,
+          "at_packed_D_pct": 0.0,
+          "rungs": {
+            "16": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "2": {
+              "hits": 3172,
+              "pct": 97.45007680491551,
+              "unknown_wall_dismissed_pct": 100.0
+            },
+            "32": {
+              "hits": 0,
+              "pct": 0.0,
+              "unknown_wall_dismissed_pct": 0.0
+            },
+            "4": {
+              "hits": 3108,
+              "pct": 95.48387096774194,
+              "unknown_wall_dismissed_pct": 99.72001232426771
+            },
+            "8": {
+              "hits": 674,
+              "pct": 20.706605222734254,
+              "unknown_wall_dismissed_pct": 0.04521437460389089
+            }
+          },
+          "unknown_wall_dismissed_at_D_pct": 0.0,
+          "unknown_wall_dismissed_at_infinity_pct": 0.0,
+          "unknown_wall_s": 1.472850185,
+          "unknown_wall_source_n": 325
+        }
+      },
+      "n": 3255,
+      "packed_surrogate_D": {
+        "max": 4294967296,
+        "min": 4294967210,
+        "p50": 4294967262,
+        "p90": 4294967290
+      },
+      "phase": {
+        "first": 1610,
+        "opening": 48,
+        "second": 1597
+      },
+      "placements": {
+        "max": 86,
+        "min": 0,
+        "p50": 34,
+        "p90": 69
+      },
+      "shallow": {
+        "h2_own_win": 83,
+        "h4_forced_loss": 12
+      },
+      "sound_deadline": {
+        "kind": "infinity",
+        "reason": "unbounded board"
+      }
+    }
+  },
+  "false_dismissal_audit": {
+    "census_lb": {
+      "atlas_certified_wins": 2600,
+      "certified_depth_tests": 2676,
+      "examples": [],
+      "known_wins": 2941,
+      "violations": 0
+    },
+    "no_admissible_first_turn": {
+      "atlas_certified_wins": 2600,
+      "certified_depth_tests": 0,
+      "examples": [],
+      "known_wins": 2941,
+      "violations": 0
+    },
+    "no_joint_carrier": {
+      "atlas_certified_wins": 2600,
+      "certified_depth_tests": 0,
+      "examples": [],
+      "known_wins": 2941,
+      "violations": 0
+    },
+    "stone_deficit_lb": {
+      "atlas_certified_wins": 2600,
+      "certified_depth_tests": 2676,
+      "examples": [],
+      "known_wins": 2941,
+      "violations": 0
+    }
+  },
+  "metadata": {
+    "cohort_sizes": {
+      "forcing19": 19,
+      "grinds": 248,
+      "human_v1": 2720,
+      "puzzle_v3": 468,
+      "selfplay_v1": 3255
+    },
+    "packed_cell_count": 4294967296,
+    "rules_board": "unbounded/Z^2; no sound finite fill deadline",
+    "surrogate_warning": "2^32-n is an implementation-carrier surrogate, not a Lean/game deadline"
+  },
+  "small_h": {
+    "definition_note": "h2 is phase-aware completion in the mover's remaining turn; h4 is the opponent-win dual from an unanswerable threat family (resolution <= b+2 <= 4)",
+    "h2_own_win": 102,
+    "h4_forced_loss": 146,
+    "positions": 6294
+  }
+}

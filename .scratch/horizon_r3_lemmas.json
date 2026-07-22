@@ -1,0 +1,427 @@
+{
+  "metadata": {
+    "head": "e118097075a2f46afcb30f8c38b0c2c98666eab0",
+    "legal_radius": 8,
+    "python": "3.14.0"
+  },
+  "rung_table": [
+    {
+      "attacker_placements": 1,
+      "attacker_quota_changed": true,
+      "defender_placements": 0,
+      "horizon": 1,
+      "phase": "opening",
+      "schedule": "A"
+    },
+    {
+      "attacker_placements": 1,
+      "attacker_quota_changed": false,
+      "defender_placements": 1,
+      "horizon": 2,
+      "phase": "opening",
+      "schedule": "AD"
+    },
+    {
+      "attacker_placements": 1,
+      "attacker_quota_changed": false,
+      "defender_placements": 2,
+      "horizon": 3,
+      "phase": "opening",
+      "schedule": "ADD"
+    },
+    {
+      "attacker_placements": 2,
+      "attacker_quota_changed": true,
+      "defender_placements": 2,
+      "horizon": 4,
+      "phase": "opening",
+      "schedule": "ADDA"
+    },
+    {
+      "attacker_placements": 3,
+      "attacker_quota_changed": true,
+      "defender_placements": 2,
+      "horizon": 5,
+      "phase": "opening",
+      "schedule": "ADDAA"
+    },
+    {
+      "attacker_placements": 3,
+      "attacker_quota_changed": false,
+      "defender_placements": 3,
+      "horizon": 6,
+      "phase": "opening",
+      "schedule": "ADDAAD"
+    },
+    {
+      "attacker_placements": 3,
+      "attacker_quota_changed": false,
+      "defender_placements": 4,
+      "horizon": 7,
+      "phase": "opening",
+      "schedule": "ADDAADD"
+    },
+    {
+      "attacker_placements": 4,
+      "attacker_quota_changed": true,
+      "defender_placements": 4,
+      "horizon": 8,
+      "phase": "opening",
+      "schedule": "ADDAADDA"
+    },
+    {
+      "attacker_placements": 5,
+      "attacker_quota_changed": true,
+      "defender_placements": 4,
+      "horizon": 9,
+      "phase": "opening",
+      "schedule": "ADDAADDAA"
+    },
+    {
+      "attacker_placements": 5,
+      "attacker_quota_changed": false,
+      "defender_placements": 5,
+      "horizon": 10,
+      "phase": "opening",
+      "schedule": "ADDAADDAAD"
+    },
+    {
+      "attacker_placements": 5,
+      "attacker_quota_changed": false,
+      "defender_placements": 6,
+      "horizon": 11,
+      "phase": "opening",
+      "schedule": "ADDAADDAADD"
+    },
+    {
+      "attacker_placements": 6,
+      "attacker_quota_changed": true,
+      "defender_placements": 6,
+      "horizon": 12,
+      "phase": "opening",
+      "schedule": "ADDAADDAADDA"
+    },
+    {
+      "attacker_placements": 7,
+      "attacker_quota_changed": true,
+      "defender_placements": 6,
+      "horizon": 13,
+      "phase": "opening",
+      "schedule": "ADDAADDAADDAA"
+    },
+    {
+      "attacker_placements": 7,
+      "attacker_quota_changed": false,
+      "defender_placements": 7,
+      "horizon": 14,
+      "phase": "opening",
+      "schedule": "ADDAADDAADDAAD"
+    },
+    {
+      "attacker_placements": 7,
+      "attacker_quota_changed": false,
+      "defender_placements": 8,
+      "horizon": 15,
+      "phase": "opening",
+      "schedule": "ADDAADDAADDAADD"
+    },
+    {
+      "attacker_placements": 8,
+      "attacker_quota_changed": true,
+      "defender_placements": 8,
+      "horizon": 16,
+      "phase": "opening",
+      "schedule": "ADDAADDAADDAADDA"
+    },
+    {
+      "attacker_placements": 1,
+      "attacker_quota_changed": true,
+      "defender_placements": 0,
+      "horizon": 1,
+      "phase": "FirstStone",
+      "schedule": "A"
+    },
+    {
+      "attacker_placements": 2,
+      "attacker_quota_changed": true,
+      "defender_placements": 0,
+      "horizon": 2,
+      "phase": "FirstStone",
+      "schedule": "AA"
+    },
+    {
+      "attacker_placements": 2,
+      "attacker_quota_changed": false,
+      "defender_placements": 1,
+      "horizon": 3,
+      "phase": "FirstStone",
+      "schedule": "AAD"
+    },
+    {
+      "attacker_placements": 2,
+      "attacker_quota_changed": false,
+      "defender_placements": 2,
+      "horizon": 4,
+      "phase": "FirstStone",
+      "schedule": "AADD"
+    },
+    {
+      "attacker_placements": 3,
+      "attacker_quota_changed": true,
+      "defender_placements": 2,
+      "horizon": 5,
+      "phase": "FirstStone",
+      "schedule": "AADDA"
+    },
+    {
+      "attacker_placements": 4,
+      "attacker_quota_changed": true,
+      "defender_placements": 2,
+      "horizon": 6,
+      "phase": "FirstStone",
+      "schedule": "AADDAA"
+    },
+    {
+      "attacker_placements": 4,
+      "attacker_quota_changed": false,
+      "defender_placements": 3,
+      "horizon": 7,
+      "phase": "FirstStone",
+      "schedule": "AADDAAD"
+    },
+    {
+      "attacker_placements": 4,
+      "attacker_quota_changed": false,
+      "defender_placements": 4,
+      "horizon": 8,
+      "phase": "FirstStone",
+      "schedule": "AADDAADD"
+    },
+    {
+      "attacker_placements": 5,
+      "attacker_quota_changed": true,
+      "defender_placements": 4,
+      "horizon": 9,
+      "phase": "FirstStone",
+      "schedule": "AADDAADDA"
+    },
+    {
+      "attacker_placements": 6,
+      "attacker_quota_changed": true,
+      "defender_placements": 4,
+      "horizon": 10,
+      "phase": "FirstStone",
+      "schedule": "AADDAADDAA"
+    },
+    {
+      "attacker_placements": 6,
+      "attacker_quota_changed": false,
+      "defender_placements": 5,
+      "horizon": 11,
+      "phase": "FirstStone",
+      "schedule": "AADDAADDAAD"
+    },
+    {
+      "attacker_placements": 6,
+      "attacker_quota_changed": false,
+      "defender_placements": 6,
+      "horizon": 12,
+      "phase": "FirstStone",
+      "schedule": "AADDAADDAADD"
+    },
+    {
+      "attacker_placements": 7,
+      "attacker_quota_changed": true,
+      "defender_placements": 6,
+      "horizon": 13,
+      "phase": "FirstStone",
+      "schedule": "AADDAADDAADDA"
+    },
+    {
+      "attacker_placements": 8,
+      "attacker_quota_changed": true,
+      "defender_placements": 6,
+      "horizon": 14,
+      "phase": "FirstStone",
+      "schedule": "AADDAADDAADDAA"
+    },
+    {
+      "attacker_placements": 8,
+      "attacker_quota_changed": false,
+      "defender_placements": 7,
+      "horizon": 15,
+      "phase": "FirstStone",
+      "schedule": "AADDAADDAADDAAD"
+    },
+    {
+      "attacker_placements": 8,
+      "attacker_quota_changed": false,
+      "defender_placements": 8,
+      "horizon": 16,
+      "phase": "FirstStone",
+      "schedule": "AADDAADDAADDAADD"
+    },
+    {
+      "attacker_placements": 1,
+      "attacker_quota_changed": true,
+      "defender_placements": 0,
+      "horizon": 1,
+      "phase": "SecondStone",
+      "schedule": "A"
+    },
+    {
+      "attacker_placements": 1,
+      "attacker_quota_changed": false,
+      "defender_placements": 1,
+      "horizon": 2,
+      "phase": "SecondStone",
+      "schedule": "AD"
+    },
+    {
+      "attacker_placements": 1,
+      "attacker_quota_changed": false,
+      "defender_placements": 2,
+      "horizon": 3,
+      "phase": "SecondStone",
+      "schedule": "ADD"
+    },
+    {
+      "attacker_placements": 2,
+      "attacker_quota_changed": true,
+      "defender_placements": 2,
+      "horizon": 4,
+      "phase": "SecondStone",
+      "schedule": "ADDA"
+    },
+    {
+      "attacker_placements": 3,
+      "attacker_quota_changed": true,
+      "defender_placements": 2,
+      "horizon": 5,
+      "phase": "SecondStone",
+      "schedule": "ADDAA"
+    },
+    {
+      "attacker_placements": 3,
+      "attacker_quota_changed": false,
+      "defender_placements": 3,
+      "horizon": 6,
+      "phase": "SecondStone",
+      "schedule": "ADDAAD"
+    },
+    {
+      "attacker_placements": 3,
+      "attacker_quota_changed": false,
+      "defender_placements": 4,
+      "horizon": 7,
+      "phase": "SecondStone",
+      "schedule": "ADDAADD"
+    },
+    {
+      "attacker_placements": 4,
+      "attacker_quota_changed": true,
+      "defender_placements": 4,
+      "horizon": 8,
+      "phase": "SecondStone",
+      "schedule": "ADDAADDA"
+    },
+    {
+      "attacker_placements": 5,
+      "attacker_quota_changed": true,
+      "defender_placements": 4,
+      "horizon": 9,
+      "phase": "SecondStone",
+      "schedule": "ADDAADDAA"
+    },
+    {
+      "attacker_placements": 5,
+      "attacker_quota_changed": false,
+      "defender_placements": 5,
+      "horizon": 10,
+      "phase": "SecondStone",
+      "schedule": "ADDAADDAAD"
+    },
+    {
+      "attacker_placements": 5,
+      "attacker_quota_changed": false,
+      "defender_placements": 6,
+      "horizon": 11,
+      "phase": "SecondStone",
+      "schedule": "ADDAADDAADD"
+    },
+    {
+      "attacker_placements": 6,
+      "attacker_quota_changed": true,
+      "defender_placements": 6,
+      "horizon": 12,
+      "phase": "SecondStone",
+      "schedule": "ADDAADDAADDA"
+    },
+    {
+      "attacker_placements": 7,
+      "attacker_quota_changed": true,
+      "defender_placements": 6,
+      "horizon": 13,
+      "phase": "SecondStone",
+      "schedule": "ADDAADDAADDAA"
+    },
+    {
+      "attacker_placements": 7,
+      "attacker_quota_changed": false,
+      "defender_placements": 7,
+      "horizon": 14,
+      "phase": "SecondStone",
+      "schedule": "ADDAADDAADDAAD"
+    },
+    {
+      "attacker_placements": 7,
+      "attacker_quota_changed": false,
+      "defender_placements": 8,
+      "horizon": 15,
+      "phase": "SecondStone",
+      "schedule": "ADDAADDAADDAADD"
+    },
+    {
+      "attacker_placements": 8,
+      "attacker_quota_changed": true,
+      "defender_placements": 8,
+      "horizon": 16,
+      "phase": "SecondStone",
+      "schedule": "ADDAADDAADDAADDA"
+    }
+  ],
+  "six_stone_two_cover": {
+    "all_have_two_cover": true,
+    "canonical_shapes": 259,
+    "cover_size_counts": {
+      "1": 177,
+      "2": 82
+    },
+    "examples": {
+      "1": {
+        "cover": [
+          3
+        ],
+        "stones": [
+          0,
+          1,
+          2,
+          4
+        ]
+      },
+      "2": {
+        "cover": [
+          -2,
+          4
+        ],
+        "stones": [
+          0,
+          1,
+          2,
+          3
+        ]
+      }
+    },
+    "failures": []
+  }
+}

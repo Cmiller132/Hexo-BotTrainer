@@ -1,0 +1,103 @@
+{
+  "metadata": {
+    "binary": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\deadline-ladder\\.scratch\\horizon_native\\.target\\release\\horizon_native.exe",
+    "max_cache_entries": 200000,
+    "mode": "registry",
+    "native_threads": 1,
+    "per_root_ms": 1000,
+    "row_evidence": ".scratch\\horizon_r4_native_registry_pilot_rows.jsonl",
+    "timeout_is_not_verdict": true
+  },
+  "selection": {
+    "eligible_depth_13_14": 155,
+    "registry_unique": 2941
+  },
+  "summary": {
+    "attempted": 5,
+    "caught_ids": [
+      "atlas_full_oa-0a8ea10c6719f4db",
+      "atlas_full_oa-0ba0c740be13f4b4"
+    ],
+    "completed_negative_mismatches": [],
+    "completed_negatives": 0,
+    "distributions": {
+      "all": {
+        "first_action_total": {
+          "max": 47249,
+          "mean": 34106.8,
+          "n": 5,
+          "p50": 31198,
+          "p90": 32998,
+          "total": 170534
+        },
+        "nodes": {
+          "max": 113925,
+          "mean": 93387.8,
+          "n": 5,
+          "p50": 98038,
+          "p90": 106496,
+          "total": 466939
+        },
+        "universe": {
+          "max": 454,
+          "mean": 394.0,
+          "n": 5,
+          "p50": 382,
+          "p90": 386,
+          "total": 1970
+        },
+        "wall_ns": {
+          "max": 1007294400,
+          "mean": 969103900.0,
+          "n": 5,
+          "p50": 1001609000,
+          "p90": 1002161200,
+          "total": 4845519500
+        }
+      },
+      "completed": {
+        "first_action_total": {
+          "max": 32998,
+          "mean": 30748.0,
+          "n": 2,
+          "p50": 28498,
+          "p90": 28498,
+          "total": 61496
+        },
+        "nodes": {
+          "max": 113925,
+          "mean": 105981.5,
+          "n": 2,
+          "p50": 98038,
+          "p90": 98038,
+          "total": 211963
+        },
+        "universe": {
+          "max": 386,
+          "mean": 378.0,
+          "n": 2,
+          "p50": 370,
+          "p90": 370,
+          "total": 756
+        },
+        "wall_ns": {
+          "max": 934075700,
+          "mean": 917227450.0,
+          "n": 2,
+          "p50": 900379200,
+          "p90": 900379200,
+          "total": 1834454900
+        }
+      }
+    },
+    "errors": 0,
+    "per_cohort_status": {},
+    "python_crosscheck_mismatches": [],
+    "statuses": {
+      "timeout": 3,
+      "win": 2
+    },
+    "timeouts": 3,
+    "wins": 2
+  }
+}

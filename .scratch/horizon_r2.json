@@ -1,0 +1,1279 @@
+{
+  "cohorts": {
+    "forcing19": {
+      "horizons": {
+        "6": {
+          "current_win": {
+            "n": 18,
+            "nodes": {
+              "max": 2775,
+              "p50": 903,
+              "p90": 1378,
+              "total": 16421
+            },
+            "universe": {
+              "max": 75,
+              "p50": 43,
+              "p90": 53
+            },
+            "wall_us": {
+              "max": 31677.6,
+              "mean": 8134.933333333333,
+              "p50": 6289.8,
+              "p90": 17119.4,
+              "total": 146428.8
+            },
+            "win_ids": [],
+            "win_pct": 0.0,
+            "wins": 0
+          },
+          "forced_loss": {
+            "n": 18,
+            "nodes": {
+              "max": 1711,
+              "p50": 1,
+              "p90": 1,
+              "total": 2952
+            },
+            "universe": {
+              "max": 75,
+              "p50": 43,
+              "p90": 53
+            },
+            "wall_us": {
+              "max": 24197.3,
+              "mean": 6044.527777777778,
+              "p50": 4008.3,
+              "p90": 11686.0,
+              "total": 108801.5
+            },
+            "win_ids": [
+              "forcing_8is963b",
+              "forcing_dy3dg99"
+            ],
+            "win_pct": 11.11111111111111,
+            "wins": 2
+          }
+        },
+        "8": {
+          "current_win": {
+            "n": 18,
+            "nodes": {
+              "max": 2775,
+              "p50": 903,
+              "p90": 1378,
+              "total": 16421
+            },
+            "universe": {
+              "max": 75,
+              "p50": 43,
+              "p90": 53
+            },
+            "wall_us": {
+              "max": 22054.8,
+              "mean": 6367.783333333333,
+              "p50": 5607.5,
+              "p90": 11528.2,
+              "total": 114620.1
+            },
+            "win_ids": [],
+            "win_pct": 0.0,
+            "wins": 0
+          },
+          "forced_loss": {
+            "n": 18,
+            "nodes": {
+              "max": 702598,
+              "p50": 2017,
+              "p90": 8002,
+              "total": 1330673
+            },
+            "universe": {
+              "max": 134,
+              "p50": 74,
+              "p90": 91
+            },
+            "wall_us": {
+              "max": 2239863.0,
+              "mean": 250322.51111111112,
+              "p50": 15069.7,
+              "p90": 79079.0,
+              "total": 4505805.2
+            },
+            "win_ids": [
+              "forcing_8is963b",
+              "forcing_dy3dg99"
+            ],
+            "win_pct": 11.11111111111111,
+            "wins": 2
+          }
+        }
+      },
+      "internal_validation": {
+        "h2_not_h6": [],
+        "h4_loss_not_h6": [],
+        "h6_loss_not_h8": [],
+        "h6_not_h8": []
+      },
+      "n": 18,
+      "validated_base": {
+        "h2_win_ids": [],
+        "h4_forced_loss_ids": [
+          "forcing_8is963b",
+          "forcing_dy3dg99"
+        ]
+      }
+    },
+    "grinds": {
+      "horizons": {
+        "6": {
+          "current_win": {
+            "n": 193,
+            "nodes": {
+              "max": 2926,
+              "p50": 703,
+              "p90": 1653,
+              "total": 166566
+            },
+            "universe": {
+              "max": 77,
+              "p50": 38,
+              "p90": 58
+            },
+            "wall_us": {
+              "max": 27788.2,
+              "mean": 6301.588601036269,
+              "p50": 4662.9,
+              "p90": 13099.7,
+              "total": 1216206.6
+            },
+            "win_ids": [],
+            "win_pct": 0.0,
+            "wins": 0
+          },
+          "forced_loss": {
+            "n": 193,
+            "nodes": {
+              "max": 127,
+              "p50": 1,
+              "p90": 1,
+              "total": 635
+            },
+            "universe": {
+              "max": 77,
+              "p50": 38,
+              "p90": 58
+            },
+            "wall_us": {
+              "max": 14745.0,
+              "mean": 4005.7865284974096,
+              "p50": 3162.0,
+              "p90": 7487.8,
+              "total": 773116.8
+            },
+            "win_ids": [],
+            "win_pct": 0.0,
+            "wins": 0
+          }
+        },
+        "8": {
+          "current_win": {
+            "n": 193,
+            "nodes": {
+              "max": 2926,
+              "p50": 703,
+              "p90": 1653,
+              "total": 166566
+            },
+            "universe": {
+              "max": 77,
+              "p50": 38,
+              "p90": 58
+            },
+            "wall_us": {
+              "max": 31014.4,
+              "mean": 6668.5025906735755,
+              "p50": 4831.8,
+              "p90": 12898.8,
+              "total": 1287021.0
+            },
+            "win_ids": [],
+            "win_pct": 0.0,
+            "wins": 0
+          },
+          "forced_loss": {
+            "n": 193,
+            "nodes": {
+              "max": 39162,
+              "p50": 2146,
+              "p90": 5357,
+              "total": 630418
+            },
+            "universe": {
+              "max": 130,
+              "p50": 74,
+              "p90": 107
+            },
+            "wall_us": {
+              "max": 149856.6,
+              "mean": 26999.0207253886,
+              "p50": 18851.0,
+              "p90": 56500.1,
+              "total": 5210811.0
+            },
+            "win_ids": [],
+            "win_pct": 0.0,
+            "wins": 0
+          }
+        }
+      },
+      "internal_validation": {
+        "h2_not_h6": [],
+        "h4_loss_not_h6": [],
+        "h6_loss_not_h8": [],
+        "h6_not_h8": []
+      },
+      "n": 193,
+      "validated_base": {
+        "h2_win_ids": [],
+        "h4_forced_loss_ids": []
+      }
+    },
+    "human_v1": {
+      "horizons": {
+        "6": {
+          "current_win": {
+            "n": 1322,
+            "nodes": {
+              "max": 9730,
+              "p50": 210,
+              "p90": 990,
+              "total": 538572
+            },
+            "universe": {
+              "max": 165,
+              "p50": 23,
+              "p90": 47
+            },
+            "wall_us": {
+              "max": 165552.8,
+              "mean": 3700.880862329803,
+              "p50": 1539.7,
+              "p90": 7977.7,
+              "total": 4892564.5
+            },
+            "win_ids": [
+              "human_0063dbc011a0664e_p45",
+              "human_05c3471c3ab37ba5_p31",
+              "human_05feb4372684737f_p53",
+              "human_07fad44874cd8aad_p19",
+              "human_07fdc5d20e89eb68_p27",
+              "human_0b39ea1a6c8eee20_p63",
+              "human_0b39ea1a6c8eee20_p83",
+              "human_0c9570189beab16e_p33",
+              "human_0c9570189beab16e_p37",
+              "human_0c9570189beab16e_p45",
+              "human_109c7b52881de543_p95",
+              "human_12a2360cad1617fc_p23",
+              "human_194ce5fa25e2029d_p47",
+              "human_1cf87d307bc7c7eb_p15",
+              "human_1d7540b8789196ad_p83",
+              "human_21609629596d6fd3_p55",
+              "human_29367806cdc99f01_p17",
+              "human_2c3b021c92704555_p15",
+              "human_2e9fda60e67dc5ed_p19",
+              "human_2f52d27f87809f16_p31",
+              "human_3c9423b1a047e24c_p29",
+              "human_3d17d05a42459994_p25",
+              "human_3e6a7aaa8d136721_p31",
+              "human_41a34b80fd66cef6_p55",
+              "human_41e2eecefcb26883_p15",
+              "human_49450ea28d095793_p29",
+              "human_4a05243f78cd8be2_p17",
+              "human_5416e3843ab1f3b7_p29",
+              "human_572f17e89f6ab4b4_p127",
+              "human_572f17e89f6ab4b4_p63",
+              "human_572f17e89f6ab4b4_p87",
+              "human_5cfcb378a9dc6e84_p45",
+              "human_5f3230983f9ea3dd_p85",
+              "human_604e9d7a6009c07b_p23",
+              "human_64004c0089a9178d_p27",
+              "human_67630ab3b7277e43_p21",
+              "human_68c1c50639039687_p17",
+              "human_6b53c8a83c044b8d_p31",
+              "human_6d26d0bb77a12b8d_p49",
+              "human_6e548d2127ed37cb_p25",
+              "human_736f572521236d55_p25",
+              "human_76f6574804d34081_p23",
+              "human_78f5a4430295cf5c_p77",
+              "human_7eb1319eae1e3435_p107",
+              "human_7ef53ac05dfb6399_p13",
+              "human_7f8d4486eef0ce04_p25",
+              "human_80beb006905ad691_p81",
+              "human_83531faa75f0ec55_p23",
+              "human_8ab85e27fb65efce_p31",
+              "human_8af5b6a251860d89_p23",
+              "human_8d1e9f4956c2caa3_p39",
+              "human_92b740931483965e_p25",
+              "human_96acd073ccd000de_p23",
+              "human_96acd073ccd000de_p53",
+              "human_97d76a4c55be1155_p59",
+              "human_9912dd17e41680d7_p151",
+              "human_9ac941b6c3ab9c8c_p17",
+              "human_9ac941b6c3ab9c8c_p21",
+              "human_a259b7fc7f19281f_p53",
+              "human_a31d9ccaf73bd24d_p17",
+              "human_a4b108cc9a7b524b_p107",
+              "human_a4c5de7f99c580b0_p27",
+              "human_a834277a999c7217_p65",
+              "human_a94f22d36ff7d3cf_p19",
+              "human_ab93c3b77edcd8c1_p57",
+              "human_ac3b3e8fc1b9711b_p25",
+              "human_b81f05b4f52ddee3_p25",
+              "human_b8c6422dc42a5552_p23",
+              "human_b9615c6b30115221_p51",
+              "human_ba4c8c74d9d048b5_p25",
+              "human_c54c79e3ba4eed5a_p319",
+              "human_c71c9ef606916639_p51",
+              "human_cb7e982286bebc8e_p15",
+              "human_d190fa3322965e18_p23",
+              "human_d279f167361bf428_p19",
+              "human_d279f167361bf428_p35",
+              "human_d371694020b025f3_p25",
+              "human_da996f7325a33d85_p33",
+              "human_dab05c7c99af7b40_p43",
+              "human_db9e61448d342d8d_p31",
+              "human_db9e61448d342d8d_p35",
+              "human_dc3c846c4023a751_p15",
+              "human_de78dc834d1cf367_p73",
+              "human_df50afc21037f0e5_p77",
+              "human_e6650040fbce33aa_p23",
+              "human_eb6d8a81417a17b5_p21",
+              "human_eba9aa00b7b239a0_p65",
+              "human_ec1214733caef8bf_p49",
+              "human_f0dbe3762307339e_p29",
+              "human_f3bd4894504de2b8_p33",
+              "human_f3dfd95284c2b5b4_p19",
+              "human_f53f6fd7547d8173_p95",
+              "human_f8c86f9a0f1ed338_p15",
+              "human_fb00d63dc6d7ef92_p131"
+            ],
+            "win_pct": 7.110438729198185,
+            "wins": 94
+          },
+          "forced_loss": {
+            "n": 1322,
+            "nodes": {
+              "max": 3240,
+              "p50": 1,
+              "p90": 63,
+              "total": 77603
+            },
+            "universe": {
+              "max": 165,
+              "p50": 23,
+              "p90": 47
+            },
+            "wall_us": {
+              "max": 169767.3,
+              "mean": 2950.83517397882,
+              "p50": 1268.7,
+              "p90": 5941.5,
+              "total": 3901004.1
+            },
+            "win_ids": [
+              "human_04124e31612ca473_p23",
+              "human_07fad44874cd8aad_p21",
+              "human_07fdc5d20e89eb68_p29",
+              "human_0f9794ff39217197_p69",
+              "human_12a2360cad1617fc_p25",
+              "human_17aaebf1e4c10aea_p49",
+              "human_1bb0358f58725fca_p27",
+              "human_1cf87d307bc7c7eb_p17",
+              "human_1f911166322d1ff1_p45",
+              "human_27057abe4ee1d907_p25",
+              "human_29c3b184d10ac9aa_p25",
+              "human_2c3b021c92704555_p17",
+              "human_301cbb3b3f39e306_p59",
+              "human_329b49804ddf39ce_p25",
+              "human_3686c6ae3dfa6ab7_p59",
+              "human_3c2eba04c165df6c_p27",
+              "human_3c543bd318b687ab_p37",
+              "human_3c9423b1a047e24c_p31",
+              "human_3d17d05a42459994_p27",
+              "human_41e2eecefcb26883_p17",
+              "human_427585ae49bb1a79_p53",
+              "human_470059da30268138_p59",
+              "human_49450ea28d095793_p39",
+              "human_4c238a7ef563ee4f_p49",
+              "human_504ecbbbe1f51296_p51",
+              "human_5416e3843ab1f3b7_p31",
+              "human_57ed6a770e4828f5_p67",
+              "human_5a047618ae87ac7d_p51",
+              "human_609b497ad370bea2_p63",
+              "human_617667fc8eefef31_p29",
+              "human_61dea8e8dfb185a1_p51",
+              "human_63002b31555af30e_p27",
+              "human_64004c0089a9178d_p29",
+              "human_6485ee15e605e5c8_p33",
+              "human_68c1c50639039687_p19",
+              "human_6b53c8a83c044b8d_p21",
+              "human_6b53c8a83c044b8d_p25",
+              "human_6b53c8a83c044b8d_p29",
+              "human_6b53c8a83c044b8d_p33",
+              "human_6e548d2127ed37cb_p27",
+              "human_7183fd0591fb85c5_p37",
+              "human_7ef53ac05dfb6399_p19",
+              "human_89bcfcca5b4215a0_p41",
+              "human_8af5b6a251860d89_p25",
+              "human_8f6e39f8be1715ee_p37",
+              "human_92b740931483965e_p27",
+              "human_98807724e9bb46fd_p31",
+              "human_9a13471b27ad4da7_p53",
+              "human_9de75d2ba4e8d346_p93",
+              "human_a32ed96ded852131_p47",
+              "human_a5a3bca998ebec86_p27",
+              "human_ab66623b8de1df07_p29",
+              "human_ac2c768fcec66f66_p33",
+              "human_ac3b3e8fc1b9711b_p27",
+              "human_adfdaf796edc7c0d_p97",
+              "human_ba4c8c74d9d048b5_p23",
+              "human_da996f7325a33d85_p35",
+              "human_dc64cb554cdb57f7_p27",
+              "human_df50afc21037f0e5_p71",
+              "human_e6650040fbce33aa_p25",
+              "human_e6ae44020f50a3cc_p29",
+              "human_eba9aa00b7b239a0_p67",
+              "human_f0dbe3762307339e_p35",
+              "human_f3dfd95284c2b5b4_p21",
+              "human_f8c86f9a0f1ed338_p17",
+              "human_fc11fbb9ab5f2c5f_p41",
+              "human_fc7b96c2cc1c93ee_p39"
+            ],
+            "win_pct": 5.068078668683812,
+            "wins": 67
+          }
+        },
+        "8": {
+          "current_win": {
+            "n": 1322,
+            "nodes": {
+              "max": 9730,
+              "p50": 210,
+              "p90": 990,
+              "total": 538572
+            },
+            "universe": {
+              "max": 165,
+              "p50": 23,
+              "p90": 47
+            },
+            "wall_us": {
+              "max": 225482.8,
+              "mean": 4446.521558245084,
+              "p50": 1919.0,
+              "p90": 9467.3,
+              "total": 5878301.5
+            },
+            "win_ids": [
+              "human_0063dbc011a0664e_p45",
+              "human_05c3471c3ab37ba5_p31",
+              "human_05feb4372684737f_p53",
+              "human_07fad44874cd8aad_p19",
+              "human_07fdc5d20e89eb68_p27",
+              "human_0b39ea1a6c8eee20_p63",
+              "human_0b39ea1a6c8eee20_p83",
+              "human_0c9570189beab16e_p33",
+              "human_0c9570189beab16e_p37",
+              "human_0c9570189beab16e_p45",
+              "human_109c7b52881de543_p95",
+              "human_12a2360cad1617fc_p23",
+              "human_194ce5fa25e2029d_p47",
+              "human_1cf87d307bc7c7eb_p15",
+              "human_1d7540b8789196ad_p83",
+              "human_21609629596d6fd3_p55",
+              "human_29367806cdc99f01_p17",
+              "human_2c3b021c92704555_p15",
+              "human_2e9fda60e67dc5ed_p19",
+              "human_2f52d27f87809f16_p31",
+              "human_3c9423b1a047e24c_p29",
+              "human_3d17d05a42459994_p25",
+              "human_3e6a7aaa8d136721_p31",
+              "human_41a34b80fd66cef6_p55",
+              "human_41e2eecefcb26883_p15",
+              "human_49450ea28d095793_p29",
+              "human_4a05243f78cd8be2_p17",
+              "human_5416e3843ab1f3b7_p29",
+              "human_572f17e89f6ab4b4_p127",
+              "human_572f17e89f6ab4b4_p63",
+              "human_572f17e89f6ab4b4_p87",
+              "human_5cfcb378a9dc6e84_p45",
+              "human_5f3230983f9ea3dd_p85",
+              "human_604e9d7a6009c07b_p23",
+              "human_64004c0089a9178d_p27",
+              "human_67630ab3b7277e43_p21",
+              "human_68c1c50639039687_p17",
+              "human_6b53c8a83c044b8d_p31",
+              "human_6d26d0bb77a12b8d_p49",
+              "human_6e548d2127ed37cb_p25",
+              "human_736f572521236d55_p25",
+              "human_76f6574804d34081_p23",
+              "human_78f5a4430295cf5c_p77",
+              "human_7eb1319eae1e3435_p107",
+              "human_7ef53ac05dfb6399_p13",
+              "human_7f8d4486eef0ce04_p25",
+              "human_80beb006905ad691_p81",
+              "human_83531faa75f0ec55_p23",
+              "human_8ab85e27fb65efce_p31",
+              "human_8af5b6a251860d89_p23",
+              "human_8d1e9f4956c2caa3_p39",
+              "human_92b740931483965e_p25",
+              "human_96acd073ccd000de_p23",
+              "human_96acd073ccd000de_p53",
+              "human_97d76a4c55be1155_p59",
+              "human_9912dd17e41680d7_p151",
+              "human_9ac941b6c3ab9c8c_p17",
+              "human_9ac941b6c3ab9c8c_p21",
+              "human_a259b7fc7f19281f_p53",
+              "human_a31d9ccaf73bd24d_p17",
+              "human_a4b108cc9a7b524b_p107",
+              "human_a4c5de7f99c580b0_p27",
+              "human_a834277a999c7217_p65",
+              "human_a94f22d36ff7d3cf_p19",
+              "human_ab93c3b77edcd8c1_p57",
+              "human_ac3b3e8fc1b9711b_p25",
+              "human_b81f05b4f52ddee3_p25",
+              "human_b8c6422dc42a5552_p23",
+              "human_b9615c6b30115221_p51",
+              "human_ba4c8c74d9d048b5_p25",
+              "human_c54c79e3ba4eed5a_p319",
+              "human_c71c9ef606916639_p51",
+              "human_cb7e982286bebc8e_p15",
+              "human_d190fa3322965e18_p23",
+              "human_d279f167361bf428_p19",
+              "human_d279f167361bf428_p35",
+              "human_d371694020b025f3_p25",
+              "human_da996f7325a33d85_p33",
+              "human_dab05c7c99af7b40_p43",
+              "human_db9e61448d342d8d_p31",
+              "human_db9e61448d342d8d_p35",
+              "human_dc3c846c4023a751_p15",
+              "human_de78dc834d1cf367_p73",
+              "human_df50afc21037f0e5_p77",
+              "human_e6650040fbce33aa_p23",
+              "human_eb6d8a81417a17b5_p21",
+              "human_eba9aa00b7b239a0_p65",
+              "human_ec1214733caef8bf_p49",
+              "human_f0dbe3762307339e_p29",
+              "human_f3bd4894504de2b8_p33",
+              "human_f3dfd95284c2b5b4_p19",
+              "human_f53f6fd7547d8173_p95",
+              "human_f8c86f9a0f1ed338_p15",
+              "human_fb00d63dc6d7ef92_p131"
+            ],
+            "win_pct": 7.110438729198185,
+            "wins": 94
+          },
+          "forced_loss": {
+            "n": 1322,
+            "nodes": {
+              "max": 6042901,
+              "p50": 904,
+              "p90": 18590,
+              "total": 27918699
+            },
+            "universe": {
+              "max": 260,
+              "p50": 48,
+              "p90": 83
+            },
+            "wall_us": {
+              "max": 32628927.3,
+              "mean": 113543.55113464448,
+              "p50": 8078.2,
+              "p90": 122548.7,
+              "total": 150104574.6
+            },
+            "win_ids": [
+              "human_04124e31612ca473_p23",
+              "human_07fad44874cd8aad_p21",
+              "human_07fdc5d20e89eb68_p29",
+              "human_0f8c6bdfc55e7f6f_p25",
+              "human_0f9794ff39217197_p69",
+              "human_12a2360cad1617fc_p21",
+              "human_12a2360cad1617fc_p25",
+              "human_17aaebf1e4c10aea_p49",
+              "human_1bb0358f58725fca_p27",
+              "human_1cf87d307bc7c7eb_p17",
+              "human_1f911166322d1ff1_p45",
+              "human_27057abe4ee1d907_p21",
+              "human_27057abe4ee1d907_p25",
+              "human_29c3b184d10ac9aa_p25",
+              "human_2c3b021c92704555_p17",
+              "human_2e9fda60e67dc5ed_p17",
+              "human_301cbb3b3f39e306_p59",
+              "human_329b49804ddf39ce_p25",
+              "human_3686c6ae3dfa6ab7_p59",
+              "human_36cde636fc04ca2b_p45",
+              "human_3ad0af6ed8a6e059_p35",
+              "human_3b5c387c001bc79c_p35",
+              "human_3c2eba04c165df6c_p23",
+              "human_3c2eba04c165df6c_p27",
+              "human_3c543bd318b687ab_p33",
+              "human_3c543bd318b687ab_p37",
+              "human_3c9423b1a047e24c_p31",
+              "human_3d17d05a42459994_p27",
+              "human_41e2eecefcb26883_p17",
+              "human_427585ae49bb1a79_p53",
+              "human_470059da30268138_p55",
+              "human_470059da30268138_p59",
+              "human_49450ea28d095793_p39",
+              "human_4c238a7ef563ee4f_p49",
+              "human_504ecbbbe1f51296_p51",
+              "human_5416e3843ab1f3b7_p31",
+              "human_57ed6a770e4828f5_p67",
+              "human_5a047618ae87ac7d_p51",
+              "human_609b497ad370bea2_p63",
+              "human_617667fc8eefef31_p29",
+              "human_61dea8e8dfb185a1_p51",
+              "human_63002b31555af30e_p27",
+              "human_64004c0089a9178d_p25",
+              "human_64004c0089a9178d_p29",
+              "human_6485ee15e605e5c8_p33",
+              "human_68c1c50639039687_p19",
+              "human_6b53c8a83c044b8d_p17",
+              "human_6b53c8a83c044b8d_p21",
+              "human_6b53c8a83c044b8d_p25",
+              "human_6b53c8a83c044b8d_p29",
+              "human_6b53c8a83c044b8d_p33",
+              "human_6e548d2127ed37cb_p27",
+              "human_70e0b4d9c6898ffe_p19",
+              "human_7183fd0591fb85c5_p37",
+              "human_7ef53ac05dfb6399_p19",
+              "human_89bcfcca5b4215a0_p41",
+              "human_8af5b6a251860d89_p25",
+              "human_8f6e39f8be1715ee_p33",
+              "human_8f6e39f8be1715ee_p37",
+              "human_9028dafaf99b1434_p27",
+              "human_92b740931483965e_p27",
+              "human_98807724e9bb46fd_p31",
+              "human_9a13471b27ad4da7_p53",
+              "human_9de75d2ba4e8d346_p93",
+              "human_a1bca2c1b2a01a07_p65",
+              "human_a31d9ccaf73bd24d_p15",
+              "human_a32ed96ded852131_p47",
+              "human_a5a3bca998ebec86_p23",
+              "human_a5a3bca998ebec86_p27",
+              "human_a7bf376041f893b0_p45",
+              "human_aa56a46bb2c87cd0_p47",
+              "human_ab66623b8de1df07_p25",
+              "human_ab66623b8de1df07_p29",
+              "human_ac2c768fcec66f66_p33",
+              "human_ac3b3e8fc1b9711b_p23",
+              "human_ac3b3e8fc1b9711b_p27",
+              "human_adfdaf796edc7c0d_p97",
+              "human_b81f05b4f52ddee3_p23",
+              "human_ba4c8c74d9d048b5_p23",
+              "human_bcae226331bcae63_p23",
+              "human_c0b89ab5d6a7c7ac_p39",
+              "human_c47c54aca413210a_p41",
+              "human_c4aa1ed203f79f63_p55",
+              "human_c77600999ef0c953_p51",
+              "human_c78f51b5bacf6893_p43",
+              "human_da996f7325a33d85_p35",
+              "human_dc64cb554cdb57f7_p27",
+              "human_dcedc2bfb438ccf5_p21",
+              "human_df50afc21037f0e5_p71",
+              "human_e6650040fbce33aa_p21",
+              "human_e6650040fbce33aa_p25",
+              "human_e6ae44020f50a3cc_p29",
+              "human_eb6d8a81417a17b5_p19",
+              "human_eba9aa00b7b239a0_p63",
+              "human_eba9aa00b7b239a0_p67",
+              "human_f0dbe3762307339e_p35",
+              "human_f3dfd95284c2b5b4_p21",
+              "human_f8c86f9a0f1ed338_p17",
+              "human_f9f50871d4efa2d9_p29",
+              "human_fc11fbb9ab5f2c5f_p41",
+              "human_fc7b96c2cc1c93ee_p39"
+            ],
+            "win_pct": 7.639939485627837,
+            "wins": 101
+          }
+        }
+      },
+      "internal_validation": {
+        "h2_not_h6": [],
+        "h4_loss_not_h6": [],
+        "h6_loss_not_h8": [],
+        "h6_not_h8": []
+      },
+      "n": 1322,
+      "validated_base": {
+        "h2_win_ids": [
+          "human_2f52d27f87809f16_p31",
+          "human_572f17e89f6ab4b4_p127",
+          "human_572f17e89f6ab4b4_p87",
+          "human_6b53c8a83c044b8d_p31",
+          "human_7eb1319eae1e3435_p107",
+          "human_80beb006905ad691_p81",
+          "human_9ac941b6c3ab9c8c_p21",
+          "human_a259b7fc7f19281f_p53",
+          "human_ba4c8c74d9d048b5_p25",
+          "human_c54c79e3ba4eed5a_p319",
+          "human_c71c9ef606916639_p51",
+          "human_d279f167361bf428_p19",
+          "human_dab05c7c99af7b40_p43",
+          "human_db9e61448d342d8d_p31",
+          "human_db9e61448d342d8d_p35",
+          "human_dc3c846c4023a751_p15",
+          "human_df50afc21037f0e5_p77",
+          "human_f53f6fd7547d8173_p95",
+          "human_fb00d63dc6d7ef92_p131"
+        ],
+        "h4_forced_loss_ids": [
+          "human_04124e31612ca473_p23",
+          "human_07fad44874cd8aad_p21",
+          "human_07fdc5d20e89eb68_p29",
+          "human_0f9794ff39217197_p69",
+          "human_12a2360cad1617fc_p25",
+          "human_17aaebf1e4c10aea_p49",
+          "human_1bb0358f58725fca_p27",
+          "human_1cf87d307bc7c7eb_p17",
+          "human_1f911166322d1ff1_p45",
+          "human_27057abe4ee1d907_p25",
+          "human_29c3b184d10ac9aa_p25",
+          "human_2c3b021c92704555_p17",
+          "human_301cbb3b3f39e306_p59",
+          "human_329b49804ddf39ce_p25",
+          "human_3686c6ae3dfa6ab7_p59",
+          "human_3c2eba04c165df6c_p27",
+          "human_3c543bd318b687ab_p37",
+          "human_3c9423b1a047e24c_p31",
+          "human_3d17d05a42459994_p27",
+          "human_41e2eecefcb26883_p17",
+          "human_427585ae49bb1a79_p53",
+          "human_470059da30268138_p59",
+          "human_49450ea28d095793_p39",
+          "human_4c238a7ef563ee4f_p49",
+          "human_504ecbbbe1f51296_p51",
+          "human_5416e3843ab1f3b7_p31",
+          "human_57ed6a770e4828f5_p67",
+          "human_5a047618ae87ac7d_p51",
+          "human_609b497ad370bea2_p63",
+          "human_617667fc8eefef31_p29",
+          "human_61dea8e8dfb185a1_p51",
+          "human_63002b31555af30e_p27",
+          "human_64004c0089a9178d_p29",
+          "human_6485ee15e605e5c8_p33",
+          "human_68c1c50639039687_p19",
+          "human_6b53c8a83c044b8d_p21",
+          "human_6b53c8a83c044b8d_p25",
+          "human_6b53c8a83c044b8d_p29",
+          "human_6b53c8a83c044b8d_p33",
+          "human_6e548d2127ed37cb_p27",
+          "human_7183fd0591fb85c5_p37",
+          "human_7ef53ac05dfb6399_p19",
+          "human_89bcfcca5b4215a0_p41",
+          "human_8af5b6a251860d89_p25",
+          "human_8f6e39f8be1715ee_p37",
+          "human_92b740931483965e_p27",
+          "human_98807724e9bb46fd_p31",
+          "human_9a13471b27ad4da7_p53",
+          "human_9de75d2ba4e8d346_p93",
+          "human_a32ed96ded852131_p47",
+          "human_a5a3bca998ebec86_p27",
+          "human_ab66623b8de1df07_p29",
+          "human_ac2c768fcec66f66_p33",
+          "human_ac3b3e8fc1b9711b_p27",
+          "human_adfdaf796edc7c0d_p97",
+          "human_ba4c8c74d9d048b5_p23",
+          "human_da996f7325a33d85_p35",
+          "human_dc64cb554cdb57f7_p27",
+          "human_df50afc21037f0e5_p71",
+          "human_e6650040fbce33aa_p25",
+          "human_e6ae44020f50a3cc_p29",
+          "human_eba9aa00b7b239a0_p67",
+          "human_f0dbe3762307339e_p35",
+          "human_f3dfd95284c2b5b4_p21",
+          "human_f8c86f9a0f1ed338_p17",
+          "human_fc11fbb9ab5f2c5f_p41",
+          "human_fc7b96c2cc1c93ee_p39"
+        ]
+      }
+    },
+    "puzzle_v3": {
+      "horizons": {
+        "6": {
+          "current_win": {
+            "n": 331,
+            "nodes": {
+              "max": 2926,
+              "p50": 190,
+              "p90": 903,
+              "total": 115362
+            },
+            "universe": {
+              "max": 81,
+              "p50": 20,
+              "p90": 44
+            },
+            "wall_us": {
+              "max": 35189.5,
+              "mean": 3403.8335347432026,
+              "p50": 1290.8,
+              "p90": 9160.8,
+              "total": 1126668.9
+            },
+            "win_ids": [
+              "human_0b39ea1a6c8eee20_p83",
+              "human_109c7b52881de543_p95",
+              "human_4a05243f78cd8be2_p17",
+              "human_67630ab3b7277e43_p21",
+              "human_96acd073ccd000de_p23",
+              "human_96acd073ccd000de_p53",
+              "human_a259b7fc7f19281f_p53",
+              "human_b81f05b4f52ddee3_p25",
+              "human_c71c9ef606916639_p51",
+              "human_da996f7325a33d85_p33",
+              "human_dab05c7c99af7b40_p43",
+              "human_db9e61448d342d8d_p35",
+              "human_f8c86f9a0f1ed338_p15",
+              "human_fb00d63dc6d7ef92_p131"
+            ],
+            "win_pct": 4.229607250755287,
+            "wins": 14
+          },
+          "forced_loss": {
+            "n": 331,
+            "nodes": {
+              "max": 1711,
+              "p50": 1,
+              "p90": 62,
+              "total": 10904
+            },
+            "universe": {
+              "max": 81,
+              "p50": 20,
+              "p90": 44
+            },
+            "wall_us": {
+              "max": 26835.1,
+              "mean": 2528.525981873112,
+              "p50": 1077.4,
+              "p90": 6810.2,
+              "total": 836942.1
+            },
+            "win_ids": [
+              "forcing_8is963b",
+              "forcing_dy3dg99",
+              "human_17aaebf1e4c10aea_p49",
+              "human_329b49804ddf39ce_p25",
+              "human_da996f7325a33d85_p35"
+            ],
+            "win_pct": 1.5105740181268883,
+            "wins": 5
+          }
+        },
+        "8": {
+          "current_win": {
+            "n": 331,
+            "nodes": {
+              "max": 2926,
+              "p50": 190,
+              "p90": 903,
+              "total": 115362
+            },
+            "universe": {
+              "max": 81,
+              "p50": 20,
+              "p90": 44
+            },
+            "wall_us": {
+              "max": 27940.1,
+              "mean": 2863.080664652568,
+              "p50": 1294.2,
+              "p90": 7142.9,
+              "total": 947679.7
+            },
+            "win_ids": [
+              "human_0b39ea1a6c8eee20_p83",
+              "human_109c7b52881de543_p95",
+              "human_4a05243f78cd8be2_p17",
+              "human_67630ab3b7277e43_p21",
+              "human_96acd073ccd000de_p23",
+              "human_96acd073ccd000de_p53",
+              "human_a259b7fc7f19281f_p53",
+              "human_b81f05b4f52ddee3_p25",
+              "human_c71c9ef606916639_p51",
+              "human_da996f7325a33d85_p33",
+              "human_dab05c7c99af7b40_p43",
+              "human_db9e61448d342d8d_p35",
+              "human_f8c86f9a0f1ed338_p15",
+              "human_fb00d63dc6d7ef92_p131"
+            ],
+            "win_pct": 4.229607250755287,
+            "wins": 14
+          },
+          "forced_loss": {
+            "n": 331,
+            "nodes": {
+              "max": 1140310,
+              "p50": 1100,
+              "p90": 7377,
+              "total": 4429542
+            },
+            "universe": {
+              "max": 151,
+              "p50": 41,
+              "p90": 80
+            },
+            "wall_us": {
+              "max": 4495137.9,
+              "mean": 55204.90181268882,
+              "p50": 6837.0,
+              "p90": 53305.3,
+              "total": 18272822.5
+            },
+            "win_ids": [
+              "forcing_8is963b",
+              "forcing_dy3dg99",
+              "human_0f8c6bdfc55e7f6f_p25",
+              "human_17aaebf1e4c10aea_p49",
+              "human_329b49804ddf39ce_p25",
+              "human_3c543bd318b687ab_p33",
+              "human_c4aa1ed203f79f63_p55",
+              "human_da996f7325a33d85_p35",
+              "human_eb6d8a81417a17b5_p19",
+              "human_f9f50871d4efa2d9_p29"
+            ],
+            "win_pct": 3.0211480362537766,
+            "wins": 10
+          }
+        }
+      },
+      "internal_validation": {
+        "h2_not_h6": [],
+        "h4_loss_not_h6": [],
+        "h6_loss_not_h8": [],
+        "h6_not_h8": []
+      },
+      "n": 331,
+      "validated_base": {
+        "h2_win_ids": [
+          "human_a259b7fc7f19281f_p53",
+          "human_c71c9ef606916639_p51",
+          "human_dab05c7c99af7b40_p43",
+          "human_db9e61448d342d8d_p35",
+          "human_fb00d63dc6d7ef92_p131"
+        ],
+        "h4_forced_loss_ids": [
+          "forcing_8is963b",
+          "forcing_dy3dg99",
+          "human_17aaebf1e4c10aea_p49",
+          "human_329b49804ddf39ce_p25",
+          "human_da996f7325a33d85_p35"
+        ]
+      }
+    },
+    "selfplay_v1": {
+      "horizons": {
+        "6": {
+          "current_win": {
+            "n": 1610,
+            "nodes": {
+              "max": 2926,
+              "p50": 171,
+              "p90": 1035,
+              "total": 599072
+            },
+            "universe": {
+              "max": 77,
+              "p50": 20,
+              "p90": 47
+            },
+            "wall_us": {
+              "max": 44953.2,
+              "mean": 3459.885217391304,
+              "p50": 1870.9,
+              "p90": 8623.6,
+              "total": 5570415.2
+            },
+            "win_ids": [
+              "sp_0_p43",
+              "sp_0_p59",
+              "sp_0_p65",
+              "sp_11_p45",
+              "sp_11_p49",
+              "sp_11_p73",
+              "sp_12_p43",
+              "sp_12_p47",
+              "sp_13_p75",
+              "sp_13_p77",
+              "sp_14_p51",
+              "sp_14_p61",
+              "sp_16_p49",
+              "sp_17_p21",
+              "sp_19_p41",
+              "sp_19_p45",
+              "sp_19_p49",
+              "sp_1_p37",
+              "sp_1_p41",
+              "sp_1_p43",
+              "sp_1_p47",
+              "sp_21_p47",
+              "sp_21_p51",
+              "sp_21_p55",
+              "sp_21_p59",
+              "sp_24_p61",
+              "sp_25_p63",
+              "sp_25_p65",
+              "sp_25_p69",
+              "sp_26_p61",
+              "sp_27_p53",
+              "sp_27_p55",
+              "sp_28_p57",
+              "sp_2_p65",
+              "sp_2_p69",
+              "sp_30_p57",
+              "sp_31_p49",
+              "sp_32_p67",
+              "sp_33_p29",
+              "sp_33_p31",
+              "sp_36_p37",
+              "sp_40_p17",
+              "sp_40_p21",
+              "sp_41_p57",
+              "sp_42_p53",
+              "sp_43_p23",
+              "sp_43_p27",
+              "sp_43_p29",
+              "sp_46_p49",
+              "sp_47_p77",
+              "sp_5_p45",
+              "sp_5_p71",
+              "sp_5_p73",
+              "sp_9_p45"
+            ],
+            "win_pct": 3.3540372670807455,
+            "wins": 54
+          },
+          "forced_loss": {
+            "n": 1610,
+            "nodes": {
+              "max": 2145,
+              "p50": 1,
+              "p90": 3,
+              "total": 17034
+            },
+            "universe": {
+              "max": 77,
+              "p50": 20,
+              "p90": 47
+            },
+            "wall_us": {
+              "max": 24180.2,
+              "mean": 2573.8799378881986,
+              "p50": 1624.0,
+              "p90": 6097.8,
+              "total": 4143946.7
+            },
+            "win_ids": [
+              "sp_11_p47",
+              "sp_12_p45",
+              "sp_19_p43",
+              "sp_19_p47",
+              "sp_1_p45",
+              "sp_2_p67"
+            ],
+            "win_pct": 0.37267080745341613,
+            "wins": 6
+          }
+        },
+        "8": {
+          "current_win": {
+            "n": 1610,
+            "nodes": {
+              "max": 2926,
+              "p50": 171,
+              "p90": 1035,
+              "total": 599072
+            },
+            "universe": {
+              "max": 77,
+              "p50": 20,
+              "p90": 47
+            },
+            "wall_us": {
+              "max": 36026.7,
+              "mean": 3834.4301242236024,
+              "p50": 2013.7,
+              "p90": 9573.4,
+              "total": 6173432.5
+            },
+            "win_ids": [
+              "sp_0_p43",
+              "sp_0_p59",
+              "sp_0_p65",
+              "sp_11_p45",
+              "sp_11_p49",
+              "sp_11_p73",
+              "sp_12_p43",
+              "sp_12_p47",
+              "sp_13_p75",
+              "sp_13_p77",
+              "sp_14_p51",
+              "sp_14_p61",
+              "sp_16_p49",
+              "sp_17_p21",
+              "sp_19_p41",
+              "sp_19_p45",
+              "sp_19_p49",
+              "sp_1_p37",
+              "sp_1_p41",
+              "sp_1_p43",
+              "sp_1_p47",
+              "sp_21_p47",
+              "sp_21_p51",
+              "sp_21_p55",
+              "sp_21_p59",
+              "sp_24_p61",
+              "sp_25_p63",
+              "sp_25_p65",
+              "sp_25_p69",
+              "sp_26_p61",
+              "sp_27_p53",
+              "sp_27_p55",
+              "sp_28_p57",
+              "sp_2_p65",
+              "sp_2_p69",
+              "sp_30_p57",
+              "sp_31_p49",
+              "sp_32_p67",
+              "sp_33_p29",
+              "sp_33_p31",
+              "sp_36_p37",
+              "sp_40_p17",
+              "sp_40_p21",
+              "sp_41_p57",
+              "sp_42_p53",
+              "sp_43_p23",
+              "sp_43_p27",
+              "sp_43_p29",
+              "sp_46_p49",
+              "sp_47_p77",
+              "sp_5_p45",
+              "sp_5_p71",
+              "sp_5_p73",
+              "sp_9_p45"
+            ],
+            "win_pct": 3.3540372670807455,
+            "wins": 54
+          },
+          "forced_loss": {
+            "n": 1610,
+            "nodes": {
+              "max": 1345240,
+              "p50": 596,
+              "p90": 4372,
+              "total": 8921789
+            },
+            "universe": {
+              "max": 130,
+              "p50": 46,
+              "p90": 88
+            },
+            "wall_us": {
+              "max": 8565315.3,
+              "mean": 37349.18,
+              "p50": 6238.5,
+              "p90": 51271.6,
+              "total": 60132179.8
+            },
+            "win_ids": [
+              "sp_11_p47",
+              "sp_12_p45",
+              "sp_19_p39",
+              "sp_19_p43",
+              "sp_19_p47",
+              "sp_1_p45",
+              "sp_2_p63",
+              "sp_2_p67"
+            ],
+            "win_pct": 0.4968944099378882,
+            "wins": 8
+          }
+        }
+      },
+      "internal_validation": {
+        "h2_not_h6": [],
+        "h4_loss_not_h6": [],
+        "h6_loss_not_h8": [],
+        "h6_not_h8": []
+      },
+      "n": 1610,
+      "validated_base": {
+        "h2_win_ids": [
+          "sp_0_p43",
+          "sp_0_p59",
+          "sp_0_p65",
+          "sp_11_p49",
+          "sp_11_p73",
+          "sp_12_p47",
+          "sp_13_p75",
+          "sp_13_p77",
+          "sp_14_p61",
+          "sp_16_p49",
+          "sp_17_p21",
+          "sp_19_p45",
+          "sp_19_p49",
+          "sp_1_p37",
+          "sp_1_p41",
+          "sp_1_p47",
+          "sp_24_p61",
+          "sp_25_p63",
+          "sp_25_p65",
+          "sp_25_p69",
+          "sp_26_p61",
+          "sp_27_p53",
+          "sp_27_p55",
+          "sp_28_p57",
+          "sp_2_p69",
+          "sp_30_p57",
+          "sp_31_p49",
+          "sp_32_p67",
+          "sp_33_p29",
+          "sp_33_p31",
+          "sp_36_p37",
+          "sp_40_p17",
+          "sp_40_p21",
+          "sp_41_p57",
+          "sp_42_p53",
+          "sp_43_p23",
+          "sp_43_p27",
+          "sp_43_p29",
+          "sp_46_p49",
+          "sp_47_p77",
+          "sp_5_p71",
+          "sp_5_p73",
+          "sp_9_p45"
+        ],
+        "h4_forced_loss_ids": [
+          "sp_11_p47",
+          "sp_12_p45",
+          "sp_19_p43",
+          "sp_19_p47",
+          "sp_1_p45",
+          "sp_2_p67"
+        ]
+      }
+    }
+  },
+  "metadata": {
+    "exact": true,
+    "horizons": [
+      6,
+      8
+    ]
+  }
+}

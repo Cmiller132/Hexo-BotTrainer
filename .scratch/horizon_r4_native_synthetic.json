@@ -1,0 +1,98 @@
+{
+  "metadata": {
+    "binary": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\deadline-ladder\\.scratch\\horizon_native\\.target\\release\\horizon_native.exe",
+    "max_cache_entries": 100000,
+    "mode": "synthetic",
+    "native_threads": 1,
+    "per_root_ms": 0,
+    "row_evidence": ".scratch\\horizon_r4_native_synthetic_rows.jsonl",
+    "timeout_is_not_verdict": true
+  },
+  "selection": {
+    "synthetic_cases": 3
+  },
+  "summary": {
+    "attempted": 3,
+    "caught_ids": [],
+    "completed_negative_mismatches": [],
+    "completed_negatives": 0,
+    "distributions": {
+      "all": {
+        "first_action_total": {
+          "max": 41378,
+          "mean": 27694.0,
+          "n": 3,
+          "p50": 41378,
+          "p90": 41378,
+          "total": 83082
+        },
+        "nodes": {
+          "max": 1,
+          "mean": 1.0,
+          "n": 3,
+          "p50": 1,
+          "p90": 1,
+          "total": 3
+        },
+        "universe": {
+          "max": 430,
+          "mean": 422.0,
+          "n": 3,
+          "p50": 430,
+          "p90": 430,
+          "total": 1266
+        },
+        "wall_ns": {
+          "max": 4874900,
+          "mean": 3234100.0,
+          "n": 3,
+          "p50": 4786400,
+          "p90": 4786400,
+          "total": 9702300
+        }
+      },
+      "completed": {
+        "first_action_total": {
+          "max": 41378,
+          "mean": 27694.0,
+          "n": 3,
+          "p50": 41378,
+          "p90": 41378,
+          "total": 83082
+        },
+        "nodes": {
+          "max": 1,
+          "mean": 1.0,
+          "n": 3,
+          "p50": 1,
+          "p90": 1,
+          "total": 3
+        },
+        "universe": {
+          "max": 430,
+          "mean": 422.0,
+          "n": 3,
+          "p50": 430,
+          "p90": 430,
+          "total": 1266
+        },
+        "wall_ns": {
+          "max": 4874900,
+          "mean": 3234100.0,
+          "n": 3,
+          "p50": 4786400,
+          "p90": 4786400,
+          "total": 9702300
+        }
+      }
+    },
+    "errors": 0,
+    "per_cohort_status": {},
+    "python_crosscheck_mismatches": [],
+    "statuses": {
+      "win": 3
+    },
+    "timeouts": 0,
+    "wins": 3
+  }
+}

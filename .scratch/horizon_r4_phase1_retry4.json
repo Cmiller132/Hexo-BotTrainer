@@ -1,0 +1,117 @@
+{
+  "metadata": {
+    "binary": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\deadline-ladder\\.scratch\\horizon_native\\.target\\release\\horizon_native.exe",
+    "max_cache_entries": 500000,
+    "mode": "registry",
+    "native_threads": 1,
+    "per_root_ms": 10000,
+    "row_evidence": ".scratch\\horizon_r4_phase1_retry4_rows.jsonl",
+    "timeout_is_not_verdict": true
+  },
+  "selection": {
+    "eligible_depth_13_14": 155,
+    "registry_unique": 2941,
+    "target_filter_after": 6,
+    "target_filter_before": 155,
+    "target_filter_missing": [],
+    "target_filter_requested": [
+      "human_20bea7804fffee60_p15",
+      "human_6023b2ef70e3ffc6_p76",
+      "sp_13_p59",
+      "sp_35_p27",
+      "sp_4_p79",
+      "sp_5_p61"
+    ]
+  },
+  "summary": {
+    "attempted": 6,
+    "caught_ids": [
+      "human_20bea7804fffee60_p15",
+      "human_6023b2ef70e3ffc6_p76",
+      "sp_13_p59",
+      "sp_35_p27",
+      "sp_4_p79",
+      "sp_5_p61"
+    ],
+    "completed_negative_mismatches": [],
+    "completed_negatives": 0,
+    "distributions": {
+      "all": {
+        "first_action_total": {
+          "max": 212691,
+          "mean": 115391.33333333333,
+          "n": 6,
+          "p50": 91765,
+          "p90": 177887,
+          "total": 692348
+        },
+        "nodes": {
+          "max": 1481765,
+          "mean": 822708.8333333334,
+          "n": 6,
+          "p50": 340011,
+          "p90": 1466302,
+          "total": 4936253
+        },
+        "universe": {
+          "max": 859,
+          "mean": 717.5,
+          "n": 6,
+          "p50": 749,
+          "p90": 838,
+          "total": 4305
+        },
+        "wall_ns": {
+          "max": 6525998900,
+          "mean": 3103487600.0,
+          "n": 6,
+          "p50": 968282000,
+          "p90": 5820896000,
+          "total": 18620925600
+        }
+      },
+      "completed": {
+        "first_action_total": {
+          "max": 212691,
+          "mean": 115391.33333333333,
+          "n": 6,
+          "p50": 91765,
+          "p90": 177887,
+          "total": 692348
+        },
+        "nodes": {
+          "max": 1481765,
+          "mean": 822708.8333333334,
+          "n": 6,
+          "p50": 340011,
+          "p90": 1466302,
+          "total": 4936253
+        },
+        "universe": {
+          "max": 859,
+          "mean": 717.5,
+          "n": 6,
+          "p50": 749,
+          "p90": 838,
+          "total": 4305
+        },
+        "wall_ns": {
+          "max": 6525998900,
+          "mean": 3103487600.0,
+          "n": 6,
+          "p50": 968282000,
+          "p90": 5820896000,
+          "total": 18620925600
+        }
+      }
+    },
+    "errors": 0,
+    "per_cohort_status": {},
+    "python_crosscheck_mismatches": [],
+    "statuses": {
+      "win": 6
+    },
+    "timeouts": 0,
+    "wins": 6
+  }
+}

@@ -1,0 +1,4177 @@
+{
+  "bounded_latent_pivot_census": {
+    "canonical_unions": 6228,
+    "dynamic_disclaimer": "state-level restricted activation census only; does not prove attacker can force the precursor through earlier defender turns",
+    "enumeration_limit": "not an exhaustive census of all dangerous one-cell activations of each union state; maxima and pre-cover numbers quantify only the counted consecutive-cross pivots",
+    "example_maximizing_counted_consecutive_cross_pivots": {
+      "attacker_count": 12,
+      "attackers": [
+        [
+          -3,
+          -1
+        ],
+        [
+          -3,
+          0
+        ],
+        [
+          -3,
+          3
+        ],
+        [
+          -2,
+          -1
+        ],
+        [
+          -2,
+          0
+        ],
+        [
+          -2,
+          2
+        ],
+        [
+          -1,
+          -1
+        ],
+        [
+          -1,
+          0
+        ],
+        [
+          -1,
+          1
+        ],
+        [
+          0,
+          -4
+        ],
+        [
+          0,
+          -3
+        ],
+        [
+          0,
+          -2
+        ]
+      ],
+      "counted_consecutive_cross_pivot_count": 3,
+      "counted_consecutive_cross_pivots": [
+        [
+          -1,
+          -2
+        ],
+        [
+          0,
+          -1
+        ],
+        [
+          0,
+          0
+        ]
+      ],
+      "counted_pivot_activations": [
+        {
+          "cover_number_without_preblock": 4,
+          "pivot": [
+            -1,
+            -2
+          ],
+          "terminal": false
+        },
+        {
+          "cover_number_without_preblock": 4,
+          "pivot": [
+            0,
+            -1
+          ],
+          "terminal": false
+        },
+        {
+          "cover_number_without_preblock": 5,
+          "pivot": [
+            0,
+            0
+          ],
+          "terminal": false
+        }
+      ],
+      "current_cover_number": 0,
+      "current_terminal": false,
+      "defender_precover_number_for_counted_pivots": 3,
+      "defender_precover_witness_for_counted_pivots": [
+        [
+          -5,
+          -1
+        ],
+        [
+          -1,
+          -2
+        ],
+        [
+          0,
+          0
+        ]
+      ]
+    },
+    "histogram_by_attacker_count_and_counted_consecutive_cross_pivots": {
+      "10": {
+        "0": 504,
+        "1": 402,
+        "2": 243
+      },
+      "11": {
+        "0": 318,
+        "1": 1548,
+        "2": 984,
+        "3": 24
+      },
+      "12": {
+        "0": 132,
+        "1": 1194,
+        "2": 669,
+        "3": 48
+      },
+      "9": {
+        "0": 54,
+        "1": 108
+      }
+    },
+    "maximum_counted_consecutive_cross_pivots": 3,
+    "maximum_counted_consecutive_cross_pivots_at_attacker_count_le_10": 2,
+    "minimum_unprecoverable_example_for_counted_pivots": {
+      "attacker_count": 11,
+      "attackers": [
+        [
+          -4,
+          4
+        ],
+        [
+          -3,
+          0
+        ],
+        [
+          -3,
+          1
+        ],
+        [
+          -3,
+          3
+        ],
+        [
+          -2,
+          0
+        ],
+        [
+          -2,
+          1
+        ],
+        [
+          -2,
+          2
+        ],
+        [
+          -1,
+          0
+        ],
+        [
+          0,
+          -2
+        ],
+        [
+          0,
+          -1
+        ],
+        [
+          0,
+          1
+        ]
+      ],
+      "counted_consecutive_cross_pivot_count": 3,
+      "counted_consecutive_cross_pivots": [
+        [
+          -3,
+          2
+        ],
+        [
+          -1,
+          1
+        ],
+        [
+          0,
+          0
+        ]
+      ],
+      "counted_pivot_activations": [
+        {
+          "cover_number_without_preblock": 4,
+          "pivot": [
+            -3,
+            2
+          ],
+          "terminal": false
+        },
+        {
+          "cover_number_without_preblock": 4,
+          "pivot": [
+            -1,
+            1
+          ],
+          "terminal": false
+        },
+        {
+          "cover_number_without_preblock": 5,
+          "pivot": [
+            0,
+            0
+          ],
+          "terminal": false
+        }
+      ],
+      "current_cover_number": 0,
+      "current_terminal": false,
+      "defender_precover_number_for_counted_pivots": 3,
+      "defender_precover_witness_for_counted_pivots": [
+        [
+          -6,
+          6
+        ],
+        [
+          -3,
+          2
+        ],
+        [
+          0,
+          0
+        ]
+      ]
+    },
+    "pivot_predicate": "counted pivots complete a consecutive four on at least two axes and have terminal or cover number >2 after activation",
+    "quotient": "translation only; rotations and reflections are retained and may be counted separately",
+    "scope": "unions of two consecutive-cross six-stone precursors; relative precursor centers in hex radius 1"
+  },
+  "claim_labels": {
+    "activation": "exact at the displayed precursor state, before quantifying earlier defender replies",
+    "dynamic": "not established by this artifact",
+    "static": "exact finite geometry for the displayed/censused attacker set"
+  },
+  "exact_seven_stone_two_axis_census": {
+    "canonical_sets": 1600,
+    "cover_histogram": {
+      "2": 1296,
+      "3": 288,
+      "4": 16
+    },
+    "examples": {
+      "2": {
+        "cover_number": 2,
+        "cover_witness": [
+          [
+            0,
+            3
+          ],
+          [
+            3,
+            0
+          ]
+        ],
+        "radius8_self_chain": {
+          "chainable": true,
+          "conditional_on_seed_legal": true,
+          "max_hop": 2,
+          "order": [
+            [
+              0,
+              0
+            ],
+            [
+              0,
+              1
+            ],
+            [
+              0,
+              2
+            ],
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              0
+            ],
+            [
+              0,
+              4
+            ],
+            [
+              4,
+              0
+            ]
+          ]
+        },
+        "residual_family": [
+          [
+            [
+              -1,
+              0
+            ],
+            [
+              3,
+              0
+            ]
+          ],
+          [
+            [
+              0,
+              -1
+            ],
+            [
+              0,
+              3
+            ]
+          ],
+          [
+            [
+              0,
+              3
+            ],
+            [
+              0,
+              5
+            ]
+          ],
+          [
+            [
+              3,
+              0
+            ],
+            [
+              5,
+              0
+            ]
+          ]
+        ],
+        "stone_count": 7,
+        "stones": [
+          [
+            0,
+            0
+          ],
+          [
+            0,
+            1
+          ],
+          [
+            0,
+            2
+          ],
+          [
+            0,
+            4
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            0
+          ],
+          [
+            4,
+            0
+          ]
+        ],
+        "supporting_line_count": 2,
+        "supporting_window_count": 4,
+        "terminal": false
+      },
+      "3": {
+        "cover_number": 3,
+        "cover_witness": [
+          [
+            -2,
+            0
+          ],
+          [
+            0,
+            3
+          ],
+          [
+            4,
+            0
+          ]
+        ],
+        "radius8_self_chain": {
+          "chainable": true,
+          "conditional_on_seed_legal": true,
+          "max_hop": 2,
+          "order": [
+            [
+              0,
+              0
+            ],
+            [
+              0,
+              1
+            ],
+            [
+              0,
+              2
+            ],
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              0
+            ],
+            [
+              3,
+              0
+            ],
+            [
+              0,
+              4
+            ]
+          ]
+        },
+        "residual_family": [
+          [
+            [
+              -2,
+              0
+            ],
+            [
+              -1,
+              0
+            ]
+          ],
+          [
+            [
+              -1,
+              0
+            ],
+            [
+              4,
+              0
+            ]
+          ],
+          [
+            [
+              0,
+              -1
+            ],
+            [
+              0,
+              3
+            ]
+          ],
+          [
+            [
+              0,
+              3
+            ],
+            [
+              0,
+              5
+            ]
+          ],
+          [
+            [
+              4,
+              0
+            ],
+            [
+              5,
+              0
+            ]
+          ]
+        ],
+        "stone_count": 7,
+        "stones": [
+          [
+            0,
+            0
+          ],
+          [
+            0,
+            1
+          ],
+          [
+            0,
+            2
+          ],
+          [
+            0,
+            4
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            0
+          ],
+          [
+            3,
+            0
+          ]
+        ],
+        "supporting_line_count": 2,
+        "supporting_window_count": 5,
+        "terminal": false
+      },
+      "4": {
+        "cover_number": 4,
+        "cover_witness": [
+          [
+            -2,
+            0
+          ],
+          [
+            0,
+            -2
+          ],
+          [
+            0,
+            4
+          ],
+          [
+            4,
+            0
+          ]
+        ],
+        "radius8_self_chain": {
+          "chainable": true,
+          "conditional_on_seed_legal": true,
+          "max_hop": 1,
+          "order": [
+            [
+              0,
+              0
+            ],
+            [
+              0,
+              1
+            ],
+            [
+              0,
+              2
+            ],
+            [
+              0,
+              3
+            ],
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              0
+            ],
+            [
+              3,
+              0
+            ]
+          ]
+        },
+        "residual_family": [
+          [
+            [
+              -2,
+              0
+            ],
+            [
+              -1,
+              0
+            ]
+          ],
+          [
+            [
+              -1,
+              0
+            ],
+            [
+              4,
+              0
+            ]
+          ],
+          [
+            [
+              0,
+              -2
+            ],
+            [
+              0,
+              -1
+            ]
+          ],
+          [
+            [
+              0,
+              -1
+            ],
+            [
+              0,
+              4
+            ]
+          ],
+          [
+            [
+              0,
+              4
+            ],
+            [
+              0,
+              5
+            ]
+          ],
+          [
+            [
+              4,
+              0
+            ],
+            [
+              5,
+              0
+            ]
+          ]
+        ],
+        "stone_count": 7,
+        "stones": [
+          [
+            0,
+            0
+          ],
+          [
+            0,
+            1
+          ],
+          [
+            0,
+            2
+          ],
+          [
+            0,
+            3
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            0
+          ],
+          [
+            3,
+            0
+          ]
+        ],
+        "supporting_line_count": 2,
+        "supporting_window_count": 6,
+        "terminal": false
+      }
+    },
+    "failure_count": 304,
+    "minimum_failure_k": 7,
+    "scope": "exhaustive up to translation, with one representative ordered axis pair fixed WLOG; reflections are retained, so the 1,600 count is not a full D6 quotient"
+  },
+  "one_axis_band_census": {
+    "all_nonterminal_k4_through_k6_have_two_cover": true,
+    "canonical_nonterminal_by_k_and_cover": {
+      "10": {
+        "2": 510,
+        "3": 715,
+        "4": 42
+      },
+      "11": {
+        "2": 80,
+        "3": 569,
+        "4": 128
+      },
+      "12": {
+        "3": 160,
+        "4": 129,
+        "5": 4
+      },
+      "4": {
+        "1": 6,
+        "2": 1
+      },
+      "5": {
+        "1": 37,
+        "2": 10
+      },
+      "6": {
+        "1": 134,
+        "2": 70
+      },
+      "7": {
+        "1": 222,
+        "2": 311
+      },
+      "8": {
+        "1": 171,
+        "2": 799,
+        "3": 53
+      },
+      "9": {
+        "1": 32,
+        "2": 987,
+        "3": 325,
+        "4": 5
+      }
+    },
+    "canonical_shapes_including_terminal": 6570,
+    "max_examples": {
+      "10": {
+        "cover_number": 4,
+        "cover_witness": [
+          [
+            -6,
+            0
+          ],
+          [
+            0,
+            0
+          ],
+          [
+            2,
+            0
+          ],
+          [
+            7,
+            0
+          ]
+        ],
+        "radius8_self_chain": {
+          "chainable": true,
+          "conditional_on_seed_legal": true,
+          "max_hop": 2,
+          "order": [
+            [
+              -5,
+              0
+            ],
+            [
+              -4,
+              0
+            ],
+            [
+              -3,
+              0
+            ],
+            [
+              -2,
+              0
+            ],
+            [
+              -1,
+              0
+            ],
+            [
+              1,
+              0
+            ],
+            [
+              3,
+              0
+            ],
+            [
+              4,
+              0
+            ],
+            [
+              5,
+              0
+            ],
+            [
+              6,
+              0
+            ]
+          ]
+        },
+        "residual_family": [
+          [
+            [
+              -6,
+              0
+            ]
+          ],
+          [
+            [
+              0,
+              0
+            ]
+          ],
+          [
+            [
+              2,
+              0
+            ]
+          ],
+          [
+            [
+              -7,
+              0
+            ],
+            [
+              -6,
+              0
+            ]
+          ],
+          [
+            [
+              0,
+              0
+            ],
+            [
+              2,
+              0
+            ]
+          ],
+          [
+            [
+              2,
+              0
+            ],
+            [
+              7,
+              0
+            ]
+          ],
+          [
+            [
+              7,
+              0
+            ],
+            [
+              8,
+              0
+            ]
+          ]
+        ],
+        "stone_count": 10,
+        "stones": [
+          [
+            -5,
+            0
+          ],
+          [
+            -4,
+            0
+          ],
+          [
+            -3,
+            0
+          ],
+          [
+            -2,
+            0
+          ],
+          [
+            -1,
+            0
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            3,
+            0
+          ],
+          [
+            4,
+            0
+          ],
+          [
+            5,
+            0
+          ],
+          [
+            6,
+            0
+          ]
+        ],
+        "supporting_line_count": 1,
+        "supporting_window_count": 11,
+        "terminal": false
+      },
+      "11": {
+        "cover_number": 4,
+        "cover_witness": [
+          [
+            -6,
+            0
+          ],
+          [
+            0,
+            0
+          ],
+          [
+            3,
+            0
+          ],
+          [
+            8,
+            0
+          ]
+        ],
+        "radius8_self_chain": {
+          "chainable": true,
+          "conditional_on_seed_legal": true,
+          "max_hop": 2,
+          "order": [
+            [
+              -5,
+              0
+            ],
+            [
+              -4,
+              0
+            ],
+            [
+              -3,
+              0
+            ],
+            [
+              -2,
+              0
+            ],
+            [
+              -1,
+              0
+            ],
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              0
+            ],
+            [
+              4,
+              0
+            ],
+            [
+              5,
+              0
+            ],
+            [
+              6,
+              0
+            ],
+            [
+              7,
+              0
+            ]
+          ]
+        },
+        "residual_family": [
+          [
+            [
+              -6,
+              0
+            ]
+          ],
+          [
+            [
+              0,
+              0
+            ]
+          ],
+          [
+            [
+              3,
+              0
+            ]
+          ],
+          [
+            [
+              -7,
+              0
+            ],
+            [
+              -6,
+              0
+            ]
+          ],
+          [
+            [
+              0,
+              0
+            ],
+            [
+              3,
+              0
+            ]
+          ],
+          [
+            [
+              3,
+              0
+            ],
+            [
+              8,
+              0
+            ]
+          ],
+          [
+            [
+              8,
+              0
+            ],
+            [
+              9,
+              0
+            ]
+          ]
+        ],
+        "stone_count": 11,
+        "stones": [
+          [
+            -5,
+            0
+          ],
+          [
+            -4,
+            0
+          ],
+          [
+            -3,
+            0
+          ],
+          [
+            -2,
+            0
+          ],
+          [
+            -1,
+            0
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            0
+          ],
+          [
+            4,
+            0
+          ],
+          [
+            5,
+            0
+          ],
+          [
+            6,
+            0
+          ],
+          [
+            7,
+            0
+          ]
+        ],
+        "supporting_line_count": 1,
+        "supporting_window_count": 12,
+        "terminal": false
+      },
+      "12": {
+        "cover_number": 5,
+        "cover_witness": [
+          [
+            -7,
+            0
+          ],
+          [
+            -1,
+            0
+          ],
+          [
+            3,
+            0
+          ],
+          [
+            6,
+            0
+          ],
+          [
+            11,
+            0
+          ]
+        ],
+        "radius8_self_chain": {
+          "chainable": true,
+          "conditional_on_seed_legal": true,
+          "max_hop": 3,
+          "order": [
+            [
+              0,
+              0
+            ],
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              0
+            ],
+            [
+              -2,
+              0
+            ],
+            [
+              -3,
+              0
+            ],
+            [
+              -4,
+              0
+            ],
+            [
+              -5,
+              0
+            ],
+            [
+              5,
+              0
+            ],
+            [
+              7,
+              0
+            ],
+            [
+              8,
+              0
+            ],
+            [
+              9,
+              0
+            ],
+            [
+              10,
+              0
+            ]
+          ]
+        },
+        "residual_family": [
+          [
+            [
+              -1,
+              0
+            ]
+          ],
+          [
+            [
+              6,
+              0
+            ]
+          ],
+          [
+            [
+              -7,
+              0
+            ],
+            [
+              -6,
+              0
+            ]
+          ],
+          [
+            [
+              -6,
+              0
+            ],
+            [
+              -1,
+              0
+            ]
+          ],
+          [
+            [
+              -1,
+              0
+            ],
+            [
+              3,
+              0
+            ]
+          ],
+          [
+            [
+              3,
+              0
+            ],
+            [
+              4,
+              0
+            ]
+          ],
+          [
+            [
+              4,
+              0
+            ],
+            [
+              6,
+              0
+            ]
+          ],
+          [
+            [
+              6,
+              0
+            ],
+            [
+              11,
+              0
+            ]
+          ],
+          [
+            [
+              11,
+              0
+            ],
+            [
+              12,
+              0
+            ]
+          ]
+        ],
+        "stone_count": 12,
+        "stones": [
+          [
+            -5,
+            0
+          ],
+          [
+            -4,
+            0
+          ],
+          [
+            -3,
+            0
+          ],
+          [
+            -2,
+            0
+          ],
+          [
+            0,
+            0
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            0
+          ],
+          [
+            5,
+            0
+          ],
+          [
+            7,
+            0
+          ],
+          [
+            8,
+            0
+          ],
+          [
+            9,
+            0
+          ],
+          [
+            10,
+            0
+          ]
+        ],
+        "supporting_line_count": 1,
+        "supporting_window_count": 11,
+        "terminal": false
+      },
+      "4": {
+        "cover_number": 2,
+        "cover_witness": [
+          [
+            -2,
+            0
+          ],
+          [
+            4,
+            0
+          ]
+        ],
+        "radius8_self_chain": {
+          "chainable": true,
+          "conditional_on_seed_legal": true,
+          "max_hop": 1,
+          "order": [
+            [
+              0,
+              0
+            ],
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              0
+            ],
+            [
+              3,
+              0
+            ]
+          ]
+        },
+        "residual_family": [
+          [
+            [
+              -2,
+              0
+            ],
+            [
+              -1,
+              0
+            ]
+          ],
+          [
+            [
+              -1,
+              0
+            ],
+            [
+              4,
+              0
+            ]
+          ],
+          [
+            [
+              4,
+              0
+            ],
+            [
+              5,
+              0
+            ]
+          ]
+        ],
+        "stone_count": 4,
+        "stones": [
+          [
+            0,
+            0
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            0
+          ],
+          [
+            3,
+            0
+          ]
+        ],
+        "supporting_line_count": 1,
+        "supporting_window_count": 3,
+        "terminal": false
+      },
+      "5": {
+        "cover_number": 2,
+        "cover_witness": [
+          [
+            -2,
+            0
+          ],
+          [
+            4,
+            0
+          ]
+        ],
+        "radius8_self_chain": {
+          "chainable": true,
+          "conditional_on_seed_legal": true,
+          "max_hop": 5,
+          "order": [
+            [
+              0,
+              0
+            ],
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              0
+            ],
+            [
+              3,
+              0
+            ],
+            [
+              -5,
+              0
+            ]
+          ]
+        },
+        "residual_family": [
+          [
+            [
+              -2,
+              0
+            ],
+            [
+              -1,
+              0
+            ]
+          ],
+          [
+            [
+              -1,
+              0
+            ],
+            [
+              4,
+              0
+            ]
+          ],
+          [
+            [
+              4,
+              0
+            ],
+            [
+              5,
+              0
+            ]
+          ]
+        ],
+        "stone_count": 5,
+        "stones": [
+          [
+            -5,
+            0
+          ],
+          [
+            0,
+            0
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            0
+          ],
+          [
+            3,
+            0
+          ]
+        ],
+        "supporting_line_count": 1,
+        "supporting_window_count": 3,
+        "terminal": false
+      },
+      "6": {
+        "cover_number": 2,
+        "cover_witness": [
+          [
+            -2,
+            0
+          ],
+          [
+            4,
+            0
+          ]
+        ],
+        "radius8_self_chain": {
+          "chainable": true,
+          "conditional_on_seed_legal": true,
+          "max_hop": 4,
+          "order": [
+            [
+              0,
+              0
+            ],
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              0
+            ],
+            [
+              3,
+              0
+            ],
+            [
+              -4,
+              0
+            ],
+            [
+              -5,
+              0
+            ]
+          ]
+        },
+        "residual_family": [
+          [
+            [
+              -2,
+              0
+            ],
+            [
+              -1,
+              0
+            ]
+          ],
+          [
+            [
+              -1,
+              0
+            ],
+            [
+              4,
+              0
+            ]
+          ],
+          [
+            [
+              4,
+              0
+            ],
+            [
+              5,
+              0
+            ]
+          ]
+        ],
+        "stone_count": 6,
+        "stones": [
+          [
+            -5,
+            0
+          ],
+          [
+            -4,
+            0
+          ],
+          [
+            0,
+            0
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            0
+          ],
+          [
+            3,
+            0
+          ]
+        ],
+        "supporting_line_count": 1,
+        "supporting_window_count": 3,
+        "terminal": false
+      },
+      "7": {
+        "cover_number": 2,
+        "cover_witness": [
+          [
+            -2,
+            0
+          ],
+          [
+            4,
+            0
+          ]
+        ],
+        "radius8_self_chain": {
+          "chainable": true,
+          "conditional_on_seed_legal": true,
+          "max_hop": 3,
+          "order": [
+            [
+              0,
+              0
+            ],
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              0
+            ],
+            [
+              3,
+              0
+            ],
+            [
+              -3,
+              0
+            ],
+            [
+              -4,
+              0
+            ],
+            [
+              -5,
+              0
+            ]
+          ]
+        },
+        "residual_family": [
+          [
+            [
+              -2,
+              0
+            ],
+            [
+              -1,
+              0
+            ]
+          ],
+          [
+            [
+              -1,
+              0
+            ],
+            [
+              4,
+              0
+            ]
+          ],
+          [
+            [
+              4,
+              0
+            ],
+            [
+              5,
+              0
+            ]
+          ]
+        ],
+        "stone_count": 7,
+        "stones": [
+          [
+            -5,
+            0
+          ],
+          [
+            -4,
+            0
+          ],
+          [
+            -3,
+            0
+          ],
+          [
+            0,
+            0
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            0
+          ],
+          [
+            3,
+            0
+          ]
+        ],
+        "supporting_line_count": 1,
+        "supporting_window_count": 6,
+        "terminal": false
+      },
+      "8": {
+        "cover_number": 3,
+        "cover_witness": [
+          [
+            -7,
+            0
+          ],
+          [
+            -1,
+            0
+          ],
+          [
+            4,
+            0
+          ]
+        ],
+        "radius8_self_chain": {
+          "chainable": true,
+          "conditional_on_seed_legal": true,
+          "max_hop": 2,
+          "order": [
+            [
+              0,
+              0
+            ],
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              0
+            ],
+            [
+              3,
+              0
+            ],
+            [
+              -2,
+              0
+            ],
+            [
+              -3,
+              0
+            ],
+            [
+              -4,
+              0
+            ],
+            [
+              -5,
+              0
+            ]
+          ]
+        },
+        "residual_family": [
+          [
+            [
+              -1,
+              0
+            ]
+          ],
+          [
+            [
+              -7,
+              0
+            ],
+            [
+              -6,
+              0
+            ]
+          ],
+          [
+            [
+              -6,
+              0
+            ],
+            [
+              -1,
+              0
+            ]
+          ],
+          [
+            [
+              -1,
+              0
+            ],
+            [
+              4,
+              0
+            ]
+          ],
+          [
+            [
+              4,
+              0
+            ],
+            [
+              5,
+              0
+            ]
+          ]
+        ],
+        "stone_count": 8,
+        "stones": [
+          [
+            -5,
+            0
+          ],
+          [
+            -4,
+            0
+          ],
+          [
+            -3,
+            0
+          ],
+          [
+            -2,
+            0
+          ],
+          [
+            0,
+            0
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            0
+          ],
+          [
+            3,
+            0
+          ]
+        ],
+        "supporting_line_count": 1,
+        "supporting_window_count": 8,
+        "terminal": false
+      },
+      "9": {
+        "cover_number": 4,
+        "cover_witness": [
+          [
+            -7,
+            0
+          ],
+          [
+            -1,
+            0
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            6,
+            0
+          ]
+        ],
+        "radius8_self_chain": {
+          "chainable": true,
+          "conditional_on_seed_legal": true,
+          "max_hop": 2,
+          "order": [
+            [
+              0,
+              0
+            ],
+            [
+              -2,
+              0
+            ],
+            [
+              -3,
+              0
+            ],
+            [
+              -4,
+              0
+            ],
+            [
+              -5,
+              0
+            ],
+            [
+              2,
+              0
+            ],
+            [
+              3,
+              0
+            ],
+            [
+              4,
+              0
+            ],
+            [
+              5,
+              0
+            ]
+          ]
+        },
+        "residual_family": [
+          [
+            [
+              -1,
+              0
+            ]
+          ],
+          [
+            [
+              1,
+              0
+            ]
+          ],
+          [
+            [
+              -7,
+              0
+            ],
+            [
+              -6,
+              0
+            ]
+          ],
+          [
+            [
+              -6,
+              0
+            ],
+            [
+              -1,
+              0
+            ]
+          ],
+          [
+            [
+              -1,
+              0
+            ],
+            [
+              1,
+              0
+            ]
+          ],
+          [
+            [
+              1,
+              0
+            ],
+            [
+              6,
+              0
+            ]
+          ],
+          [
+            [
+              6,
+              0
+            ],
+            [
+              7,
+              0
+            ]
+          ]
+        ],
+        "stone_count": 9,
+        "stones": [
+          [
+            -5,
+            0
+          ],
+          [
+            -4,
+            0
+          ],
+          [
+            -3,
+            0
+          ],
+          [
+            -2,
+            0
+          ],
+          [
+            0,
+            0
+          ],
+          [
+            2,
+            0
+          ],
+          [
+            3,
+            0
+          ],
+          [
+            4,
+            0
+          ],
+          [
+            5,
+            0
+          ]
+        ],
+        "supporting_line_count": 1,
+        "supporting_window_count": 10,
+        "terminal": false
+      }
+    },
+    "r3_prefix_k4_through_k6_including_terminal": 259,
+    "scope": "exact for normalized subsets of [-5,10] meeting base [0,5] in >=4; not arbitrary separated components",
+    "terminal_shapes_skipped": {
+      "6": 1,
+      "7": 7,
+      "8": 39,
+      "9": 120,
+      "10": 250,
+      "11": 341,
+      "12": 312
+    }
+  },
+  "schema": 2,
+  "static_named_obstructions": {
+    "cross7": {
+      "cover_number": 4,
+      "cover_witness": [
+        [
+          -2,
+          0
+        ],
+        [
+          0,
+          -2
+        ],
+        [
+          0,
+          4
+        ],
+        [
+          4,
+          0
+        ]
+      ],
+      "radius8_self_chain": {
+        "chainable": true,
+        "conditional_on_seed_legal": true,
+        "max_hop": 1,
+        "order": [
+          [
+            0,
+            0
+          ],
+          [
+            0,
+            1
+          ],
+          [
+            0,
+            2
+          ],
+          [
+            0,
+            3
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            0
+          ],
+          [
+            3,
+            0
+          ]
+        ]
+      },
+      "residual_family": [
+        [
+          [
+            -2,
+            0
+          ],
+          [
+            -1,
+            0
+          ]
+        ],
+        [
+          [
+            -1,
+            0
+          ],
+          [
+            4,
+            0
+          ]
+        ],
+        [
+          [
+            0,
+            -2
+          ],
+          [
+            0,
+            -1
+          ]
+        ],
+        [
+          [
+            0,
+            -1
+          ],
+          [
+            0,
+            4
+          ]
+        ],
+        [
+          [
+            0,
+            4
+          ],
+          [
+            0,
+            5
+          ]
+        ],
+        [
+          [
+            4,
+            0
+          ],
+          [
+            5,
+            0
+          ]
+        ]
+      ],
+      "stone_count": 7,
+      "stones": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          0,
+          2
+        ],
+        [
+          0,
+          3
+        ],
+        [
+          1,
+          0
+        ],
+        [
+          2,
+          0
+        ],
+        [
+          3,
+          0
+        ]
+      ],
+      "supporting_line_count": 2,
+      "supporting_window_count": 6,
+      "terminal": false
+    },
+    "disjoint_consecutive_four_runs": {
+      "12": {
+        "cover_number": 6,
+        "cover_witness": [
+          [
+            -2,
+            0
+          ],
+          [
+            4,
+            0
+          ],
+          [
+            8,
+            0
+          ],
+          [
+            14,
+            0
+          ],
+          [
+            18,
+            0
+          ],
+          [
+            24,
+            0
+          ]
+        ],
+        "radius8_self_chain": {
+          "chainable": true,
+          "conditional_on_seed_legal": true,
+          "max_hop": 7,
+          "order": [
+            [
+              0,
+              0
+            ],
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              0
+            ],
+            [
+              3,
+              0
+            ],
+            [
+              10,
+              0
+            ],
+            [
+              11,
+              0
+            ],
+            [
+              12,
+              0
+            ],
+            [
+              13,
+              0
+            ],
+            [
+              20,
+              0
+            ],
+            [
+              21,
+              0
+            ],
+            [
+              22,
+              0
+            ],
+            [
+              23,
+              0
+            ]
+          ]
+        },
+        "residual_family": [
+          [
+            [
+              -2,
+              0
+            ],
+            [
+              -1,
+              0
+            ]
+          ],
+          [
+            [
+              -1,
+              0
+            ],
+            [
+              4,
+              0
+            ]
+          ],
+          [
+            [
+              4,
+              0
+            ],
+            [
+              5,
+              0
+            ]
+          ],
+          [
+            [
+              8,
+              0
+            ],
+            [
+              9,
+              0
+            ]
+          ],
+          [
+            [
+              9,
+              0
+            ],
+            [
+              14,
+              0
+            ]
+          ],
+          [
+            [
+              14,
+              0
+            ],
+            [
+              15,
+              0
+            ]
+          ],
+          [
+            [
+              18,
+              0
+            ],
+            [
+              19,
+              0
+            ]
+          ],
+          [
+            [
+              19,
+              0
+            ],
+            [
+              24,
+              0
+            ]
+          ],
+          [
+            [
+              24,
+              0
+            ],
+            [
+              25,
+              0
+            ]
+          ]
+        ],
+        "stone_count": 12,
+        "stones": [
+          [
+            0,
+            0
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            0
+          ],
+          [
+            3,
+            0
+          ],
+          [
+            10,
+            0
+          ],
+          [
+            11,
+            0
+          ],
+          [
+            12,
+            0
+          ],
+          [
+            13,
+            0
+          ],
+          [
+            20,
+            0
+          ],
+          [
+            21,
+            0
+          ],
+          [
+            22,
+            0
+          ],
+          [
+            23,
+            0
+          ]
+        ],
+        "supporting_line_count": 1,
+        "supporting_window_count": 9,
+        "terminal": false
+      },
+      "4": {
+        "cover_number": 2,
+        "cover_witness": [
+          [
+            -2,
+            0
+          ],
+          [
+            4,
+            0
+          ]
+        ],
+        "radius8_self_chain": {
+          "chainable": true,
+          "conditional_on_seed_legal": true,
+          "max_hop": 1,
+          "order": [
+            [
+              0,
+              0
+            ],
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              0
+            ],
+            [
+              3,
+              0
+            ]
+          ]
+        },
+        "residual_family": [
+          [
+            [
+              -2,
+              0
+            ],
+            [
+              -1,
+              0
+            ]
+          ],
+          [
+            [
+              -1,
+              0
+            ],
+            [
+              4,
+              0
+            ]
+          ],
+          [
+            [
+              4,
+              0
+            ],
+            [
+              5,
+              0
+            ]
+          ]
+        ],
+        "stone_count": 4,
+        "stones": [
+          [
+            0,
+            0
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            0
+          ],
+          [
+            3,
+            0
+          ]
+        ],
+        "supporting_line_count": 1,
+        "supporting_window_count": 3,
+        "terminal": false
+      },
+      "8": {
+        "cover_number": 4,
+        "cover_witness": [
+          [
+            -2,
+            0
+          ],
+          [
+            4,
+            0
+          ],
+          [
+            8,
+            0
+          ],
+          [
+            14,
+            0
+          ]
+        ],
+        "radius8_self_chain": {
+          "chainable": true,
+          "conditional_on_seed_legal": true,
+          "max_hop": 7,
+          "order": [
+            [
+              0,
+              0
+            ],
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              0
+            ],
+            [
+              3,
+              0
+            ],
+            [
+              10,
+              0
+            ],
+            [
+              11,
+              0
+            ],
+            [
+              12,
+              0
+            ],
+            [
+              13,
+              0
+            ]
+          ]
+        },
+        "residual_family": [
+          [
+            [
+              -2,
+              0
+            ],
+            [
+              -1,
+              0
+            ]
+          ],
+          [
+            [
+              -1,
+              0
+            ],
+            [
+              4,
+              0
+            ]
+          ],
+          [
+            [
+              4,
+              0
+            ],
+            [
+              5,
+              0
+            ]
+          ],
+          [
+            [
+              8,
+              0
+            ],
+            [
+              9,
+              0
+            ]
+          ],
+          [
+            [
+              9,
+              0
+            ],
+            [
+              14,
+              0
+            ]
+          ],
+          [
+            [
+              14,
+              0
+            ],
+            [
+              15,
+              0
+            ]
+          ]
+        ],
+        "stone_count": 8,
+        "stones": [
+          [
+            0,
+            0
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            0
+          ],
+          [
+            3,
+            0
+          ],
+          [
+            10,
+            0
+          ],
+          [
+            11,
+            0
+          ],
+          [
+            12,
+            0
+          ],
+          [
+            13,
+            0
+          ]
+        ],
+        "supporting_line_count": 1,
+        "supporting_window_count": 6,
+        "terminal": false
+      }
+    },
+    "six_line_weave12": {
+      "cover_number": 12,
+      "cover_witness": [
+        [
+          -3,
+          2
+        ],
+        [
+          -3,
+          4
+        ],
+        [
+          -2,
+          0
+        ],
+        [
+          -2,
+          5
+        ],
+        [
+          0,
+          -2
+        ],
+        [
+          0,
+          4
+        ],
+        [
+          2,
+          -3
+        ],
+        [
+          2,
+          3
+        ],
+        [
+          3,
+          -2
+        ],
+        [
+          3,
+          2
+        ],
+        [
+          4,
+          -1
+        ],
+        [
+          4,
+          0
+        ]
+      ],
+      "radius8_self_chain": {
+        "chainable": true,
+        "conditional_on_seed_legal": true,
+        "max_hop": 1,
+        "order": [
+          [
+            0,
+            0
+          ],
+          [
+            0,
+            1
+          ],
+          [
+            -1,
+            2
+          ],
+          [
+            0,
+            2
+          ],
+          [
+            0,
+            3
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            1,
+            2
+          ],
+          [
+            2,
+            -1
+          ],
+          [
+            2,
+            0
+          ],
+          [
+            2,
+            1
+          ],
+          [
+            2,
+            2
+          ],
+          [
+            3,
+            0
+          ]
+        ]
+      },
+      "residual_family": [
+        [
+          [
+            -3,
+            2
+          ],
+          [
+            -2,
+            2
+          ]
+        ],
+        [
+          [
+            -3,
+            4
+          ],
+          [
+            -2,
+            3
+          ]
+        ],
+        [
+          [
+            -2,
+            0
+          ],
+          [
+            -1,
+            0
+          ]
+        ],
+        [
+          [
+            -2,
+            2
+          ],
+          [
+            3,
+            2
+          ]
+        ],
+        [
+          [
+            -2,
+            3
+          ],
+          [
+            3,
+            -2
+          ]
+        ],
+        [
+          [
+            -2,
+            5
+          ],
+          [
+            -1,
+            4
+          ]
+        ],
+        [
+          [
+            -1,
+            0
+          ],
+          [
+            4,
+            0
+          ]
+        ],
+        [
+          [
+            -1,
+            4
+          ],
+          [
+            4,
+            -1
+          ]
+        ],
+        [
+          [
+            0,
+            -2
+          ],
+          [
+            0,
+            -1
+          ]
+        ],
+        [
+          [
+            0,
+            -1
+          ],
+          [
+            0,
+            4
+          ]
+        ],
+        [
+          [
+            0,
+            4
+          ],
+          [
+            0,
+            5
+          ]
+        ],
+        [
+          [
+            2,
+            -3
+          ],
+          [
+            2,
+            -2
+          ]
+        ],
+        [
+          [
+            2,
+            -2
+          ],
+          [
+            2,
+            3
+          ]
+        ],
+        [
+          [
+            2,
+            3
+          ],
+          [
+            2,
+            4
+          ]
+        ],
+        [
+          [
+            3,
+            -2
+          ],
+          [
+            4,
+            -3
+          ]
+        ],
+        [
+          [
+            3,
+            2
+          ],
+          [
+            4,
+            2
+          ]
+        ],
+        [
+          [
+            4,
+            -1
+          ],
+          [
+            5,
+            -2
+          ]
+        ],
+        [
+          [
+            4,
+            0
+          ],
+          [
+            5,
+            0
+          ]
+        ]
+      ],
+      "stone_count": 12,
+      "stones": [
+        [
+          -1,
+          2
+        ],
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          0,
+          2
+        ],
+        [
+          0,
+          3
+        ],
+        [
+          1,
+          0
+        ],
+        [
+          1,
+          2
+        ],
+        [
+          2,
+          -1
+        ],
+        [
+          2,
+          0
+        ],
+        [
+          2,
+          1
+        ],
+        [
+          2,
+          2
+        ],
+        [
+          3,
+          0
+        ]
+      ],
+      "supporting_line_count": 6,
+      "supporting_window_count": 18,
+      "terminal": false
+    },
+    "three_axis_star10": {
+      "cover_number": 6,
+      "cover_witness": [
+        [
+          -2,
+          0
+        ],
+        [
+          -2,
+          2
+        ],
+        [
+          0,
+          -2
+        ],
+        [
+          0,
+          4
+        ],
+        [
+          4,
+          -4
+        ],
+        [
+          4,
+          0
+        ]
+      ],
+      "radius8_self_chain": {
+        "chainable": true,
+        "conditional_on_seed_legal": true,
+        "max_hop": 1,
+        "order": [
+          [
+            0,
+            0
+          ],
+          [
+            0,
+            1
+          ],
+          [
+            0,
+            2
+          ],
+          [
+            0,
+            3
+          ],
+          [
+            1,
+            -1
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            -2
+          ],
+          [
+            2,
+            0
+          ],
+          [
+            3,
+            -3
+          ],
+          [
+            3,
+            0
+          ]
+        ]
+      },
+      "residual_family": [
+        [
+          [
+            -2,
+            0
+          ],
+          [
+            -1,
+            0
+          ]
+        ],
+        [
+          [
+            -2,
+            2
+          ],
+          [
+            -1,
+            1
+          ]
+        ],
+        [
+          [
+            -1,
+            0
+          ],
+          [
+            4,
+            0
+          ]
+        ],
+        [
+          [
+            -1,
+            1
+          ],
+          [
+            4,
+            -4
+          ]
+        ],
+        [
+          [
+            0,
+            -2
+          ],
+          [
+            0,
+            -1
+          ]
+        ],
+        [
+          [
+            0,
+            -1
+          ],
+          [
+            0,
+            4
+          ]
+        ],
+        [
+          [
+            0,
+            4
+          ],
+          [
+            0,
+            5
+          ]
+        ],
+        [
+          [
+            4,
+            -4
+          ],
+          [
+            5,
+            -5
+          ]
+        ],
+        [
+          [
+            4,
+            0
+          ],
+          [
+            5,
+            0
+          ]
+        ]
+      ],
+      "stone_count": 10,
+      "stones": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          0,
+          2
+        ],
+        [
+          0,
+          3
+        ],
+        [
+          1,
+          -1
+        ],
+        [
+          1,
+          0
+        ],
+        [
+          2,
+          -2
+        ],
+        [
+          2,
+          0
+        ],
+        [
+          3,
+          -3
+        ],
+        [
+          3,
+          0
+        ]
+      ],
+      "supporting_line_count": 3,
+      "supporting_window_count": 9,
+      "terminal": false
+    },
+    "three_line_triangle9": {
+      "cover_number": 6,
+      "cover_witness": [
+        [
+          -2,
+          0
+        ],
+        [
+          -2,
+          5
+        ],
+        [
+          0,
+          -2
+        ],
+        [
+          0,
+          4
+        ],
+        [
+          4,
+          -1
+        ],
+        [
+          4,
+          0
+        ]
+      ],
+      "radius8_self_chain": {
+        "chainable": true,
+        "conditional_on_seed_legal": true,
+        "max_hop": 1,
+        "order": [
+          [
+            0,
+            0
+          ],
+          [
+            0,
+            1
+          ],
+          [
+            0,
+            2
+          ],
+          [
+            0,
+            3
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            1,
+            2
+          ],
+          [
+            2,
+            0
+          ],
+          [
+            2,
+            1
+          ],
+          [
+            3,
+            0
+          ]
+        ]
+      },
+      "residual_family": [
+        [
+          [
+            -2,
+            0
+          ],
+          [
+            -1,
+            0
+          ]
+        ],
+        [
+          [
+            -2,
+            5
+          ],
+          [
+            -1,
+            4
+          ]
+        ],
+        [
+          [
+            -1,
+            0
+          ],
+          [
+            4,
+            0
+          ]
+        ],
+        [
+          [
+            -1,
+            4
+          ],
+          [
+            4,
+            -1
+          ]
+        ],
+        [
+          [
+            0,
+            -2
+          ],
+          [
+            0,
+            -1
+          ]
+        ],
+        [
+          [
+            0,
+            -1
+          ],
+          [
+            0,
+            4
+          ]
+        ],
+        [
+          [
+            0,
+            4
+          ],
+          [
+            0,
+            5
+          ]
+        ],
+        [
+          [
+            4,
+            -1
+          ],
+          [
+            5,
+            -2
+          ]
+        ],
+        [
+          [
+            4,
+            0
+          ],
+          [
+            5,
+            0
+          ]
+        ]
+      ],
+      "stone_count": 9,
+      "stones": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          0,
+          2
+        ],
+        [
+          0,
+          3
+        ],
+        [
+          1,
+          0
+        ],
+        [
+          1,
+          2
+        ],
+        [
+          2,
+          0
+        ],
+        [
+          2,
+          1
+        ],
+        [
+          3,
+          0
+        ]
+      ],
+      "supporting_line_count": 3,
+      "supporting_window_count": 9,
+      "terminal": false
+    },
+    "two_radius8_chained_runs8": {
+      "cover_number": 4,
+      "cover_witness": [
+        [
+          -2,
+          0
+        ],
+        [
+          4,
+          0
+        ],
+        [
+          8,
+          0
+        ],
+        [
+          14,
+          0
+        ]
+      ],
+      "radius8_self_chain": {
+        "chainable": true,
+        "conditional_on_seed_legal": true,
+        "max_hop": 7,
+        "order": [
+          [
+            0,
+            0
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            0
+          ],
+          [
+            3,
+            0
+          ],
+          [
+            10,
+            0
+          ],
+          [
+            11,
+            0
+          ],
+          [
+            12,
+            0
+          ],
+          [
+            13,
+            0
+          ]
+        ]
+      },
+      "residual_family": [
+        [
+          [
+            -2,
+            0
+          ],
+          [
+            -1,
+            0
+          ]
+        ],
+        [
+          [
+            -1,
+            0
+          ],
+          [
+            4,
+            0
+          ]
+        ],
+        [
+          [
+            4,
+            0
+          ],
+          [
+            5,
+            0
+          ]
+        ],
+        [
+          [
+            8,
+            0
+          ],
+          [
+            9,
+            0
+          ]
+        ],
+        [
+          [
+            9,
+            0
+          ],
+          [
+            14,
+            0
+          ]
+        ],
+        [
+          [
+            14,
+            0
+          ],
+          [
+            15,
+            0
+          ]
+        ]
+      ],
+      "stone_count": 8,
+      "stones": [
+        [
+          0,
+          0
+        ],
+        [
+          1,
+          0
+        ],
+        [
+          2,
+          0
+        ],
+        [
+          3,
+          0
+        ],
+        [
+          10,
+          0
+        ],
+        [
+          11,
+          0
+        ],
+        [
+          12,
+          0
+        ],
+        [
+          13,
+          0
+        ]
+      ],
+      "supporting_line_count": 1,
+      "supporting_window_count": 6,
+      "terminal": false
+    }
+  },
+  "triangle_six_pair_activation": {
+    "attacker_action_carrier_size": 24,
+    "attacker_precursor": {
+      "cover_number": 0,
+      "cover_witness": [],
+      "radius8_self_chain": {
+        "chainable": true,
+        "conditional_on_seed_legal": true,
+        "max_hop": 2,
+        "order": [
+          [
+            0,
+            0
+          ],
+          [
+            0,
+            -1
+          ],
+          [
+            0,
+            1
+          ],
+          [
+            -1,
+            2
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            -2,
+            0
+          ]
+        ]
+      },
+      "residual_family": [],
+      "stone_count": 6,
+      "stones": [
+        [
+          -2,
+          0
+        ],
+        [
+          -1,
+          2
+        ],
+        [
+          0,
+          -1
+        ],
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          1,
+          0
+        ]
+      ],
+      "supporting_line_count": 0,
+      "supporting_window_count": 0,
+      "terminal": false
+    },
+    "dangerous_attacker_pair_count": 48,
+    "dangerous_attacker_pairs": [
+      [
+        [
+          -4,
+          0
+        ],
+        [
+          -2,
+          3
+        ]
+      ],
+      [
+        [
+          -4,
+          0
+        ],
+        [
+          0,
+          -2
+        ]
+      ],
+      [
+        [
+          -4,
+          0
+        ],
+        [
+          0,
+          2
+        ]
+      ],
+      [
+        [
+          -4,
+          0
+        ],
+        [
+          2,
+          -1
+        ]
+      ],
+      [
+        [
+          -4,
+          5
+        ],
+        [
+          -1,
+          0
+        ]
+      ],
+      [
+        [
+          -4,
+          5
+        ],
+        [
+          0,
+          -2
+        ]
+      ],
+      [
+        [
+          -4,
+          5
+        ],
+        [
+          0,
+          2
+        ]
+      ],
+      [
+        [
+          -3,
+          0
+        ],
+        [
+          -2,
+          3
+        ]
+      ],
+      [
+        [
+          -3,
+          0
+        ],
+        [
+          0,
+          -2
+        ]
+      ],
+      [
+        [
+          -3,
+          0
+        ],
+        [
+          0,
+          2
+        ]
+      ],
+      [
+        [
+          -3,
+          0
+        ],
+        [
+          2,
+          -1
+        ]
+      ],
+      [
+        [
+          -3,
+          4
+        ],
+        [
+          -1,
+          0
+        ]
+      ],
+      [
+        [
+          -3,
+          4
+        ],
+        [
+          0,
+          -2
+        ]
+      ],
+      [
+        [
+          -3,
+          4
+        ],
+        [
+          0,
+          2
+        ]
+      ],
+      [
+        [
+          -2,
+          3
+        ],
+        [
+          -1,
+          0
+        ]
+      ],
+      [
+        [
+          -2,
+          3
+        ],
+        [
+          0,
+          -4
+        ]
+      ],
+      [
+        [
+          -2,
+          3
+        ],
+        [
+          0,
+          -3
+        ]
+      ],
+      [
+        [
+          -2,
+          3
+        ],
+        [
+          0,
+          -2
+        ]
+      ],
+      [
+        [
+          -2,
+          3
+        ],
+        [
+          0,
+          2
+        ]
+      ],
+      [
+        [
+          -2,
+          3
+        ],
+        [
+          0,
+          3
+        ]
+      ],
+      [
+        [
+          -2,
+          3
+        ],
+        [
+          0,
+          4
+        ]
+      ],
+      [
+        [
+          -2,
+          3
+        ],
+        [
+          2,
+          0
+        ]
+      ],
+      [
+        [
+          -2,
+          3
+        ],
+        [
+          3,
+          0
+        ]
+      ],
+      [
+        [
+          -1,
+          0
+        ],
+        [
+          0,
+          -4
+        ]
+      ],
+      [
+        [
+          -1,
+          0
+        ],
+        [
+          0,
+          -3
+        ]
+      ],
+      [
+        [
+          -1,
+          0
+        ],
+        [
+          0,
+          -2
+        ]
+      ],
+      [
+        [
+          -1,
+          0
+        ],
+        [
+          0,
+          2
+        ]
+      ],
+      [
+        [
+          -1,
+          0
+        ],
+        [
+          0,
+          3
+        ]
+      ],
+      [
+        [
+          -1,
+          0
+        ],
+        [
+          0,
+          4
+        ]
+      ],
+      [
+        [
+          -1,
+          0
+        ],
+        [
+          2,
+          -1
+        ]
+      ],
+      [
+        [
+          -1,
+          0
+        ],
+        [
+          3,
+          -2
+        ]
+      ],
+      [
+        [
+          -1,
+          0
+        ],
+        [
+          4,
+          -3
+        ]
+      ],
+      [
+        [
+          0,
+          -4
+        ],
+        [
+          2,
+          -1
+        ]
+      ],
+      [
+        [
+          0,
+          -3
+        ],
+        [
+          2,
+          -1
+        ]
+      ],
+      [
+        [
+          0,
+          -2
+        ],
+        [
+          2,
+          -1
+        ]
+      ],
+      [
+        [
+          0,
+          -2
+        ],
+        [
+          2,
+          0
+        ]
+      ],
+      [
+        [
+          0,
+          -2
+        ],
+        [
+          3,
+          -2
+        ]
+      ],
+      [
+        [
+          0,
+          -2
+        ],
+        [
+          3,
+          0
+        ]
+      ],
+      [
+        [
+          0,
+          -2
+        ],
+        [
+          4,
+          -3
+        ]
+      ],
+      [
+        [
+          0,
+          2
+        ],
+        [
+          2,
+          -1
+        ]
+      ],
+      [
+        [
+          0,
+          2
+        ],
+        [
+          2,
+          0
+        ]
+      ],
+      [
+        [
+          0,
+          2
+        ],
+        [
+          3,
+          -2
+        ]
+      ],
+      [
+        [
+          0,
+          2
+        ],
+        [
+          3,
+          0
+        ]
+      ],
+      [
+        [
+          0,
+          2
+        ],
+        [
+          4,
+          -3
+        ]
+      ],
+      [
+        [
+          0,
+          3
+        ],
+        [
+          2,
+          -1
+        ]
+      ],
+      [
+        [
+          0,
+          4
+        ],
+        [
+          2,
+          -1
+        ]
+      ],
+      [
+        [
+          2,
+          -1
+        ],
+        [
+          2,
+          0
+        ]
+      ],
+      [
+        [
+          2,
+          -1
+        ],
+        [
+          3,
+          0
+        ]
+      ]
+    ],
+    "dangerous_pair_cover_histogram_without_preblock": {
+      "3": 40,
+      "4": 8
+    },
+    "defender_precover_number": 3,
+    "defender_precover_witness": [
+      [
+        -4,
+        0
+      ],
+      [
+        -3,
+        4
+      ],
+      [
+        0,
+        -3
+      ]
+    ],
+    "dominance_complete_precover_carrier_size": 17,
+    "dynamic_disclaimer": "the two earlier defender pairs may already pay this three-stone local tax; coupling that tax to the anchored interaction is the unresolved reachability theorem",
+    "fresh_clock_relevance": "after six remote A stones, this is the placement-11..18 tail of fresh h18",
+    "reserve_pair_fails": true,
+    "scope": "exact local D-pair/A-pair/D-pair/A-pair tail; excludes earlier defender occupancy, defender wins, and forced reachability"
+  }
+}

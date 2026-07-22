@@ -1,0 +1,115 @@
+{
+  "metadata": {
+    "binary": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\deadline-ladder\\.scratch\\horizon_native\\.target\\release\\horizon_native.exe",
+    "max_cache_entries": 50000,
+    "mode": "cohorts",
+    "native_threads": 1,
+    "per_root_ms": 10,
+    "row_evidence": ".scratch\\horizon_r4_phase1_cohorts_human_resume_rows.jsonl",
+    "timeout_is_not_verdict": true
+  },
+  "selection": {
+    "available_cohorts": [
+      "forcing19",
+      "grinds",
+      "human_v1",
+      "puzzle_v3",
+      "selfplay_v1"
+    ],
+    "excluded_ids_after": 586,
+    "excluded_ids_found": 2134,
+    "excluded_ids_source": ".scratch\\horizon_r4_phase1_cohorts_human_rows.jsonl",
+    "selected": 2720,
+    "skipped": {}
+  },
+  "summary": {
+    "attempted": 586,
+    "caught_ids": [],
+    "completed_negative_mismatches": [],
+    "completed_negatives": 0,
+    "distributions": {
+      "all": {
+        "first_action_total": {
+          "max": 239211,
+          "mean": 34748.1518771331,
+          "n": 586,
+          "p50": 686,
+          "p90": 93294,
+          "total": 20362417
+        },
+        "nodes": {
+          "max": 104448,
+          "mean": 2297.1791808873722,
+          "n": 586,
+          "p50": 1024,
+          "p90": 3072,
+          "total": 1346147
+        },
+        "universe": {
+          "max": 1452,
+          "mean": 560.0102389078498,
+          "n": 586,
+          "p50": 522,
+          "p90": 765,
+          "total": 328166
+        },
+        "wall_ns": {
+          "max": 2477546500,
+          "mean": 231820232.42320818,
+          "n": 586,
+          "p50": 14177700,
+          "p90": 1079031000,
+          "total": 135846656200
+        }
+      },
+      "completed": {
+        "first_action_total": {
+          "max": 659,
+          "mean": 659.0,
+          "n": 1,
+          "p50": 659,
+          "p90": 659,
+          "total": 659
+        },
+        "nodes": {
+          "max": 1,
+          "mean": 1.0,
+          "n": 1,
+          "p50": 1,
+          "p90": 1,
+          "total": 1
+        },
+        "universe": {
+          "max": 776,
+          "mean": 776.0,
+          "n": 1,
+          "p50": 776,
+          "p90": 776,
+          "total": 776
+        },
+        "wall_ns": {
+          "max": 2725700,
+          "mean": 2725700.0,
+          "n": 1,
+          "p50": 2725700,
+          "p90": 2725700,
+          "total": 2725700
+        }
+      }
+    },
+    "errors": 0,
+    "per_cohort_status": {
+      "human_v1": {
+        "timeout": 585,
+        "win": 1
+      }
+    },
+    "python_crosscheck_mismatches": [],
+    "statuses": {
+      "timeout": 585,
+      "win": 1
+    },
+    "timeouts": 585,
+    "wins": 1
+  }
+}
