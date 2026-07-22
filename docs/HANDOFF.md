@@ -175,9 +175,14 @@ Live lanes (2026-07-21 evening, third round):
   R2-1/R2-2 amendments `a018befb` → narrow confirmation `af5665be`
   (CONFIRMED-CLEARED-FOR-BUILD). Full-tree is NO-GO; final adoption gate
   remains the owner's.
-- **j2near-profile** (claude/j2near-profile): cap-1000/J2near-on phase
-  bottleneck profile + per-outcome wall attribution + cap curve
-  1000→2000 tracking the five known J2near-unique upgrade IDs.
+- **attacker-gen-r3** (claude/attacker-gen-r3): speed round 3 on the
+  combined attacker+window+second-cand path (48.46% of wall);
+  bit-identical mandatory (digest a8c6f3ca + cap-750 row identity).
+
+Exited and gated: **bottleneck-750** (`e08d9da0` on claude/j2near-profile,
+REPORT_TSS_BOTTLENECK_750.md) — the 32.85% residual is state make/unmake
+(24.10%) + PN bookkeeping (7.71%); UNKNOWN-at-cap rows eat 65.46% of
+battery wall (early-stop ceiling 30 s); ranked attacks in SOLVER_NOTES §5.
 
 Landed this session: candidate-gen 1.72x fold `2a1bdf97`; J2near
 default-off fold `f5a5c5f0`; cap-750 retune `55f3c2b6` (superseded same

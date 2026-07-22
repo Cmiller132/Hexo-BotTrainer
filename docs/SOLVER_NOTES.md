@@ -22,15 +22,26 @@ hints / loss_reserve / fragments / zones OFF.
 
 ## 2. Measured facts the current work stands on
 
-- **Generation dominates wall — now 1.72x cheaper.** Winning proof path
-  ≈ 0.0003%. Candidate-gen rounds 1+2 folded (`2a1bdf97`, bit-identical):
-  post-fold production shape (cap 500) = attacker pair gen 48.66%,
-  defender gen 15.58%, second-cand regen 5.65%, TT probe/insert 0.46%,
-  per-solve setup 0.19%, outside-inclusive-expansion residual 32.85%
-  (the next unattributed block). Deep F19 = attacker 35.97%, defender
-  30.56%, TT 2.01%. Historic pre-fold shape (A_OR_GEN 60.5%,
-  D_FORCED_GEN 20.4%; P7 1.42x `2c262e10`) is superseded — see the
-  2026-07-21 fold entry in §5.
+- **Generation dominates wall — now 1.72x cheaper; residual NAMED.**
+  Winning proof path ≈ 0.0003%. Candidate-gen rounds 1+2 folded
+  (`2a1bdf97`, bit-identical). **Exhaustive cap-750 decomposition
+  (2026-07-21, `e08d9da0` on claude/j2near-profile;
+  REPORT_TSS_BOTTLENECK_750.md; buckets sum to 100.00%, node identity
+  730,143 exact, 2.03% profiling overhead):** state make/unmake
+  **24.10%**, window analysis/gate build **21.43%**, attacker generation
+  proper **20.90%**, defender-pair plan construction **15.77%**, PN
+  select/backprop/stage bookkeeping **7.71%**, second-cand regen 6.13%,
+  certificate 1.31%, TT 0.31%, setup 0.15%, other 1.46%. The old 32.85%
+  unattributed residual = state make/unmake + PN bookkeeping (31.80%).
+  Combined attacker+window+second-cand path = 48.46%. **Outcome
+  attribution: 641 UNKNOWN-at-cap rows consume 65.46% of battery wall**
+  (perfect-early-stop ceiling 30.08 s of 45.96 s); frozen-pn subset (259
+  rows, pn identical 500→750) costs 9.07% in the final increment alone.
+  Defender-plan is the only bucket whose share AND per-node cost grow
+  with cap (caveat: cap-500 instrumented pass had 15.1% overhead, so
+  cross-cap ratios are indicative). Deep F19 = attacker 35.97%, defender
+  30.56%, TT 2.01% (older split). Historic pre-fold shape (A_OR_GEN
+  60.5%, D_FORCED_GEN 20.4%; P7 1.42x `2c262e10`) superseded.
 - **TT at cap 500 ≈ overhead but cheap** (hit/entry ≈ 0.01; measured
   probe/insert wall share 0.433% — below any removal payoff, TT-min
   KILLED in r2). Deep memory resident = WidePnSearch arena +
@@ -188,6 +199,16 @@ CapResumeSession promotion · GPU bench close-out.
   +61 rows. The `tss_solver_j2near` key and wiring REMAIN (default-off,
   retest lever); only the TOML policy reverted. Bottleneck diagnostic
   relaunched at the cap-750/off production point.
+- 2026-07-21 (bottleneck diagnostic, `e08d9da0` on claude/j2near-profile;
+  REPORT_TSS_BOTTLENECK_750.md). MEASURED: exhaustive cap-750 phase
+  decomposition — details folded into §2. Ranked attacks: (1) fuse
+  attacker+window+second-cand path (48.46%; −25% ≈ 5.6 s ≈ cap ~839),
+  (2) state make/unmake (24.10%; −50% ≈ 5.5 s ≈ cap ~838), (3) guarded
+  cap-bound early abandon (frozen-pn subset alone ≈ 4.2 s ≈ cap ~817;
+  perfect-oracle ceiling 30.1 s ≈ cap ~1,231 — requires sub-root
+  stagnation evidence + no-regression gate per triage findings). Runner-up
+  defender-plan (15.77%, the with-cap-growing bucket). TT is a non-target
+  (0.31%). Attack 1 is live on claude/attacker-gen-r3.
 - 2026-07-21 (triage Phase B, `be4bd34a` on claude/triage-b;
   REPORT_TRIAGE_PHASE_B.md). MEASURED: sub-root trajectory telemetry
   (cfg-test, 34,616 snapshots over the 248 labeled grinds @cap 5k).
