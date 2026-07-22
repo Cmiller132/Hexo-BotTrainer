@@ -149,6 +149,15 @@ hexfield_eq_main5_prefit_main() {
   export MALLOC_MMAP_THRESHOLD_=536870912
   export MALLOC_TOP_PAD_=134217728
   export TORCHINDUCTOR_COMPILE_THREADS=8
+  export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
+  # Max-speed prefit profile (owner-ordered 2026-07-22). The prefit's fast path
+  # is its OWN compiled forward (HEXFIELD_PREFIT_COMPILE=1 default, dynamic=True
+  # over the varying micro-bucket shapes) + the fused Triton train-stream
+  # ray-tap op below (the eager-K2-island retirement, ~85% of train-step device
+  # time at main_3 shapes). HEXFIELD_TRAIN_FLEX stays OFF here BY DESIGN — see
+  # prefit.py's header note: the inner flex compile is dynamic=False and would
+  # recompile per micro-bucket shape. HEXFIELD_TRAIN_COMPILE is trainer.py-only.
+  export HEXFIELD_TRITON_RAYTAP_TRAIN="${HEXFIELD_TRITON_RAYTAP_TRAIN:-1}"
   # Caching-allocator mode every eq GPU job runs with (12 GB WDDM line; the
   # 15-block trunk nearly doubles activation memory vs the 8-block A5 — if the
   # prefit OOMs, lower -- --batch-rows before touching anything else).
