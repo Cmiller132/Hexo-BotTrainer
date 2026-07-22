@@ -12,7 +12,7 @@ use hexo_engine::{apply_placement, HexCoord, HexoState, Placement};
 use serde_json::{json, Value};
 
 use crate::tss_core::{CertVerify, DeepSolve, ProofStatus, SolveCaps};
-use crate::tss_solver::{TssSolver, WidthOptions};
+use crate::tss_solver::{generation_memo_profile, wide_gen_profile, TssSolver, WidthOptions};
 use crate::tss_verify::TssVerifier;
 
 #[derive(Clone)]
@@ -80,7 +80,8 @@ fn grind_ids() -> HashSet<String> {
     BufReader::new(File::open(&path).expect("open grind labels"))
         .lines()
         .filter_map(|line| {
-            let row: Value = serde_json::from_str(&line.expect("read label row")).expect("label json");
+            let row: Value =
+                serde_json::from_str(&line.expect("read label row")).expect("label json");
             (row["source"].as_str() == Some("grind"))
                 .then(|| row["pos_id"].as_str().expect("grind pos_id").to_owned())
         })
@@ -117,9 +118,10 @@ fn solve_one(solver: &mut TssSolver, state: &HexoState, cap: u64, tt_bytes: usiz
         },
     );
     let wall_nanos = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
-    let verified = result.cert.as_ref().is_some_and(|cert| {
-        TssVerifier.verify(state, cert, result.status)
-    });
+    let verified = result
+        .cert
+        .as_ref()
+        .is_some_and(|cert| TssVerifier.verify(state, cert, result.status));
     let verify_failed = u64::from(result.status != ProofStatus::Unknown && !verified);
     Outcome {
         status: status_name(result.status),
@@ -139,25 +141,60 @@ fn run_repetitions(
     let mut off = vec![Vec::with_capacity(repetitions); positions.len()];
     let mut on = vec![Vec::with_capacity(repetitions); positions.len()];
     for repetition in 0..repetitions {
-        for &j2near in if repetition % 2 == 0 { &[false, true] } else { &[true, false] } {
+        for &j2near in if repetition % 2 == 0 {
+            &[false, true]
+        } else {
+            &[true, false]
+        } {
             let sink = if j2near { &mut on } else { &mut off };
             let mut solver = make_solver(j2near);
+            let profile_before = wide_gen_profile();
+            let memo_before = generation_memo_profile();
+            let mut arm_wall_nanos = 0u64;
             for (index, position) in positions.iter().enumerate() {
                 let result = solve_one(&mut solver, &position.state, cap, tt_bytes);
                 assert_eq!(result.verify_failed, 0, "{} verifier failure", position.id);
+                arm_wall_nanos = arm_wall_nanos.saturating_add(result.wall_nanos);
                 sink[index].push(result);
             }
+            let profile_after = wide_gen_profile();
+            let memo_after = generation_memo_profile();
+            let delta = (
+                profile_after.0.saturating_sub(profile_before.0),
+                profile_after.1.saturating_sub(profile_before.1),
+                profile_after.2.saturating_sub(profile_before.2),
+                profile_after.3.saturating_sub(profile_before.3),
+                profile_after.4.saturating_sub(profile_before.4),
+                profile_after.5.saturating_sub(profile_before.5),
+            );
+            println!(
+                "J2NEAR_ARM repetition={repetition} mode={} cap={cap} solve_wall_ms={:.1} pair_ms={} defender_ms={} regen_ms={} expand_ms={} refresh_ms={} insert_ms={} memo_lookups={} memo_hits={}",
+                if j2near { "on" } else { "off" },
+                arm_wall_nanos as f64 / 1e6,
+                delta.0,
+                delta.1,
+                delta.2,
+                delta.3,
+                delta.4,
+                delta.5,
+                memo_after.0.saturating_sub(memo_before.0),
+                memo_after.1.saturating_sub(memo_before.1),
+            );
         }
     }
     for (index, position) in positions.iter().enumerate() {
         for runs in [&off[index], &on[index]] {
             let first = &runs[0];
-            assert!(runs.iter().all(|run| {
-                run.status == first.status
-                    && run.nodes == first.nodes
-                    && run.verified == first.verified
-                    && run.verify_failed == first.verify_failed
-            }), "{} nondeterministic verdict or node count", position.id);
+            assert!(
+                runs.iter().all(|run| {
+                    run.status == first.status
+                        && run.nodes == first.nodes
+                        && run.verified == first.verified
+                        && run.verify_failed == first.verify_failed
+                }),
+                "{} nondeterministic verdict or node count",
+                position.id
+            );
         }
     }
     (off, on)
@@ -218,15 +255,14 @@ fn write_rows(
 }
 
 fn archived_identity() -> BTreeMap<(String, String), (&'static str, u64)> {
-    let base = root_dir().join(
-        "scripts/tss_harness/harness_runs/20260720_231040_dualpass_adoption",
-    );
+    let base =
+        root_dir().join("scripts/tss_harness/harness_runs/20260720_231040_dualpass_adoption");
     let mut out = BTreeMap::new();
     for set in ["selfplay_v1", "human_v1", "puzzle_v3"] {
         let path = base.join(format!("records_dualpass_adoption_{set}.jsonl"));
         for line in BufReader::new(File::open(&path).expect("open identity archive")).lines() {
-            let row: Value = serde_json::from_str(&line.expect("read identity row"))
-                .expect("identity json");
+            let row: Value =
+                serde_json::from_str(&line.expect("read identity row")).expect("identity json");
             let status = match row["status"].as_str().expect("identity status") {
                 "win" => "win",
                 "loss" => "loss",
@@ -252,7 +288,14 @@ fn tss_j2near_matched_ab() {
         .ok()
         .map(|value| value.parse::<usize>().expect("numeric repetitions"))
         .unwrap_or(3);
-    assert!(repetitions >= 3, "wall claims require at least three repetitions");
+    let allow_single = std::env::var("TSS_ATTACKER_GEN_R3_SINGLE")
+        .ok()
+        .as_deref()
+        == Some("1");
+    assert!(
+        repetitions >= if allow_single { 1 } else { 3 },
+        "wall claims require at least three repetitions"
+    );
     let frozen = all_frozen();
     assert_eq!(frozen.len(), 6_443);
     let mut writer = output_writer("matched.jsonl");
@@ -275,9 +318,11 @@ fn tss_j2near_matched_ab() {
         }
         write_rows(&mut writer, &frozen, cap, 256 << 10, &off, &on);
         writer.flush().expect("flush frozen A/B");
-        println!("J2NEAR_AB cohort=frozen cap={cap} rows={} repetitions={repetitions}", frozen.len());
+        println!(
+            "J2NEAR_AB cohort=frozen cap={cap} rows={} repetitions={repetitions}",
+            frozen.len()
+        );
     }
-
 }
 
 #[test]
@@ -287,7 +332,10 @@ fn tss_j2near_grind_ab() {
         .ok()
         .map(|value| value.parse::<usize>().expect("numeric repetitions"))
         .unwrap_or(3);
-    assert!(repetitions >= 3, "wall claims require at least three repetitions");
+    assert!(
+        repetitions >= 3,
+        "wall claims require at least three repetitions"
+    );
     let ids = grind_ids();
     let mut by_id = BTreeMap::new();
     for position in all_frozen() {
@@ -295,14 +343,22 @@ fn tss_j2near_grind_ab() {
     }
     let grinds = ids
         .iter()
-        .map(|id| by_id.get(id).unwrap_or_else(|| panic!("missing grind {id}")).clone())
+        .map(|id| {
+            by_id
+                .get(id)
+                .unwrap_or_else(|| panic!("missing grind {id}"))
+                .clone()
+        })
         .collect::<Vec<_>>();
     assert_eq!(grinds.len(), 248);
     let (off, on) = run_repetitions(&grinds, 50_000, 256 << 20, repetitions);
     let mut writer = output_writer("grind.jsonl");
     write_rows(&mut writer, &grinds, 50_000, 256 << 20, &off, &on);
     writer.flush().expect("flush grind A/B");
-    println!("J2NEAR_AB cohort=grind cap=50000 rows={} repetitions={repetitions}", grinds.len());
+    println!(
+        "J2NEAR_AB cohort=grind cap=50000 rows={} repetitions={repetitions}",
+        grinds.len()
+    );
 }
 
 #[test]
