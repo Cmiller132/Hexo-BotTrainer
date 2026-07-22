@@ -1,0 +1,1560 @@
+{
+  "h10_validation": {
+    "caught": 78,
+    "depth_le_8": 76,
+    "first_pairs_fresh": {
+      "after_true_legal": {
+        "max": 178471,
+        "p50": 10424,
+        "p90": 28670
+      },
+      "before_unbounded": {
+        "max": 178540,
+        "p50": 10439,
+        "p90": 28733
+      }
+    },
+    "fresh_depth_10_witnesses": [
+      "human_b132a09ccb4eb829_p101",
+      "sp_20_p77"
+    ],
+    "misses": [],
+    "rows": [
+      {
+        "cert_depth": 6,
+        "h8_shortcut": true,
+        "legal_first_pairs": 4470,
+        "nodes": 1,
+        "old_first_pairs": 4482,
+        "old_universe": 323,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-07ff57191ae3fdfa",
+        "quotient_universe": 323,
+        "wall_ns": 12640000,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 2,
+        "h8_shortcut": true,
+        "legal_first_pairs": 23127,
+        "nodes": 1,
+        "old_first_pairs": 23158,
+        "old_universe": 582,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-0ba4d353ceed58dd",
+        "quotient_universe": 582,
+        "wall_ns": 67015900,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 5,
+        "nodes": 304,
+        "old_universe": 153,
+        "phase": "second",
+        "pos_id": "atlas_full_oa-21e88affe3597bbf",
+        "quotient_universe": 110,
+        "wall_ns": 1785500,
+        "win": true
+      },
+      {
+        "cert_depth": 6,
+        "h8_shortcut": true,
+        "legal_first_pairs": 25919,
+        "nodes": 1,
+        "old_first_pairs": 25945,
+        "old_universe": 634,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-2b428a33ac46597c",
+        "quotient_universe": 634,
+        "wall_ns": 61565800,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 6,
+        "h8_shortcut": true,
+        "legal_first_pairs": 4789,
+        "nodes": 6,
+        "old_first_pairs": 4805,
+        "old_universe": 322,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-36a221aa702154ba",
+        "quotient_universe": 320,
+        "wall_ns": 12357900,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 2,
+        "h8_shortcut": true,
+        "legal_first_pairs": 7894,
+        "nodes": 1,
+        "old_first_pairs": 7926,
+        "old_universe": 396,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-38ef9e79b9ab8bd6",
+        "quotient_universe": 396,
+        "wall_ns": 19510000,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 1,
+        "nodes": 2,
+        "old_universe": 182,
+        "phase": "second",
+        "pos_id": "atlas_full_oa-39674c790c5437da",
+        "quotient_universe": 142,
+        "wall_ns": 21900,
+        "win": true
+      },
+      {
+        "cert_depth": 5,
+        "nodes": 400,
+        "old_universe": 158,
+        "phase": "second",
+        "pos_id": "atlas_full_oa-3c2762e55c2af7e2",
+        "quotient_universe": 118,
+        "wall_ns": 3641100,
+        "win": true
+      },
+      {
+        "cert_depth": 6,
+        "h8_shortcut": true,
+        "legal_first_pairs": 4693,
+        "nodes": 9,
+        "old_first_pairs": 4712,
+        "old_universe": 318,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-40f189b7cbf82b28",
+        "quotient_universe": 317,
+        "wall_ns": 12457200,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 5,
+        "nodes": 343,
+        "old_universe": 157,
+        "phase": "second",
+        "pos_id": "atlas_full_oa-42551fb87e915ae5",
+        "quotient_universe": 116,
+        "wall_ns": 3743000,
+        "win": true
+      },
+      {
+        "cert_depth": 5,
+        "nodes": 81,
+        "old_universe": 210,
+        "phase": "second",
+        "pos_id": "atlas_full_oa-4a91f3b61b890567",
+        "quotient_universe": 159,
+        "wall_ns": 293800,
+        "win": true
+      },
+      {
+        "cert_depth": 2,
+        "h8_shortcut": true,
+        "legal_first_pairs": 13778,
+        "nodes": 1,
+        "old_first_pairs": 13814,
+        "old_universe": 478,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-4cf66ead127526be",
+        "quotient_universe": 478,
+        "wall_ns": 32958500,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 1,
+        "nodes": 2,
+        "old_universe": 224,
+        "phase": "second",
+        "pos_id": "atlas_full_oa-4d38ecd758048686",
+        "quotient_universe": 155,
+        "wall_ns": 16300,
+        "win": true
+      },
+      {
+        "cert_depth": 2,
+        "h8_shortcut": true,
+        "legal_first_pairs": 5471,
+        "nodes": 1,
+        "old_first_pairs": 5494,
+        "old_universe": 344,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-5425d35403416f9b",
+        "quotient_universe": 343,
+        "wall_ns": 14188500,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 2,
+        "h8_shortcut": true,
+        "legal_first_pairs": 24133,
+        "nodes": 1,
+        "old_first_pairs": 24180,
+        "old_universe": 586,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-5799a06a546f5980",
+        "quotient_universe": 586,
+        "wall_ns": 60823900,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 2,
+        "h8_shortcut": true,
+        "legal_first_pairs": 7231,
+        "nodes": 1,
+        "old_first_pairs": 7248,
+        "old_universe": 381,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-5ae978cdace13480",
+        "quotient_universe": 377,
+        "wall_ns": 18243800,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 1,
+        "nodes": 2,
+        "old_universe": 153,
+        "phase": "second",
+        "pos_id": "atlas_full_oa-5e92071b23b32555",
+        "quotient_universe": 105,
+        "wall_ns": 21300,
+        "win": true
+      },
+      {
+        "cert_depth": 2,
+        "h8_shortcut": true,
+        "legal_first_pairs": 10424,
+        "nodes": 1,
+        "old_first_pairs": 10439,
+        "old_universe": 444,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-61a6af9aed05053d",
+        "quotient_universe": 443,
+        "wall_ns": 26468300,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 1,
+        "nodes": 2,
+        "old_universe": 81,
+        "phase": "second",
+        "pos_id": "atlas_full_oa-677c5db6ef8d57a2",
+        "quotient_universe": 49,
+        "wall_ns": 15900,
+        "win": true
+      },
+      {
+        "cert_depth": 6,
+        "h8_shortcut": true,
+        "legal_first_pairs": 5017,
+        "nodes": 4,
+        "old_first_pairs": 5029,
+        "old_universe": 342,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-6d4adfc83c511a3a",
+        "quotient_universe": 337,
+        "wall_ns": 13968700,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 2,
+        "h8_shortcut": true,
+        "legal_first_pairs": 7664,
+        "nodes": 1,
+        "old_first_pairs": 7677,
+        "old_universe": 409,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-75e133bf45ef42c4",
+        "quotient_universe": 407,
+        "wall_ns": 29438500,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 6,
+        "h8_shortcut": true,
+        "legal_first_pairs": 4897,
+        "nodes": 6,
+        "old_first_pairs": 4907,
+        "old_universe": 317,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-778d8c161251c0c3",
+        "quotient_universe": 316,
+        "wall_ns": 12465500,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 2,
+        "h8_shortcut": true,
+        "legal_first_pairs": 26887,
+        "nodes": 1,
+        "old_first_pairs": 26915,
+        "old_universe": 646,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-804525958e2600db",
+        "quotient_universe": 646,
+        "wall_ns": 62034500,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 5,
+        "nodes": 77,
+        "old_universe": 154,
+        "phase": "second",
+        "pos_id": "atlas_full_oa-82095adae0b94f52",
+        "quotient_universe": 106,
+        "wall_ns": 271500,
+        "win": true
+      },
+      {
+        "cert_depth": 6,
+        "h8_shortcut": true,
+        "legal_first_pairs": 15207,
+        "nodes": 1,
+        "old_first_pairs": 15223,
+        "old_universe": 521,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-8879bbcab94a3163",
+        "quotient_universe": 521,
+        "wall_ns": 34615800,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 6,
+        "h8_shortcut": true,
+        "legal_first_pairs": 4317,
+        "nodes": 10,
+        "old_first_pairs": 4330,
+        "old_universe": 309,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-8a68dadb57fe9456",
+        "quotient_universe": 305,
+        "wall_ns": 11340800,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 6,
+        "h8_shortcut": true,
+        "legal_first_pairs": 9044,
+        "nodes": 1,
+        "old_first_pairs": 9070,
+        "old_universe": 418,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-8b2f9b5a954134a5",
+        "quotient_universe": 418,
+        "wall_ns": 21928200,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 6,
+        "h8_shortcut": true,
+        "legal_first_pairs": 6234,
+        "nodes": 23,
+        "old_first_pairs": 6251,
+        "old_universe": 343,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-951fffa65da710af",
+        "quotient_universe": 341,
+        "wall_ns": 16479900,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 6,
+        "h8_shortcut": true,
+        "legal_first_pairs": 16042,
+        "nodes": 6,
+        "old_first_pairs": 16061,
+        "old_universe": 561,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-9a06a71943b29908",
+        "quotient_universe": 561,
+        "wall_ns": 43496100,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 6,
+        "h8_shortcut": true,
+        "legal_first_pairs": 3425,
+        "nodes": 9,
+        "old_first_pairs": 3435,
+        "old_universe": 286,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-9b4b787c7f1dcf98",
+        "quotient_universe": 285,
+        "wall_ns": 9980000,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 1,
+        "nodes": 2,
+        "old_universe": 212,
+        "phase": "second",
+        "pos_id": "atlas_full_oa-ac4e139c0c235214",
+        "quotient_universe": 163,
+        "wall_ns": 21100,
+        "win": true
+      },
+      {
+        "cert_depth": 2,
+        "h8_shortcut": true,
+        "legal_first_pairs": 4809,
+        "nodes": 1,
+        "old_first_pairs": 4821,
+        "old_universe": 336,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-b22d9e7bf339df90",
+        "quotient_universe": 336,
+        "wall_ns": 12725500,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 2,
+        "h8_shortcut": true,
+        "legal_first_pairs": 28670,
+        "nodes": 1,
+        "old_first_pairs": 28733,
+        "old_universe": 641,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-b7bbc03e1327f7b5",
+        "quotient_universe": 641,
+        "wall_ns": 81344800,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 6,
+        "h8_shortcut": true,
+        "legal_first_pairs": 2917,
+        "nodes": 9,
+        "old_first_pairs": 2930,
+        "old_universe": 275,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-c120563f2da87614",
+        "quotient_universe": 275,
+        "wall_ns": 8715800,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 1,
+        "nodes": 2,
+        "old_universe": 124,
+        "phase": "second",
+        "pos_id": "atlas_full_oa-c5d0933314357fb6",
+        "quotient_universe": 80,
+        "wall_ns": 24000,
+        "win": true
+      },
+      {
+        "cert_depth": 1,
+        "nodes": 2,
+        "old_universe": 201,
+        "phase": "second",
+        "pos_id": "atlas_full_oa-d049938e91bc7c71",
+        "quotient_universe": 156,
+        "wall_ns": 11300,
+        "win": true
+      },
+      {
+        "cert_depth": 2,
+        "h8_shortcut": true,
+        "legal_first_pairs": 14148,
+        "nodes": 1,
+        "old_first_pairs": 14165,
+        "old_universe": 518,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-daa537edfe2edefd",
+        "quotient_universe": 518,
+        "wall_ns": 34170900,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 6,
+        "h8_shortcut": true,
+        "legal_first_pairs": 4347,
+        "nodes": 9,
+        "old_first_pairs": 4363,
+        "old_universe": 313,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-ddbdbfab6ee8a3c3",
+        "quotient_universe": 312,
+        "wall_ns": 11287400,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 2,
+        "h8_shortcut": true,
+        "legal_first_pairs": 20938,
+        "nodes": 1,
+        "old_first_pairs": 20965,
+        "old_universe": 603,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-ee5eae78c9a82d05",
+        "quotient_universe": 603,
+        "wall_ns": 49280500,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 6,
+        "h8_shortcut": true,
+        "legal_first_pairs": 14562,
+        "nodes": 11,
+        "old_first_pairs": 14601,
+        "old_universe": 481,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-f6170888a8d617a1",
+        "quotient_universe": 481,
+        "wall_ns": 33518500,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 6,
+        "h8_shortcut": true,
+        "legal_first_pairs": 7621,
+        "nodes": 26,
+        "old_first_pairs": 7646,
+        "old_universe": 394,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-f902f3534eff1449",
+        "quotient_universe": 394,
+        "wall_ns": 18591200,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 6,
+        "h8_shortcut": true,
+        "legal_first_pairs": 16006,
+        "nodes": 1,
+        "old_first_pairs": 16025,
+        "old_universe": 558,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-fcdeed9ad5ba60c9",
+        "quotient_universe": 558,
+        "wall_ns": 41131100,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 6,
+        "h8_shortcut": true,
+        "legal_first_pairs": 5430,
+        "nodes": 8,
+        "old_first_pairs": 5446,
+        "old_universe": 353,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "atlas_full_oa-fd81b5e1d141fe07",
+        "quotient_universe": 350,
+        "wall_ns": 15045600,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 1,
+        "nodes": 2,
+        "old_universe": 154,
+        "phase": "second",
+        "pos_id": "atlas_full_oa-fe7e1980dc545256",
+        "quotient_universe": 111,
+        "wall_ns": 20500,
+        "win": true
+      },
+      {
+        "cert_depth": 5,
+        "nodes": 400,
+        "old_universe": 158,
+        "phase": "second",
+        "pos_id": "atlas_oa-3c2762e55c2af7e2",
+        "quotient_universe": 118,
+        "wall_ns": 3664200,
+        "win": true
+      },
+      {
+        "cert_depth": 5,
+        "nodes": 81,
+        "old_universe": 210,
+        "phase": "second",
+        "pos_id": "atlas_oa-4a91f3b61b890567",
+        "quotient_universe": 159,
+        "wall_ns": 277200,
+        "win": true
+      },
+      {
+        "cert_depth": 6,
+        "h8_shortcut": true,
+        "legal_first_pairs": 7780,
+        "nodes": 1,
+        "old_first_pairs": 7782,
+        "old_universe": 442,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "human_3d17d05a42459994_p25",
+        "quotient_universe": 441,
+        "wall_ns": 20881600,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 6,
+        "h8_shortcut": true,
+        "legal_first_pairs": 18580,
+        "nodes": 3,
+        "old_first_pairs": 18618,
+        "old_universe": 541,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "human_3e6a7aaa8d136721_p31",
+        "quotient_universe": 541,
+        "wall_ns": 42630200,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 5,
+        "nodes": 97,
+        "old_universe": 179,
+        "phase": "second",
+        "pos_id": "human_438cf2993db2676d_p48",
+        "quotient_universe": 148,
+        "wall_ns": 408300,
+        "win": true
+      },
+      {
+        "cert_depth": 6,
+        "h8_shortcut": true,
+        "legal_first_pairs": 26669,
+        "nodes": 3,
+        "old_first_pairs": 26711,
+        "old_universe": 606,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "human_572f17e89f6ab4b4_p63",
+        "quotient_universe": 606,
+        "wall_ns": 71378900,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 5,
+        "nodes": 99,
+        "old_universe": 201,
+        "phase": "second",
+        "pos_id": "human_5aef7545813a348a_p34",
+        "quotient_universe": 163,
+        "wall_ns": 407700,
+        "win": true
+      },
+      {
+        "cert_depth": 6,
+        "h8_shortcut": true,
+        "legal_first_pairs": 13874,
+        "nodes": 1,
+        "old_first_pairs": 13901,
+        "old_universe": 490,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "human_5cfcb378a9dc6e84_p45",
+        "quotient_universe": 489,
+        "wall_ns": 34605600,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 5,
+        "nodes": 152,
+        "old_universe": 74,
+        "phase": "second",
+        "pos_id": "human_67630ab3b7277e43_p22",
+        "quotient_universe": 61,
+        "wall_ns": 702200,
+        "win": true
+      },
+      {
+        "cert_depth": 6,
+        "h8_shortcut": true,
+        "legal_first_pairs": 9379,
+        "nodes": 1,
+        "old_first_pairs": 9391,
+        "old_universe": 475,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "human_6e548d2127ed37cb_p25",
+        "quotient_universe": 473,
+        "wall_ns": 23750000,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 6,
+        "h8_shortcut": true,
+        "legal_first_pairs": 9111,
+        "nodes": 1,
+        "old_first_pairs": 9127,
+        "old_universe": 466,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "human_92b740931483965e_p25",
+        "quotient_universe": 466,
+        "wall_ns": 25811800,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 6,
+        "h8_shortcut": true,
+        "legal_first_pairs": 23023,
+        "nodes": 2,
+        "old_first_pairs": 23057,
+        "old_universe": 608,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "human_ab93c3b77edcd8c1_p57",
+        "quotient_universe": 608,
+        "wall_ns": 53699600,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 6,
+        "h8_shortcut": true,
+        "legal_first_pairs": 8522,
+        "nodes": 1,
+        "old_first_pairs": 8534,
+        "old_universe": 402,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "human_b81f05b4f52ddee3_p25",
+        "quotient_universe": 402,
+        "wall_ns": 20260600,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 6,
+        "h8_shortcut": true,
+        "legal_first_pairs": 9827,
+        "nodes": 1,
+        "old_first_pairs": 9840,
+        "old_universe": 458,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "human_b8c6422dc42a5552_p23",
+        "quotient_universe": 458,
+        "wall_ns": 23774500,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 5,
+        "nodes": 77,
+        "old_universe": 77,
+        "phase": "second",
+        "pos_id": "human_bcae226331bcae63_p26",
+        "quotient_universe": 63,
+        "wall_ns": 272900,
+        "win": true
+      },
+      {
+        "cert_depth": 5,
+        "nodes": 482,
+        "old_universe": 102,
+        "phase": "second",
+        "pos_id": "human_bec873af729120b3_p26",
+        "quotient_universe": 79,
+        "wall_ns": 3449300,
+        "win": true
+      },
+      {
+        "cert_depth": 2,
+        "h8_shortcut": true,
+        "legal_first_pairs": 178471,
+        "nodes": 1,
+        "old_first_pairs": 178540,
+        "old_universe": 1339,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "human_c54c79e3ba4eed5a_p319",
+        "quotient_universe": 1336,
+        "wall_ns": 688432600,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 5,
+        "nodes": 284,
+        "old_universe": 60,
+        "phase": "second",
+        "pos_id": "human_d190fa3322965e18_p24",
+        "quotient_universe": 51,
+        "wall_ns": 2126400,
+        "win": true
+      },
+      {
+        "cert_depth": 5,
+        "nodes": 206,
+        "old_universe": 139,
+        "phase": "second",
+        "pos_id": "human_d371694020b025f3_p26",
+        "quotient_universe": 90,
+        "wall_ns": 1083400,
+        "win": true
+      },
+      {
+        "cert_depth": 5,
+        "nodes": 99,
+        "old_universe": 234,
+        "phase": "second",
+        "pos_id": "human_d5c9e65ee824b42e_p52",
+        "quotient_universe": 196,
+        "wall_ns": 429700,
+        "win": true
+      },
+      {
+        "cert_depth": 2,
+        "h8_shortcut": true,
+        "legal_first_pairs": 18952,
+        "nodes": 1,
+        "old_first_pairs": 18980,
+        "old_universe": 540,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "human_db9e61448d342d8d_p31",
+        "quotient_universe": 540,
+        "wall_ns": 43386100,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 2,
+        "h8_shortcut": true,
+        "legal_first_pairs": 20467,
+        "nodes": 1,
+        "old_first_pairs": 20498,
+        "old_universe": 555,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "human_db9e61448d342d8d_p35",
+        "quotient_universe": 555,
+        "wall_ns": 46751600,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 6,
+        "h8_shortcut": true,
+        "legal_first_pairs": 68396,
+        "nodes": 4,
+        "old_first_pairs": 68431,
+        "old_universe": 914,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "human_de78dc834d1cf367_p73",
+        "quotient_universe": 914,
+        "wall_ns": 181883700,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 6,
+        "h8_shortcut": true,
+        "legal_first_pairs": 6475,
+        "nodes": 1,
+        "old_first_pairs": 6489,
+        "old_universe": 367,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "human_f3dfd95284c2b5b4_p19",
+        "quotient_universe": 363,
+        "wall_ns": 17605900,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 5,
+        "nodes": 590,
+        "old_universe": 107,
+        "phase": "second",
+        "pos_id": "human_f9f50871d4efa2d9_p32",
+        "quotient_universe": 94,
+        "wall_ns": 7935600,
+        "win": true
+      },
+      {
+        "cert_depth": 1,
+        "nodes": 2,
+        "old_universe": 259,
+        "phase": "second",
+        "pos_id": "sp_16_p50",
+        "quotient_universe": 223,
+        "wall_ns": 13300,
+        "win": true
+      },
+      {
+        "cert_depth": 5,
+        "nodes": 211,
+        "old_universe": 169,
+        "phase": "second",
+        "pos_id": "sp_19_p42",
+        "quotient_universe": 151,
+        "wall_ns": 1421900,
+        "win": true
+      },
+      {
+        "cert_depth": 1,
+        "nodes": 2,
+        "old_universe": 185,
+        "phase": "second",
+        "pos_id": "sp_2_p70",
+        "quotient_universe": 159,
+        "wall_ns": 10700,
+        "win": true
+      },
+      {
+        "cert_depth": 2,
+        "h8_shortcut": true,
+        "legal_first_pairs": 28122,
+        "nodes": 1,
+        "old_first_pairs": 28149,
+        "old_universe": 639,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "sp_31_p49",
+        "quotient_universe": 639,
+        "wall_ns": 68983500,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 1,
+        "nodes": 2,
+        "old_universe": 139,
+        "phase": "second",
+        "pos_id": "sp_33_p30",
+        "quotient_universe": 129,
+        "wall_ns": 22200,
+        "win": true
+      },
+      {
+        "cert_depth": 2,
+        "h8_shortcut": true,
+        "legal_first_pairs": 29863,
+        "nodes": 1,
+        "old_first_pairs": 29888,
+        "old_universe": 666,
+        "peak_branch_universe": 0,
+        "phase": "first",
+        "pos_id": "sp_41_p57",
+        "quotient_universe": 666,
+        "wall_ns": 67696800,
+        "win": true,
+        "witness": null
+      },
+      {
+        "cert_depth": 1,
+        "nodes": 2,
+        "old_universe": 142,
+        "phase": "second",
+        "pos_id": "sp_43_p28",
+        "quotient_universe": 132,
+        "wall_ns": 22300,
+        "win": true
+      },
+      {
+        "cert_depth": 10,
+        "h8_shortcut": false,
+        "legal_first_pairs": 58544,
+        "nodes": 34703,
+        "old_first_pairs": 58598,
+        "old_universe": 896,
+        "peak_branch_universe": 145,
+        "phase": "first",
+        "pos_id": "human_b132a09ccb4eb829_p101",
+        "quotient_universe": 896,
+        "wall_ns": 1304480500,
+        "win": true,
+        "witness": [
+          [
+            -4,
+            -5
+          ],
+          [
+            12,
+            -12
+          ]
+        ],
+        "witness_min_root_distances": [
+          2,
+          1
+        ]
+      },
+      {
+        "cert_depth": 10,
+        "h8_shortcut": false,
+        "legal_first_pairs": 50408,
+        "nodes": 689531,
+        "old_first_pairs": 50432,
+        "old_universe": 819,
+        "peak_branch_universe": 135,
+        "phase": "first",
+        "pos_id": "sp_20_p77",
+        "quotient_universe": 819,
+        "wall_ns": 7834571000,
+        "win": true,
+        "witness": [
+          [
+            6,
+            -12
+          ],
+          [
+            10,
+            -19
+          ]
+        ],
+        "witness_min_root_distances": [
+          2,
+          2
+        ]
+      }
+    ],
+    "tested": 78,
+    "universe": {
+      "after_incidence_classes": {
+        "max": 1336,
+        "p50": 337,
+        "p90": 634
+      },
+      "after_peak_pair_conditioned_nonshortcut": {
+        "max": 145,
+        "p50": 135,
+        "p90": 135
+      },
+      "before_V_or_U": {
+        "max": 1339,
+        "p50": 342,
+        "p90": 634
+      }
+    },
+    "universe_by_cohort": {
+      "human_v1": {
+        "after_incidence_classes": {
+          "max": 1336,
+          "p50": 441,
+          "p90": 608
+        },
+        "before_V_or_U": {
+          "max": 1339,
+          "p50": 442,
+          "p90": 608
+        },
+        "tested_references": 24
+      },
+      "puzzle_v3": {
+        "after_incidence_classes": {
+          "max": 896,
+          "p50": 159,
+          "p90": 555
+        },
+        "before_V_or_U": {
+          "max": 896,
+          "p50": 210,
+          "p90": 555
+        },
+        "tested_references": 7
+      },
+      "selfplay_v1": {
+        "after_incidence_classes": {
+          "max": 819,
+          "p50": 159,
+          "p90": 666
+        },
+        "before_V_or_U": {
+          "max": 819,
+          "p50": 185,
+          "p90": 666
+        },
+        "tested_references": 8
+      }
+    }
+  },
+  "metadata": {
+    "head": "e118097075a2f46afcb30f8c38b0c2c98666eab0",
+    "legal_radius": 8,
+    "python": "3.14.0"
+  },
+  "rung_table": [
+    {
+      "attacker_placements": 1,
+      "attacker_quota_changed": true,
+      "defender_placements": 0,
+      "horizon": 1,
+      "phase": "opening",
+      "schedule": "A"
+    },
+    {
+      "attacker_placements": 1,
+      "attacker_quota_changed": false,
+      "defender_placements": 1,
+      "horizon": 2,
+      "phase": "opening",
+      "schedule": "AD"
+    },
+    {
+      "attacker_placements": 1,
+      "attacker_quota_changed": false,
+      "defender_placements": 2,
+      "horizon": 3,
+      "phase": "opening",
+      "schedule": "ADD"
+    },
+    {
+      "attacker_placements": 2,
+      "attacker_quota_changed": true,
+      "defender_placements": 2,
+      "horizon": 4,
+      "phase": "opening",
+      "schedule": "ADDA"
+    },
+    {
+      "attacker_placements": 3,
+      "attacker_quota_changed": true,
+      "defender_placements": 2,
+      "horizon": 5,
+      "phase": "opening",
+      "schedule": "ADDAA"
+    },
+    {
+      "attacker_placements": 3,
+      "attacker_quota_changed": false,
+      "defender_placements": 3,
+      "horizon": 6,
+      "phase": "opening",
+      "schedule": "ADDAAD"
+    },
+    {
+      "attacker_placements": 3,
+      "attacker_quota_changed": false,
+      "defender_placements": 4,
+      "horizon": 7,
+      "phase": "opening",
+      "schedule": "ADDAADD"
+    },
+    {
+      "attacker_placements": 4,
+      "attacker_quota_changed": true,
+      "defender_placements": 4,
+      "horizon": 8,
+      "phase": "opening",
+      "schedule": "ADDAADDA"
+    },
+    {
+      "attacker_placements": 5,
+      "attacker_quota_changed": true,
+      "defender_placements": 4,
+      "horizon": 9,
+      "phase": "opening",
+      "schedule": "ADDAADDAA"
+    },
+    {
+      "attacker_placements": 5,
+      "attacker_quota_changed": false,
+      "defender_placements": 5,
+      "horizon": 10,
+      "phase": "opening",
+      "schedule": "ADDAADDAAD"
+    },
+    {
+      "attacker_placements": 5,
+      "attacker_quota_changed": false,
+      "defender_placements": 6,
+      "horizon": 11,
+      "phase": "opening",
+      "schedule": "ADDAADDAADD"
+    },
+    {
+      "attacker_placements": 6,
+      "attacker_quota_changed": true,
+      "defender_placements": 6,
+      "horizon": 12,
+      "phase": "opening",
+      "schedule": "ADDAADDAADDA"
+    },
+    {
+      "attacker_placements": 7,
+      "attacker_quota_changed": true,
+      "defender_placements": 6,
+      "horizon": 13,
+      "phase": "opening",
+      "schedule": "ADDAADDAADDAA"
+    },
+    {
+      "attacker_placements": 7,
+      "attacker_quota_changed": false,
+      "defender_placements": 7,
+      "horizon": 14,
+      "phase": "opening",
+      "schedule": "ADDAADDAADDAAD"
+    },
+    {
+      "attacker_placements": 7,
+      "attacker_quota_changed": false,
+      "defender_placements": 8,
+      "horizon": 15,
+      "phase": "opening",
+      "schedule": "ADDAADDAADDAADD"
+    },
+    {
+      "attacker_placements": 8,
+      "attacker_quota_changed": true,
+      "defender_placements": 8,
+      "horizon": 16,
+      "phase": "opening",
+      "schedule": "ADDAADDAADDAADDA"
+    },
+    {
+      "attacker_placements": 1,
+      "attacker_quota_changed": true,
+      "defender_placements": 0,
+      "horizon": 1,
+      "phase": "FirstStone",
+      "schedule": "A"
+    },
+    {
+      "attacker_placements": 2,
+      "attacker_quota_changed": true,
+      "defender_placements": 0,
+      "horizon": 2,
+      "phase": "FirstStone",
+      "schedule": "AA"
+    },
+    {
+      "attacker_placements": 2,
+      "attacker_quota_changed": false,
+      "defender_placements": 1,
+      "horizon": 3,
+      "phase": "FirstStone",
+      "schedule": "AAD"
+    },
+    {
+      "attacker_placements": 2,
+      "attacker_quota_changed": false,
+      "defender_placements": 2,
+      "horizon": 4,
+      "phase": "FirstStone",
+      "schedule": "AADD"
+    },
+    {
+      "attacker_placements": 3,
+      "attacker_quota_changed": true,
+      "defender_placements": 2,
+      "horizon": 5,
+      "phase": "FirstStone",
+      "schedule": "AADDA"
+    },
+    {
+      "attacker_placements": 4,
+      "attacker_quota_changed": true,
+      "defender_placements": 2,
+      "horizon": 6,
+      "phase": "FirstStone",
+      "schedule": "AADDAA"
+    },
+    {
+      "attacker_placements": 4,
+      "attacker_quota_changed": false,
+      "defender_placements": 3,
+      "horizon": 7,
+      "phase": "FirstStone",
+      "schedule": "AADDAAD"
+    },
+    {
+      "attacker_placements": 4,
+      "attacker_quota_changed": false,
+      "defender_placements": 4,
+      "horizon": 8,
+      "phase": "FirstStone",
+      "schedule": "AADDAADD"
+    },
+    {
+      "attacker_placements": 5,
+      "attacker_quota_changed": true,
+      "defender_placements": 4,
+      "horizon": 9,
+      "phase": "FirstStone",
+      "schedule": "AADDAADDA"
+    },
+    {
+      "attacker_placements": 6,
+      "attacker_quota_changed": true,
+      "defender_placements": 4,
+      "horizon": 10,
+      "phase": "FirstStone",
+      "schedule": "AADDAADDAA"
+    },
+    {
+      "attacker_placements": 6,
+      "attacker_quota_changed": false,
+      "defender_placements": 5,
+      "horizon": 11,
+      "phase": "FirstStone",
+      "schedule": "AADDAADDAAD"
+    },
+    {
+      "attacker_placements": 6,
+      "attacker_quota_changed": false,
+      "defender_placements": 6,
+      "horizon": 12,
+      "phase": "FirstStone",
+      "schedule": "AADDAADDAADD"
+    },
+    {
+      "attacker_placements": 7,
+      "attacker_quota_changed": true,
+      "defender_placements": 6,
+      "horizon": 13,
+      "phase": "FirstStone",
+      "schedule": "AADDAADDAADDA"
+    },
+    {
+      "attacker_placements": 8,
+      "attacker_quota_changed": true,
+      "defender_placements": 6,
+      "horizon": 14,
+      "phase": "FirstStone",
+      "schedule": "AADDAADDAADDAA"
+    },
+    {
+      "attacker_placements": 8,
+      "attacker_quota_changed": false,
+      "defender_placements": 7,
+      "horizon": 15,
+      "phase": "FirstStone",
+      "schedule": "AADDAADDAADDAAD"
+    },
+    {
+      "attacker_placements": 8,
+      "attacker_quota_changed": false,
+      "defender_placements": 8,
+      "horizon": 16,
+      "phase": "FirstStone",
+      "schedule": "AADDAADDAADDAADD"
+    },
+    {
+      "attacker_placements": 1,
+      "attacker_quota_changed": true,
+      "defender_placements": 0,
+      "horizon": 1,
+      "phase": "SecondStone",
+      "schedule": "A"
+    },
+    {
+      "attacker_placements": 1,
+      "attacker_quota_changed": false,
+      "defender_placements": 1,
+      "horizon": 2,
+      "phase": "SecondStone",
+      "schedule": "AD"
+    },
+    {
+      "attacker_placements": 1,
+      "attacker_quota_changed": false,
+      "defender_placements": 2,
+      "horizon": 3,
+      "phase": "SecondStone",
+      "schedule": "ADD"
+    },
+    {
+      "attacker_placements": 2,
+      "attacker_quota_changed": true,
+      "defender_placements": 2,
+      "horizon": 4,
+      "phase": "SecondStone",
+      "schedule": "ADDA"
+    },
+    {
+      "attacker_placements": 3,
+      "attacker_quota_changed": true,
+      "defender_placements": 2,
+      "horizon": 5,
+      "phase": "SecondStone",
+      "schedule": "ADDAA"
+    },
+    {
+      "attacker_placements": 3,
+      "attacker_quota_changed": false,
+      "defender_placements": 3,
+      "horizon": 6,
+      "phase": "SecondStone",
+      "schedule": "ADDAAD"
+    },
+    {
+      "attacker_placements": 3,
+      "attacker_quota_changed": false,
+      "defender_placements": 4,
+      "horizon": 7,
+      "phase": "SecondStone",
+      "schedule": "ADDAADD"
+    },
+    {
+      "attacker_placements": 4,
+      "attacker_quota_changed": true,
+      "defender_placements": 4,
+      "horizon": 8,
+      "phase": "SecondStone",
+      "schedule": "ADDAADDA"
+    },
+    {
+      "attacker_placements": 5,
+      "attacker_quota_changed": true,
+      "defender_placements": 4,
+      "horizon": 9,
+      "phase": "SecondStone",
+      "schedule": "ADDAADDAA"
+    },
+    {
+      "attacker_placements": 5,
+      "attacker_quota_changed": false,
+      "defender_placements": 5,
+      "horizon": 10,
+      "phase": "SecondStone",
+      "schedule": "ADDAADDAAD"
+    },
+    {
+      "attacker_placements": 5,
+      "attacker_quota_changed": false,
+      "defender_placements": 6,
+      "horizon": 11,
+      "phase": "SecondStone",
+      "schedule": "ADDAADDAADD"
+    },
+    {
+      "attacker_placements": 6,
+      "attacker_quota_changed": true,
+      "defender_placements": 6,
+      "horizon": 12,
+      "phase": "SecondStone",
+      "schedule": "ADDAADDAADDA"
+    },
+    {
+      "attacker_placements": 7,
+      "attacker_quota_changed": true,
+      "defender_placements": 6,
+      "horizon": 13,
+      "phase": "SecondStone",
+      "schedule": "ADDAADDAADDAA"
+    },
+    {
+      "attacker_placements": 7,
+      "attacker_quota_changed": false,
+      "defender_placements": 7,
+      "horizon": 14,
+      "phase": "SecondStone",
+      "schedule": "ADDAADDAADDAAD"
+    },
+    {
+      "attacker_placements": 7,
+      "attacker_quota_changed": false,
+      "defender_placements": 8,
+      "horizon": 15,
+      "phase": "SecondStone",
+      "schedule": "ADDAADDAADDAADD"
+    },
+    {
+      "attacker_placements": 8,
+      "attacker_quota_changed": true,
+      "defender_placements": 8,
+      "horizon": 16,
+      "phase": "SecondStone",
+      "schedule": "ADDAADDAADDAADDA"
+    }
+  ],
+  "six_stone_two_cover": {
+    "all_have_two_cover": true,
+    "canonical_shapes": 259,
+    "cover_size_counts": {
+      "1": 177,
+      "2": 82
+    },
+    "examples": {
+      "1": {
+        "cover": [
+          3
+        ],
+        "stones": [
+          0,
+          1,
+          2,
+          4
+        ]
+      },
+      "2": {
+        "cover": [
+          -2,
+          4
+        ],
+        "stones": [
+          0,
+          1,
+          2,
+          3
+        ]
+      }
+    },
+    "failures": []
+  }
+}
