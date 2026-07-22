@@ -8,17 +8,17 @@ MEASURED (verified data) / CODE-FACT (cite lines) / HYPOTHESIS / RETRACTED
 
 ## 1. Production profile (main_4 line; trainer currently stopped)
 
-`tss_solver_mode=3` (WIN+LOSS), node cap 1000 + J2near ON (owner
-completeness ruling 2026-07-21, superseding the same-day cap-750 retune —
-see the J2near-wire entry in §5; wall budget consciously relaxed:
-completeness of the verified training-target set now outranks the old
-49.96 s battery wall), 256 KiB TT, unbounded horizon
-(`semantic_horizon=u32::MAX`), wide (`vcf_pair_j2near` selected by the
-first-class `tss_solver_j2near` config key over `configure_leaf_profile`:
-wide + lazy frontier + interior census gate [inert when unbounded]),
-`dual_pass=true`, `all_leaves=true` (park 5000 ms emergency-only), async
-12/24, root+interior guards. G2 / ordering hints / loss_reserve /
-fragments / zones OFF.
+`tss_solver_mode=3` (WIN+LOSS), node cap 750, J2near OFF (owner reversal
+2026-07-21 late: the same-evening cap-1000/J2near-on point was judged not
+worth the wall — J2near adds zero decided rows at caps ≤1,000; cap 750 is
+the measured strictly-better post-fold point, +89 decisions under the old
+wall — see the §5 entries), 256 KiB TT, unbounded horizon
+(`semantic_horizon=u32::MAX`), wide (`vcf_pair_complete`; the first-class
+`tss_solver_j2near` key stays wired default-off over
+`configure_leaf_profile`: wide + lazy frontier + interior census gate
+[inert when unbounded]), `dual_pass=true`, `all_leaves=true` (park
+5000 ms emergency-only), async 12/24, root+interior guards. G2 / ordering
+hints / loss_reserve / fragments / zones OFF.
 
 ## 2. Measured facts the current work stands on
 
@@ -181,6 +181,13 @@ CapResumeSession promotion · GPU bench close-out.
   measured on claude/j2near-profile. Gates: 4-case seam test, j2near unit
   set, python-feature suite 221/0/43 + release lib 136/0/42, all repeated
   in an independent orchestrator rerun from a cold build.
+- 2026-07-21 late (owner REVERSAL of the same-evening completeness
+  ruling): **cap back to 750, J2near OFF** ("it seems to not be worth
+  it") — consistent with the measured data: J2near-on decides zero extra
+  rows at any cap ≤1,000 and cap 1,000 costs 60.5 s vs 45.96 s at 750 for
+  +61 rows. The `tss_solver_j2near` key and wiring REMAIN (default-off,
+  retest lever); only the TOML policy reverted. Bottleneck diagnostic
+  relaunched at the cap-750/off production point.
 - 2026-07-21 (triage Phase B, `be4bd34a` on claude/triage-b;
   REPORT_TRIAGE_PHASE_B.md). MEASURED: sub-root trajectory telemetry
   (cfg-test, 34,616 snapshots over the 248 labeled grinds @cap 5k).

@@ -69,14 +69,14 @@ drive; ran to ~ep25 with an eval). Not a crash; checkpoints intact.**
 
 - Line: fresh-start run, weights-only warm start from main_3 ep90; cosine
   LR 2e-4→2e-5 over 150 epochs + floor. Branch `claude/main4-integration`.
-- Solver config: mode 3 (WIN+LOSS), cap 1000 + `tss_solver_j2near=true`
-  (owner completeness ruling 2026-07-21, superseding the same-day cap-750
-  point — REPORT_J2NEAR_WIRE.md `80e3ea18`: J2near now a first-class
-  config key, env path deleted; cap-1000 arms measured decision-safe in
-  REPORT_J2NEAR_CAP.md, wall budget consciously relaxed to 60.5 s
-  battery; toml updated, applies at relaunch, first-epoch gates still
-  bind), 256 KiB TT, unbounded horizon, wide J2near profile,
-  `tss_solver_dual_pass=true`,
+- Solver config: mode 3 (WIN+LOSS), cap 750, `tss_solver_j2near=false`
+  (owner reversal 2026-07-21 late — the brief cap-1000/J2near-on point
+  was judged not worth the wall; J2near stays wired as a first-class
+  default-off key, env path deleted — REPORT_J2NEAR_WIRE.md `80e3ea18`;
+  cap 750 = measured strictly-better post-fold point per
+  REPORT_J2NEAR_CAP.md: +89 decisions, 45.96 s < old 49.96 s wall; toml
+  applies at relaunch, first-epoch gates still bind), 256 KiB TT,
+  unbounded horizon, wide profile, `tss_solver_dual_pass=true`,
   `tss_solver_all_leaves=true` (strict solver-first: every leaf solved
   before GPU eval; park 5000 ms = emergency valve only), async 12/24
   workers, root+interior guards on. G2 / ordering hints / loss_reserve OFF.

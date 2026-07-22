@@ -42,11 +42,14 @@ tss_interior_guard = true
 # mode 3 = verified WIN + hard-LOSS consumption.
 tss_solver_mode = 3
 tss_solver_root_guard = true
-# Cap 1,000 + J2near ON (owner completeness ruling 2026-07-21; wall budget
-# consciously relaxed). REPORT_J2NEAR_CAP.md measured both cap-1,000 arms as
-# decision-safe: 1,362 decided rows, zero archive downgrades, and zero W/L
-# flips. First-epoch validation gates at relaunch still apply.
-tss_solver_node_cap = 1000
+# Cap 750, J2near OFF (owner reversal 2026-07-21 late: the brief cap-1000 +
+# J2near-on point was judged not worth the wall — REPORT_J2NEAR_CAP.md shows
+# J2near-on adds ZERO decided rows at any cap <= 1,000 and its unique proofs
+# need 1,111-1,783 nodes). Cap 750 is the measured strictly-better point after
+# the 1.72x generation fold: all previously decided rows preserved, +89
+# verified decisions, 45.96 s median battery < old 49.96 s wall.
+# First-epoch validation gates at relaunch still apply.
+tss_solver_node_cap = 750
 tss_solver_sample_16 = 16
 # Unused-budget dual pass for the wide Both split (R-TWOPASS-IMPL). ON for main_4.
 tss_solver_dual_pass = true
@@ -86,8 +89,10 @@ tss_solver_all_leaves = true
 # Zone AND-generation OFF (production A/B measured zero additional decided
 # positions; a TOML flip away if a deeper-cap corpus ever shows value).
 tss_zone = false
-# Free-tempo J2near width is always ON for production under the owner ruling.
-tss_solver_j2near = true
+# Free-tempo J2near width OFF (owner reversal 2026-07-21 late — adds no
+# decided row at affordable caps; kept as a first-class key for future retest
+# once speed headroom reaches the ~1,100+-node J2near-unique proof band).
+tss_solver_j2near = false
 # Other default-OFF solver extensions from the main_4 integration merge stay OFF.
 tss_solver_group2 = false
 tss_solver_loss_reserve_nodes = 0
