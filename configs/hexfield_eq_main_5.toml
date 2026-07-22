@@ -14,12 +14,13 @@
 #
 # Everything else deliberately close to the live main_4 regime, with ONE
 # intentional delta beyond capacity:
-#   * LR: cosine 3e-4 -> 2e-5 over 150 epochs, then HOLD at the 2e-5 floor
+#   * LR: cosine 3e-4 -> 2e-5 over 130 epochs, then HOLD at the 2e-5 floor
 #     (owner ruling 2026-07-22: raise the START from main_4's 2e-4 to 3e-4 to
-#     move the deeper 15-block trunk faster early; same 2e-5 floor + 150-epoch
-#     horizon, so the curve converges to main_4's exactly at ep150. Every epoch
-#     the amount ABOVE the floor is 1.556x main_4's — ep0 3.0e-4, ep25 2.81e-4,
-#     ep50 2.30e-4, ep75 1.60e-4, ep100 9.0e-5, ep125 3.88e-5, ep150 2.0e-5).
+#     move the deeper 15-block trunk faster early, AND shorten the decay horizon
+#     150->130 for a faster mid-run decrease — a little lower through ep50-75.
+#     Same 2e-5 floor, reached at ep130 (vs main_4's ep150). Trajectory:
+#     ep0 3.0e-4, ep25 2.75e-4, ep50 2.10e-4, ep75 1.26e-4, ep100 5.5e-5,
+#     ep125 2.1e-5, ep130+ 2.0e-5 floor).
 #   * Solver: mode 3, cap 750, J2near OFF, dual_pass, horizon UNBOUNDED,
 #     all-leaves strict park (5000 ms), async 12/24 — the measured post-fold
 #     production point (REPORT_J2NEAR_CAP.md; owner reversal 2026-07-21 late).
@@ -137,7 +138,7 @@ learning_rate = 3e-4
 lr_schedule = "cosine"
 lr_warmup_steps = 0
 lr_final = 2e-5
-lr_decay_epochs = 150
+lr_decay_epochs = 130
 weight_decay = 1e-4
 grad_clip = 5.0
 adaptive_clip = true
@@ -219,7 +220,13 @@ update_checkpoint_pointer = false
 passes_per_epoch = 1
 
 [checkpoint]
-# FRESH-weights BC prefit off the 10 highest main_4 sample epochs, written by
-# scripts/_hexfield_eq_main5_prefit.sh (initialize_from, NOT resume_from).
-initialize_from = "/mnt/e/Hexo-BotTrainer/runs/hexfield_eq_main5_prefit/cca15/soak_init.pt"
+# FRESH-weights BC prefit off the 10 highest main_4 sample epochs
+# (scripts/_hexfield_eq_main5_prefit.sh). Owner ruling 2026-07-22: LAUNCH EARLY
+# from the epoch-2 checkpoint (3 shuffled passes — corpus globally shuffled
+# across all 10 epochs, so the newest games were already seen from pass 0).
+# The prefit writes {meta,model} per-epoch checkpoints; the trainer's
+# initialize_from reads payload["model"] via warm_start_into, so this loads
+# exactly like a soak_init (weights-only warm start, fresh optimizer/window/
+# epoch). NOT resume_from.
+initialize_from = "/mnt/e/Hexo-BotTrainer/runs/hexfield_eq_main5_prefit/cca15/checkpoint_epoch2.pt"
 save_name = "latest"
