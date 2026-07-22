@@ -27,6 +27,7 @@ evidence.
 | R8 | 2.1, 2.5, 4.1, 4.3, 6 | Restricts acceptance to a checked D6-safe coordinate closure and binds ruleset, coordinate, and semantic versions into root identity and the typed result. |
 | R2-1 | 1.3, 2.4, 2.6, 3.1, 3.2, 4.2, 6 | Defines one authoritative `RefuteLeafExactEligibleV1` conjunction for production, self-verification, and gating, including all root, profile, strict-cap, constructor, and exact-expansion premises. |
 | R2-2 | 2.1, 4.2, 4.3, 6 | Freezes the byte preimage of `root_semantic_sha256`, defines failure counters as ordered-occurrence counts, states their sum identities, and requires independent digest/counter goldens. |
+| R3-1 | 4.2, 6 | Confirms from the frozen `T/G1/S/U` equations that an accepted `Q=1` root is impossible and replaces only that golden with a realizable class-level sole-orientation vector; the `Q=0` and commuting `Q=2` goldens remain unchanged. |
 
 ## 1. Claim semantics
 
@@ -865,7 +866,7 @@ shared. Producer semantic normalization/decoding may not be shared unless the
 literal decoder is separately modeled, golden-tested, and approved in the
 call-graph review.
 
-### 4.2 Re-derivation obligations — amended per R1, R2, R4, R5, R2-1, R2-2
+### 4.2 Re-derivation obligations — amended per R1, R2, R4, R5, R2-1, R2-2, R3-1
 
 **HYPOTHESIS.** After strict decoding, version/policy checks, reachable-token
 validation, D6 preflight, and exact root binding, the verifier MUST:
@@ -899,12 +900,81 @@ not broaden leaf-v1 acceptance.
 
 Tests MUST include independent golden vectors from a third simple oracle. Each
 root-identity vector pins the literal canonical-preimage bytes in hexadecimal
-and the resulting 32 digest bytes. Counter vectors MUST separately pin (1) a
-sole-orientation failing class, where `Q=1`, `quotient_class_count=1`, and the
-selected `fail_*` value is `1`, and (2) a two-member commuting failing class,
-where `Q=2`, `quotient_class_count=1`, and the selected `fail_*` value is `2`.
-All other failing fields are zero in those focused vectors. At least one vector
-MUST combine digest and counter expectations in the same literal artifact.
+and the resulting 32 digest bytes. The existing accepted `Q=0` root-identity
+vector and the two-member commuting failing-class vector, where `Q=2`,
+`quotient_class_count=1`, and the selected `fail_*` value is `2`, remain
+mandatory and unchanged.
+
+**HYPOTHESIS — R3-1 golden correction.** The former focused root-level `Q=1`
+vector is impossible under section 2.2. If `|T| >= 2`, distinct `a,b in T`
+give both `(a,b)` and `(b,a)` through `T-{a}` and `T-{b}`, so `Q >= 2`; if
+`T` is empty, `Q=0`. If `T={a}` and `(a,b) in U`, then `b in G1(P,a)`. Its
+literal witness is a live claimant window containing legal empty `a` and `b`.
+Claimant count at least two would put that same legal `b` in `T`, so the count
+is exactly one. The window therefore has five empties, and all four besides
+`a` are legal at this post-opening turn start because each is at hex distance
+at most five from its claimant stone. The same window puts all four in
+`G1(P,a)`, hence `Q >= 4`. Opening, `SecondStone`, and terminal roots are not
+accepted leaf roots; a terminal pair prefix does not alter root-level `U`; and
+the D6-safe closure forbids coordinate-boundary clipping. Thus none supplies a
+`Q=1` exception.
+
+The replacement class-level vector MUST use this reachable history, in
+placement order (owners follow the frozen opening schedule):
+
+```text
+1 (0,0) P0; 2 (-1,0) P1; 3 (6,0) P1;
+4 (1,0) P0; 5 (2,0) P0; 6 (3,5) P1;
+7 (-1,6) P1; 8 (4,0) P0; 9 (5,0) P0.
+```
+
+At the resulting nonterminal `FirstStone` root, `A=P1` and `D=P0`. The only
+live defender count-at-least-four window is axis 0, start `(0,0)`, with defender
+stones at offsets `0,1,2,4,5` and sole empty `a=(3,0)`; its adjacent count-four
+windows are blocked by claimant stones at `(-1,0)` and `(6,0)`. No live
+claimant window has count two. The only claimant-live window through `a` is
+axis 1, start `(3,0)`, with its one claimant stone at `(3,5)`. Consequently
+
+```text
+T = {(3,0)}
+G1(P,(3,0)) = {(3,1),(3,2),(3,3),(3,4)}
+U = {((3,0),(3,1)), ((3,0),(3,2)),
+     ((3,0),(3,3)), ((3,0),(3,4))}.
+```
+
+The defender threat family is the singleton `{{(3,0)}}`, so its transversal
+number is one and `ForcedLoss_A(P,2)` is absent; absence of a claimant
+count-two live window also excludes `OwnWinNow_A(P,2)` and makes every pair's
+`Hpair_A` empty. All four occurrences therefore fail
+`NoNewClaimantThreat`. Their reverses are absent because no second coordinate
+is in `T`, so the quotient has four sole-orientation classes. In particular,
+the selected class `C={((3,0),(3,1))}` has `|C|=1` and contributes exactly one
+ordered occurrence to `fail_no_new`; the other three classes are the companions
+forced by the singleton-`T` lower bound. The vector pins
+
+```text
+t_count = 1; Q = 4; quotient_class_count = 4
+fail_no_new/fail_defender_first/fail_loose_0/fail_loose_1 = 4/0/0/0
+
+Q = 4 = 1 selected failure occurrence + 3 companion failure occurrences
+  = fail_no_new + fail_defender_first + fail_loose_0 + fail_loose_1
+quotient_class_count = 4 = 1 selected class + 3 companion classes
+  = classes_no_new + classes_defender_first + classes_loose_0 + classes_loose_1
+Q = sum_C |C| = 1 + 1 + 1 + 1.
+```
+
+Its exact `RootSemanticPreimageV1` hexadecimal and digest are respectively:
+
+```text
+485852464c56313a524f4f542d53454d414e5449433a5631000100010001000100010009ffff000001ffff06000100000000000100000000020000000003000500010400000000050000000006000000010101090000000001
+0ef6c6f1d35ff6826d655b3b11a8af537bf1be1da114034a1c7feef2adf2817c
+```
+
+The golden set therefore pins a selected sole class's one-occurrence
+contribution and, through the unchanged `Q=2` vector, the distinct interpretation
+in which one quotient class contributes two ordered failures. The replacement
+vector combines digest and counter expectations in the same accepted literal
+artifact. All failing fields not selected by either focused vector are zero.
 
 One-sided defect injection MUST omit a weak promotion in only one
 implementation, retain one stale defender window, flip each `tau` case, corrupt
@@ -984,7 +1054,7 @@ disproof-coverage telemetry. None may become `-1`, full-game `Loss`, a forced
 opponent move, search pruning, a proof cache, or imported atlas truth. The
 executed-byte/model correspondence is a separate later proof round.
 
-## 6. Gates, NCE disposition, and kill criteria — amended per R2, R3, R5, R6, R7, R8, R2-1, R2-2
+## 6. Gates, NCE disposition, and kill criteria — amended per R2, R3, R5, R6, R7, R8, R2-1, R2-2, R3-1
 
 **HYPOTHESIS.** Before measurements, freeze hashes/manifests for training and
 held-out cohorts, exact commands, solver flags, binary/compiler/features,
@@ -1039,11 +1109,13 @@ The R2-1 fixture set is mandatory and does not authorize another wire tag:
    self-verification. The strict-cap case MUST NOT be treated as natural
    exhaustion.
 
-The R2-2 golden set is also a gate artifact, not an implementation-generated
-snapshot: a third simple oracle independently supplies the exact preimage hex,
-digest bytes, `Q`, quotient-class count, and four `fail_*` values. It includes
-both counter shapes fixed in section 4.2 and is checked unchanged by producer,
-verifier, and model-codec tests.
+The R2-2/R3-1 golden set is also a gate artifact, not an
+implementation-generated snapshot: a third simple oracle independently
+supplies the exact preimage hex, digest bytes, `Q`, quotient-class count, and
+four `fail_*` values. It includes the unchanged `Q=0` and commuting `Q=2`
+vectors and the replacement class-level sole-orientation vector fixed in
+section 4.2, and is checked unchanged by producer, verifier, and model-codec
+tests.
 
 **HYPOTHESIS — explicit counterexample closure.** None of the eight review
 counterexamples is accepted residual risk:
