@@ -12,7 +12,9 @@ use hexo_engine::{apply_placement, HexCoord, HexoState, Placement};
 use serde_json::{json, Value};
 
 use crate::tss_core::{CertVerify, DeepSolve, ProofStatus, SolveCaps};
-use crate::tss_solver::{TssSolver, WidthOptions};
+use crate::tss_solver::{
+    begin_cap_profile, take_cap_profile, CapProfileSnapshot, TssSolver, WidthOptions,
+};
 use crate::tss_verify::TssVerifier;
 
 #[derive(Clone)]
@@ -26,6 +28,8 @@ struct Position {
 struct Outcome {
     status: &'static str,
     nodes: u64,
+    root_pn: Option<u32>,
+    root_dn: Option<u32>,
     verified: bool,
     verify_failed: u64,
     wall_nanos: u64,
@@ -80,7 +84,8 @@ fn grind_ids() -> HashSet<String> {
     BufReader::new(File::open(&path).expect("open grind labels"))
         .lines()
         .filter_map(|line| {
-            let row: Value = serde_json::from_str(&line.expect("read label row")).expect("label json");
+            let row: Value =
+                serde_json::from_str(&line.expect("read label row")).expect("label json");
             (row["source"].as_str() == Some("grind"))
                 .then(|| row["pos_id"].as_str().expect("grind pos_id").to_owned())
         })
@@ -117,17 +122,65 @@ fn solve_one(solver: &mut TssSolver, state: &HexoState, cap: u64, tt_bytes: usiz
         },
     );
     let wall_nanos = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
-    let verified = result.cert.as_ref().is_some_and(|cert| {
-        TssVerifier.verify(state, cert, result.status)
-    });
+    let (root_pn, root_dn) = solver
+        .last_wide_root_numbers()
+        .map(|(pn, dn)| (Some(pn), Some(dn)))
+        .unwrap_or((None, None));
+    let verified = result
+        .cert
+        .as_ref()
+        .is_some_and(|cert| TssVerifier.verify(state, cert, result.status));
     let verify_failed = u64::from(result.status != ProofStatus::Unknown && !verified);
     Outcome {
         status: status_name(result.status),
         nodes: result.stats.nodes,
+        root_pn,
+        root_dn,
         verified,
         verify_failed,
         wall_nanos,
     }
+}
+
+fn solve_one_profiled(
+    solver: &mut TssSolver,
+    state: &HexoState,
+    cap: u64,
+    tt_bytes: usize,
+) -> (Outcome, CapProfileSnapshot) {
+    let started = Instant::now();
+    begin_cap_profile();
+    let result = solver.solve(
+        state,
+        &SolveCaps {
+            node_cap: cap,
+            tt_bytes_cap: tt_bytes,
+            semantic_horizon: u32::MAX,
+        },
+    );
+    let profile = take_cap_profile();
+    let wall_nanos = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    let (root_pn, root_dn) = solver
+        .last_wide_root_numbers()
+        .map(|(pn, dn)| (Some(pn), Some(dn)))
+        .unwrap_or((None, None));
+    let verified = result
+        .cert
+        .as_ref()
+        .is_some_and(|cert| TssVerifier.verify(state, cert, result.status));
+    let verify_failed = u64::from(result.status != ProofStatus::Unknown && !verified);
+    (
+        Outcome {
+            status: status_name(result.status),
+            nodes: result.stats.nodes,
+            root_pn,
+            root_dn,
+            verified,
+            verify_failed,
+            wall_nanos,
+        },
+        profile,
+    )
 }
 
 fn run_repetitions(
@@ -139,7 +192,11 @@ fn run_repetitions(
     let mut off = vec![Vec::with_capacity(repetitions); positions.len()];
     let mut on = vec![Vec::with_capacity(repetitions); positions.len()];
     for repetition in 0..repetitions {
-        for &j2near in if repetition % 2 == 0 { &[false, true] } else { &[true, false] } {
+        for &j2near in if repetition % 2 == 0 {
+            &[false, true]
+        } else {
+            &[true, false]
+        } {
             let sink = if j2near { &mut on } else { &mut off };
             let mut solver = make_solver(j2near);
             for (index, position) in positions.iter().enumerate() {
@@ -152,12 +209,16 @@ fn run_repetitions(
     for (index, position) in positions.iter().enumerate() {
         for runs in [&off[index], &on[index]] {
             let first = &runs[0];
-            assert!(runs.iter().all(|run| {
-                run.status == first.status
-                    && run.nodes == first.nodes
-                    && run.verified == first.verified
-                    && run.verify_failed == first.verify_failed
-            }), "{} nondeterministic verdict or node count", position.id);
+            assert!(
+                runs.iter().all(|run| {
+                    run.status == first.status
+                        && run.nodes == first.nodes
+                        && run.verified == first.verified
+                        && run.verify_failed == first.verify_failed
+                }),
+                "{} nondeterministic verdict or node count",
+                position.id
+            );
         }
     }
     (off, on)
@@ -218,15 +279,14 @@ fn write_rows(
 }
 
 fn archived_identity() -> BTreeMap<(String, String), (&'static str, u64)> {
-    let base = root_dir().join(
-        "scripts/tss_harness/harness_runs/20260720_231040_dualpass_adoption",
-    );
+    let base =
+        root_dir().join("scripts/tss_harness/harness_runs/20260720_231040_dualpass_adoption");
     let mut out = BTreeMap::new();
     for set in ["selfplay_v1", "human_v1", "puzzle_v3"] {
         let path = base.join(format!("records_dualpass_adoption_{set}.jsonl"));
         for line in BufReader::new(File::open(&path).expect("open identity archive")).lines() {
-            let row: Value = serde_json::from_str(&line.expect("read identity row"))
-                .expect("identity json");
+            let row: Value =
+                serde_json::from_str(&line.expect("read identity row")).expect("identity json");
             let status = match row["status"].as_str().expect("identity status") {
                 "win" => "win",
                 "loss" => "loss",
@@ -252,7 +312,10 @@ fn tss_j2near_matched_ab() {
         .ok()
         .map(|value| value.parse::<usize>().expect("numeric repetitions"))
         .unwrap_or(3);
-    assert!(repetitions >= 3, "wall claims require at least three repetitions");
+    assert!(
+        repetitions >= 3,
+        "wall claims require at least three repetitions"
+    );
     let frozen = all_frozen();
     assert_eq!(frozen.len(), 6_443);
     let mut writer = output_writer("matched.jsonl");
@@ -275,9 +338,189 @@ fn tss_j2near_matched_ab() {
         }
         write_rows(&mut writer, &frozen, cap, 256 << 10, &off, &on);
         writer.flush().expect("flush frozen A/B");
-        println!("J2NEAR_AB cohort=frozen cap={cap} rows={} repetitions={repetitions}", frozen.len());
+        println!(
+            "J2NEAR_AB cohort=frozen cap={cap} rows={} repetitions={repetitions}",
+            frozen.len()
+        );
     }
+}
 
+#[test]
+#[ignore = "test-only phase profile plus uninstrumented identity battery"]
+fn tss_j2near_cap_profile() {
+    for name in [
+        "TSS_SHARED_FRAGMENTS",
+        "TSS_LAZY_FRONTIER",
+        "TSS_LAZY_FRONTIER_VALIDATE_KEYS",
+        "TSS_INTERIOR_CENSUS_GATE",
+        "TSS_K_REPLY_CONSUME",
+        "TSS_K_REPLY_SHADOW",
+        "TSS_VCF_J2NEAR",
+        "TSS_THRESHOLD_DELTA",
+        "TSS_THRESHOLD_COUNTERS",
+        "TSS_ZONE_ORDER",
+        "TSS_ZONE_ORDER_BAND",
+        "TSS_SECOND_CANDIDATES_REFERENCE",
+        "TSS_LIVE_GE3_SEED",
+        "TSS_CLOSURE_COUNTERS",
+        "TSS_REVEAL_PREFIX_STUDY",
+        "TSS_ORDERING_STUDY",
+        "TSS_TURN_QUOTIENT_TELEMETRY",
+        "TSS_TRACE_PN",
+    ] {
+        assert!(
+            std::env::var_os(name).is_none(),
+            "production profile requires {name} unset"
+        );
+    }
+    let caps = std::env::var("TSS_J2NEAR_PROFILE_CAPS")
+        .unwrap_or_else(|_| "500,750".to_owned())
+        .split(',')
+        .map(|value| value.trim().parse::<u64>().expect("numeric profile cap"))
+        .collect::<Vec<_>>();
+    let repetitions = std::env::var("TSS_BOTTLENECK_REPETITIONS")
+        .ok()
+        .map(|value| value.parse::<usize>().expect("numeric repetitions"))
+        .unwrap_or(3);
+    assert!(
+        repetitions >= 3,
+        "wall attribution requires three repetitions"
+    );
+    let frozen = all_frozen();
+    assert_eq!(frozen.len(), 6_443);
+    let mut writer = output_writer("profile.jsonl");
+    for cap in caps {
+        let mut baseline = vec![Vec::with_capacity(repetitions); frozen.len()];
+        for _ in 0..repetitions {
+            let mut baseline_solver = make_solver(false);
+            for (index, position) in frozen.iter().enumerate() {
+                let outcome = solve_one(&mut baseline_solver, &position.state, cap, 256 << 10);
+                assert_eq!(outcome.verify_failed, 0, "{} verifier failure", position.id);
+                baseline[index].push(outcome);
+            }
+        }
+        let baseline_nodes = baseline.iter().map(|runs| runs[0].nodes).sum::<u64>();
+        for (position, runs) in frozen.iter().zip(&baseline) {
+            let first = &runs[0];
+            assert!(
+                runs.iter().all(|run| {
+                    run.status == first.status
+                        && run.nodes == first.nodes
+                        && run.root_pn == first.root_pn
+                        && run.root_dn == first.root_dn
+                        && run.verified == first.verified
+                        && run.verify_failed == first.verify_failed
+                }),
+                "{} baseline verdict, nodes, or root numbers changed",
+                position.id
+            );
+        }
+        let mut profiled_solver = make_solver(false);
+        let mut profiled_nodes = 0u64;
+        for (position, runs) in frozen.iter().zip(&baseline) {
+            let expected = &runs[0];
+            let (actual, profile) =
+                solve_one_profiled(&mut profiled_solver, &position.state, cap, 256 << 10);
+            assert_eq!(
+                actual.status, expected.status,
+                "{} profile status",
+                position.id
+            );
+            assert_eq!(
+                actual.nodes, expected.nodes,
+                "{} profile nodes",
+                position.id
+            );
+            assert_eq!(
+                actual.verified, expected.verified,
+                "{} profile verify",
+                position.id
+            );
+            assert_eq!(
+                actual.verify_failed, 0,
+                "{} profile verifier failure",
+                position.id
+            );
+            assert_eq!(
+                actual.root_pn, expected.root_pn,
+                "{} profile root pn",
+                position.id
+            );
+            assert_eq!(
+                actual.root_dn, expected.root_dn,
+                "{} profile root dn",
+                position.id
+            );
+            profiled_nodes = profiled_nodes.saturating_add(actual.nodes);
+            let measured_nanos = profile
+                .other_nanos
+                .saturating_add(profile.setup_nanos)
+                .saturating_add(profile.attacker_generation_nanos)
+                .saturating_add(profile.second_candidate_nanos)
+                .saturating_add(profile.window_nanos)
+                .saturating_add(profile.defender_generation_nanos)
+                .saturating_add(profile.defender_plan_nanos)
+                .saturating_add(profile.tt_nanos)
+                .saturating_add(profile.pn_select_backprop_nanos)
+                .saturating_add(profile.state_make_unmake_nanos)
+                .saturating_add(profile.certificate_nanos);
+            let final_status = match actual.status {
+                "win" => "win",
+                "loss" => "loss",
+                "unknown" if actual.nodes == cap => "unknown_at_cap",
+                "unknown" => "width_exhaust",
+                _ => unreachable!(),
+            };
+            let row = json!({
+                "set": position.set,
+                "pos_id": position.id,
+                "cap": cap,
+                "status": actual.status,
+                "final_status": final_status,
+                "verified": actual.verified,
+                "nodes": actual.nodes,
+                "root_pn": actual.root_pn,
+                "root_dn": actual.root_dn,
+                "baseline_wall_nanos": runs.iter().map(|run| run.wall_nanos).collect::<Vec<_>>(),
+                "profiled_wall_nanos": actual.wall_nanos,
+                "phase_total_nanos": measured_nanos,
+                "profile_clock_gap_nanos": actual.wall_nanos.saturating_sub(measured_nanos),
+                "phase_other_nanos": profile.other_nanos,
+                "phase_setup_nanos": profile.setup_nanos,
+                "phase_attacker_generation_nanos": profile.attacker_generation_nanos,
+                "phase_second_candidate_nanos": profile.second_candidate_nanos,
+                "phase_window_nanos": profile.window_nanos,
+                "phase_defender_generation_nanos": profile.defender_generation_nanos,
+                "phase_defender_plan_nanos": profile.defender_plan_nanos,
+                "phase_tt_nanos": profile.tt_nanos,
+                "phase_pn_select_backprop_nanos": profile.pn_select_backprop_nanos,
+                "phase_state_make_unmake_nanos": profile.state_make_unmake_nanos,
+                "phase_certificate_nanos": profile.certificate_nanos,
+            });
+            serde_json::to_writer(&mut writer, &row).expect("write profile row");
+            writeln!(writer).expect("finish profile row");
+        }
+        let expected_nodes = match cap {
+            500 => Some(556_452),
+            750 => Some(730_143),
+            _ => None,
+        };
+        if let Some(expected_nodes) = expected_nodes {
+            assert_eq!(
+                baseline_nodes, expected_nodes,
+                "cap {cap} baseline node identity"
+            );
+            assert_eq!(
+                profiled_nodes, expected_nodes,
+                "cap {cap} frozen node identity"
+            );
+        }
+        writer.flush().expect("flush cap profile");
+        println!(
+            "BOTTLENECK_PROFILE cap={cap} rows={} baseline_nodes={baseline_nodes} profiled_nodes={profiled_nodes} repetitions={repetitions}",
+            frozen.len()
+        );
+    }
 }
 
 #[test]
@@ -287,7 +530,10 @@ fn tss_j2near_grind_ab() {
         .ok()
         .map(|value| value.parse::<usize>().expect("numeric repetitions"))
         .unwrap_or(3);
-    assert!(repetitions >= 3, "wall claims require at least three repetitions");
+    assert!(
+        repetitions >= 3,
+        "wall claims require at least three repetitions"
+    );
     let ids = grind_ids();
     let mut by_id = BTreeMap::new();
     for position in all_frozen() {
@@ -295,14 +541,22 @@ fn tss_j2near_grind_ab() {
     }
     let grinds = ids
         .iter()
-        .map(|id| by_id.get(id).unwrap_or_else(|| panic!("missing grind {id}")).clone())
+        .map(|id| {
+            by_id
+                .get(id)
+                .unwrap_or_else(|| panic!("missing grind {id}"))
+                .clone()
+        })
         .collect::<Vec<_>>();
     assert_eq!(grinds.len(), 248);
     let (off, on) = run_repetitions(&grinds, 50_000, 256 << 20, repetitions);
     let mut writer = output_writer("grind.jsonl");
     write_rows(&mut writer, &grinds, 50_000, 256 << 20, &off, &on);
     writer.flush().expect("flush grind A/B");
-    println!("J2NEAR_AB cohort=grind cap=50000 rows={} repetitions={repetitions}", grinds.len());
+    println!(
+        "J2NEAR_AB cohort=grind cap=50000 rows={} repetitions={repetitions}",
+        grinds.len()
+    );
 }
 
 #[test]

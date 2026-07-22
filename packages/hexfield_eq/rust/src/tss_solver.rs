@@ -12,8 +12,8 @@
 //! must produce a proof.  Failure or any resource exhaustion is `Unknown`; a
 //! failed restricted attack is never interpreted as a proof for the opponent.
 
-use std::cmp::Reverse;
 use std::cell::RefCell;
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::mem::size_of;
@@ -59,7 +59,6 @@ impl SolveOrdering {
             Self::Prior => "prior",
         }
     }
-
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1031,10 +1030,7 @@ impl TssSolver {
             interior_census_gate: std::env::var_os("TSS_INTERIOR_CENSUS_GATE")
                 .is_some_and(|value| value == "1"),
             k_reply_consume: matches!(std::env::var("TSS_K_REPLY_CONSUME").as_deref(), Ok("1")),
-            free_tempo_j2near: matches!(
-                std::env::var("TSS_VCF_J2NEAR").as_deref(),
-                Ok("1")
-            ),
+            free_tempo_j2near: matches!(std::env::var("TSS_VCF_J2NEAR").as_deref(), Ok("1")),
         }
     }
 
@@ -1337,10 +1333,7 @@ impl TssSolver {
                     stats,
                 };
             }
-            if goal == SolveGoal::Both
-                && effective.vcf_pair_complete
-                && effective.dual_pass
-            {
+            if goal == SolveGoal::Both && effective.vcf_pair_complete && effective.dual_pass {
                 dual_cap = caps.node_cap.saturating_sub(stats.nodes);
             }
         }
@@ -1494,6 +1487,8 @@ impl TssSolver {
         lazy_frontier: bool,
         ordering_hints: Option<&OrderingHints>,
     ) -> AttemptResult {
+        #[cfg(test)]
+        let _setup_profile = CapProfileGuard::enter(CapProfilePhase::Setup);
         let fragments_enabled = self.shared_fragments_enabled;
         let shared_bytes = self
             .shared_tt
@@ -1517,13 +1512,19 @@ impl TssSolver {
         search.ordering_hints = ordering_hints.cloned();
         let root = search.insert_root(state);
         #[cfg(test)]
+        drop(_setup_profile);
+        #[cfg(test)]
         WIDE_SETUP_NANOS.fetch_add(
             u64::try_from(setup_started.elapsed().as_nanos()).unwrap_or(u64::MAX),
             std::sync::atomic::Ordering::Relaxed,
         );
         #[cfg(test)]
         let search_started = Instant::now();
+        #[cfg(test)]
+        let _pn_profile = CapProfileGuard::enter(CapProfilePhase::PnSelectBackprop);
         search.run(state, root);
+        #[cfg(test)]
+        drop(_pn_profile);
         #[cfg(test)]
         WIDE_SEARCH_NANOS.fetch_add(
             u64::try_from(search_started.elapsed().as_nanos()).unwrap_or(u64::MAX),
@@ -1690,10 +1691,7 @@ impl TssSolver {
         #[cfg(test)]
         {
             let memo = search.generation_memo.borrow();
-            GENERATION_MEMO_LOOKUPS.fetch_add(
-                memo.lookups,
-                std::sync::atomic::Ordering::Relaxed,
-            );
+            GENERATION_MEMO_LOOKUPS.fetch_add(memo.lookups, std::sync::atomic::Ordering::Relaxed);
             GENERATION_MEMO_HITS.fetch_add(memo.hits, std::sync::atomic::Ordering::Relaxed);
         }
         drop(search);
@@ -2529,8 +2527,7 @@ static WIDE_ZONE_ORDER_KEYS: std::sync::atomic::AtomicU64 = std::sync::atomic::A
 static WIDE_ZONE_ORDER_KEY_NANOS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 #[cfg(test)]
-static SECOND_CANDIDATE_CALLS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static SECOND_CANDIDATE_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(test)]
 static SECOND_CANDIDATE_REFERENCE_GROWTHS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
@@ -2538,11 +2535,164 @@ static SECOND_CANDIDATE_REFERENCE_GROWTHS: std::sync::atomic::AtomicU64 =
 static SECOND_CANDIDATE_OPTIMIZED_GROWTHS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 #[cfg(test)]
-static GENERATION_MEMO_LOOKUPS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static GENERATION_MEMO_LOOKUPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(test)]
-static GENERATION_MEMO_HITS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static GENERATION_MEMO_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Test-only, explicitly enabled exclusive phase clock for the cap-profile
+/// harness. Production builds contain neither the clock nor its guards.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+enum CapProfilePhase {
+    Other = 0,
+    Setup = 1,
+    AttackerGeneration = 2,
+    SecondCandidate = 3,
+    Window = 4,
+    DefenderGeneration = 5,
+    DefenderPlan = 6,
+    Tt = 7,
+    PnSelectBackprop = 8,
+    StateMakeUnmake = 9,
+    Certificate = 10,
+}
+
+#[cfg(test)]
+const CAP_PROFILE_PHASES: usize = 11;
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct CapProfileSnapshot {
+    pub(crate) other_nanos: u64,
+    pub(crate) setup_nanos: u64,
+    pub(crate) attacker_generation_nanos: u64,
+    pub(crate) second_candidate_nanos: u64,
+    pub(crate) window_nanos: u64,
+    pub(crate) defender_generation_nanos: u64,
+    pub(crate) defender_plan_nanos: u64,
+    pub(crate) tt_nanos: u64,
+    pub(crate) pn_select_backprop_nanos: u64,
+    pub(crate) state_make_unmake_nanos: u64,
+    pub(crate) certificate_nanos: u64,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct CapProfileClock {
+    enabled: bool,
+    current: Option<CapProfilePhase>,
+    started: Instant,
+    stack: Vec<Option<CapProfilePhase>>,
+    nanos: [u64; CAP_PROFILE_PHASES],
+}
+
+#[cfg(test)]
+impl Default for CapProfileClock {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            current: None,
+            started: Instant::now(),
+            stack: Vec::new(),
+            nanos: [0; CAP_PROFILE_PHASES],
+        }
+    }
+}
+
+#[cfg(test)]
+impl CapProfileClock {
+    fn flush_at(&mut self, now: Instant) {
+        if let Some(phase) = self.current {
+            let elapsed =
+                u64::try_from(now.duration_since(self.started).as_nanos()).unwrap_or(u64::MAX);
+            let slot = &mut self.nanos[phase as usize];
+            *slot = slot.saturating_add(elapsed);
+        }
+        self.started = now;
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static CAP_PROFILE_CLOCK: RefCell<CapProfileClock> = RefCell::new(CapProfileClock::default());
+}
+
+#[cfg(test)]
+struct CapProfileGuard {
+    active: bool,
+}
+
+#[cfg(test)]
+impl CapProfileGuard {
+    fn enter(phase: CapProfilePhase) -> Self {
+        let active = CAP_PROFILE_CLOCK.with(|slot| {
+            let mut clock = slot.borrow_mut();
+            if !clock.enabled {
+                return false;
+            }
+            let now = Instant::now();
+            clock.flush_at(now);
+            let previous = clock.current;
+            clock.stack.push(previous);
+            clock.current = Some(phase);
+            true
+        });
+        Self { active }
+    }
+}
+
+#[cfg(test)]
+impl Drop for CapProfileGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        CAP_PROFILE_CLOCK.with(|slot| {
+            let mut clock = slot.borrow_mut();
+            let now = Instant::now();
+            clock.flush_at(now);
+            clock.current = clock.stack.pop().unwrap_or(None);
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn begin_cap_profile() {
+    CAP_PROFILE_CLOCK.with(|slot| {
+        let mut clock = slot.borrow_mut();
+        assert!(!clock.enabled, "nested cap profile");
+        clock.enabled = true;
+        clock.current = Some(CapProfilePhase::Other);
+        clock.started = Instant::now();
+        clock.stack.clear();
+        clock.nanos = [0; CAP_PROFILE_PHASES];
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn take_cap_profile() -> CapProfileSnapshot {
+    CAP_PROFILE_CLOCK.with(|slot| {
+        let mut clock = slot.borrow_mut();
+        assert!(clock.enabled, "cap profile was not started");
+        assert!(clock.stack.is_empty(), "cap profile guard leaked");
+        clock.flush_at(Instant::now());
+        clock.enabled = false;
+        clock.current = None;
+        CapProfileSnapshot {
+            other_nanos: clock.nanos[CapProfilePhase::Other as usize],
+            setup_nanos: clock.nanos[CapProfilePhase::Setup as usize],
+            attacker_generation_nanos: clock.nanos[CapProfilePhase::AttackerGeneration as usize],
+            second_candidate_nanos: clock.nanos[CapProfilePhase::SecondCandidate as usize],
+            window_nanos: clock.nanos[CapProfilePhase::Window as usize],
+            defender_generation_nanos: clock.nanos[CapProfilePhase::DefenderGeneration as usize],
+            defender_plan_nanos: clock.nanos[CapProfilePhase::DefenderPlan as usize],
+            tt_nanos: clock.nanos[CapProfilePhase::Tt as usize],
+            pn_select_backprop_nanos: clock.nanos[CapProfilePhase::PnSelectBackprop as usize],
+            state_make_unmake_nanos: clock.nanos[CapProfilePhase::StateMakeUnmake as usize],
+            certificate_nanos: clock.nanos[CapProfilePhase::Certificate as usize],
+        }
+    })
+}
 
 /// Temporary hot-path attribution for the corpus harness: accumulated wall
 /// nanos of the wide generators/priors, read via `wide_gen_profile`.
@@ -4393,8 +4543,7 @@ impl<'store> WidePnSearch<'store> {
                 // strict self-verification under the extension policy. Any
                 // failure drops the certificate; the clean re-solve below
                 // restores flag-off behavior.
-                let finalized =
-                    crate::tss_verify_group2::finder_finalize_group2(state, &cert)?;
+                let finalized = crate::tss_verify_group2::finder_finalize_group2(state, &cert)?;
                 let claimed = status_for_claimant(state.current_player(), claimant);
                 if !crate::tss_core::CertVerify::verify(
                     &crate::tss_verify::Group2Verifier,
@@ -4612,7 +4761,12 @@ impl<'store> WidePnSearch<'store> {
     fn insert_position(&mut self, key: WidePositionKey, depth: usize, prior: WidePnPrior) -> usize {
         #[cfg(test)]
         let _timer = WideGenTimer::start(&WIDE_INSERT_NANOS);
-        if let Some(&id) = self.by_position.get(&key) {
+        let existing = {
+            #[cfg(test)]
+            let _tt_profile = CapProfileGuard::enter(CapProfilePhase::Tt);
+            self.by_position.get(&key).copied()
+        };
+        if let Some(id) = existing {
             self.tt_hits = self.tt_hits.saturating_add(1);
             return id;
         }
@@ -4644,7 +4798,11 @@ impl<'store> WidePnSearch<'store> {
 
         let added = wide_position_index_bytes(&key);
         if self.tt_bytes_cap > 0 && self.current_bytes.saturating_add(added) <= self.tt_bytes_cap {
-            self.by_position.insert(key, id);
+            {
+                #[cfg(test)]
+                let _tt_profile = CapProfileGuard::enter(CapProfilePhase::Tt);
+                self.by_position.insert(key, id);
+            }
             self.current_bytes = self.current_bytes.saturating_add(added);
             self.peak_bytes = self.peak_bytes.max(self.current_bytes);
         } else {
@@ -4688,7 +4846,11 @@ impl<'store> WidePnSearch<'store> {
             };
             WidePnPrior { pn, dn: 1 }
         } else {
-            let analysis = threats::analyze(state);
+            let analysis = {
+                #[cfg(test)]
+                let _window_profile = CapProfileGuard::enter(CapProfilePhase::Window);
+                threats::analyze(state)
+            };
             #[cfg(test)]
             let pn = if self.live_ge3_seed {
                 self.live_ge3_seed_prior(state)
@@ -4732,7 +4894,11 @@ impl<'store> WidePnSearch<'store> {
 
     fn completed_turn_prior(&self, state: &RustHexoState) -> WidePnPrior {
         debug_assert_ne!(state.current_player(), self.claimant);
-        let analysis = threats::analyze(state);
+        let analysis = {
+            #[cfg(test)]
+            let _window_profile = CapProfileGuard::enter(CapProfilePhase::Window);
+            threats::analyze(state)
+        };
         let pn = pn_from_fork_degree(analysis.opp_threat_count);
         #[cfg(test)]
         let pn = if self.live_ge3_seed {
@@ -5333,7 +5499,12 @@ impl<'store> WidePnSearch<'store> {
                     let linked = child.entry.is_none() && matches!(kind, WidePnKind::Choice);
                     #[cfg(test)]
                     let state_started = threshold_residency.state_started();
-                    let applied = state.apply_with_delta(Placement { coord });
+                    let applied = {
+                        #[cfg(test)]
+                        let _state_profile =
+                            CapProfileGuard::enter(CapProfilePhase::StateMakeUnmake);
+                        state.apply_with_delta(Placement { coord })
+                    };
                     #[cfg(test)]
                     threshold_residency.record_state_elapsed(state_started);
                     let Ok((_result, delta)) = applied else {
@@ -5380,7 +5551,12 @@ impl<'store> WidePnSearch<'store> {
                     threshold_residency.resume();
                     #[cfg(test)]
                     let state_started = threshold_residency.state_started();
-                    state.undo(delta);
+                    {
+                        #[cfg(test)]
+                        let _state_profile =
+                            CapProfileGuard::enter(CapProfilePhase::StateMakeUnmake);
+                        state.undo(delta);
+                    }
                     #[cfg(test)]
                     threshold_residency.record_state_elapsed(state_started);
                     match outcome {
@@ -5400,7 +5576,12 @@ impl<'store> WidePnSearch<'store> {
                     let linked = child.entry.is_none() && matches!(kind, WidePnKind::Choice);
                     #[cfg(test)]
                     let state_started = threshold_residency.state_started();
-                    let first_applied = state.apply_with_delta(Placement { coord: first });
+                    let first_applied = {
+                        #[cfg(test)]
+                        let _state_profile =
+                            CapProfileGuard::enter(CapProfilePhase::StateMakeUnmake);
+                        state.apply_with_delta(Placement { coord: first })
+                    };
                     #[cfg(test)]
                     threshold_residency.record_state_elapsed(state_started);
                     let Ok((_first_result, first_delta)) = first_applied else {
@@ -5411,13 +5592,23 @@ impl<'store> WidePnSearch<'store> {
                     };
                     #[cfg(test)]
                     let state_started = threshold_residency.state_started();
-                    let second_applied = state.apply_with_delta(Placement { coord: second });
+                    let second_applied = {
+                        #[cfg(test)]
+                        let _state_profile =
+                            CapProfileGuard::enter(CapProfilePhase::StateMakeUnmake);
+                        state.apply_with_delta(Placement { coord: second })
+                    };
                     #[cfg(test)]
                     threshold_residency.record_state_elapsed(state_started);
                     let Ok((_second_result, second_delta)) = second_applied else {
                         #[cfg(test)]
                         let state_started = threshold_residency.state_started();
-                        state.undo(first_delta);
+                        {
+                            #[cfg(test)]
+                            let _state_profile =
+                                CapProfileGuard::enter(CapProfilePhase::StateMakeUnmake);
+                            state.undo(first_delta);
+                        }
                         #[cfg(test)]
                         threshold_residency.record_state_elapsed(state_started);
                         self.set_child_refuted(id, child_index);
@@ -5481,8 +5672,13 @@ impl<'store> WidePnSearch<'store> {
                     }
                     #[cfg(test)]
                     let state_started = threshold_residency.state_started();
-                    state.undo(second_delta);
-                    state.undo(first_delta);
+                    {
+                        #[cfg(test)]
+                        let _state_profile =
+                            CapProfileGuard::enter(CapProfilePhase::StateMakeUnmake);
+                        state.undo(second_delta);
+                        state.undo(first_delta);
+                    }
                     #[cfg(test)]
                     threshold_residency.record_state_elapsed(state_started);
                     match outcome {
@@ -5801,17 +5997,16 @@ impl<'store> WidePnSearch<'store> {
             // The complete vector has already been stably prior-sorted. Drive
             // its first still-live edge so the external ordering is effective
             // without changing membership or any terminal classification.
-            return children.iter().enumerate().find_map(|(index, child)| {
-                match kind {
+            return children
+                .iter()
+                .enumerate()
+                .find_map(|(index, child)| match kind {
                     WidePnKind::Choice if !self.child_is_genuinely_refuted(child) => Some(index),
-                    WidePnKind::Universal { .. }
-                        if !self.child_is_genuinely_proven(child) =>
-                    {
+                    WidePnKind::Universal { .. } if !self.child_is_genuinely_proven(child) => {
                         Some(index)
                     }
                     _ => None,
-                }
-            });
+                });
         }
         if kind != WidePnKind::Choice || !self.zone_order_mode.enabled() {
             return self.select_child_index_baseline(
@@ -6620,7 +6815,11 @@ impl<'store> WidePnSearch<'store> {
             return WidePnStepOutcome::Progress;
         }
         if !matches!(state.phase(), TurnPhase::Opening) {
-            let analysis = threats::analyze(state);
+            let analysis = {
+                #[cfg(test)]
+                let _window_profile = CapProfileGuard::enter(CapProfilePhase::Window);
+                threats::analyze(state)
+            };
             if let Some(winner) = winner_from_analysis(state, &analysis) {
                 if winner == self.claimant {
                     match typed_lambda_leaf(
@@ -6673,7 +6872,11 @@ impl<'store> WidePnSearch<'store> {
         let (kind, mut children) = if state.current_player() == self.claimant {
             (WidePnKind::Choice, self.attack_children(state, depth))
         } else {
-            let analysis = threats::analyze(state);
+            let analysis = {
+                #[cfg(test)]
+                let _window_profile = CapProfileGuard::enter(CapProfilePhase::Window);
+                threats::analyze(state)
+            };
             let implicit_dispatch = !matches!(state.phase(), TurnPhase::Opening)
                 && analysis.opp_threat_count > 0
                 && !analysis.own_win_now
@@ -6801,12 +7004,16 @@ impl<'store> WidePnSearch<'store> {
 
     fn attack_pair_children(&self, state: &mut RustHexoState, _depth: usize) -> Vec<WidePnChild> {
         #[cfg(test)]
+        let _cap_profile = CapProfileGuard::enter(CapProfilePhase::AttackerGeneration);
+        #[cfg(test)]
         let _gen_timer = WideGenTimer::start(&WIDE_GEN_PAIR_NANOS);
         #[cfg(test)]
         let closure_started = self.closure_counters.then(Instant::now);
         #[cfg(test)]
         let gate_started = self.closure_counters.then(Instant::now);
         let gate = {
+            #[cfg(test)]
+            let _window_profile = CapProfileGuard::enter(CapProfilePhase::Window);
             let mut memo = self.generation_memo.borrow_mut();
             WideTurnGate::build_memoized(state, self.claimant, &mut memo)
         };
@@ -6926,6 +7133,8 @@ impl<'store> WidePnSearch<'store> {
             let mut reveal_second_elapsed = 0u64;
             {
                 #[cfg(test)]
+                let _second_profile = CapProfileGuard::enter(CapProfilePhase::SecondCandidate);
+                #[cfg(test)]
                 let _regen_timer = WideGenTimer::start(&WIDE_GEN_PRIOR_NANOS);
                 #[cfg(test)]
                 let second_started = self.closure_counters.then(Instant::now);
@@ -6970,14 +7179,10 @@ impl<'store> WidePnSearch<'store> {
                         "optimized second candidates diverged from HashSet reference"
                     );
                     SECOND_CANDIDATE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    SECOND_CANDIDATE_REFERENCE_GROWTHS.fetch_add(
-                        reference_growths,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
-                    SECOND_CANDIDATE_OPTIMIZED_GROWTHS.fetch_add(
-                        optimized_growths,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
+                    SECOND_CANDIDATE_REFERENCE_GROWTHS
+                        .fetch_add(reference_growths, std::sync::atomic::Ordering::Relaxed);
+                    SECOND_CANDIDATE_OPTIMIZED_GROWTHS
+                        .fetch_add(optimized_growths, std::sync::atomic::Ordering::Relaxed);
                 }
                 #[cfg(not(test))]
                 let _ = optimized_growths;
@@ -7216,6 +7421,8 @@ impl<'store> WidePnSearch<'store> {
         depth: usize,
         turn_first: Option<HexCoord>,
     ) -> Vec<WidePnChild> {
+        #[cfg(test)]
+        let _cap_profile = CapProfileGuard::enter(CapProfilePhase::AttackerGeneration);
         let mut candidates = ordered_threat_creating_moves_with_width(
             state,
             self.claimant,
@@ -7253,9 +7460,14 @@ impl<'store> WidePnSearch<'store> {
                 .as_ref()
                 .map(|context| context.features(&[candidate.coord]))
                 .unwrap_or_default();
-            let Ok((result, delta)) = state.apply_with_delta(Placement {
-                coord: candidate.coord,
-            }) else {
+            let applied = {
+                #[cfg(test)]
+                let _state_profile = CapProfileGuard::enter(CapProfilePhase::StateMakeUnmake);
+                state.apply_with_delta(Placement {
+                    coord: candidate.coord,
+                })
+            };
+            let Ok((result, delta)) = applied else {
                 continue;
             };
             let completion_ply = self.root_ply.saturating_add(depth as u32).saturating_add(1);
@@ -7305,7 +7517,11 @@ impl<'store> WidePnSearch<'store> {
             let future_key = (self.lazy_frontier
                 && child_result == Some(WidePnChildResult::Pending))
             .then(|| WideFutureKey::OnSelection(WidePositionKey::from_state(state)));
-            state.undo(delta);
+            {
+                #[cfg(test)]
+                let _state_profile = CapProfileGuard::enter(CapProfilePhase::StateMakeUnmake);
+                state.undo(delta);
+            }
             if let Some(result) = child_result {
                 children.push(WidePnChild {
                     mv: WidePnMove::One(candidate.coord),
@@ -7329,6 +7545,8 @@ impl<'store> WidePnSearch<'store> {
         state: &mut RustHexoState,
         defender_budget: u8,
     ) -> Vec<WidePnChild> {
+        #[cfg(test)]
+        let _cap_profile = CapProfileGuard::enter(CapProfilePhase::DefenderGeneration);
         let mut explicit = forced_defender_replies(
             state,
             self.claimant,
@@ -7339,7 +7557,12 @@ impl<'store> WidePnSearch<'store> {
         explicit.sort_by_key(|coord| canonical_coord_key(frame, *coord));
         let mut children = Vec::with_capacity(explicit.len());
         for coord in explicit {
-            let Ok((result, delta)) = state.apply_with_delta(Placement { coord }) else {
+            let applied = {
+                #[cfg(test)]
+                let _state_profile = CapProfileGuard::enter(CapProfilePhase::StateMakeUnmake);
+                state.apply_with_delta(Placement { coord })
+            };
+            let Ok((result, delta)) = applied else {
                 continue;
             };
             let child_result = match result.outcome {
@@ -7365,7 +7588,11 @@ impl<'store> WidePnSearch<'store> {
             } else {
                 (None, None)
             };
-            state.undo(delta);
+            {
+                #[cfg(test)]
+                let _state_profile = CapProfileGuard::enter(CapProfilePhase::StateMakeUnmake);
+                state.undo(delta);
+            }
             children.push(WidePnChild {
                 mv: WidePnMove::One(coord),
                 result: child_result,
@@ -7397,8 +7624,14 @@ impl<'store> WidePnSearch<'store> {
 
     fn defender_pair_children(&mut self, state: &mut RustHexoState) -> Option<Vec<WidePnChild>> {
         #[cfg(test)]
+        let _cap_profile = CapProfileGuard::enter(CapProfilePhase::DefenderGeneration);
+        #[cfg(test)]
         let _gen_timer = WideGenTimer::start(&WIDE_GEN_DEFENDER_NANOS);
-        let plan = forced_defender_pair_plan(state, self.claimant)?;
+        let plan = {
+            #[cfg(test)]
+            let _plan_profile = CapProfileGuard::enter(CapProfilePhase::DefenderPlan);
+            forced_defender_pair_plan(state, self.claimant)?
+        };
         let depth = usize::try_from(
             state
                 .placements_made()
@@ -7457,6 +7690,8 @@ impl<'store> WidePnSearch<'store> {
     }
 
     fn materialize(&self, state: &RustHexoState, root: usize) -> Option<WideMaterializedProof> {
+        #[cfg(test)]
+        let _cap_profile = CapProfileGuard::enter(CapProfilePhase::Certificate);
         if self.entries.get(root)?.pn != 0 {
             return None;
         }
@@ -9644,14 +9879,13 @@ impl Hasher for CoordHasher {
 
     fn write(&mut self, bytes: &[u8]) {
         for &byte in bytes {
-            self.0 = (self.0.rotate_left(5) ^ u64::from(byte))
-                .wrapping_mul(0x517c_c1b7_2722_0a95);
+            self.0 = (self.0.rotate_left(5) ^ u64::from(byte)).wrapping_mul(0x517c_c1b7_2722_0a95);
         }
     }
 
     fn write_i16(&mut self, value: i16) {
-        self.0 = (self.0.rotate_left(5) ^ u64::from(value as u16))
-            .wrapping_mul(0x517c_c1b7_2722_0a95);
+        self.0 =
+            (self.0.rotate_left(5) ^ u64::from(value as u16)).wrapping_mul(0x517c_c1b7_2722_0a95);
     }
 }
 
@@ -9811,7 +10045,11 @@ impl WideTurnGate {
                 let canonical = canonical_coord_key(frame, item.coord);
                 (
                     width_tier,
-                    if width_tier == 0 { item.priority_class } else { 0 },
+                    if width_tier == 0 {
+                        item.priority_class
+                    } else {
+                        0
+                    },
                     Reverse(if width_tier == 0 {
                         item.child_threats
                     } else {
@@ -10707,9 +10945,11 @@ fn group2_finder_preconditions(
         return false;
     }
     let mover = state.current_player();
-    let direct_win_upper = state.board().windows().entries().any(|entry| {
-        entry.count(claimant) == 0 && entry.count(mover).saturating_add(b) >= 6
-    });
+    let direct_win_upper = state
+        .board()
+        .windows()
+        .entries()
+        .any(|entry| entry.count(claimant) == 0 && entry.count(mover).saturating_add(b) >= 6);
     if direct_win_upper {
         return false;
     }
@@ -11708,8 +11948,14 @@ impl CachedProof {
 /// Exhaustive heap charge for one boxed `UniversalGroup2NodeV1`.
 fn group2_node_heap_bytes(node: &crate::tss_verify::UniversalGroup2NodeV1) -> usize {
     allocation_bytes(1, size_of::<crate::tss_verify::UniversalGroup2NodeV1>())
-        .saturating_add(allocation_bytes(node.edges.capacity(), size_of::<CertEdge>()))
-        .saturating_add(allocation_bytes(node.proof.authority.defender_path.len(), 1))
+        .saturating_add(allocation_bytes(
+            node.edges.capacity(),
+            size_of::<CertEdge>(),
+        ))
+        .saturating_add(allocation_bytes(
+            node.proof.authority.defender_path.len(),
+            1,
+        ))
         .saturating_add(allocation_bytes(node.proof.authority.fhw_path.len(), 1))
 }
 
@@ -11728,7 +11974,10 @@ fn fhw_gate_heap_bytes(gate: &crate::tss_verify::FhwGateNodeV1) -> usize {
             gate.proof.map.capacity(),
             size_of::<crate::tss_verify::FhwMapV1>(),
         ))
-        .saturating_add(allocation_bytes(gate.proof.authority.defender_path.len(), 1))
+        .saturating_add(allocation_bytes(
+            gate.proof.authority.defender_path.len(),
+            1,
+        ))
         .saturating_add(allocation_bytes(gate.proof.authority.fhw_path.len(), 1));
     for entry in &gate.proof.map {
         bytes = bytes
@@ -12170,6 +12419,8 @@ pub(crate) fn compact_certificate(
     arena: &[CertNode],
     root: CertNodeId,
 ) -> Option<(Vec<CertNode>, CertNodeId)> {
+    #[cfg(test)]
+    let _cap_profile = CapProfileGuard::enter(CapProfilePhase::Certificate);
     compact_certificate_limited(arena, root, MAX_CERT_NODES, MAX_CERT_EDGES)
 }
 
@@ -12300,12 +12551,10 @@ fn compact_certificate_limited(
                         )?,
                     });
                 }
-                CertNode::UniversalGroup2V1(Box::new(
-                    crate::tss_verify::UniversalGroup2NodeV1 {
-                        edges: mapped_edges,
-                        proof: node.proof.clone(),
-                    },
-                ))
+                CertNode::UniversalGroup2V1(Box::new(crate::tss_verify::UniversalGroup2NodeV1 {
+                    edges: mapped_edges,
+                    proof: node.proof.clone(),
+                }))
             }
             // Gate role rows reference arena IDs; the solver never builds
             // gates, so compaction refuses rather than remapping partially.
@@ -12383,7 +12632,14 @@ mod tests {
                     legal = false;
                     break;
                 };
-                if apply_placement(&mut state, Placement { coord: HexCoord { q, r } }).is_err() {
+                if apply_placement(
+                    &mut state,
+                    Placement {
+                        coord: HexCoord { q, r },
+                    },
+                )
+                .is_err()
+                {
                     legal = false;
                     break;
                 }
@@ -12392,7 +12648,11 @@ mod tests {
                 positions.push(state);
             }
         }
-        assert!(positions.len() >= 150, "human cohort short: {}", positions.len());
+        assert!(
+            positions.len() >= 150,
+            "human cohort short: {}",
+            positions.len()
+        );
         let caps = SolveCaps {
             node_cap: 500,
             tt_bytes_cap: 256 << 10,
@@ -12466,10 +12726,7 @@ mod tests {
         state
     }
 
-    fn j2near_root_children(
-        moves: &[(i16, i16)],
-        width: WidthOptions,
-    ) -> Vec<WidePnMove> {
+    fn j2near_root_children(moves: &[(i16, i16)], width: WidthOptions) -> Vec<WidePnMove> {
         let mut state = replay(moves);
         let search = WidePnSearch::new_with_width(
             state.current_player(),
@@ -12539,16 +12796,18 @@ mod tests {
             k_reply_consume: false,
             free_tempo_j2near: true,
         };
-        assert!(solver
-            .effective_solve_config(
-                &SolveCaps {
-                    node_cap: 500,
-                    tt_bytes_cap: 256 << 10,
-                    semantic_horizon: u32::MAX,
-                },
-                runtime,
-            )
-            .free_tempo_j2near);
+        assert!(
+            solver
+                .effective_solve_config(
+                    &SolveCaps {
+                        node_cap: 500,
+                        tt_bytes_cap: 256 << 10,
+                        semantic_horizon: u32::MAX,
+                    },
+                    runtime,
+                )
+                .free_tempo_j2near
+        );
         assert!(!WidthOptions::vcf_pair_complete().free_tempo_j2near);
         assert!(WidthOptions::vcf_pair_j2near().free_tempo_j2near);
     }
@@ -12600,7 +12859,10 @@ mod tests {
             let on = on_solver.solve_goal(&state, &caps, SolveGoal::Win);
             assert_eq!(on.status, ProofStatus::Win, "{id}: flag-on status");
             let cert = on.cert.as_ref().expect("WIN carries a certificate");
-            assert!(TssVerifier.verify(&state, cert, ProofStatus::Win), "{id}: canonical verifier");
+            assert!(
+                TssVerifier.verify(&state, cert, ProofStatus::Win),
+                "{id}: canonical verifier"
+            );
             let mut d6_verified = 0usize;
             let mut d6_mask = 0u16;
             for symmetry in 0..D6_SYMMETRY_COUNT {
@@ -16235,7 +16497,10 @@ mod tests {
             let hinted = solve_with_ordering_hint(&state, &caps, goal, hint);
             assert_eq!(hinted.status, baseline.status, "fixture={name}");
             if let Some(cert) = hinted.cert.as_ref() {
-                assert!(TssVerifier.verify(&state, cert, hinted.status), "fixture={name}");
+                assert!(
+                    TssVerifier.verify(&state, cert, hinted.status),
+                    "fixture={name}"
+                );
             }
         }
     }
@@ -16248,28 +16513,20 @@ mod tests {
             tt_bytes_cap: 256 << 10,
             semantic_horizon: u32::MAX,
         };
-        let proving = solve_with_ordering_hint(
-            &state,
-            &caps,
-            SolveGoal::Win,
-            HexCoord::new(3, -6),
-        );
-        let away = solve_with_ordering_hint(
-            &state,
-            &caps,
-            SolveGoal::Win,
-            HexCoord::new(0, -6),
-        );
+        let proving = solve_with_ordering_hint(&state, &caps, SolveGoal::Win, HexCoord::new(3, -6));
+        let away = solve_with_ordering_hint(&state, &caps, SolveGoal::Win, HexCoord::new(0, -6));
         for result in [&proving, &away] {
             assert_eq!(result.status, ProofStatus::Win);
             assert!(TssVerifier.verify(&state, result.cert.as_ref().unwrap(), result.status));
         }
-        let proving_root = proving.cert.as_ref().and_then(|cert| {
-            match cert.nodes.get(cert.root_node as usize) {
-                Some(CertNode::Choice { mv, .. }) => Some(*mv),
-                _ => None,
-            }
-        });
+        let proving_root =
+            proving
+                .cert
+                .as_ref()
+                .and_then(|cert| match cert.nodes.get(cert.root_node as usize) {
+                    Some(CertNode::Choice { mv, .. }) => Some(*mv),
+                    _ => None,
+                });
         assert_eq!(proving_root, Some(HexCoord::new(3, -6)));
         assert!(
             proving.stats.nodes < away.stats.nodes,
@@ -16346,9 +16603,18 @@ mod tests {
         let mut hinted = hinted_search.attack_children(&mut state.clone(), 0);
         hinted_search.order_children_by_hints(&mut hinted);
 
-        assert_ne!(baseline.first().map(|child| child.mv), hinted.first().map(|child| child.mv));
-        let mut baseline_set = baseline.into_iter().map(|child| key(child.mv)).collect::<Vec<_>>();
-        let mut hinted_set = hinted.into_iter().map(|child| key(child.mv)).collect::<Vec<_>>();
+        assert_ne!(
+            baseline.first().map(|child| child.mv),
+            hinted.first().map(|child| child.mv)
+        );
+        let mut baseline_set = baseline
+            .into_iter()
+            .map(|child| key(child.mv))
+            .collect::<Vec<_>>();
+        let mut hinted_set = hinted
+            .into_iter()
+            .map(|child| key(child.mv))
+            .collect::<Vec<_>>();
         baseline_set.sort_unstable();
         hinted_set.sort_unstable();
         assert_eq!(hinted_set, baseline_set);
@@ -16366,7 +16632,10 @@ mod tests {
     ) {
         assert_eq!(actual.status, expected.status);
         assert_eq!(actual.cert, expected.cert);
-        assert_eq!(format!("{:?}", actual.stats), format!("{:?}", expected.stats));
+        assert_eq!(
+            format!("{:?}", actual.stats),
+            format!("{:?}", expected.stats)
+        );
     }
 
     #[test]
@@ -16381,18 +16650,14 @@ mod tests {
         // so today's flag-off `Both` path decides it before the budget split.
         // Pin that current behavior explicitly.
         let root_fact = forced_loss_fixture();
-        let root_off = wide_solver_with_dual_pass(false)
-            .solve_goal(&root_fact, &caps, SolveGoal::Both);
-        let root_on = wide_solver_with_dual_pass(true)
-            .solve_goal(&root_fact, &caps, SolveGoal::Both);
+        let root_off =
+            wide_solver_with_dual_pass(false).solve_goal(&root_fact, &caps, SolveGoal::Both);
+        let root_on =
+            wide_solver_with_dual_pass(true).solve_goal(&root_fact, &caps, SolveGoal::Both);
         assert_eq!(root_off.status, ProofStatus::Loss);
         assert_eq!(root_off.status, root_on.status);
         assert_eq!(root_off.stats.nodes, root_on.stats.nodes);
-        assert!(TssVerifier.verify(
-            &root_fact,
-            root_off.cert.as_ref().unwrap(),
-            root_off.status,
-        ));
+        assert!(TssVerifier.verify(&root_fact, root_off.cert.as_ref().unwrap(), root_off.status,));
 
         // This existing non-lambda-one forced-defender fixture has a cheap
         // opponent-WIN proof, while the wide primal leaves budget unused.
@@ -16452,8 +16717,7 @@ mod tests {
             semantic_horizon: u32::MAX,
         };
         for state in [quiet_fixture(), pair_width_first_stone_fixture()] {
-            let both = wide_solver_with_dual_pass(false)
-                .solve_goal(&state, &caps, SolveGoal::Both);
+            let both = wide_solver_with_dual_pass(false).solve_goal(&state, &caps, SolveGoal::Both);
             let win = wide_solver_with_dual_pass(false).solve_goal(&state, &caps, SolveGoal::Win);
             assert_eq!(both.status, win.status);
             assert_eq!(both.cert, win.cert);
@@ -16474,10 +16738,16 @@ mod tests {
                 xsnfyll_forced_defender_fixture(),
                 win_now_fixture(),
             ] {
-                let implicit_zero = wide_solver_with_dual_pass(dual_pass)
-                    .solve_goal(&state, &caps, SolveGoal::Both);
-                let explicit_zero = wide_solver_with_loss_budget(dual_pass, 0)
-                    .solve_goal(&state, &caps, SolveGoal::Both);
+                let implicit_zero = wide_solver_with_dual_pass(dual_pass).solve_goal(
+                    &state,
+                    &caps,
+                    SolveGoal::Both,
+                );
+                let explicit_zero = wide_solver_with_loss_budget(dual_pass, 0).solve_goal(
+                    &state,
+                    &caps,
+                    SolveGoal::Both,
+                );
                 assert_deep_result_identical(&implicit_zero, &explicit_zero);
             }
         }
@@ -16491,15 +16761,18 @@ mod tests {
             tt_bytes_cap: 256 << 10,
             semantic_horizon: u32::MAX,
         };
-        let current = wide_solver_with_loss_budget(true, 0)
-            .solve_goal(&state, &caps, SolveGoal::Both);
-        let reserved = wide_solver_with_loss_budget(true, 64)
-            .solve_goal(&state, &caps, SolveGoal::Both);
+        let current =
+            wide_solver_with_loss_budget(true, 0).solve_goal(&state, &caps, SolveGoal::Both);
+        let reserved =
+            wide_solver_with_loss_budget(true, 64).solve_goal(&state, &caps, SolveGoal::Both);
         assert_eq!(current.status, ProofStatus::Loss);
         assert_deep_result_identical(&reserved, &current);
         assert!(TssVerifier.verify(
             &state,
-            reserved.cert.as_ref().expect("reserved loss carries a certificate"),
+            reserved
+                .cert
+                .as_ref()
+                .expect("reserved loss carries a certificate"),
             reserved.status,
         ));
     }
@@ -16512,15 +16785,18 @@ mod tests {
             tt_bytes_cap: 256 << 10,
             semantic_horizon: u32::MAX,
         };
-        let current = wide_solver_with_loss_budget(false, 0)
-            .solve_goal(&state, &caps, SolveGoal::Both);
-        let reserved = wide_solver_with_loss_budget(false, 64)
-            .solve_goal(&state, &caps, SolveGoal::Both);
+        let current =
+            wide_solver_with_loss_budget(false, 0).solve_goal(&state, &caps, SolveGoal::Both);
+        let reserved =
+            wide_solver_with_loss_budget(false, 64).solve_goal(&state, &caps, SolveGoal::Both);
         assert_eq!(current.status, ProofStatus::Unknown);
         assert_eq!(reserved.status, ProofStatus::Loss);
         assert!(TssVerifier.verify(
             &state,
-            reserved.cert.as_ref().expect("reserved loss carries a certificate"),
+            reserved
+                .cert
+                .as_ref()
+                .expect("reserved loss carries a certificate"),
             reserved.status,
         ));
         assert!(reserved.stats.nodes <= caps.node_cap);
@@ -16542,10 +16818,10 @@ mod tests {
             tt_bytes_cap: 0,
             semantic_horizon: u32::MAX,
         };
-        let current = wide_solver_with_loss_budget(true, 0)
-            .solve_goal(&state, &caps, SolveGoal::Both);
-        let reserved = wide_solver_with_loss_budget(true, 1)
-            .solve_goal(&state, &caps, SolveGoal::Both);
+        let current =
+            wide_solver_with_loss_budget(true, 0).solve_goal(&state, &caps, SolveGoal::Both);
+        let reserved =
+            wide_solver_with_loss_budget(true, 1).solve_goal(&state, &caps, SolveGoal::Both);
         assert_eq!(current.status, ProofStatus::Unknown);
         assert_eq!(reserved.status, ProofStatus::Unknown);
         assert_eq!(current.stats.nodes, caps.node_cap);
@@ -17163,12 +17439,13 @@ mod tests {
     #[ignore = "full 6,443-position production-shape identity battery"]
     fn tss_frozen_identity_battery() {
         fn parse_jsonl_state(line: &str) -> (String, RustHexoState) {
-            let id_start = line.find("\"pos_id\": \"").expect("pos_id")
-                + "\"pos_id\": \"".len();
-            let id_end = line[id_start..].find('"').map(|n| id_start + n).expect("pos_id end");
+            let id_start = line.find("\"pos_id\": \"").expect("pos_id") + "\"pos_id\": \"".len();
+            let id_end = line[id_start..]
+                .find('"')
+                .map(|n| id_start + n)
+                .expect("pos_id end");
             let id = line[id_start..id_end].to_owned();
-            let moves_start = line.find("\"moves\": [").expect("moves")
-                + "\"moves\": [".len();
+            let moves_start = line.find("\"moves\": [").expect("moves") + "\"moves\": [".len();
             let moves_end = line[moves_start..]
                 .find("], \"pos_id\"")
                 .map(|n| moves_start + n + 1)
@@ -17183,8 +17460,11 @@ mod tests {
                     while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
                         cursor += 1;
                     }
-                    numbers.push(line[moves_start + start..moves_start + cursor]
-                        .parse().expect("i16 coordinate"));
+                    numbers.push(
+                        line[moves_start + start..moves_start + cursor]
+                            .parse()
+                            .expect("i16 coordinate"),
+                    );
                 } else {
                     cursor += 1;
                 }
@@ -17192,9 +17472,13 @@ mod tests {
             assert_eq!(numbers.len() % 2, 0, "{id}: q/r pairs");
             let mut state = RustHexoState::new();
             for pair in numbers.chunks_exact(2) {
-                apply_placement(&mut state, Placement {
-                    coord: HexCoord::new(pair[0], pair[1]),
-                }).unwrap_or_else(|error| panic!("{id}: replay failed: {error}"));
+                apply_placement(
+                    &mut state,
+                    Placement {
+                        coord: HexCoord::new(pair[0], pair[1]),
+                    },
+                )
+                .unwrap_or_else(|error| panic!("{id}: replay failed: {error}"));
             }
             (id, state)
         }
@@ -17231,18 +17515,28 @@ mod tests {
                 let started = Instant::now();
                 let result = solver.solve_goal(&state, &caps, SolveGoal::Both);
                 solve_nanos = solve_nanos.saturating_add(
-                    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX));
+                    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                );
                 if result.status == ProofStatus::Unknown {
                     assert!(result.cert.is_none(), "{id}: Unknown carried certificate");
                 } else {
-                    let cert = result.cert.as_ref()
+                    let cert = result
+                        .cert
+                        .as_ref()
                         .unwrap_or_else(|| panic!("{id}: decided result lacks certificate"));
-                    assert!(TssVerifier.verify(&state, cert, result.status), "{id}: verifier");
+                    assert!(
+                        TssVerifier.verify(&state, cert, result.status),
+                        "{id}: verifier"
+                    );
                 }
                 let cert_hash = fnv1a(format!("{:?}", result.cert).as_bytes());
                 use std::fmt::Write as _;
-                writeln!(stable, "{set}\t{id}\t{:?}\t{}\t{cert_hash:016x}",
-                    result.status, result.stats.nodes).expect("identity row");
+                writeln!(
+                    stable,
+                    "{set}\t{id}\t{:?}\t{}\t{cert_hash:016x}",
+                    result.status, result.stats.nodes
+                )
+                .expect("identity row");
                 count += 1;
                 nodes = nodes.saturating_add(result.stats.nodes);
             }
@@ -17266,8 +17560,7 @@ mod tests {
             "GENERATION_MEMO_DONE lookups={memo_lookups} hits={memo_hits} hit_rate_pct={:.3}",
             100.0 * memo_hits as f64 / memo_lookups.max(1) as f64,
         );
-        let (pair_ms, defender_ms, regen_ms, expand_ms, refresh_ms, insert_ms) =
-            wide_gen_profile();
+        let (pair_ms, defender_ms, regen_ms, expand_ms, refresh_ms, insert_ms) = wide_gen_profile();
         println!(
             "GEN_PROFILE pair_ms={pair_ms} defender_ms={defender_ms} regen_ms={regen_ms} expand_ms={expand_ms} refresh_ms={refresh_ms} insert_ms={insert_ms}"
         );
