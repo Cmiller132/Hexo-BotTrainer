@@ -1,0 +1,911 @@
+{
+  "claim_class": "MEASURED ordering-only",
+  "code_facts": [
+    {
+      "class": "CODE-FACT",
+      "fact": "CertNode::Choice stores both mv and child in the in-memory arena.",
+      "location": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\truth-pass\\packages\\hexfield_eq\\rust\\src\\tss_verify.rs:276"
+    },
+    {
+      "class": "CODE-FACT",
+      "fact": "deep_solve_probe derives aggregate certificate geometry, then emits only the root Choice q/r; it does not emit the node arena or child ID.",
+      "location": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\truth-pass\\packages\\hexfield_eq\\rust\\src\\search.rs:5026"
+    },
+    {
+      "class": "CODE-FACT",
+      "fact": "internalization_v1 re-solves through the verified path and stores the certificate-designated root Choice as cert_move.",
+      "location": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\v1-soak\\scripts\\tss_harness\\mint_internalization_set.py:12"
+    }
+  ],
+  "internalization_manifest": {
+    "cohorts": {
+      "human": {
+        "loss": 105,
+        "win": 317,
+        "win_with_cert_move": 304
+      },
+      "puzzle": {
+        "loss": 9,
+        "win": 92,
+        "win_with_cert_move": 88
+      },
+      "selfplay": {
+        "loss": 10,
+        "win": 150,
+        "win_with_cert_move": 84
+      }
+    },
+    "n": 683,
+    "set": "internalization_v1",
+    "sha256": "523e0783531ac6253dbe1bf61bbba957613547da6ccfd26b64a6f6f6fb10e41c",
+    "solver_config": {
+      "cert_version": 2,
+      "goal": "both",
+      "horizon": 0,
+      "ladder": false,
+      "node_cap": 500,
+      "wide": true,
+      "zone": false
+    },
+    "source_archive": "20260720_215241_baseline_production_v5",
+    "total_loss": 124,
+    "total_win": 559,
+    "total_win_with_cert_move": 476
+  },
+  "reproduction": {
+    "architecture_environment": {
+      "HEXFIELD_EQ_ATTENTION_HEADS": "3",
+      "HEXFIELD_EQ_CHANNELS": "192",
+      "HEXFIELD_EQ_C_ORBIT": "16",
+      "HEXFIELD_EQ_FEATURE_VERSION": "2",
+      "HEXFIELD_EQ_GROUP_ORDER": "12",
+      "HEXFIELD_EQ_RAYTAP": "both",
+      "HEXFIELD_EQ_RAYTAP_LUT": "additive",
+      "HEXFIELD_EQ_RAY_BLOCKERS": "1",
+      "HEXFIELD_EQ_REG_LANE": "1",
+      "HEXFIELD_EQ_TRUNK": "CCACCACA"
+    },
+    "binary_loading": "direct PyO3 extension loading from the pinned truth-pass golden stage; minimal parent modules avoid importing unrelated NumPy-dependent package code",
+    "command": "python .scratch/horizon_r4_cert_hints.py --output .scratch/horizon_r4_cert_hints.json",
+    "cwd": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\deadline-ladder",
+    "inherited_tss_variables_removed": [],
+    "platform": "Windows-11-10.0.26200-SP0",
+    "probe_config": {
+      "goal": "win",
+      "horizon": 16,
+      "ladder": false,
+      "node_cap": 500,
+      "wide": true,
+      "with_stats": false,
+      "zone": false
+    },
+    "python": "3.14.0 (tags/v3.14.0:ebf955d, Oct  7 2025, 10:15:03) [MSC v.1944 64 bit (AMD64)]",
+    "tss_environment_policy": "remove inherited TSS_* variables; use compiled defaults"
+  },
+  "results": {
+    "human_20bea7804fffee60_p15": {
+      "archive_cross_checks": {
+        "internalization_row_matches_frozen_moves": true,
+        "main4_registry": {
+          "cert_depth": 14,
+          "deep_nodes": 122,
+          "has_cert": true,
+          "status": "win",
+          "verified": true,
+          "verify_failed": 0
+        },
+        "soak_h16_flat_wide": null
+      },
+      "archived_cert_root_choice": [
+        -1,
+        0
+      ],
+      "archived_cert_root_source": "internalization_v1.jsonl",
+      "certificate_geometry_relation": {
+        "choice_nodes_root_equals_child_plus_one": true,
+        "depth_root_equals_child_plus_one": true,
+        "pair_omitted_equal": true,
+        "universal_nodes_equal": true,
+        "zone_nodes_equal": true
+      },
+      "claim": "MEASURED ordering-only",
+      "clock_note": "fresh FirstStone root: two same-player placements",
+      "cohort": "human",
+      "full_turn_ordering": [
+        [
+          -1,
+          0
+        ],
+        [
+          -1,
+          2
+        ]
+      ],
+      "phase_proof": {
+        "after_archived_root_choice": {
+          "current_player": "player0",
+          "phase": "SecondStone",
+          "placements_made": 16
+        },
+        "after_independent_child_choice": {
+          "current_player": "player1",
+          "phase": "FirstStone",
+          "placements_made": 17
+        },
+        "root": {
+          "current_player": "player0",
+          "phase": "FirstStone",
+          "placements_made": 15
+        }
+      },
+      "root_h16_verified_probe": {
+        "cert_choice_nodes": 20,
+        "cert_depth": 14,
+        "cert_root_move_q": -1,
+        "cert_root_move_r": 0,
+        "cert_universal_nodes": 17,
+        "cert_version": 2,
+        "cert_zone_nodes": 0,
+        "deep_nodes": 76,
+        "deep_verify_failed": 0,
+        "has_cert": true,
+        "horizon_cut": 0,
+        "horizon_cut_tall": 0,
+        "horizon_preflight_failed": 0,
+        "horizon_retry": 0,
+        "pair_omitted": 9,
+        "placements": 15,
+        "status": "win",
+        "wall_nanos": 67067300,
+        "zone_verify_failed": 0
+      },
+      "same_original_arena_child_recovered": false,
+      "second_cell_evidence": "independent verified solve of the exact SecondStone child; not serialized in the original flat certificate artifact",
+      "secondstone_h16_verified_probe": {
+        "cert_choice_nodes": 19,
+        "cert_depth": 13,
+        "cert_root_move_q": -1,
+        "cert_root_move_r": 2,
+        "cert_universal_nodes": 17,
+        "cert_version": 2,
+        "cert_zone_nodes": 0,
+        "deep_nodes": 222,
+        "deep_verify_failed": 0,
+        "has_cert": true,
+        "horizon_cut": 0,
+        "horizon_cut_tall": 0,
+        "horizon_preflight_failed": 0,
+        "horizon_retry": 0,
+        "pair_omitted": 9,
+        "placements": 16,
+        "status": "win",
+        "wall_nanos": 152265000,
+        "zone_verify_failed": 0
+      }
+    },
+    "human_6023b2ef70e3ffc6_p76": {
+      "archive_cross_checks": {
+        "internalization_row_matches_frozen_moves": true,
+        "main4_registry": {
+          "cert_depth": 13,
+          "deep_nodes": 23,
+          "has_cert": true,
+          "status": "win",
+          "verified": true,
+          "verify_failed": 0
+        },
+        "soak_h16_flat_wide": null
+      },
+      "archived_cert_root_choice": [
+        6,
+        13
+      ],
+      "archived_cert_root_source": "internalization_v1.jsonl",
+      "certificate_geometry_relation": null,
+      "claim": "MEASURED ordering-only",
+      "clock_note": "SecondStone root: the certified root Choice is the only remaining same-player placement; no second Choice exists before the phase changes",
+      "cohort": "human",
+      "full_turn_ordering": [
+        [
+          6,
+          13
+        ]
+      ],
+      "phase_proof": {
+        "after_archived_root_choice": {
+          "current_player": "player1",
+          "phase": "FirstStone",
+          "placements_made": 77
+        },
+        "after_independent_child_choice": null,
+        "root": {
+          "current_player": "player0",
+          "phase": "SecondStone",
+          "placements_made": 76
+        }
+      },
+      "root_h16_verified_probe": {
+        "cert_choice_nodes": 13,
+        "cert_depth": 13,
+        "cert_root_move_q": 6,
+        "cert_root_move_r": 13,
+        "cert_universal_nodes": 14,
+        "cert_version": 2,
+        "cert_zone_nodes": 0,
+        "deep_nodes": 23,
+        "deep_verify_failed": 0,
+        "has_cert": true,
+        "horizon_cut": 0,
+        "horizon_cut_tall": 0,
+        "horizon_preflight_failed": 0,
+        "horizon_retry": 0,
+        "pair_omitted": 6,
+        "placements": 76,
+        "status": "win",
+        "wall_nanos": 49746300,
+        "zone_verify_failed": 0
+      },
+      "same_original_arena_child_recovered": false,
+      "second_cell_evidence": "not applicable: root clock is already SecondStone",
+      "secondstone_h16_verified_probe": null
+    },
+    "sp_0_p51": {
+      "archive_cross_checks": {
+        "internalization_row_matches_frozen_moves": true,
+        "main4_registry": {
+          "cert_depth": 14,
+          "deep_nodes": 131,
+          "has_cert": true,
+          "status": "win",
+          "verified": true,
+          "verify_failed": 0
+        },
+        "soak_h16_flat_wide": {
+          "arm": "h16_flat_wide",
+          "cert_choice_nodes": 26,
+          "cert_depth": 14,
+          "cert_root_move_q": 0,
+          "cert_root_move_r": -6,
+          "cert_universal_nodes": 20,
+          "cert_zone_nodes": 0,
+          "deep_nodes": 131,
+          "deep_verify_failed": 0,
+          "pair_omitted": 12,
+          "status": "win"
+        }
+      },
+      "archived_cert_root_choice": [
+        0,
+        -6
+      ],
+      "archived_cert_root_source": "internalization_v1.jsonl",
+      "certificate_geometry_relation": {
+        "choice_nodes_root_equals_child_plus_one": true,
+        "depth_root_equals_child_plus_one": true,
+        "pair_omitted_equal": true,
+        "universal_nodes_equal": true,
+        "zone_nodes_equal": true
+      },
+      "claim": "MEASURED ordering-only",
+      "clock_note": "fresh FirstStone root: two same-player placements",
+      "cohort": "selfplay",
+      "full_turn_ordering": [
+        [
+          0,
+          -6
+        ],
+        [
+          2,
+          -8
+        ]
+      ],
+      "phase_proof": {
+        "after_archived_root_choice": {
+          "current_player": "player0",
+          "phase": "SecondStone",
+          "placements_made": 52
+        },
+        "after_independent_child_choice": {
+          "current_player": "player1",
+          "phase": "FirstStone",
+          "placements_made": 53
+        },
+        "root": {
+          "current_player": "player0",
+          "phase": "FirstStone",
+          "placements_made": 51
+        }
+      },
+      "root_h16_verified_probe": {
+        "cert_choice_nodes": 26,
+        "cert_depth": 14,
+        "cert_root_move_q": 0,
+        "cert_root_move_r": -6,
+        "cert_universal_nodes": 20,
+        "cert_version": 2,
+        "cert_zone_nodes": 0,
+        "deep_nodes": 131,
+        "deep_verify_failed": 0,
+        "has_cert": true,
+        "horizon_cut": 0,
+        "horizon_cut_tall": 0,
+        "horizon_preflight_failed": 0,
+        "horizon_retry": 0,
+        "pair_omitted": 12,
+        "placements": 51,
+        "status": "win",
+        "wall_nanos": 193401800,
+        "zone_verify_failed": 0
+      },
+      "same_original_arena_child_recovered": false,
+      "second_cell_evidence": "independent verified solve of the exact SecondStone child; not serialized in the original flat certificate artifact",
+      "secondstone_h16_verified_probe": {
+        "cert_choice_nodes": 25,
+        "cert_depth": 13,
+        "cert_root_move_q": 2,
+        "cert_root_move_r": -8,
+        "cert_universal_nodes": 20,
+        "cert_version": 2,
+        "cert_zone_nodes": 0,
+        "deep_nodes": 321,
+        "deep_verify_failed": 0,
+        "has_cert": true,
+        "horizon_cut": 0,
+        "horizon_cut_tall": 0,
+        "horizon_preflight_failed": 0,
+        "horizon_retry": 0,
+        "pair_omitted": 12,
+        "placements": 52,
+        "status": "win",
+        "wall_nanos": 337011500,
+        "zone_verify_failed": 0
+      }
+    },
+    "sp_13_p59": {
+      "archive_cross_checks": {
+        "internalization_row_matches_frozen_moves": true,
+        "main4_registry": {
+          "cert_depth": 14,
+          "deep_nodes": 34,
+          "has_cert": true,
+          "status": "win",
+          "verified": true,
+          "verify_failed": 0
+        },
+        "soak_h16_flat_wide": {
+          "arm": "h16_flat_wide",
+          "cert_choice_nodes": 26,
+          "cert_depth": 14,
+          "cert_root_move_q": 9,
+          "cert_root_move_r": -5,
+          "cert_universal_nodes": 20,
+          "cert_zone_nodes": 0,
+          "deep_nodes": 34,
+          "deep_verify_failed": 0,
+          "pair_omitted": 12,
+          "status": "win"
+        }
+      },
+      "archived_cert_root_choice": [
+        9,
+        -5
+      ],
+      "archived_cert_root_source": "internalization_v1.jsonl",
+      "certificate_geometry_relation": {
+        "choice_nodes_root_equals_child_plus_one": true,
+        "depth_root_equals_child_plus_one": true,
+        "pair_omitted_equal": true,
+        "universal_nodes_equal": true,
+        "zone_nodes_equal": true
+      },
+      "claim": "MEASURED ordering-only",
+      "clock_note": "fresh FirstStone root: two same-player placements",
+      "cohort": "selfplay",
+      "full_turn_ordering": [
+        [
+          9,
+          -5
+        ],
+        [
+          6,
+          -5
+        ]
+      ],
+      "phase_proof": {
+        "after_archived_root_choice": {
+          "current_player": "player0",
+          "phase": "SecondStone",
+          "placements_made": 60
+        },
+        "after_independent_child_choice": {
+          "current_player": "player1",
+          "phase": "FirstStone",
+          "placements_made": 61
+        },
+        "root": {
+          "current_player": "player0",
+          "phase": "FirstStone",
+          "placements_made": 59
+        }
+      },
+      "root_h16_verified_probe": {
+        "cert_choice_nodes": 26,
+        "cert_depth": 14,
+        "cert_root_move_q": 9,
+        "cert_root_move_r": -5,
+        "cert_universal_nodes": 20,
+        "cert_version": 2,
+        "cert_zone_nodes": 0,
+        "deep_nodes": 34,
+        "deep_verify_failed": 0,
+        "has_cert": true,
+        "horizon_cut": 0,
+        "horizon_cut_tall": 0,
+        "horizon_preflight_failed": 0,
+        "horizon_retry": 0,
+        "pair_omitted": 12,
+        "placements": 59,
+        "status": "win",
+        "wall_nanos": 66343200,
+        "zone_verify_failed": 0
+      },
+      "same_original_arena_child_recovered": false,
+      "second_cell_evidence": "independent verified solve of the exact SecondStone child; not serialized in the original flat certificate artifact",
+      "secondstone_h16_verified_probe": {
+        "cert_choice_nodes": 25,
+        "cert_depth": 13,
+        "cert_root_move_q": 6,
+        "cert_root_move_r": -5,
+        "cert_universal_nodes": 20,
+        "cert_version": 2,
+        "cert_zone_nodes": 0,
+        "deep_nodes": 28,
+        "deep_verify_failed": 0,
+        "has_cert": true,
+        "horizon_cut": 0,
+        "horizon_cut_tall": 0,
+        "horizon_preflight_failed": 0,
+        "horizon_retry": 0,
+        "pair_omitted": 12,
+        "placements": 60,
+        "status": "win",
+        "wall_nanos": 44623000,
+        "zone_verify_failed": 0
+      }
+    },
+    "sp_35_p27": {
+      "archive_cross_checks": {
+        "internalization_row_matches_frozen_moves": true,
+        "main4_registry": {
+          "cert_depth": 14,
+          "deep_nodes": 268,
+          "has_cert": true,
+          "status": "win",
+          "verified": true,
+          "verify_failed": 0
+        },
+        "soak_h16_flat_wide": {
+          "arm": "h16_flat_wide",
+          "cert_choice_nodes": 26,
+          "cert_depth": 14,
+          "cert_root_move_q": -1,
+          "cert_root_move_r": 0,
+          "cert_universal_nodes": 20,
+          "cert_zone_nodes": 0,
+          "deep_nodes": 169,
+          "deep_verify_failed": 0,
+          "pair_omitted": 12,
+          "status": "win"
+        }
+      },
+      "archived_cert_root_choice": [
+        -1,
+        0
+      ],
+      "archived_cert_root_source": "internalization_v1.jsonl",
+      "certificate_geometry_relation": {
+        "choice_nodes_root_equals_child_plus_one": true,
+        "depth_root_equals_child_plus_one": true,
+        "pair_omitted_equal": true,
+        "universal_nodes_equal": true,
+        "zone_nodes_equal": true
+      },
+      "claim": "MEASURED ordering-only",
+      "clock_note": "fresh FirstStone root: two same-player placements",
+      "cohort": "selfplay",
+      "full_turn_ordering": [
+        [
+          -1,
+          0
+        ],
+        [
+          -7,
+          8
+        ]
+      ],
+      "phase_proof": {
+        "after_archived_root_choice": {
+          "current_player": "player0",
+          "phase": "SecondStone",
+          "placements_made": 28
+        },
+        "after_independent_child_choice": {
+          "current_player": "player1",
+          "phase": "FirstStone",
+          "placements_made": 29
+        },
+        "root": {
+          "current_player": "player0",
+          "phase": "FirstStone",
+          "placements_made": 27
+        }
+      },
+      "root_h16_verified_probe": {
+        "cert_choice_nodes": 26,
+        "cert_depth": 14,
+        "cert_root_move_q": -1,
+        "cert_root_move_r": 0,
+        "cert_universal_nodes": 20,
+        "cert_version": 2,
+        "cert_zone_nodes": 0,
+        "deep_nodes": 169,
+        "deep_verify_failed": 0,
+        "has_cert": true,
+        "horizon_cut": 0,
+        "horizon_cut_tall": 0,
+        "horizon_preflight_failed": 0,
+        "horizon_retry": 0,
+        "pair_omitted": 12,
+        "placements": 27,
+        "status": "win",
+        "wall_nanos": 136735400,
+        "zone_verify_failed": 0
+      },
+      "same_original_arena_child_recovered": false,
+      "second_cell_evidence": "independent verified solve of the exact SecondStone child; not serialized in the original flat certificate artifact",
+      "secondstone_h16_verified_probe": {
+        "cert_choice_nodes": 25,
+        "cert_depth": 13,
+        "cert_root_move_q": -7,
+        "cert_root_move_r": 8,
+        "cert_universal_nodes": 20,
+        "cert_version": 2,
+        "cert_zone_nodes": 0,
+        "deep_nodes": 254,
+        "deep_verify_failed": 0,
+        "has_cert": true,
+        "horizon_cut": 0,
+        "horizon_cut_tall": 0,
+        "horizon_preflight_failed": 0,
+        "horizon_retry": 0,
+        "pair_omitted": 12,
+        "placements": 28,
+        "status": "win",
+        "wall_nanos": 218592700,
+        "zone_verify_failed": 0
+      }
+    },
+    "sp_4_p79": {
+      "archive_cross_checks": {
+        "internalization_row_matches_frozen_moves": true,
+        "main4_registry": {
+          "cert_depth": 14,
+          "deep_nodes": 42,
+          "has_cert": true,
+          "status": "win",
+          "verified": true,
+          "verify_failed": 0
+        },
+        "soak_h16_flat_wide": {
+          "arm": "h16_flat_wide",
+          "cert_choice_nodes": 18,
+          "cert_depth": 14,
+          "cert_root_move_q": -4,
+          "cert_root_move_r": 4,
+          "cert_universal_nodes": 14,
+          "cert_zone_nodes": 0,
+          "deep_nodes": 39,
+          "deep_verify_failed": 0,
+          "pair_omitted": 8,
+          "status": "win"
+        }
+      },
+      "archived_cert_root_choice": [
+        -4,
+        4
+      ],
+      "archived_cert_root_source": "internalization_v1.jsonl",
+      "certificate_geometry_relation": {
+        "choice_nodes_root_equals_child_plus_one": true,
+        "depth_root_equals_child_plus_one": true,
+        "pair_omitted_equal": true,
+        "universal_nodes_equal": true,
+        "zone_nodes_equal": true
+      },
+      "claim": "MEASURED ordering-only",
+      "clock_note": "fresh FirstStone root: two same-player placements",
+      "cohort": "selfplay",
+      "full_turn_ordering": [
+        [
+          -4,
+          4
+        ],
+        [
+          -2,
+          4
+        ]
+      ],
+      "phase_proof": {
+        "after_archived_root_choice": {
+          "current_player": "player0",
+          "phase": "SecondStone",
+          "placements_made": 80
+        },
+        "after_independent_child_choice": {
+          "current_player": "player1",
+          "phase": "FirstStone",
+          "placements_made": 81
+        },
+        "root": {
+          "current_player": "player0",
+          "phase": "FirstStone",
+          "placements_made": 79
+        }
+      },
+      "root_h16_verified_probe": {
+        "cert_choice_nodes": 18,
+        "cert_depth": 14,
+        "cert_root_move_q": -4,
+        "cert_root_move_r": 4,
+        "cert_universal_nodes": 14,
+        "cert_version": 2,
+        "cert_zone_nodes": 0,
+        "deep_nodes": 39,
+        "deep_verify_failed": 0,
+        "has_cert": true,
+        "horizon_cut": 0,
+        "horizon_cut_tall": 0,
+        "horizon_preflight_failed": 0,
+        "horizon_retry": 0,
+        "pair_omitted": 8,
+        "placements": 79,
+        "status": "win",
+        "wall_nanos": 64874100,
+        "zone_verify_failed": 0
+      },
+      "same_original_arena_child_recovered": false,
+      "second_cell_evidence": "independent verified solve of the exact SecondStone child; not serialized in the original flat certificate artifact",
+      "secondstone_h16_verified_probe": {
+        "cert_choice_nodes": 17,
+        "cert_depth": 13,
+        "cert_root_move_q": -2,
+        "cert_root_move_r": 4,
+        "cert_universal_nodes": 14,
+        "cert_version": 2,
+        "cert_zone_nodes": 0,
+        "deep_nodes": 17,
+        "deep_verify_failed": 0,
+        "has_cert": true,
+        "horizon_cut": 0,
+        "horizon_cut_tall": 0,
+        "horizon_preflight_failed": 0,
+        "horizon_retry": 0,
+        "pair_omitted": 8,
+        "placements": 80,
+        "status": "win",
+        "wall_nanos": 42808000,
+        "zone_verify_failed": 0
+      }
+    },
+    "sp_5_p61": {
+      "archive_cross_checks": {
+        "internalization_row_matches_frozen_moves": true,
+        "main4_registry": {
+          "cert_depth": 14,
+          "deep_nodes": 93,
+          "has_cert": true,
+          "status": "win",
+          "verified": true,
+          "verify_failed": 0
+        },
+        "soak_h16_flat_wide": {
+          "arm": "h16_flat_wide",
+          "cert_choice_nodes": 34,
+          "cert_depth": 14,
+          "cert_root_move_q": -1,
+          "cert_root_move_r": -3,
+          "cert_universal_nodes": 25,
+          "cert_zone_nodes": 0,
+          "deep_nodes": 93,
+          "deep_verify_failed": 0,
+          "pair_omitted": 16,
+          "status": "win"
+        }
+      },
+      "archived_cert_root_choice": [
+        -1,
+        -3
+      ],
+      "archived_cert_root_source": "internalization_v1.jsonl",
+      "certificate_geometry_relation": {
+        "choice_nodes_root_equals_child_plus_one": true,
+        "depth_root_equals_child_plus_one": true,
+        "pair_omitted_equal": true,
+        "universal_nodes_equal": true,
+        "zone_nodes_equal": true
+      },
+      "claim": "MEASURED ordering-only",
+      "clock_note": "fresh FirstStone root: two same-player placements",
+      "cohort": "selfplay",
+      "full_turn_ordering": [
+        [
+          -1,
+          -3
+        ],
+        [
+          3,
+          -5
+        ]
+      ],
+      "phase_proof": {
+        "after_archived_root_choice": {
+          "current_player": "player1",
+          "phase": "SecondStone",
+          "placements_made": 62
+        },
+        "after_independent_child_choice": {
+          "current_player": "player0",
+          "phase": "FirstStone",
+          "placements_made": 63
+        },
+        "root": {
+          "current_player": "player1",
+          "phase": "FirstStone",
+          "placements_made": 61
+        }
+      },
+      "root_h16_verified_probe": {
+        "cert_choice_nodes": 34,
+        "cert_depth": 14,
+        "cert_root_move_q": -1,
+        "cert_root_move_r": -3,
+        "cert_universal_nodes": 25,
+        "cert_version": 2,
+        "cert_zone_nodes": 0,
+        "deep_nodes": 93,
+        "deep_verify_failed": 0,
+        "has_cert": true,
+        "horizon_cut": 0,
+        "horizon_cut_tall": 0,
+        "horizon_preflight_failed": 0,
+        "horizon_retry": 0,
+        "pair_omitted": 16,
+        "placements": 61,
+        "status": "win",
+        "wall_nanos": 123032000,
+        "zone_verify_failed": 0
+      },
+      "same_original_arena_child_recovered": false,
+      "second_cell_evidence": "independent verified solve of the exact SecondStone child; not serialized in the original flat certificate artifact",
+      "secondstone_h16_verified_probe": {
+        "cert_choice_nodes": 33,
+        "cert_depth": 13,
+        "cert_root_move_q": 3,
+        "cert_root_move_r": -5,
+        "cert_universal_nodes": 25,
+        "cert_version": 2,
+        "cert_zone_nodes": 0,
+        "deep_nodes": 47,
+        "deep_verify_failed": 0,
+        "has_cert": true,
+        "horizon_cut": 0,
+        "horizon_cut_tall": 0,
+        "horizon_preflight_failed": 0,
+        "horizon_retry": 0,
+        "pair_omitted": 16,
+        "placements": 62,
+        "status": "win",
+        "wall_nanos": 79421200,
+        "zone_verify_failed": 0
+      }
+    }
+  },
+  "schema": "horizon_r4_cert_hints_v1",
+  "scope": {
+    "cargo_builds": false,
+    "negative_boundary": "the soak/probe JSON projection contains no certificate node array or child ID, so it cannot establish that the second cell is literally the child Choice in the archived arena",
+    "package_edits": false,
+    "root_choice": "artifact-certified Choice cell from the pinned internalization set, then independently reproduced by the staged verified solver",
+    "second_choice": "independent verified h16 solve at the exact SecondStone state; usable for ordering only",
+    "solver_runs_single_process": true
+  },
+  "sources": {
+    "audit_script": {
+      "bytes": 19697,
+      "path": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\deadline-ladder\\.scratch\\horizon_r4_cert_hints.py",
+      "sha256": "5fed410b835b078ace6051aa61d649150cd7e393a80426b047894fc8423ba95f"
+    },
+    "frozen_human_set": {
+      "bytes": 1127279,
+      "path": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\deadline-ladder\\scripts\\tss_harness\\sets\\human_v1.jsonl",
+      "sha256": "5784defe2531db55360e9860ddddc9b89b148547b16a0c970ff7d83f407c66b6"
+    },
+    "frozen_selfplay_set": {
+      "bytes": 1514526,
+      "path": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\deadline-ladder\\scripts\\tss_harness\\sets\\selfplay_v1.jsonl",
+      "sha256": "d8b4256408dfdabf71a90d3653962160bcc05ec66bba580dd6379149d998b708"
+    },
+    "internalization_generator": {
+      "bytes": 7872,
+      "path": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\v1-soak\\scripts\\tss_harness\\mint_internalization_set.py",
+      "sha256": "3ad6c4e432854366c1caf8cc8d9a6febf24143458fd7f3ccd4922d2487062fcc"
+    },
+    "internalization_manifest": {
+      "bytes": 719,
+      "path": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\v1-soak\\scripts\\tss_harness\\sets\\internalization_v1.manifest.json",
+      "sha256": "d1f227d9e979bf0d1d9f2448c15e200f3a5d51082b0614ca42c7261ebe8856f8"
+    },
+    "internalization_set": {
+      "bytes": 323457,
+      "path": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\v1-soak\\scripts\\tss_harness\\sets\\internalization_v1.jsonl",
+      "sha256": "523e0783531ac6253dbe1bf61bbba957613547da6ccfd26b64a6f6f6fb10e41c"
+    },
+    "internalization_sha256_pin": {
+      "bytes": 91,
+      "path": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\v1-soak\\scripts\\tss_harness\\sets\\internalization_v1.sha256",
+      "sha256": "e8981b43e1183bae43a2dd3dcfdffeda37173a798d9d99638fe2c8d9a74bc800"
+    },
+    "main4_human_registry": {
+      "bytes": 220507,
+      "path": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\deadline-ladder\\scripts\\tss_harness\\harness_runs\\20260721_032725_main4_integration_gate2\\records_main4_integration_gate2_human_v1.jsonl",
+      "sha256": "41b276934022573a6f706b1396e37f2a21805473f4921958960ae0c752d3c53b"
+    },
+    "main4_selfplay_registry": {
+      "bytes": 218049,
+      "path": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\deadline-ladder\\scripts\\tss_harness\\harness_runs\\20260721_032725_main4_integration_gate2\\records_main4_integration_gate2_selfplay_v1.jsonl",
+      "sha256": "a2d9cef940befe90972ed6ae62db96c965e73403cd9712682ae5aff19570023c"
+    },
+    "soak_selfplay": {
+      "bytes": 22988971,
+      "path": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\v1-soak\\raws\\soak_selfplay.jsonl",
+      "sha256": "e6ed2499d459ec9889818e00a0bd84a7d4fd62197e57e7cca1e3cc4b6d07a542"
+    },
+    "staged_checkout_certificate_projection_source": {
+      "bytes": 286676,
+      "path": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\truth-pass\\packages\\hexfield_eq\\rust\\src\\search.rs",
+      "sha256": "94467ce372f96c78d29f5f20f3a1db4fdef723a8424046413fae38308dfde83d"
+    },
+    "staged_checkout_certificate_verifier_source": {
+      "bytes": 97684,
+      "path": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\truth-pass\\packages\\hexfield_eq\\rust\\src\\tss_verify.rs",
+      "sha256": "245c510541c1aa3adc1e8293d1541b8bf896d4880a00785754127aba89b4e87e"
+    },
+    "staged_hexfield_eq_pyd": {
+      "bytes": 6636544,
+      "path": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\truth-pass\\.cargo-target\\golden-stage-20260721\\hexfield_eq\\_rust.pyd",
+      "sha256": "d86240a65edfa18cdaedb90337833585e9aba92e4ba9053d606f1ba4e03496bc"
+    },
+    "staged_hexo_engine_pyd": {
+      "bytes": 778752,
+      "path": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\truth-pass\\.cargo-target\\golden-stage-20260721\\hexo_engine\\_rust.pyd",
+      "sha256": "163892dd67badffb8615a1fe02bae85fcd2ff6d0afb077b635c1ccf827eb3f53"
+    },
+    "v1_certificate_projection_source": {
+      "bytes": 273240,
+      "path": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\v1-soak\\packages\\hexfield_eq\\rust\\src\\search.rs",
+      "sha256": "fd15d6ad7c06f903fb01cb5e7b3f97f566f6570e6da694cc96bb1ad30d8e1c01"
+    },
+    "v1_certificate_verifier_source": {
+      "bytes": 78741,
+      "path": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\v1-soak\\packages\\hexfield_eq\\rust\\src\\tss_verify.rs",
+      "sha256": "9990d38618da2204351e328ca0143be2aef98bb3001e4a0462cf346b707f2ce8"
+    }
+  },
+  "summary": {
+    "all_child_probes_verified": true,
+    "all_root_probes_verified": true,
+    "fresh_root_full_pairs": 6,
+    "roots": 7,
+    "secondstone_singletons": 1
+  }
+}

@@ -1,0 +1,125 @@
+{
+  "eligible_ids": 155,
+  "eligible_unique_ordered_move_histories": 154,
+  "fresh": {
+    "mismatches": [],
+    "python_native_first_action_count_matches": 149,
+    "roots": 149
+  },
+  "interpretation": {
+    "native_correction": "the Rust parser/model accepts SecondStone h13 and enumerates only the legal singleton action quota",
+    "parity_limit": "the immediate SecondStone synthetic win agrees in one node but does not validate the inherited Python exhaustive action space",
+    "python_code_fact": "build_next_model adds legal singleton A1 actions for SecondStone, then unconditionally also adds two-cell pairs from retained near windows",
+    "true_clock": "SecondStone has one placement remaining in its current turn, so those pair masks are phase-illegal"
+  },
+  "metadata": {
+    "claim_label": "CODE-FACT plus MEASURED exhaustive model reconstruction",
+    "native_rows": ".scratch/horizon_r4_phase1_registry_final_rows.jsonl",
+    "python_source": ".scratch/horizon_r3.py",
+    "schema": 1,
+    "scope": "all registry IDs at exact certificate depths 13 or 14"
+  },
+  "phase_counts": {
+    "first": 149,
+    "second": 6
+  },
+  "secondstone": {
+    "all_native_counts_equal_correct_singleton_counts": true,
+    "all_python_models_contain_phase_illegal_pairs": true,
+    "details": [
+      {
+        "correct_secondstone_singletons": 776,
+        "horizon": 13,
+        "id": "human_194ce5fa25e2029d_p40",
+        "native_first_actions": 776,
+        "native_matches_correct_singletons": true,
+        "phase": "second",
+        "python_empty_actions": 0,
+        "python_first_actions": 9382,
+        "python_pair_actions": 8606,
+        "python_phase_illegal_pair_excess": 8606,
+        "python_singleton_actions": 776
+      },
+      {
+        "correct_secondstone_singletons": 557,
+        "horizon": 13,
+        "id": "human_1d7540b8789196ad_p54",
+        "native_first_actions": 557,
+        "native_matches_correct_singletons": true,
+        "phase": "second",
+        "python_empty_actions": 0,
+        "python_first_actions": 6431,
+        "python_pair_actions": 5874,
+        "python_phase_illegal_pair_excess": 5874,
+        "python_singleton_actions": 557
+      },
+      {
+        "correct_secondstone_singletons": 456,
+        "horizon": 13,
+        "id": "human_3c9423b1a047e24c_p22",
+        "native_first_actions": 456,
+        "native_matches_correct_singletons": true,
+        "phase": "second",
+        "python_empty_actions": 0,
+        "python_first_actions": 5335,
+        "python_pair_actions": 4879,
+        "python_phase_illegal_pair_excess": 4879,
+        "python_singleton_actions": 456
+      },
+      {
+        "correct_secondstone_singletons": 347,
+        "horizon": 13,
+        "id": "human_41e78c67c2ac8570_p20",
+        "native_first_actions": 347,
+        "native_matches_correct_singletons": true,
+        "phase": "second",
+        "python_empty_actions": 0,
+        "python_first_actions": 4070,
+        "python_pair_actions": 3723,
+        "python_phase_illegal_pair_excess": 3723,
+        "python_singleton_actions": 347
+      },
+      {
+        "correct_secondstone_singletons": 710,
+        "horizon": 13,
+        "id": "human_6023b2ef70e3ffc6_p76",
+        "native_first_actions": 710,
+        "native_matches_correct_singletons": true,
+        "phase": "second",
+        "python_empty_actions": 0,
+        "python_first_actions": 8267,
+        "python_pair_actions": 7557,
+        "python_phase_illegal_pair_excess": 7557,
+        "python_singleton_actions": 710
+      },
+      {
+        "correct_secondstone_singletons": 654,
+        "horizon": 13,
+        "id": "human_d4f2b0b1853d8565_p44",
+        "native_first_actions": 654,
+        "native_matches_correct_singletons": true,
+        "phase": "second",
+        "python_empty_actions": 0,
+        "python_first_actions": 7738,
+        "python_pair_actions": 7084,
+        "python_phase_illegal_pair_excess": 7084,
+        "python_singleton_actions": 654
+      }
+    ],
+    "python_phase_illegal_pair_excess": {
+      "max": 8606,
+      "min": 3723,
+      "n": 6,
+      "p50": 5874,
+      "p90": 7557,
+      "sum": 37723
+    },
+    "roots": 6
+  },
+  "source_sha256": {
+    ".scratch/horizon_native/src/lib.rs": "9CA2C0779832D06302192D2009F5128AD01827BAC68567E2C511868CAEECC84C",
+    ".scratch/horizon_r3.py": "9A1CB9160CD93264122A8D0436ABEFBF018C585E9836A6C002D81BE93C977668",
+    ".scratch/horizon_r4_phase1_registry_final_rows.jsonl": "B68612E066F34AB71834A201DB2F780F4BBEC7579FB695323D4F0279A859B5ED",
+    ".scratch/horizon_r4_python_boundary.py": "1A07950874B4BD2DEA0AD17FD648E1A33BE8EFBBAA2FB855DAD436F92BD4D909"
+  }
+}

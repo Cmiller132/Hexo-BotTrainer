@@ -1,0 +1,2030 @@
+{
+  "clock_consequences": {
+    "SecondStone_Win17_equals_Win18_equals_Win19": true,
+    "SecondStone_Win21_equals_Win22_equals_Win23": true,
+    "SecondStone_and_opening_h24_are_new_attacker_placements": true,
+    "claim_label": "PROOF-SKETCH from PlayerCanForceWithin semantics and CODE-FACT schedules",
+    "definition_level_argument": [
+      "The schedules being compared have the same prefix through the last A placement; every added placement belongs to D.",
+      "At an ongoing leaf after that last A placement, unfolding PlayerCanForceWithin for one or two D placements is false: a D placement cannot return winner A, and an ongoing child eventually reaches the zero-fuel false case. Legal cells remain nonempty for a finite nonempty radius-eight board.",
+      "Substitute these equal false suffixes and induct backward through the common prefix. A terminal A win in the common prefix returns true immediately in every horizon."
+    ],
+    "formalization_status": "definition-level proof sketch only; HorizonRound.lean was read-only and no new Lean theorem was added",
+    "fresh_Win18_equals_Win19_equals_Win20": true,
+    "fresh_Win22_equals_Win23_equals_Win24": true,
+    "global_all_phase_h24_requires_distinct_partial_opening_endpoint": true,
+    "opening_Win17_equals_Win18_equals_Win19": true,
+    "opening_Win21_equals_Win22_equals_Win23": true
+  },
+  "exact_dynamic_endpoint_notation": {
+    "E_c": "After an explicit A turn, E_c is the exact full-board suffix forall legal D pair, exists legal A continuation of capacity c in {1,2}, with first-placement terminal prefixes retained. Equivalently, after excluding a D winning prefix, the family of all A residual sets of size <=c must have no hitting set of size <=2. Residual cells are radius-eight legal because they are within five of an existing A stone.",
+    "SecondStone_h17": "exists a0 forall D1 exists A1 forall D2 exists A2 forall D3 exists A3: E_2; a0 is the root turn's one remaining stone",
+    "SecondStone_h21": "exists a0 forall D1 exists A1 forall D2 exists A2 forall D3 exists A3 forall D4 exists A4: E_2",
+    "SecondStone_h24": "exists a0 forall D1 exists A1 forall D2 exists A2 forall D3 exists A3 forall D4 exists A4 forall D5 exists A5: E_1",
+    "fresh_h17_h18": "exists A1 forall D1 exists A2 forall D2 exists A3 forall D3 exists A4: E_1 (h17) / E_2 (h18)",
+    "fresh_h21_h22": "exists A1 forall D1 exists A2 forall D2 exists A3 forall D3 exists A4 forall D4 exists A5: E_1 (h21) / E_2 (h22)",
+    "normalization_status": "These formulas are exact on the full dynamic true-rule tree. Replacing that tree by the R3 root-anchored V quotient at h17 or beyond remains HYPOTHESIS pending an excursion/interaction coupling theorem.",
+    "opening_adjustment": "Use the SecondStone clock but replace exists a0 by the fixed forced-origin placement (0,0)."
+  },
+  "fresh_h17_singleton_cover": {
+    "claim": "Every nonterminal attacker set of at most eight stones has at most two distinct singleton completion cells.",
+    "claim_label": "PROOF-SKETCH plus MEASURED exhaustive finite census",
+    "dynamic_limit": "This closes only the static final-pair cover needed by fresh h17. It does not prove that remote excursions can be normalized away while the defender also answers the anchored interaction.",
+    "enumeration_scope": "raw subsets of [-5,10] with exactly five stones in base [0,5]; translations/reflections and positions with multiple eligible base windows are deliberately not deduplicated",
+    "geometric_reduction": [
+      "A singleton completion window contains five attacker stones. Two distinct geometric lines would require at least 5+5-1=9 stones (or 10 for disjoint parallel lines), so at k<=8 all supporting windows lie on one line.",
+      "Normalize one supporting interval to [0,5]. Any other five-stone support shares at least two of the <=8 stones and therefore lies in the finite carrier [-5,10]. Stones outside that carrier are irrelevant to this family.",
+      "Opponent stones only delete pure attacker windows. Every completion cell is within distance five of an attacker stone, so both the defender cover and final attacker placement obey the radius-eight rule."
+    ],
+    "rows": [
+      {
+        "attacker_stones_in_carrier": 5,
+        "first_examples_by_threat_count": {
+          "1": {
+            "singleton_completion_cells": [
+              4
+            ],
+            "stones": [
+              0,
+              1,
+              2,
+              3,
+              5
+            ]
+          },
+          "2": {
+            "singleton_completion_cells": [
+              -1,
+              5
+            ],
+            "stones": [
+              0,
+              1,
+              2,
+              3,
+              4
+            ]
+          }
+        },
+        "maximum_singleton_completion_cells": 2,
+        "nonterminal_candidates": 6,
+        "raw_normalized_candidates": 6,
+        "singleton_threat_count_histogram": {
+          "1": 4,
+          "2": 2
+        },
+        "terminal_candidates_rejected": 0
+      },
+      {
+        "attacker_stones_in_carrier": 6,
+        "first_examples_by_threat_count": {
+          "1": {
+            "singleton_completion_cells": [
+              4
+            ],
+            "stones": [
+              -5,
+              0,
+              1,
+              2,
+              3,
+              5
+            ]
+          },
+          "2": {
+            "singleton_completion_cells": [
+              -1,
+              5
+            ],
+            "stones": [
+              -5,
+              0,
+              1,
+              2,
+              3,
+              4
+            ]
+          }
+        },
+        "maximum_singleton_completion_cells": 2,
+        "nonterminal_candidates": 58,
+        "raw_normalized_candidates": 60,
+        "singleton_threat_count_histogram": {
+          "1": 36,
+          "2": 22
+        },
+        "terminal_candidates_rejected": 2
+      },
+      {
+        "attacker_stones_in_carrier": 7,
+        "first_examples_by_threat_count": {
+          "1": {
+            "singleton_completion_cells": [
+              4
+            ],
+            "stones": [
+              -5,
+              -4,
+              0,
+              1,
+              2,
+              3,
+              5
+            ]
+          },
+          "2": {
+            "singleton_completion_cells": [
+              -1,
+              5
+            ],
+            "stones": [
+              -5,
+              -4,
+              0,
+              1,
+              2,
+              3,
+              4
+            ]
+          }
+        },
+        "maximum_singleton_completion_cells": 2,
+        "nonterminal_candidates": 250,
+        "raw_normalized_candidates": 270,
+        "singleton_threat_count_histogram": {
+          "1": 140,
+          "2": 110
+        },
+        "terminal_candidates_rejected": 20
+      },
+      {
+        "attacker_stones_in_carrier": 8,
+        "first_examples_by_threat_count": {
+          "1": {
+            "singleton_completion_cells": [
+              4
+            ],
+            "stones": [
+              -5,
+              -4,
+              -3,
+              0,
+              1,
+              2,
+              3,
+              5
+            ]
+          },
+          "2": {
+            "singleton_completion_cells": [
+              -1,
+              5
+            ],
+            "stones": [
+              -5,
+              -4,
+              -3,
+              0,
+              1,
+              2,
+              3,
+              4
+            ]
+          }
+        },
+        "maximum_singleton_completion_cells": 2,
+        "nonterminal_candidates": 630,
+        "raw_normalized_candidates": 720,
+        "singleton_threat_count_histogram": {
+          "1": 300,
+          "2": 330
+        },
+        "terminal_candidates_rejected": 90
+      }
+    ],
+    "totals": {
+      "failures_of_two_cell_cover": 0,
+      "maximum_singleton_completion_cells": 2,
+      "nonterminal_raw_normalized_candidates": 944,
+      "terminal_candidates_rejected": 112
+    }
+  },
+  "h21_singleton_reserve_pair_obstruction": {
+    "claim": "Nine stones already support four distinct singleton completion cells, so a reserved defender pair cannot by itself dominate the fresh-h21 remote endpoint.",
+    "claim_label": "MEASURED exact finite geometry; dynamic reachability unproved",
+    "dynamic_limit": "The construction is a local state obstruction, not a forcing strategy: earlier defender pairs may pre-block it, and coupling that tax to the anchored interaction remains the open theorem.",
+    "fresh_h21_budget_example10": {
+      "radius8_direct_from_origin_max_distance": 5,
+      "singleton_completion_cells": [
+        [
+          -1,
+          0
+        ],
+        [
+          0,
+          -1
+        ],
+        [
+          0,
+          5
+        ],
+        [
+          5,
+          0
+        ]
+      ],
+      "singleton_cover_number": 4,
+      "stones": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          0,
+          2
+        ],
+        [
+          0,
+          3
+        ],
+        [
+          0,
+          4
+        ],
+        [
+          1,
+          0
+        ],
+        [
+          2,
+          0
+        ],
+        [
+          3,
+          0
+        ],
+        [
+          4,
+          0
+        ],
+        [
+          4,
+          1
+        ]
+      ],
+      "supporting_windows": [
+        {
+          "singleton": [
+            -1,
+            0
+          ],
+          "window": [
+            [
+              -1,
+              0
+            ],
+            [
+              0,
+              0
+            ],
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              0
+            ],
+            [
+              3,
+              0
+            ],
+            [
+              4,
+              0
+            ]
+          ]
+        },
+        {
+          "singleton": [
+            0,
+            -1
+          ],
+          "window": [
+            [
+              0,
+              -1
+            ],
+            [
+              0,
+              0
+            ],
+            [
+              0,
+              1
+            ],
+            [
+              0,
+              2
+            ],
+            [
+              0,
+              3
+            ],
+            [
+              0,
+              4
+            ]
+          ]
+        },
+        {
+          "singleton": [
+            0,
+            5
+          ],
+          "window": [
+            [
+              0,
+              0
+            ],
+            [
+              0,
+              1
+            ],
+            [
+              0,
+              2
+            ],
+            [
+              0,
+              3
+            ],
+            [
+              0,
+              4
+            ],
+            [
+              0,
+              5
+            ]
+          ]
+        },
+        {
+          "singleton": [
+            5,
+            0
+          ],
+          "window": [
+            [
+              0,
+              0
+            ],
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              0
+            ],
+            [
+              3,
+              0
+            ],
+            [
+              4,
+              0
+            ],
+            [
+              5,
+              0
+            ]
+          ]
+        }
+      ],
+      "terminal": false,
+      "terminal_window_count": 0
+    },
+    "minimal_cross9": {
+      "singleton_completion_cells": [
+        [
+          -1,
+          0
+        ],
+        [
+          0,
+          -1
+        ],
+        [
+          0,
+          5
+        ],
+        [
+          5,
+          0
+        ]
+      ],
+      "singleton_cover_number": 4,
+      "stones": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          0,
+          2
+        ],
+        [
+          0,
+          3
+        ],
+        [
+          0,
+          4
+        ],
+        [
+          1,
+          0
+        ],
+        [
+          2,
+          0
+        ],
+        [
+          3,
+          0
+        ],
+        [
+          4,
+          0
+        ]
+      ],
+      "supporting_windows": [
+        {
+          "singleton": [
+            -1,
+            0
+          ],
+          "window": [
+            [
+              -1,
+              0
+            ],
+            [
+              0,
+              0
+            ],
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              0
+            ],
+            [
+              3,
+              0
+            ],
+            [
+              4,
+              0
+            ]
+          ]
+        },
+        {
+          "singleton": [
+            0,
+            -1
+          ],
+          "window": [
+            [
+              0,
+              -1
+            ],
+            [
+              0,
+              0
+            ],
+            [
+              0,
+              1
+            ],
+            [
+              0,
+              2
+            ],
+            [
+              0,
+              3
+            ],
+            [
+              0,
+              4
+            ]
+          ]
+        },
+        {
+          "singleton": [
+            0,
+            5
+          ],
+          "window": [
+            [
+              0,
+              0
+            ],
+            [
+              0,
+              1
+            ],
+            [
+              0,
+              2
+            ],
+            [
+              0,
+              3
+            ],
+            [
+              0,
+              4
+            ],
+            [
+              0,
+              5
+            ]
+          ]
+        },
+        {
+          "singleton": [
+            5,
+            0
+          ],
+          "window": [
+            [
+              0,
+              0
+            ],
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              0
+            ],
+            [
+              3,
+              0
+            ],
+            [
+              4,
+              0
+            ],
+            [
+              5,
+              0
+            ]
+          ]
+        }
+      ],
+      "terminal": false,
+      "terminal_window_count": 0
+    }
+  },
+  "metadata": {
+    "claim_discipline": {
+      "CODE-FACT": "direct schedule or formula evaluation",
+      "HYPOTHESIS": "dynamic remote/interaction coupling remains unproved",
+      "MEASURED": "exhaustive finite enumeration in this program",
+      "PROOF-SKETCH": "definition-level mathematical reduction, not Lean-checked here"
+    },
+    "purpose": "Horizon R4 phase-3 clock semantics and static theory boundary",
+    "python": "3.14.0",
+    "script_path": ".scratch/horizon_r4_ladder.py",
+    "script_sha256": "85A4F250D8F3D08CD43D4665256F2E9075BBC52DB0795D28B7BAC23485BF9278"
+  },
+  "phase3_boundary": {
+    "claim_label": "CODE-FACT clocks; MEASURED static geometry; HYPOTHESIS dynamic normalization",
+    "h17_full_interaction_normalization": "open",
+    "h17_static_final_cover": "closed for <=8 attacker stones",
+    "h18": "blocked by the separately audited six-stone pair-activation obstruction; earlier defender pre-cover versus anchored-defense tax remains the precise open coupling theorem",
+    "h21_h22": "the simple reserve-pair schema already fails statically: the displayed nine-stone cross has four singleton completion cells",
+    "h24_scope_warning": "fresh h24 collapses to h22, but SecondStone/opening h24 add a new attacker singleton and require their own endpoint"
+  },
+  "phase_clocks_h13_through_h26": {
+    "FirstStone": {
+      "constant_attacker_quota_blocks_intersecting_h13_h26": [
+        {
+          "attacker_placements": 7,
+          "current_attacker_win_predicates_equal_within_block": true,
+          "first_horizon": 13,
+          "intersects_reported_range": [
+            13,
+            13
+          ],
+          "last_horizon": 13
+        },
+        {
+          "attacker_placements": 8,
+          "current_attacker_win_predicates_equal_within_block": true,
+          "first_horizon": 14,
+          "intersects_reported_range": [
+            14,
+            16
+          ],
+          "last_horizon": 16
+        },
+        {
+          "attacker_placements": 9,
+          "current_attacker_win_predicates_equal_within_block": true,
+          "first_horizon": 17,
+          "intersects_reported_range": [
+            17,
+            17
+          ],
+          "last_horizon": 17
+        },
+        {
+          "attacker_placements": 10,
+          "current_attacker_win_predicates_equal_within_block": true,
+          "first_horizon": 18,
+          "intersects_reported_range": [
+            18,
+            20
+          ],
+          "last_horizon": 20
+        },
+        {
+          "attacker_placements": 11,
+          "current_attacker_win_predicates_equal_within_block": true,
+          "first_horizon": 21,
+          "intersects_reported_range": [
+            21,
+            21
+          ],
+          "last_horizon": 21
+        },
+        {
+          "attacker_placements": 12,
+          "current_attacker_win_predicates_equal_within_block": true,
+          "first_horizon": 22,
+          "intersects_reported_range": [
+            22,
+            24
+          ],
+          "last_horizon": 24
+        },
+        {
+          "attacker_placements": 13,
+          "current_attacker_win_predicates_equal_within_block": true,
+          "first_horizon": 25,
+          "intersects_reported_range": [
+            25,
+            25
+          ],
+          "last_horizon": 25
+        },
+        {
+          "attacker_placements": 14,
+          "current_attacker_win_predicates_equal_within_block": true,
+          "first_horizon": 26,
+          "intersects_reported_range": [
+            26,
+            26
+          ],
+          "last_horizon": 28
+        }
+      ],
+      "entries": [
+        {
+          "attacker_placements": 7,
+          "attacker_quota_changed": true,
+          "defender_placements": 6,
+          "horizon": 13,
+          "last_placement_owner": "A",
+          "schedule": "AADDAADDAADDA",
+          "win_equal_to_previous_horizon": false
+        },
+        {
+          "attacker_placements": 8,
+          "attacker_quota_changed": true,
+          "defender_placements": 6,
+          "horizon": 14,
+          "last_placement_owner": "A",
+          "schedule": "AADDAADDAADDAA",
+          "win_equal_to_previous_horizon": false
+        },
+        {
+          "attacker_placements": 8,
+          "attacker_quota_changed": false,
+          "defender_placements": 7,
+          "horizon": 15,
+          "last_placement_owner": "D",
+          "schedule": "AADDAADDAADDAAD",
+          "win_equal_to_previous_horizon": true
+        },
+        {
+          "attacker_placements": 8,
+          "attacker_quota_changed": false,
+          "defender_placements": 8,
+          "horizon": 16,
+          "last_placement_owner": "D",
+          "schedule": "AADDAADDAADDAADD",
+          "win_equal_to_previous_horizon": true
+        },
+        {
+          "attacker_placements": 9,
+          "attacker_quota_changed": true,
+          "defender_placements": 8,
+          "horizon": 17,
+          "last_placement_owner": "A",
+          "schedule": "AADDAADDAADDAADDA",
+          "win_equal_to_previous_horizon": false
+        },
+        {
+          "attacker_placements": 10,
+          "attacker_quota_changed": true,
+          "defender_placements": 8,
+          "horizon": 18,
+          "last_placement_owner": "A",
+          "schedule": "AADDAADDAADDAADDAA",
+          "win_equal_to_previous_horizon": false
+        },
+        {
+          "attacker_placements": 10,
+          "attacker_quota_changed": false,
+          "defender_placements": 9,
+          "horizon": 19,
+          "last_placement_owner": "D",
+          "schedule": "AADDAADDAADDAADDAAD",
+          "win_equal_to_previous_horizon": true
+        },
+        {
+          "attacker_placements": 10,
+          "attacker_quota_changed": false,
+          "defender_placements": 10,
+          "horizon": 20,
+          "last_placement_owner": "D",
+          "schedule": "AADDAADDAADDAADDAADD",
+          "win_equal_to_previous_horizon": true
+        },
+        {
+          "attacker_placements": 11,
+          "attacker_quota_changed": true,
+          "defender_placements": 10,
+          "horizon": 21,
+          "last_placement_owner": "A",
+          "schedule": "AADDAADDAADDAADDAADDA",
+          "win_equal_to_previous_horizon": false
+        },
+        {
+          "attacker_placements": 12,
+          "attacker_quota_changed": true,
+          "defender_placements": 10,
+          "horizon": 22,
+          "last_placement_owner": "A",
+          "schedule": "AADDAADDAADDAADDAADDAA",
+          "win_equal_to_previous_horizon": false
+        },
+        {
+          "attacker_placements": 12,
+          "attacker_quota_changed": false,
+          "defender_placements": 11,
+          "horizon": 23,
+          "last_placement_owner": "D",
+          "schedule": "AADDAADDAADDAADDAADDAAD",
+          "win_equal_to_previous_horizon": true
+        },
+        {
+          "attacker_placements": 12,
+          "attacker_quota_changed": false,
+          "defender_placements": 12,
+          "horizon": 24,
+          "last_placement_owner": "D",
+          "schedule": "AADDAADDAADDAADDAADDAADD",
+          "win_equal_to_previous_horizon": true
+        },
+        {
+          "attacker_placements": 13,
+          "attacker_quota_changed": true,
+          "defender_placements": 12,
+          "horizon": 25,
+          "last_placement_owner": "A",
+          "schedule": "AADDAADDAADDAADDAADDAADDA",
+          "win_equal_to_previous_horizon": false
+        },
+        {
+          "attacker_placements": 14,
+          "attacker_quota_changed": true,
+          "defender_placements": 12,
+          "horizon": 26,
+          "last_placement_owner": "A",
+          "schedule": "AADDAADDAADDAADDAADDAADDAA",
+          "win_equal_to_previous_horizon": false
+        }
+      ],
+      "opening_first_A_is_forced_origin": false,
+      "representative_root_placements": 1
+    },
+    "SecondStone": {
+      "constant_attacker_quota_blocks_intersecting_h13_h26": [
+        {
+          "attacker_placements": 7,
+          "current_attacker_win_predicates_equal_within_block": true,
+          "first_horizon": 13,
+          "intersects_reported_range": [
+            13,
+            15
+          ],
+          "last_horizon": 15
+        },
+        {
+          "attacker_placements": 8,
+          "current_attacker_win_predicates_equal_within_block": true,
+          "first_horizon": 16,
+          "intersects_reported_range": [
+            16,
+            16
+          ],
+          "last_horizon": 16
+        },
+        {
+          "attacker_placements": 9,
+          "current_attacker_win_predicates_equal_within_block": true,
+          "first_horizon": 17,
+          "intersects_reported_range": [
+            17,
+            19
+          ],
+          "last_horizon": 19
+        },
+        {
+          "attacker_placements": 10,
+          "current_attacker_win_predicates_equal_within_block": true,
+          "first_horizon": 20,
+          "intersects_reported_range": [
+            20,
+            20
+          ],
+          "last_horizon": 20
+        },
+        {
+          "attacker_placements": 11,
+          "current_attacker_win_predicates_equal_within_block": true,
+          "first_horizon": 21,
+          "intersects_reported_range": [
+            21,
+            23
+          ],
+          "last_horizon": 23
+        },
+        {
+          "attacker_placements": 12,
+          "current_attacker_win_predicates_equal_within_block": true,
+          "first_horizon": 24,
+          "intersects_reported_range": [
+            24,
+            24
+          ],
+          "last_horizon": 24
+        },
+        {
+          "attacker_placements": 13,
+          "current_attacker_win_predicates_equal_within_block": true,
+          "first_horizon": 25,
+          "intersects_reported_range": [
+            25,
+            26
+          ],
+          "last_horizon": 27
+        }
+      ],
+      "entries": [
+        {
+          "attacker_placements": 7,
+          "attacker_quota_changed": true,
+          "defender_placements": 6,
+          "horizon": 13,
+          "last_placement_owner": "A",
+          "schedule": "ADDAADDAADDAA",
+          "win_equal_to_previous_horizon": false
+        },
+        {
+          "attacker_placements": 7,
+          "attacker_quota_changed": false,
+          "defender_placements": 7,
+          "horizon": 14,
+          "last_placement_owner": "D",
+          "schedule": "ADDAADDAADDAAD",
+          "win_equal_to_previous_horizon": true
+        },
+        {
+          "attacker_placements": 7,
+          "attacker_quota_changed": false,
+          "defender_placements": 8,
+          "horizon": 15,
+          "last_placement_owner": "D",
+          "schedule": "ADDAADDAADDAADD",
+          "win_equal_to_previous_horizon": true
+        },
+        {
+          "attacker_placements": 8,
+          "attacker_quota_changed": true,
+          "defender_placements": 8,
+          "horizon": 16,
+          "last_placement_owner": "A",
+          "schedule": "ADDAADDAADDAADDA",
+          "win_equal_to_previous_horizon": false
+        },
+        {
+          "attacker_placements": 9,
+          "attacker_quota_changed": true,
+          "defender_placements": 8,
+          "horizon": 17,
+          "last_placement_owner": "A",
+          "schedule": "ADDAADDAADDAADDAA",
+          "win_equal_to_previous_horizon": false
+        },
+        {
+          "attacker_placements": 9,
+          "attacker_quota_changed": false,
+          "defender_placements": 9,
+          "horizon": 18,
+          "last_placement_owner": "D",
+          "schedule": "ADDAADDAADDAADDAAD",
+          "win_equal_to_previous_horizon": true
+        },
+        {
+          "attacker_placements": 9,
+          "attacker_quota_changed": false,
+          "defender_placements": 10,
+          "horizon": 19,
+          "last_placement_owner": "D",
+          "schedule": "ADDAADDAADDAADDAADD",
+          "win_equal_to_previous_horizon": true
+        },
+        {
+          "attacker_placements": 10,
+          "attacker_quota_changed": true,
+          "defender_placements": 10,
+          "horizon": 20,
+          "last_placement_owner": "A",
+          "schedule": "ADDAADDAADDAADDAADDA",
+          "win_equal_to_previous_horizon": false
+        },
+        {
+          "attacker_placements": 11,
+          "attacker_quota_changed": true,
+          "defender_placements": 10,
+          "horizon": 21,
+          "last_placement_owner": "A",
+          "schedule": "ADDAADDAADDAADDAADDAA",
+          "win_equal_to_previous_horizon": false
+        },
+        {
+          "attacker_placements": 11,
+          "attacker_quota_changed": false,
+          "defender_placements": 11,
+          "horizon": 22,
+          "last_placement_owner": "D",
+          "schedule": "ADDAADDAADDAADDAADDAAD",
+          "win_equal_to_previous_horizon": true
+        },
+        {
+          "attacker_placements": 11,
+          "attacker_quota_changed": false,
+          "defender_placements": 12,
+          "horizon": 23,
+          "last_placement_owner": "D",
+          "schedule": "ADDAADDAADDAADDAADDAADD",
+          "win_equal_to_previous_horizon": true
+        },
+        {
+          "attacker_placements": 12,
+          "attacker_quota_changed": true,
+          "defender_placements": 12,
+          "horizon": 24,
+          "last_placement_owner": "A",
+          "schedule": "ADDAADDAADDAADDAADDAADDA",
+          "win_equal_to_previous_horizon": false
+        },
+        {
+          "attacker_placements": 13,
+          "attacker_quota_changed": true,
+          "defender_placements": 12,
+          "horizon": 25,
+          "last_placement_owner": "A",
+          "schedule": "ADDAADDAADDAADDAADDAADDAA",
+          "win_equal_to_previous_horizon": false
+        },
+        {
+          "attacker_placements": 13,
+          "attacker_quota_changed": false,
+          "defender_placements": 13,
+          "horizon": 26,
+          "last_placement_owner": "D",
+          "schedule": "ADDAADDAADDAADDAADDAADDAAD",
+          "win_equal_to_previous_horizon": true
+        }
+      ],
+      "opening_first_A_is_forced_origin": false,
+      "representative_root_placements": 2
+    },
+    "opening": {
+      "constant_attacker_quota_blocks_intersecting_h13_h26": [
+        {
+          "attacker_placements": 7,
+          "current_attacker_win_predicates_equal_within_block": true,
+          "first_horizon": 13,
+          "intersects_reported_range": [
+            13,
+            15
+          ],
+          "last_horizon": 15
+        },
+        {
+          "attacker_placements": 8,
+          "current_attacker_win_predicates_equal_within_block": true,
+          "first_horizon": 16,
+          "intersects_reported_range": [
+            16,
+            16
+          ],
+          "last_horizon": 16
+        },
+        {
+          "attacker_placements": 9,
+          "current_attacker_win_predicates_equal_within_block": true,
+          "first_horizon": 17,
+          "intersects_reported_range": [
+            17,
+            19
+          ],
+          "last_horizon": 19
+        },
+        {
+          "attacker_placements": 10,
+          "current_attacker_win_predicates_equal_within_block": true,
+          "first_horizon": 20,
+          "intersects_reported_range": [
+            20,
+            20
+          ],
+          "last_horizon": 20
+        },
+        {
+          "attacker_placements": 11,
+          "current_attacker_win_predicates_equal_within_block": true,
+          "first_horizon": 21,
+          "intersects_reported_range": [
+            21,
+            23
+          ],
+          "last_horizon": 23
+        },
+        {
+          "attacker_placements": 12,
+          "current_attacker_win_predicates_equal_within_block": true,
+          "first_horizon": 24,
+          "intersects_reported_range": [
+            24,
+            24
+          ],
+          "last_horizon": 24
+        },
+        {
+          "attacker_placements": 13,
+          "current_attacker_win_predicates_equal_within_block": true,
+          "first_horizon": 25,
+          "intersects_reported_range": [
+            25,
+            26
+          ],
+          "last_horizon": 27
+        }
+      ],
+      "entries": [
+        {
+          "attacker_placements": 7,
+          "attacker_quota_changed": true,
+          "defender_placements": 6,
+          "horizon": 13,
+          "last_placement_owner": "A",
+          "schedule": "ADDAADDAADDAA",
+          "win_equal_to_previous_horizon": false
+        },
+        {
+          "attacker_placements": 7,
+          "attacker_quota_changed": false,
+          "defender_placements": 7,
+          "horizon": 14,
+          "last_placement_owner": "D",
+          "schedule": "ADDAADDAADDAAD",
+          "win_equal_to_previous_horizon": true
+        },
+        {
+          "attacker_placements": 7,
+          "attacker_quota_changed": false,
+          "defender_placements": 8,
+          "horizon": 15,
+          "last_placement_owner": "D",
+          "schedule": "ADDAADDAADDAADD",
+          "win_equal_to_previous_horizon": true
+        },
+        {
+          "attacker_placements": 8,
+          "attacker_quota_changed": true,
+          "defender_placements": 8,
+          "horizon": 16,
+          "last_placement_owner": "A",
+          "schedule": "ADDAADDAADDAADDA",
+          "win_equal_to_previous_horizon": false
+        },
+        {
+          "attacker_placements": 9,
+          "attacker_quota_changed": true,
+          "defender_placements": 8,
+          "horizon": 17,
+          "last_placement_owner": "A",
+          "schedule": "ADDAADDAADDAADDAA",
+          "win_equal_to_previous_horizon": false
+        },
+        {
+          "attacker_placements": 9,
+          "attacker_quota_changed": false,
+          "defender_placements": 9,
+          "horizon": 18,
+          "last_placement_owner": "D",
+          "schedule": "ADDAADDAADDAADDAAD",
+          "win_equal_to_previous_horizon": true
+        },
+        {
+          "attacker_placements": 9,
+          "attacker_quota_changed": false,
+          "defender_placements": 10,
+          "horizon": 19,
+          "last_placement_owner": "D",
+          "schedule": "ADDAADDAADDAADDAADD",
+          "win_equal_to_previous_horizon": true
+        },
+        {
+          "attacker_placements": 10,
+          "attacker_quota_changed": true,
+          "defender_placements": 10,
+          "horizon": 20,
+          "last_placement_owner": "A",
+          "schedule": "ADDAADDAADDAADDAADDA",
+          "win_equal_to_previous_horizon": false
+        },
+        {
+          "attacker_placements": 11,
+          "attacker_quota_changed": true,
+          "defender_placements": 10,
+          "horizon": 21,
+          "last_placement_owner": "A",
+          "schedule": "ADDAADDAADDAADDAADDAA",
+          "win_equal_to_previous_horizon": false
+        },
+        {
+          "attacker_placements": 11,
+          "attacker_quota_changed": false,
+          "defender_placements": 11,
+          "horizon": 22,
+          "last_placement_owner": "D",
+          "schedule": "ADDAADDAADDAADDAADDAAD",
+          "win_equal_to_previous_horizon": true
+        },
+        {
+          "attacker_placements": 11,
+          "attacker_quota_changed": false,
+          "defender_placements": 12,
+          "horizon": 23,
+          "last_placement_owner": "D",
+          "schedule": "ADDAADDAADDAADDAADDAADD",
+          "win_equal_to_previous_horizon": true
+        },
+        {
+          "attacker_placements": 12,
+          "attacker_quota_changed": true,
+          "defender_placements": 12,
+          "horizon": 24,
+          "last_placement_owner": "A",
+          "schedule": "ADDAADDAADDAADDAADDAADDA",
+          "win_equal_to_previous_horizon": false
+        },
+        {
+          "attacker_placements": 13,
+          "attacker_quota_changed": true,
+          "defender_placements": 12,
+          "horizon": 25,
+          "last_placement_owner": "A",
+          "schedule": "ADDAADDAADDAADDAADDAADDAA",
+          "win_equal_to_previous_horizon": false
+        },
+        {
+          "attacker_placements": 13,
+          "attacker_quota_changed": false,
+          "defender_placements": 13,
+          "horizon": 26,
+          "last_placement_owner": "D",
+          "schedule": "ADDAADDAADDAADDAADDAADDAAD",
+          "win_equal_to_previous_horizon": true
+        }
+      ],
+      "opening_first_A_is_forced_origin": true,
+      "representative_root_placements": 0
+    }
+  },
+  "registry_validation_ladder": {
+    "cert_depth_semantics": "maximum exact-leaf resolution ply in the verified certificate, minus root placements; it is a sufficient deadline, not a claim of minimal winning depth",
+    "cumulative": {
+      "14": {
+        "by_phase": {
+          "FirstStone": 239,
+          "SecondStone": 39,
+          "opening": 0
+        },
+        "count": 278,
+        "ids_sha256_compact_json": "0A03671CBB8C4156A13C95A3E2BB6442569A08C2EE0D37E1457BC9CD849B7DF3",
+        "increment": {
+          "after_horizon": 0,
+          "by_phase": {
+            "FirstStone": 239,
+            "SecondStone": 39,
+            "opening": 0
+          },
+          "count": 278,
+          "ids_sha256_compact_json": "0A03671CBB8C4156A13C95A3E2BB6442569A08C2EE0D37E1457BC9CD849B7DF3"
+        }
+      },
+      "18": {
+        "by_phase": {
+          "FirstStone": 964,
+          "SecondStone": 221,
+          "opening": 0
+        },
+        "count": 1185,
+        "ids_sha256_compact_json": "61080427B2203B3761F0B1927195E574B8866E34A2830ABBCE5A70D19DDED87C",
+        "increment": {
+          "after_horizon": 14,
+          "by_phase": {
+            "FirstStone": 725,
+            "SecondStone": 182,
+            "opening": 0
+          },
+          "count": 907,
+          "ids_sha256_compact_json": "68A6D26CAA96DA0D6C3DED50DBC2EEA6362362D7EF3A2817450E6405343A1A2D"
+        }
+      },
+      "22": {
+        "by_phase": {
+          "FirstStone": 1712,
+          "SecondStone": 522,
+          "opening": 0
+        },
+        "count": 2234,
+        "ids_sha256_compact_json": "9F08C9FFE302B026393A5D97284151C79E8D3BFBA7D3A380485C4280B0D02D3F",
+        "increment": {
+          "after_horizon": 18,
+          "by_phase": {
+            "FirstStone": 748,
+            "SecondStone": 301,
+            "opening": 0
+          },
+          "count": 1049,
+          "ids_sha256_compact_json": "C9BF9C64499B03E12EEA56692CE556456EDFBA34B0FE452A418321192865824F"
+        }
+      },
+      "24": {
+        "by_phase": {
+          "FirstStone": 1712,
+          "SecondStone": 522,
+          "opening": 0
+        },
+        "count": 2234,
+        "ids_sha256_compact_json": "9F08C9FFE302B026393A5D97284151C79E8D3BFBA7D3A380485C4280B0D02D3F",
+        "increment": {
+          "after_horizon": 22,
+          "by_phase": {
+            "FirstStone": 0,
+            "SecondStone": 0,
+            "opening": 0
+          },
+          "count": 0,
+          "ids_sha256_compact_json": "4F53CDA18C2BAA0C0354BB5F9A3ECBE5ED12AB4D8E11BA873C2F11161202B945"
+        }
+      },
+      "26": {
+        "by_phase": {
+          "FirstStone": 1950,
+          "SecondStone": 616,
+          "opening": 0
+        },
+        "count": 2566,
+        "ids_sha256_compact_json": "FAD984BCEEFAF7EDF74509C3EDEBEB3D010B00D79D9F0B9FBA6CEF79559CB96F",
+        "increment": {
+          "after_horizon": 24,
+          "by_phase": {
+            "FirstStone": 238,
+            "SecondStone": 94,
+            "opening": 0
+          },
+          "count": 332,
+          "ids_sha256_compact_json": "452115F2E85CF37E70B0B9DB20CC70BEFA3025B4B1A955448CD980E3A42D79C5"
+        }
+      }
+    },
+    "exact_depths": {
+      "13": {
+        "by_phase": {
+          "FirstStone": 0,
+          "SecondStone": 6,
+          "opening": 0
+        },
+        "count": 6,
+        "ids_sha256_compact_json": "8F96650FBEED36A9C3738AD32FCD0486944472E4AFB8954DDB55689201952ABB"
+      },
+      "14": {
+        "by_phase": {
+          "FirstStone": 149,
+          "SecondStone": 0,
+          "opening": 0
+        },
+        "count": 149,
+        "ids_sha256_compact_json": "6124F95B47BF8B49D6571AA49E67F0C23B6DB3642C1DB6DFACDE22BC6472F976"
+      },
+      "17": {
+        "by_phase": {
+          "FirstStone": 0,
+          "SecondStone": 182,
+          "opening": 0
+        },
+        "count": 182,
+        "ids_sha256_compact_json": "7B35FB071B22506B0CD2E216B5A5B5B7B7CB9AD9DD3FAC46144FAC439B505C01"
+      },
+      "18": {
+        "by_phase": {
+          "FirstStone": 725,
+          "SecondStone": 0,
+          "opening": 0
+        },
+        "count": 725,
+        "ids_sha256_compact_json": "E33E15E8A722D7EB2CE7A66691B00F194813AE442F4BE54DF5F6AC6160638363"
+      },
+      "21": {
+        "by_phase": {
+          "FirstStone": 0,
+          "SecondStone": 301,
+          "opening": 0
+        },
+        "count": 301,
+        "ids_sha256_compact_json": "9BEDF08B9D35C44AF8EA40F4CB45B8FB9DB4135727D4246F1EA9FE47952F7426"
+      },
+      "22": {
+        "by_phase": {
+          "FirstStone": 748,
+          "SecondStone": 0,
+          "opening": 0
+        },
+        "count": 748,
+        "ids_sha256_compact_json": "141A30D630F0F115A56016269E3E303C3DF7F8E2251F40ADF6BD96769C47C820"
+      },
+      "25": {
+        "by_phase": {
+          "FirstStone": 0,
+          "SecondStone": 94,
+          "opening": 0
+        },
+        "count": 94,
+        "ids_sha256_compact_json": "43BE62A521DD9E254C541DC6BFD78A127286110C2BA574C15B409550602388FB"
+      },
+      "26": {
+        "by_phase": {
+          "FirstStone": 238,
+          "SecondStone": 0,
+          "opening": 0
+        },
+        "count": 238,
+        "ids_sha256_compact_json": "830A0406A1B7736FA01CDEC70ECA2A10A6348EDE229F7027690EF9C62AA160E3"
+      }
+    },
+    "phase_aligned_exact_depth_rungs": {
+      "13_14": {
+        "FirstStone_depth": 14,
+        "SecondStone_depth": 13,
+        "by_phase": {
+          "FirstStone": 149,
+          "SecondStone": 6,
+          "opening": 0
+        },
+        "count": 155,
+        "ids_sha256_compact_json": "EC4DE6586A39A1382232F529D42923B52D8E9318CD2D7A89D22F925C2B5911DB"
+      },
+      "17_18": {
+        "FirstStone_depth": 18,
+        "SecondStone_depth": 17,
+        "by_phase": {
+          "FirstStone": 725,
+          "SecondStone": 182,
+          "opening": 0
+        },
+        "count": 907,
+        "ids_sha256_compact_json": "68A6D26CAA96DA0D6C3DED50DBC2EEA6362362D7EF3A2817450E6405343A1A2D"
+      },
+      "21_22": {
+        "FirstStone_depth": 22,
+        "SecondStone_depth": 21,
+        "by_phase": {
+          "FirstStone": 748,
+          "SecondStone": 301,
+          "opening": 0
+        },
+        "count": 1049,
+        "ids_sha256_compact_json": "C9BF9C64499B03E12EEA56692CE556456EDFBA34B0FE452A418321192865824F"
+      },
+      "25_26": {
+        "FirstStone_depth": 26,
+        "SecondStone_depth": 25,
+        "by_phase": {
+          "FirstStone": 238,
+          "SecondStone": 94,
+          "opening": 0
+        },
+        "count": 332,
+        "ids_sha256_compact_json": "452115F2E85CF37E70B0B9DB20CC70BEFA3025B4B1A955448CD980E3A42D79C5"
+      }
+    },
+    "source_path": ".scratch/horizon_r4_registry.json",
+    "source_sha256": "451CDF48687D469EB21BEF7889677F0825F015F7728686FE324843C05FB35612"
+  },
+  "rule_only_static_scaling": {
+    "claim_label": "CODE-FACT / PROOF-SKETCH analytical upper bounds, not runtime measurements",
+    "rows": [
+      {
+        "horizon": 13,
+        "phase_endpoint_shapes": {
+          "FirstStone": {
+            "effective_last_attacker_horizon": 13,
+            "effective_quota": {
+              "A": 7,
+              "D": 6
+            },
+            "final_attacker_capacity_after_last_defender_pair": 1,
+            "opening_fixed_blocks_before_suffix": 0,
+            "quantified_choice_blocks_before_suffix": 5,
+            "requested_horizon": 13,
+            "requested_quota": {
+              "A": 7,
+              "D": 6
+            },
+            "scope": "exact decomposition of the full dynamic true-rule tree; it does not assert that a root-anchored finite quotient is sufficient",
+            "turn_blocks_before_exact_final_D_pair_A_suffix": 5
+          },
+          "SecondStone": {
+            "effective_last_attacker_horizon": 13,
+            "effective_quota": {
+              "A": 7,
+              "D": 6
+            },
+            "final_attacker_capacity_after_last_defender_pair": 2,
+            "opening_fixed_blocks_before_suffix": 0,
+            "quantified_choice_blocks_before_suffix": 5,
+            "requested_horizon": 13,
+            "requested_quota": {
+              "A": 7,
+              "D": 6
+            },
+            "scope": "exact decomposition of the full dynamic true-rule tree; it does not assert that a root-anchored finite quotient is sufficient",
+            "turn_blocks_before_exact_final_D_pair_A_suffix": 5
+          },
+          "opening": {
+            "effective_last_attacker_horizon": 13,
+            "effective_quota": {
+              "A": 7,
+              "D": 6
+            },
+            "final_attacker_capacity_after_last_defender_pair": 2,
+            "opening_fixed_blocks_before_suffix": 1,
+            "quantified_choice_blocks_before_suffix": 4,
+            "requested_horizon": 13,
+            "requested_quota": {
+              "A": 7,
+              "D": 6
+            },
+            "scope": "exact decomposition of the full dynamic true-rule tree; it does not assert that a root-anchored finite quotient is sufficient",
+            "turn_blocks_before_exact_final_D_pair_A_suffix": 5
+          }
+        },
+        "radius8_rule_envelope_radius_from_one_existing_seed": 104,
+        "single_seed_ordered_placement_sequence_upper_bound": "13873277756211056665016850824022510796800",
+        "single_seed_ordered_placement_sequence_upper_bound_log10": 40.142179081351586,
+        "single_seed_rule_envelope_cells_including_seed": 32761,
+        "single_seed_rule_envelope_future_empty_cells": 32760
+      },
+      {
+        "horizon": 14,
+        "phase_endpoint_shapes": {
+          "FirstStone": {
+            "effective_last_attacker_horizon": 14,
+            "effective_quota": {
+              "A": 8,
+              "D": 6
+            },
+            "final_attacker_capacity_after_last_defender_pair": 2,
+            "opening_fixed_blocks_before_suffix": 0,
+            "quantified_choice_blocks_before_suffix": 5,
+            "requested_horizon": 14,
+            "requested_quota": {
+              "A": 8,
+              "D": 6
+            },
+            "scope": "exact decomposition of the full dynamic true-rule tree; it does not assert that a root-anchored finite quotient is sufficient",
+            "turn_blocks_before_exact_final_D_pair_A_suffix": 5
+          },
+          "SecondStone": {
+            "effective_last_attacker_horizon": 13,
+            "effective_quota": {
+              "A": 7,
+              "D": 6
+            },
+            "final_attacker_capacity_after_last_defender_pair": 2,
+            "opening_fixed_blocks_before_suffix": 0,
+            "quantified_choice_blocks_before_suffix": 5,
+            "requested_horizon": 14,
+            "requested_quota": {
+              "A": 7,
+              "D": 7
+            },
+            "scope": "exact decomposition of the full dynamic true-rule tree; it does not assert that a root-anchored finite quotient is sufficient",
+            "turn_blocks_before_exact_final_D_pair_A_suffix": 5
+          },
+          "opening": {
+            "effective_last_attacker_horizon": 13,
+            "effective_quota": {
+              "A": 7,
+              "D": 6
+            },
+            "final_attacker_capacity_after_last_defender_pair": 2,
+            "opening_fixed_blocks_before_suffix": 1,
+            "quantified_choice_blocks_before_suffix": 4,
+            "requested_horizon": 14,
+            "requested_quota": {
+              "A": 7,
+              "D": 7
+            },
+            "scope": "exact decomposition of the full dynamic true-rule tree; it does not assert that a root-anchored finite quotient is sufficient",
+            "turn_blocks_before_exact_final_D_pair_A_suffix": 5
+          }
+        },
+        "radius8_rule_envelope_radius_from_one_existing_seed": 112,
+        "single_seed_ordered_placement_sequence_upper_bound": "41952791934782235355010956891844072649523200",
+        "single_seed_ordered_placement_sequence_upper_bound_log10": 43.62276086818075,
+        "single_seed_rule_envelope_cells_including_seed": 37969,
+        "single_seed_rule_envelope_future_empty_cells": 37968
+      },
+      {
+        "horizon": 17,
+        "phase_endpoint_shapes": {
+          "FirstStone": {
+            "effective_last_attacker_horizon": 17,
+            "effective_quota": {
+              "A": 9,
+              "D": 8
+            },
+            "final_attacker_capacity_after_last_defender_pair": 1,
+            "opening_fixed_blocks_before_suffix": 0,
+            "quantified_choice_blocks_before_suffix": 7,
+            "requested_horizon": 17,
+            "requested_quota": {
+              "A": 9,
+              "D": 8
+            },
+            "scope": "exact decomposition of the full dynamic true-rule tree; it does not assert that a root-anchored finite quotient is sufficient",
+            "turn_blocks_before_exact_final_D_pair_A_suffix": 7
+          },
+          "SecondStone": {
+            "effective_last_attacker_horizon": 17,
+            "effective_quota": {
+              "A": 9,
+              "D": 8
+            },
+            "final_attacker_capacity_after_last_defender_pair": 2,
+            "opening_fixed_blocks_before_suffix": 0,
+            "quantified_choice_blocks_before_suffix": 7,
+            "requested_horizon": 17,
+            "requested_quota": {
+              "A": 9,
+              "D": 8
+            },
+            "scope": "exact decomposition of the full dynamic true-rule tree; it does not assert that a root-anchored finite quotient is sufficient",
+            "turn_blocks_before_exact_final_D_pair_A_suffix": 7
+          },
+          "opening": {
+            "effective_last_attacker_horizon": 17,
+            "effective_quota": {
+              "A": 9,
+              "D": 8
+            },
+            "final_attacker_capacity_after_last_defender_pair": 2,
+            "opening_fixed_blocks_before_suffix": 1,
+            "quantified_choice_blocks_before_suffix": 6,
+            "requested_horizon": 17,
+            "requested_quota": {
+              "A": 9,
+              "D": 8
+            },
+            "scope": "exact decomposition of the full dynamic true-rule tree; it does not assert that a root-anchored finite quotient is sufficient",
+            "turn_blocks_before_exact_final_D_pair_A_suffix": 7
+          }
+        },
+        "radius8_rule_envelope_radius_from_one_existing_seed": 136,
+        "single_seed_ordered_placement_sequence_upper_bound": "1724972932557547751961670200918446529740342166552576000",
+        "single_seed_ordered_placement_sequence_upper_bound_log10": 54.236782284723425,
+        "single_seed_rule_envelope_cells_including_seed": 55897,
+        "single_seed_rule_envelope_future_empty_cells": 55896
+      },
+      {
+        "horizon": 18,
+        "phase_endpoint_shapes": {
+          "FirstStone": {
+            "effective_last_attacker_horizon": 18,
+            "effective_quota": {
+              "A": 10,
+              "D": 8
+            },
+            "final_attacker_capacity_after_last_defender_pair": 2,
+            "opening_fixed_blocks_before_suffix": 0,
+            "quantified_choice_blocks_before_suffix": 7,
+            "requested_horizon": 18,
+            "requested_quota": {
+              "A": 10,
+              "D": 8
+            },
+            "scope": "exact decomposition of the full dynamic true-rule tree; it does not assert that a root-anchored finite quotient is sufficient",
+            "turn_blocks_before_exact_final_D_pair_A_suffix": 7
+          },
+          "SecondStone": {
+            "effective_last_attacker_horizon": 17,
+            "effective_quota": {
+              "A": 9,
+              "D": 8
+            },
+            "final_attacker_capacity_after_last_defender_pair": 2,
+            "opening_fixed_blocks_before_suffix": 0,
+            "quantified_choice_blocks_before_suffix": 7,
+            "requested_horizon": 18,
+            "requested_quota": {
+              "A": 9,
+              "D": 9
+            },
+            "scope": "exact decomposition of the full dynamic true-rule tree; it does not assert that a root-anchored finite quotient is sufficient",
+            "turn_blocks_before_exact_final_D_pair_A_suffix": 7
+          },
+          "opening": {
+            "effective_last_attacker_horizon": 17,
+            "effective_quota": {
+              "A": 9,
+              "D": 8
+            },
+            "final_attacker_capacity_after_last_defender_pair": 2,
+            "opening_fixed_blocks_before_suffix": 1,
+            "quantified_choice_blocks_before_suffix": 6,
+            "requested_horizon": 18,
+            "requested_quota": {
+              "A": 9,
+              "D": 9
+            },
+            "scope": "exact decomposition of the full dynamic true-rule tree; it does not assert that a root-anchored finite quotient is sufficient",
+            "turn_blocks_before_exact_final_D_pair_A_suffix": 7
+          }
+        },
+        "radius8_rule_envelope_radius_from_one_existing_seed": 144,
+        "single_seed_ordered_placement_sequence_upper_bound": "6706694761783745659626973741170920107630450343556415488000",
+        "single_seed_ordered_placement_sequence_upper_bound_log10": 57.82650854097766,
+        "single_seed_rule_envelope_cells_including_seed": 62641,
+        "single_seed_rule_envelope_future_empty_cells": 62640
+      },
+      {
+        "horizon": 21,
+        "phase_endpoint_shapes": {
+          "FirstStone": {
+            "effective_last_attacker_horizon": 21,
+            "effective_quota": {
+              "A": 11,
+              "D": 10
+            },
+            "final_attacker_capacity_after_last_defender_pair": 1,
+            "opening_fixed_blocks_before_suffix": 0,
+            "quantified_choice_blocks_before_suffix": 9,
+            "requested_horizon": 21,
+            "requested_quota": {
+              "A": 11,
+              "D": 10
+            },
+            "scope": "exact decomposition of the full dynamic true-rule tree; it does not assert that a root-anchored finite quotient is sufficient",
+            "turn_blocks_before_exact_final_D_pair_A_suffix": 9
+          },
+          "SecondStone": {
+            "effective_last_attacker_horizon": 21,
+            "effective_quota": {
+              "A": 11,
+              "D": 10
+            },
+            "final_attacker_capacity_after_last_defender_pair": 2,
+            "opening_fixed_blocks_before_suffix": 0,
+            "quantified_choice_blocks_before_suffix": 9,
+            "requested_horizon": 21,
+            "requested_quota": {
+              "A": 11,
+              "D": 10
+            },
+            "scope": "exact decomposition of the full dynamic true-rule tree; it does not assert that a root-anchored finite quotient is sufficient",
+            "turn_blocks_before_exact_final_D_pair_A_suffix": 9
+          },
+          "opening": {
+            "effective_last_attacker_horizon": 21,
+            "effective_quota": {
+              "A": 11,
+              "D": 10
+            },
+            "final_attacker_capacity_after_last_defender_pair": 2,
+            "opening_fixed_blocks_before_suffix": 1,
+            "quantified_choice_blocks_before_suffix": 8,
+            "requested_horizon": 21,
+            "requested_quota": {
+              "A": 11,
+              "D": 10
+            },
+            "scope": "exact decomposition of the full dynamic true-rule tree; it does not assert that a root-anchored finite quotient is sufficient",
+            "turn_blocks_before_exact_final_D_pair_A_suffix": 9
+          }
+        },
+        "radius8_rule_envelope_radius_from_one_existing_seed": 168,
+        "single_seed_ordered_placement_sequence_upper_bound": "539352487172911071862340115812755670742195932065547770819290071040000",
+        "single_seed_ordered_placement_sequence_upper_bound_log10": 68.73187268578118,
+        "single_seed_rule_envelope_cells_including_seed": 85177,
+        "single_seed_rule_envelope_future_empty_cells": 85176
+      },
+      {
+        "horizon": 22,
+        "phase_endpoint_shapes": {
+          "FirstStone": {
+            "effective_last_attacker_horizon": 22,
+            "effective_quota": {
+              "A": 12,
+              "D": 10
+            },
+            "final_attacker_capacity_after_last_defender_pair": 2,
+            "opening_fixed_blocks_before_suffix": 0,
+            "quantified_choice_blocks_before_suffix": 9,
+            "requested_horizon": 22,
+            "requested_quota": {
+              "A": 12,
+              "D": 10
+            },
+            "scope": "exact decomposition of the full dynamic true-rule tree; it does not assert that a root-anchored finite quotient is sufficient",
+            "turn_blocks_before_exact_final_D_pair_A_suffix": 9
+          },
+          "SecondStone": {
+            "effective_last_attacker_horizon": 21,
+            "effective_quota": {
+              "A": 11,
+              "D": 10
+            },
+            "final_attacker_capacity_after_last_defender_pair": 2,
+            "opening_fixed_blocks_before_suffix": 0,
+            "quantified_choice_blocks_before_suffix": 9,
+            "requested_horizon": 22,
+            "requested_quota": {
+              "A": 11,
+              "D": 11
+            },
+            "scope": "exact decomposition of the full dynamic true-rule tree; it does not assert that a root-anchored finite quotient is sufficient",
+            "turn_blocks_before_exact_final_D_pair_A_suffix": 9
+          },
+          "opening": {
+            "effective_last_attacker_horizon": 21,
+            "effective_quota": {
+              "A": 11,
+              "D": 10
+            },
+            "final_attacker_capacity_after_last_defender_pair": 2,
+            "opening_fixed_blocks_before_suffix": 1,
+            "quantified_choice_blocks_before_suffix": 8,
+            "requested_horizon": 22,
+            "requested_quota": {
+              "A": 11,
+              "D": 11
+            },
+            "scope": "exact decomposition of the full dynamic true-rule tree; it does not assert that a root-anchored finite quotient is sufficient",
+            "turn_blocks_before_exact_final_D_pair_A_suffix": 9
+          }
+        },
+        "radius8_rule_envelope_radius_from_one_existing_seed": 176,
+        "single_seed_ordered_placement_sequence_upper_bound": "2563003019045673413489840230342214947366915069175483006933266417582080000",
+        "single_seed_ordered_placement_sequence_upper_bound_log10": 72.40874911775433,
+        "single_seed_rule_envelope_cells_including_seed": 93457,
+        "single_seed_rule_envelope_future_empty_cells": 93456
+      },
+      {
+        "horizon": 24,
+        "phase_endpoint_shapes": {
+          "FirstStone": {
+            "effective_last_attacker_horizon": 22,
+            "effective_quota": {
+              "A": 12,
+              "D": 10
+            },
+            "final_attacker_capacity_after_last_defender_pair": 2,
+            "opening_fixed_blocks_before_suffix": 0,
+            "quantified_choice_blocks_before_suffix": 9,
+            "requested_horizon": 24,
+            "requested_quota": {
+              "A": 12,
+              "D": 12
+            },
+            "scope": "exact decomposition of the full dynamic true-rule tree; it does not assert that a root-anchored finite quotient is sufficient",
+            "turn_blocks_before_exact_final_D_pair_A_suffix": 9
+          },
+          "SecondStone": {
+            "effective_last_attacker_horizon": 24,
+            "effective_quota": {
+              "A": 12,
+              "D": 12
+            },
+            "final_attacker_capacity_after_last_defender_pair": 1,
+            "opening_fixed_blocks_before_suffix": 0,
+            "quantified_choice_blocks_before_suffix": 11,
+            "requested_horizon": 24,
+            "requested_quota": {
+              "A": 12,
+              "D": 12
+            },
+            "scope": "exact decomposition of the full dynamic true-rule tree; it does not assert that a root-anchored finite quotient is sufficient",
+            "turn_blocks_before_exact_final_D_pair_A_suffix": 11
+          },
+          "opening": {
+            "effective_last_attacker_horizon": 24,
+            "effective_quota": {
+              "A": 12,
+              "D": 12
+            },
+            "final_attacker_capacity_after_last_defender_pair": 1,
+            "opening_fixed_blocks_before_suffix": 1,
+            "quantified_choice_blocks_before_suffix": 10,
+            "requested_horizon": 24,
+            "requested_quota": {
+              "A": 12,
+              "D": 12
+            },
+            "scope": "exact decomposition of the full dynamic true-rule tree; it does not assert that a root-anchored finite quotient is sufficient",
+            "turn_blocks_before_exact_final_D_pair_A_suffix": 11
+          }
+        },
+        "radius8_rule_envelope_radius_from_one_existing_seed": 192,
+        "single_seed_ordered_placement_sequence_upper_bound": "66007866808840406206439656154339202082561635786033137014656119844247657512960000",
+        "single_seed_ordered_placement_sequence_upper_bound_log10": 79.81959569778537,
+        "single_seed_rule_envelope_cells_including_seed": 111169,
+        "single_seed_rule_envelope_future_empty_cells": 111168
+      },
+      {
+        "horizon": 25,
+        "phase_endpoint_shapes": {
+          "FirstStone": {
+            "effective_last_attacker_horizon": 25,
+            "effective_quota": {
+              "A": 13,
+              "D": 12
+            },
+            "final_attacker_capacity_after_last_defender_pair": 1,
+            "opening_fixed_blocks_before_suffix": 0,
+            "quantified_choice_blocks_before_suffix": 11,
+            "requested_horizon": 25,
+            "requested_quota": {
+              "A": 13,
+              "D": 12
+            },
+            "scope": "exact decomposition of the full dynamic true-rule tree; it does not assert that a root-anchored finite quotient is sufficient",
+            "turn_blocks_before_exact_final_D_pair_A_suffix": 11
+          },
+          "SecondStone": {
+            "effective_last_attacker_horizon": 25,
+            "effective_quota": {
+              "A": 13,
+              "D": 12
+            },
+            "final_attacker_capacity_after_last_defender_pair": 2,
+            "opening_fixed_blocks_before_suffix": 0,
+            "quantified_choice_blocks_before_suffix": 11,
+            "requested_horizon": 25,
+            "requested_quota": {
+              "A": 13,
+              "D": 12
+            },
+            "scope": "exact decomposition of the full dynamic true-rule tree; it does not assert that a root-anchored finite quotient is sufficient",
+            "turn_blocks_before_exact_final_D_pair_A_suffix": 11
+          },
+          "opening": {
+            "effective_last_attacker_horizon": 25,
+            "effective_quota": {
+              "A": 13,
+              "D": 12
+            },
+            "final_attacker_capacity_after_last_defender_pair": 2,
+            "opening_fixed_blocks_before_suffix": 1,
+            "quantified_choice_blocks_before_suffix": 10,
+            "requested_horizon": 25,
+            "requested_quota": {
+              "A": 13,
+              "D": 12
+            },
+            "scope": "exact decomposition of the full dynamic true-rule tree; it does not assert that a root-anchored finite quotient is sufficient",
+            "turn_blocks_before_exact_final_D_pair_A_suffix": 11
+          }
+        },
+        "radius8_rule_envelope_radius_from_one_existing_seed": 200,
+        "single_seed_ordered_placement_sequence_upper_bound": "356442480767738193514774143233431691245832833244578939879143047158937350569984000000",
+        "single_seed_ordered_placement_sequence_upper_bound_log10": 83.55198945760834,
+        "single_seed_rule_envelope_cells_including_seed": 120601,
+        "single_seed_rule_envelope_future_empty_cells": 120600
+      },
+      {
+        "horizon": 26,
+        "phase_endpoint_shapes": {
+          "FirstStone": {
+            "effective_last_attacker_horizon": 26,
+            "effective_quota": {
+              "A": 14,
+              "D": 12
+            },
+            "final_attacker_capacity_after_last_defender_pair": 2,
+            "opening_fixed_blocks_before_suffix": 0,
+            "quantified_choice_blocks_before_suffix": 11,
+            "requested_horizon": 26,
+            "requested_quota": {
+              "A": 14,
+              "D": 12
+            },
+            "scope": "exact decomposition of the full dynamic true-rule tree; it does not assert that a root-anchored finite quotient is sufficient",
+            "turn_blocks_before_exact_final_D_pair_A_suffix": 11
+          },
+          "SecondStone": {
+            "effective_last_attacker_horizon": 25,
+            "effective_quota": {
+              "A": 13,
+              "D": 12
+            },
+            "final_attacker_capacity_after_last_defender_pair": 2,
+            "opening_fixed_blocks_before_suffix": 0,
+            "quantified_choice_blocks_before_suffix": 11,
+            "requested_horizon": 26,
+            "requested_quota": {
+              "A": 13,
+              "D": 13
+            },
+            "scope": "exact decomposition of the full dynamic true-rule tree; it does not assert that a root-anchored finite quotient is sufficient",
+            "turn_blocks_before_exact_final_D_pair_A_suffix": 11
+          },
+          "opening": {
+            "effective_last_attacker_horizon": 25,
+            "effective_quota": {
+              "A": 13,
+              "D": 12
+            },
+            "final_attacker_capacity_after_last_defender_pair": 2,
+            "opening_fixed_blocks_before_suffix": 1,
+            "quantified_choice_blocks_before_suffix": 10,
+            "requested_horizon": 26,
+            "requested_quota": {
+              "A": 13,
+              "D": 13
+            },
+            "scope": "exact decomposition of the full dynamic true-rule tree; it does not assert that a root-anchored finite quotient is sufficient",
+            "turn_blocks_before_exact_final_D_pair_A_suffix": 11
+          }
+        },
+        "radius8_rule_envelope_radius_from_one_existing_seed": 208,
+        "single_seed_ordered_placement_sequence_upper_bound": "2001780971991617694778971588398952378036597191501555326361267352844592160801030144000000",
+        "single_seed_ordered_placement_sequence_upper_bound_log10": 87.3014165567301,
+        "single_seed_rule_envelope_cells_including_seed": 130417,
+        "single_seed_rule_envelope_future_empty_cells": 130416
+      }
+    ],
+    "scope": [
+      "Ignoring early terminal cutoffs, the union of cells reachable within h radius-eight-chained placements from one existing seed is exactly the axial hex ball of radius 8h, with 1+3R(R+1) cells. A multi-stone root uses the union of such balls, not this single-seed count.",
+      "At a state with N occupied cells, immediate legal empties are at most 216N: each occupied cell contributes a radius-eight ball of 217 cells and all N occupied cells are removed.",
+      "Consequently a one-seed h-placement tree has at most 216^h*h! ordered placement sequences. This is a deliberately loose tree-size upper bound, not a measured wall time or a claim about the candidate interaction quotient.",
+      "The endpoint block counts are exact for the full dynamic tree. Each deeper fresh pair rung adds one forall-D / exists-A turn pair before the final cover suffix; they do not establish a tractable finite normalization."
+    ]
+  }
+}

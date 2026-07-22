@@ -1,0 +1,118 @@
+{
+  "metadata": {
+    "binary": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\deadline-ladder\\.scratch\\horizon_native\\.target\\release\\horizon_native.exe",
+    "max_cache_entries": 50000,
+    "mode": "cohorts",
+    "native_threads": 1,
+    "per_root_ms": 10,
+    "row_evidence": ".scratch\\horizon_r4_phase1_cohorts_selfplay_3_rows.jsonl",
+    "timeout_is_not_verdict": true
+  },
+  "selection": {
+    "available_cohorts": [
+      "forcing19",
+      "grinds",
+      "human_v1",
+      "puzzle_v3",
+      "selfplay_v1"
+    ],
+    "excluded_ids_after": 1607,
+    "excluded_ids_found": 1600,
+    "excluded_ids_sources": [
+      ".scratch\\horizon_r4_phase1_cohorts_selfplay_1_rows.jsonl",
+      ".scratch\\horizon_r4_phase1_cohorts_selfplay_2_rows.jsonl"
+    ],
+    "selected": 3207,
+    "skipped": {
+      "opening_unsupported": 48
+    }
+  },
+  "summary": {
+    "attempted": 800,
+    "caught_ids": [],
+    "completed_negative_mismatches": [],
+    "completed_negatives": 0,
+    "distributions": {
+      "all": {
+        "first_action_total": {
+          "max": 313520,
+          "mean": 51469.44,
+          "n": 800,
+          "p50": 872,
+          "p90": 157112,
+          "total": 41175552
+        },
+        "nodes": {
+          "max": 93184,
+          "mean": 2234.20375,
+          "n": 800,
+          "p50": 2048,
+          "p90": 4096,
+          "total": 1787363
+        },
+        "universe": {
+          "max": 1223,
+          "mean": 629.7075,
+          "n": 800,
+          "p50": 631,
+          "p90": 847,
+          "total": 503766
+        },
+        "wall_ns": {
+          "max": 1889767700,
+          "mean": 54219486.0,
+          "n": 800,
+          "p50": 11892800,
+          "p90": 18203100,
+          "total": 43375588800
+        }
+      },
+      "completed": {
+        "first_action_total": {
+          "max": 0,
+          "mean": 0.0,
+          "n": 0,
+          "p50": 0,
+          "p90": 0,
+          "total": 0
+        },
+        "nodes": {
+          "max": 0,
+          "mean": 0.0,
+          "n": 0,
+          "p50": 0,
+          "p90": 0,
+          "total": 0
+        },
+        "universe": {
+          "max": 0,
+          "mean": 0.0,
+          "n": 0,
+          "p50": 0,
+          "p90": 0,
+          "total": 0
+        },
+        "wall_ns": {
+          "max": 0,
+          "mean": 0.0,
+          "n": 0,
+          "p50": 0,
+          "p90": 0,
+          "total": 0
+        }
+      }
+    },
+    "errors": 0,
+    "per_cohort_status": {
+      "selfplay_v1": {
+        "timeout": 800
+      }
+    },
+    "python_crosscheck_mismatches": [],
+    "statuses": {
+      "timeout": 800
+    },
+    "timeouts": 800,
+    "wins": 0
+  }
+}

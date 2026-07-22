@@ -1,0 +1,16 @@
+[package]
+name = "horizon_native"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[dependencies]
+
+# Keep this scratch research crate independent of the repository workspace.
+[workspace]

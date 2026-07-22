@@ -1,0 +1,118 @@
+{
+  "metadata": {
+    "binary": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\deadline-ladder\\.scratch\\horizon_native\\.target\\release\\horizon_native.exe",
+    "max_cache_entries": 100000,
+    "mode": "cohorts",
+    "native_threads": 1,
+    "per_root_ms": 25,
+    "row_evidence": ".scratch\\horizon_r4_phase1_cohorts_small_rows.jsonl",
+    "timeout_is_not_verdict": true
+  },
+  "selection": {
+    "available_cohorts": [
+      "forcing19",
+      "grinds",
+      "human_v1",
+      "puzzle_v3",
+      "selfplay_v1"
+    ],
+    "selected": 735,
+    "skipped": {}
+  },
+  "summary": {
+    "attempted": 735,
+    "caught_ids": [],
+    "completed_negative_mismatches": [],
+    "completed_negatives": 0,
+    "distributions": {
+      "all": {
+        "first_action_total": {
+          "max": 346945,
+          "mean": 78874.41224489796,
+          "n": 735,
+          "p50": 46617,
+          "p90": 202303,
+          "total": 57972693
+        },
+        "nodes": {
+          "max": 133120,
+          "mean": 12688.91156462585,
+          "n": 735,
+          "p50": 5120,
+          "p90": 39936,
+          "total": 9326350
+        },
+        "universe": {
+          "max": 1087,
+          "mean": 599.1224489795918,
+          "n": 735,
+          "p50": 571,
+          "p90": 860,
+          "total": 440355
+        },
+        "wall_ns": {
+          "max": 2673725200,
+          "mean": 132858712.65306123,
+          "n": 735,
+          "p50": 27283100,
+          "p90": 51135800,
+          "total": 97651153800
+        }
+      },
+      "completed": {
+        "first_action_total": {
+          "max": 41064,
+          "mean": 21792.0,
+          "n": 7,
+          "p50": 32469,
+          "p90": 41001,
+          "total": 152544
+        },
+        "nodes": {
+          "max": 71170,
+          "mean": 45564.142857142855,
+          "n": 7,
+          "p50": 59110,
+          "p90": 68829,
+          "total": 318949
+        },
+        "universe": {
+          "max": 722,
+          "mean": 500.85714285714283,
+          "n": 7,
+          "p50": 431,
+          "p90": 683,
+          "total": 3506
+        },
+        "wall_ns": {
+          "max": 23296700,
+          "mean": 10781900.0,
+          "n": 7,
+          "p50": 10647800,
+          "p90": 16974500,
+          "total": 75473300
+        }
+      }
+    },
+    "errors": 0,
+    "per_cohort_status": {
+      "forcing19": {
+        "timeout": 19
+      },
+      "grinds": {
+        "timeout": 248
+      },
+      "puzzle_v3": {
+        "timeout": 461,
+        "win": 7
+      }
+    },
+    "python_crosscheck_mismatches": [],
+    "statuses": {
+      "timeout": 728,
+      "win": 7
+    },
+    "timeouts": 728,
+    "wins": 7
+  }
+}

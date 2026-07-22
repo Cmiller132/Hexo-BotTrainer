@@ -1,0 +1,2985 @@
+{
+  "metadata": {
+    "scope": "depth-13/14 registry IDs under the R3 finite quotient",
+    "eligible_ids": 155,
+    "cargo_used": false,
+    "timeout_is_not_verdict": true
+  },
+  "root_fringe": {
+    "claim": "MEASURED",
+    "ids": 155,
+    "ids_with_root_illegal_fringe": 155,
+    "physical_universe_distribution": {
+      "min": 362,
+      "p50": 418,
+      "p90": 564,
+      "max": 898,
+      "sum": 70155
+    },
+    "root_illegal_fringe_distribution": {
+      "min": 56,
+      "p50": 75,
+      "p90": 85,
+      "max": 128,
+      "sum": 11973
+    },
+    "maximum_root_distance_distribution": {
+      "min": 10,
+      "p50": 10,
+      "p90": 10,
+      "max": 10,
+      "sum": 1550
+    },
+    "rows": [
+      {
+        "pos_id": "atlas_full_oa-0507ff8596d93ac1",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 454,
+        "root_illegal_fringe_cells": 72,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-0a8ea10c6719f4db",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 370,
+        "root_illegal_fringe_cells": 82,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-0ba0c740be13f4b4",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 386,
+        "root_illegal_fringe_cells": 70,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-0bf5dbf648509b4c",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 382,
+        "root_illegal_fringe_cells": 80,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-0f760fd1f247377b",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 378,
+        "root_illegal_fringe_cells": 77,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-0fcffb0c600dd88a",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 370,
+        "root_illegal_fringe_cells": 78,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-1033085c553ac5c5",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 395,
+        "root_illegal_fringe_cells": 74,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-10aee60029627dad",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 426,
+        "root_illegal_fringe_cells": 58,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-12f34da2af226d6c",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 398,
+        "root_illegal_fringe_cells": 81,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-138ba62895fc60f9",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 450,
+        "root_illegal_fringe_cells": 78,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-15060d1a70429b37",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 368,
+        "root_illegal_fringe_cells": 82,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-165c7ce392924b17",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 611,
+        "root_illegal_fringe_cells": 81,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-1a1bec0f1dfb0146",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 491,
+        "root_illegal_fringe_cells": 80,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-1c271a9c19b58afd",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 399,
+        "root_illegal_fringe_cells": 72,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-1d16b875a7192d2c",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 406,
+        "root_illegal_fringe_cells": 82,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-1ed25a537674ecd6",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 435,
+        "root_illegal_fringe_cells": 57,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-20a28502fe4213ed",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 390,
+        "root_illegal_fringe_cells": 70,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-215c7950171f3d2f",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 376,
+        "root_illegal_fringe_cells": 82,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-24196c4dd3ddbd6d",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 393,
+        "root_illegal_fringe_cells": 75,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-251f8527e29f6a01",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 469,
+        "root_illegal_fringe_cells": 79,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-255b2249c55c5735",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 465,
+        "root_illegal_fringe_cells": 69,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-2b3809e71830a774",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 441,
+        "root_illegal_fringe_cells": 61,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-2c5a28343ed53b72",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 398,
+        "root_illegal_fringe_cells": 78,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-3092bf4731246dcd",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 376,
+        "root_illegal_fringe_cells": 82,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-32fea5b7230c1200",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 426,
+        "root_illegal_fringe_cells": 79,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-38dcc00c166e3651",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 461,
+        "root_illegal_fringe_cells": 80,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-39daf9137daddf75",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 410,
+        "root_illegal_fringe_cells": 82,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-3b088ddf6709d513",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 431,
+        "root_illegal_fringe_cells": 80,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-3bceb5a9c6f360ed",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 412,
+        "root_illegal_fringe_cells": 65,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-3bd44a37cd207873",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 396,
+        "root_illegal_fringe_cells": 74,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-3c20b598a2d5b59c",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 519,
+        "root_illegal_fringe_cells": 67,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-3e90908c9f8f6b0c",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 432,
+        "root_illegal_fringe_cells": 58,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-40b93db04e0e939f",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 405,
+        "root_illegal_fringe_cells": 80,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-465edb19c49e2a82",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 375,
+        "root_illegal_fringe_cells": 81,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-478cf986e5c3c7dd",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 404,
+        "root_illegal_fringe_cells": 75,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-48ca51d549d1089d",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 571,
+        "root_illegal_fringe_cells": 69,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-49f0742073b1df8d",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 389,
+        "root_illegal_fringe_cells": 70,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-4b09f85c6b01dec2",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 425,
+        "root_illegal_fringe_cells": 72,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-4c8d7ab0904adff4",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 447,
+        "root_illegal_fringe_cells": 62,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-4ef5ecb7de935b58",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 418,
+        "root_illegal_fringe_cells": 64,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-4f1fe0aa8a4f8730",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 410,
+        "root_illegal_fringe_cells": 68,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-528cfbaba0511333",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 473,
+        "root_illegal_fringe_cells": 83,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-52a7f182c64b4b77",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 376,
+        "root_illegal_fringe_cells": 76,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-553025fd1d6acbe0",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 425,
+        "root_illegal_fringe_cells": 64,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-57f1ea9c1a1300b8",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 405,
+        "root_illegal_fringe_cells": 68,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-589135036507d950",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 405,
+        "root_illegal_fringe_cells": 77,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-5978fb1c20b528a6",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 459,
+        "root_illegal_fringe_cells": 74,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-5f172b1422799520",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 403,
+        "root_illegal_fringe_cells": 78,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-6016f9fb0eb7578a",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 420,
+        "root_illegal_fringe_cells": 66,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-608297504efb169d",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 425,
+        "root_illegal_fringe_cells": 56,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-62615cf429aa1ad0",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 454,
+        "root_illegal_fringe_cells": 76,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-626bd87c0aee152a",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 381,
+        "root_illegal_fringe_cells": 80,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-63272890401e0c55",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 415,
+        "root_illegal_fringe_cells": 67,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-655a3edeb1e792e3",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 499,
+        "root_illegal_fringe_cells": 78,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-66759f922cf14bd2",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 409,
+        "root_illegal_fringe_cells": 68,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-69f06926262f1e22",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 378,
+        "root_illegal_fringe_cells": 77,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-6c3f9b58c7f05fff",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 427,
+        "root_illegal_fringe_cells": 69,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-6f1702a5d02761f9",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 545,
+        "root_illegal_fringe_cells": 64,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-704b4443558c4fd2",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 382,
+        "root_illegal_fringe_cells": 79,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-7098d998fae78b70",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 465,
+        "root_illegal_fringe_cells": 71,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-748d0182654496bc",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 379,
+        "root_illegal_fringe_cells": 76,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-76478689eb3ad17b",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 395,
+        "root_illegal_fringe_cells": 79,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-778760a2fcb37080",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 370,
+        "root_illegal_fringe_cells": 78,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-7be54121410778d1",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 398,
+        "root_illegal_fringe_cells": 73,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-7d66f4b3c0d3d43b",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 402,
+        "root_illegal_fringe_cells": 74,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-7f0d5ac90ca806f1",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 376,
+        "root_illegal_fringe_cells": 78,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-7f50a9e9564954f3",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 368,
+        "root_illegal_fringe_cells": 82,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-8514a4bd6fdd6564",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 464,
+        "root_illegal_fringe_cells": 65,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-85d5c2b202ca3b70",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 468,
+        "root_illegal_fringe_cells": 67,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-862101d8ae638992",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 386,
+        "root_illegal_fringe_cells": 72,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-8a195708c66ede44",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 396,
+        "root_illegal_fringe_cells": 78,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-8a1a468e41161903",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 393,
+        "root_illegal_fringe_cells": 82,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-8ab7398dd2144e0d",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 394,
+        "root_illegal_fringe_cells": 75,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-8b1620ca98ab23fa",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 385,
+        "root_illegal_fringe_cells": 72,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-8c6aa3718aa7f641",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 392,
+        "root_illegal_fringe_cells": 71,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-913846da454d6d73",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 489,
+        "root_illegal_fringe_cells": 73,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-93c053d89dc5be2b",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 418,
+        "root_illegal_fringe_cells": 76,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-97d491184899f49c",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 390,
+        "root_illegal_fringe_cells": 75,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-9a0021a998640da7",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 394,
+        "root_illegal_fringe_cells": 74,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-9a485fee4ae990c9",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 484,
+        "root_illegal_fringe_cells": 74,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-9d82c46e34508c07",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 399,
+        "root_illegal_fringe_cells": 72,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-a0ad2c75ca22e823",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 470,
+        "root_illegal_fringe_cells": 76,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-a4bd08c4bc2d99a4",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 414,
+        "root_illegal_fringe_cells": 75,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-a5a828d9e21ede84",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 388,
+        "root_illegal_fringe_cells": 75,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-a67ee3ac143aa7a6",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 559,
+        "root_illegal_fringe_cells": 63,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-a689d516b0473573",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 382,
+        "root_illegal_fringe_cells": 70,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-a8464a9a2d71c4a9",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 430,
+        "root_illegal_fringe_cells": 74,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-a8748c7cd08dfabb",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 453,
+        "root_illegal_fringe_cells": 66,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-aa3bad21c5e576a6",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 407,
+        "root_illegal_fringe_cells": 76,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-aaac5170a17a80ed",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 380,
+        "root_illegal_fringe_cells": 82,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-ac552632f3d78b21",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 390,
+        "root_illegal_fringe_cells": 72,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-acf60c06e49d4786",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 468,
+        "root_illegal_fringe_cells": 67,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-afabf2aeb88004a6",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 395,
+        "root_illegal_fringe_cells": 73,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-b2b84c4bd02ee484",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 412,
+        "root_illegal_fringe_cells": 85,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-b2eb1310fbcf1199",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 417,
+        "root_illegal_fringe_cells": 74,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-b3184c2c73f550a8",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 362,
+        "root_illegal_fringe_cells": 84,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-b407abe6ccb26e13",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 400,
+        "root_illegal_fringe_cells": 83,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-bd8c8cf3cebe4bfb",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 430,
+        "root_illegal_fringe_cells": 70,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-bf0c2253df7943ab",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 378,
+        "root_illegal_fringe_cells": 77,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-bf59ac4044b4b46b",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 510,
+        "root_illegal_fringe_cells": 84,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-bf84fcd93f197956",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 459,
+        "root_illegal_fringe_cells": 67,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-bfc61bd1fc64e792",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 385,
+        "root_illegal_fringe_cells": 69,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-c347ee3a50b2c3af",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 447,
+        "root_illegal_fringe_cells": 67,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-c515cddcef6134b3",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 468,
+        "root_illegal_fringe_cells": 75,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-ca26e6ef1fffc9a3",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 370,
+        "root_illegal_fringe_cells": 78,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-cc2455b641945a4d",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 393,
+        "root_illegal_fringe_cells": 71,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-cdb9678dec816143",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 482,
+        "root_illegal_fringe_cells": 79,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-ce555d78b854356d",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 392,
+        "root_illegal_fringe_cells": 75,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-cf834a1d83cceff1",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 485,
+        "root_illegal_fringe_cells": 70,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-d0b860d46b22cb1a",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 422,
+        "root_illegal_fringe_cells": 69,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-d0ea875a152693fd",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 480,
+        "root_illegal_fringe_cells": 73,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-d2eccf2d7306b47f",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 394,
+        "root_illegal_fringe_cells": 78,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-d39c6780a726c43d",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 400,
+        "root_illegal_fringe_cells": 64,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-d7f1c966e6ed7f8d",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 474,
+        "root_illegal_fringe_cells": 77,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-d9d1717a25585146",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 404,
+        "root_illegal_fringe_cells": 70,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-dd68f6359eb5e7b8",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 410,
+        "root_illegal_fringe_cells": 84,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-deb9bd158b782a25",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 368,
+        "root_illegal_fringe_cells": 82,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-e14d9d8fc8443706",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 427,
+        "root_illegal_fringe_cells": 70,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-e2dfb9e81d8d0a5f",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 592,
+        "root_illegal_fringe_cells": 83,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-e2f0786fb375566d",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 425,
+        "root_illegal_fringe_cells": 61,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-e44958b48525746f",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 437,
+        "root_illegal_fringe_cells": 71,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-e586484bfd79664c",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 472,
+        "root_illegal_fringe_cells": 79,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-ea3111b011e6459b",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 382,
+        "root_illegal_fringe_cells": 79,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-eaaf96adf8a3aa42",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 389,
+        "root_illegal_fringe_cells": 75,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-eba8dfbfbaa0d966",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 424,
+        "root_illegal_fringe_cells": 64,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-edc503275d30102e",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 434,
+        "root_illegal_fringe_cells": 67,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-ee827f6bb9be46a3",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 417,
+        "root_illegal_fringe_cells": 72,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-f4edca0b7580e39a",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 546,
+        "root_illegal_fringe_cells": 70,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-f6026f301edcfa7c",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 417,
+        "root_illegal_fringe_cells": 65,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-f64f9f95f1461308",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 362,
+        "root_illegal_fringe_cells": 80,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-f6d111a76162b989",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 480,
+        "root_illegal_fringe_cells": 68,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-f7c2d92fc69fd54b",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 392,
+        "root_illegal_fringe_cells": 75,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-fa293b60d01f0e2c",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 459,
+        "root_illegal_fringe_cells": 71,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-fa4b6404c64bf089",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 390,
+        "root_illegal_fringe_cells": 73,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-fd31b3404fe44eba",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 423,
+        "root_illegal_fringe_cells": 66,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_full_oa-fd9f894eb2066256",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 386,
+        "root_illegal_fringe_cells": 72,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "atlas_oa-c515cddcef6134b3",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 468,
+        "root_illegal_fringe_cells": 75,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "human_162b07d9a12084e2_p61",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 771,
+        "root_illegal_fringe_cells": 124,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "human_194ce5fa25e2029d_p40",
+        "cert_depth": 13,
+        "phase": "second",
+        "physical_universe": 898,
+        "root_illegal_fringe_cells": 122,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "human_1d7540b8789196ad_p54",
+        "cert_depth": 13,
+        "phase": "second",
+        "physical_universe": 654,
+        "root_illegal_fringe_cells": 97,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "human_20bea7804fffee60_p15",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 466,
+        "root_illegal_fringe_cells": 83,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "human_27057abe4ee1d907_p15",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 564,
+        "root_illegal_fringe_cells": 96,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "human_37979e171ebe14b2_p79",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 790,
+        "root_illegal_fringe_cells": 113,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "human_3c9423b1a047e24c_p22",
+        "cert_depth": 13,
+        "phase": "second",
+        "physical_universe": 548,
+        "root_illegal_fringe_cells": 92,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "human_41e78c67c2ac8570_p20",
+        "cert_depth": 13,
+        "phase": "second",
+        "physical_universe": 448,
+        "root_illegal_fringe_cells": 101,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "human_6023b2ef70e3ffc6_p76",
+        "cert_depth": 13,
+        "phase": "second",
+        "physical_universe": 838,
+        "root_illegal_fringe_cells": 128,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "human_736f572521236d55_p17",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 461,
+        "root_illegal_fringe_cells": 80,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "human_c77600999ef0c953_p45",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 570,
+        "root_illegal_fringe_cells": 105,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "human_c77600999ef0c953_p49",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 585,
+        "root_illegal_fringe_cells": 112,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "human_d4f2b0b1853d8565_p44",
+        "cert_depth": 13,
+        "phase": "second",
+        "physical_universe": 772,
+        "root_illegal_fringe_cells": 118,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "sp_0_p51",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 745,
+        "root_illegal_fringe_cells": 102,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "sp_13_p59",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 797,
+        "root_illegal_fringe_cells": 111,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "sp_35_p27",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 596,
+        "root_illegal_fringe_cells": 93,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "sp_4_p79",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 859,
+        "root_illegal_fringe_cells": 127,
+        "maximum_root_distance": 10
+      },
+      {
+        "pos_id": "sp_5_p61",
+        "cert_depth": 14,
+        "phase": "first",
+        "physical_universe": 749,
+        "root_illegal_fringe_cells": 96,
+        "maximum_root_distance": 10
+      }
+    ]
+  },
+  "published_boundary_counterexample": {
+    "claim": "MEASURED",
+    "pos_id": "atlas_oa-c515cddcef6134b3",
+    "horizon": 14,
+    "preferred_a1": [
+      [
+        2,
+        0
+      ],
+      [
+        2,
+        1
+      ]
+    ],
+    "active_d1_physical_cells": 466,
+    "post_a1_legal_active_cells": 397,
+    "first_illegal_generated_d1": {
+      "rank_one_based": 67,
+      "cells": [
+        [
+          -19,
+          3
+        ],
+        [
+          -19,
+          4
+        ]
+      ],
+      "minimum_post_a1_occupied_distances": [
+        10,
+        10
+      ],
+      "legal_actions_before_it": 66
+    }
+  },
+  "atlas_pv_saturation": {
+    "claim": "MEASURED",
+    "atlas_roots_checked": 136,
+    "all_first_five_pv_actions_generated_and_legal": true,
+    "all_a2_d2_a3_active_cells_within_distance_five": true,
+    "all_pv_a3_endpoints_win_in_r3_formula": true,
+    "win_line_length_counts": {
+      "14": 121,
+      "17": 14,
+      "18": 1
+    },
+    "a3_endpoint_threat_count_distribution": {
+      "min": 4,
+      "p50": 4,
+      "p90": 4,
+      "max": 6,
+      "sum": 554
+    },
+    "stage_active_max_distance_distributions": {
+      "a2": {
+        "min": 4,
+        "p50": 5,
+        "p90": 5,
+        "max": 5,
+        "sum": 677
+      },
+      "d2": {
+        "min": 3,
+        "p50": 4,
+        "p90": 4,
+        "max": 4,
+        "sum": 542
+      },
+      "a3": {
+        "min": 2,
+        "p50": 4,
+        "p90": 4,
+        "max": 4,
+        "sum": 518
+      }
+    },
+    "rows": [
+      {
+        "pos_id": "atlas_full_oa-0507ff8596d93ac1",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-0a8ea10c6719f4db",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-0ba0c740be13f4b4",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-0bf5dbf648509b4c",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-0f760fd1f247377b",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-0fcffb0c600dd88a",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-1033085c553ac5c5",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-10aee60029627dad",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 4,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 3,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-12f34da2af226d6c",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-138ba62895fc60f9",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-15060d1a70429b37",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-165c7ce392924b17",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 5
+      },
+      {
+        "pos_id": "atlas_full_oa-1a1bec0f1dfb0146",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-1c271a9c19b58afd",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-1d16b875a7192d2c",
+        "win_line_len": 17,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-1ed25a537674ecd6",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-20a28502fe4213ed",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-215c7950171f3d2f",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-24196c4dd3ddbd6d",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 3,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-251f8527e29f6a01",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-255b2249c55c5735",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-2b3809e71830a774",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 3,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-2c5a28343ed53b72",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-3092bf4731246dcd",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 3,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-32fea5b7230c1200",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-38dcc00c166e3651",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-39daf9137daddf75",
+        "win_line_len": 17,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 2,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-3b088ddf6709d513",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-3bceb5a9c6f360ed",
+        "win_line_len": 17,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 3,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 6
+      },
+      {
+        "pos_id": "atlas_full_oa-3bd44a37cd207873",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-3c20b598a2d5b59c",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 3,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-3e90908c9f8f6b0c",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-40b93db04e0e939f",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-465edb19c49e2a82",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-478cf986e5c3c7dd",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-48ca51d549d1089d",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-49f0742073b1df8d",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-4b09f85c6b01dec2",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 3,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-4c8d7ab0904adff4",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-4ef5ecb7de935b58",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-4f1fe0aa8a4f8730",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-528cfbaba0511333",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-52a7f182c64b4b77",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-553025fd1d6acbe0",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-57f1ea9c1a1300b8",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-589135036507d950",
+        "win_line_len": 17,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-5978fb1c20b528a6",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-5f172b1422799520",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-6016f9fb0eb7578a",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-608297504efb169d",
+        "win_line_len": 17,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-62615cf429aa1ad0",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-626bd87c0aee152a",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-63272890401e0c55",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-655a3edeb1e792e3",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-66759f922cf14bd2",
+        "win_line_len": 17,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 3,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-69f06926262f1e22",
+        "win_line_len": 17,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 5
+      },
+      {
+        "pos_id": "atlas_full_oa-6c3f9b58c7f05fff",
+        "win_line_len": 17,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 3,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-6f1702a5d02761f9",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 3,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-704b4443558c4fd2",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-7098d998fae78b70",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-748d0182654496bc",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-76478689eb3ad17b",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-778760a2fcb37080",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-7be54121410778d1",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-7d66f4b3c0d3d43b",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-7f0d5ac90ca806f1",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-7f50a9e9564954f3",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-8514a4bd6fdd6564",
+        "win_line_len": 17,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 5
+      },
+      {
+        "pos_id": "atlas_full_oa-85d5c2b202ca3b70",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-862101d8ae638992",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-8a195708c66ede44",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-8a1a468e41161903",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 3,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-8ab7398dd2144e0d",
+        "win_line_len": 17,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-8b1620ca98ab23fa",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-8c6aa3718aa7f641",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 3,
+        "a3_active_max_occupied_distance": 2,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-913846da454d6d73",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-93c053d89dc5be2b",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-97d491184899f49c",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-9a0021a998640da7",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-9a485fee4ae990c9",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-9d82c46e34508c07",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-a0ad2c75ca22e823",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-a4bd08c4bc2d99a4",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 5
+      },
+      {
+        "pos_id": "atlas_full_oa-a5a828d9e21ede84",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-a67ee3ac143aa7a6",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 4,
+        "d2_active_max_occupied_distance": 3,
+        "a3_active_max_occupied_distance": 3,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-a689d516b0473573",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 5
+      },
+      {
+        "pos_id": "atlas_full_oa-a8464a9a2d71c4a9",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-a8748c7cd08dfabb",
+        "win_line_len": 17,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 6
+      },
+      {
+        "pos_id": "atlas_full_oa-aa3bad21c5e576a6",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-aaac5170a17a80ed",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-ac552632f3d78b21",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 3,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-acf60c06e49d4786",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-afabf2aeb88004a6",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 3,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 5
+      },
+      {
+        "pos_id": "atlas_full_oa-b2b84c4bd02ee484",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-b2eb1310fbcf1199",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-b3184c2c73f550a8",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-b407abe6ccb26e13",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-bd8c8cf3cebe4bfb",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-bf0c2253df7943ab",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-bf59ac4044b4b46b",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-bf84fcd93f197956",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-bfc61bd1fc64e792",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 3,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-c347ee3a50b2c3af",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-c515cddcef6134b3",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-ca26e6ef1fffc9a3",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-cc2455b641945a4d",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-cdb9678dec816143",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-ce555d78b854356d",
+        "win_line_len": 18,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-cf834a1d83cceff1",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-d0b860d46b22cb1a",
+        "win_line_len": 17,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 3,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-d0ea875a152693fd",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 4,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 3,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-d2eccf2d7306b47f",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-d39c6780a726c43d",
+        "win_line_len": 17,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-d7f1c966e6ed7f8d",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-d9d1717a25585146",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 3,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-dd68f6359eb5e7b8",
+        "win_line_len": 17,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-deb9bd158b782a25",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-e14d9d8fc8443706",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-e2dfb9e81d8d0a5f",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-e2f0786fb375566d",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 3,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-e44958b48525746f",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-e586484bfd79664c",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 3,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-ea3111b011e6459b",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-eaaf96adf8a3aa42",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-eba8dfbfbaa0d966",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 3,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-edc503275d30102e",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 3,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-ee827f6bb9be46a3",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-f4edca0b7580e39a",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-f6026f301edcfa7c",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-f64f9f95f1461308",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-f6d111a76162b989",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-f7c2d92fc69fd54b",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-fa293b60d01f0e2c",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-fa4b6404c64bf089",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-fd31b3404fe44eba",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      },
+      {
+        "pos_id": "atlas_full_oa-fd9f894eb2066256",
+        "win_line_len": 14,
+        "a2_active_max_occupied_distance": 5,
+        "d2_active_max_occupied_distance": 4,
+        "a3_active_max_occupied_distance": 4,
+        "pv_a3_endpoint_win": true,
+        "pv_a3_threats": 4
+      }
+    ]
+  },
+  "played_continuation_ordering_hints": {
+    "claim": "MEASURED ordering-only heuristic; not a certificate, verdict, or pruning rule",
+    "boundary_ids": 18,
+    "source_counts": {
+      "human": 13,
+      "selfplay": 5
+    },
+    "all_registry_prefixes_match_source": true,
+    "all_hints_member_of_exact_first_action_generator": true,
+    "safe_use": "Move the matching action to the front of A1 ordering only; search all other actions normally if it fails.",
+    "source_files": {
+      "human": {
+        "path": "E:\\Hexo-BotTrainer-hexgt\\data\\hexo-bootstrap-corpus\\hexo_human_corpus.jsonl",
+        "sha256": "b2fe61eb360b91d77873a751446d28287955cad49e331fc32c156b4e1316840c"
+      },
+      "selfplay": {
+        "path": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\deadline-ladder\\scripts\\tss_harness\\sets\\selfplay_v1.jsonl",
+        "sha256": "d8b4256408dfdabf71a90d3653962160bcc05ec66bba580dd6379149d998b708"
+      }
+    },
+    "rows": [
+      {
+        "pos_id": "human_162b07d9a12084e2_p61",
+        "source_kind": "human",
+        "source_key": "162b07d9a12084e2",
+        "registry_prefix_placements": 61,
+        "phase": "first",
+        "action_placements": 2,
+        "played_next_action": [
+          [
+            5,
+            -8
+          ],
+          [
+            8,
+            -8
+          ]
+        ],
+        "member_of_exact_first_action_generator": true,
+        "source_record_placements": 75,
+        "source_path": "E:\\Hexo-BotTrainer-hexgt\\data\\hexo-bootstrap-corpus\\hexo_human_corpus.jsonl"
+      },
+      {
+        "pos_id": "human_194ce5fa25e2029d_p40",
+        "source_kind": "human",
+        "source_key": "194ce5fa25e2029d",
+        "registry_prefix_placements": 40,
+        "phase": "second",
+        "action_placements": 1,
+        "played_next_action": [
+          [
+            13,
+            1
+          ]
+        ],
+        "member_of_exact_first_action_generator": true,
+        "source_record_placements": 53,
+        "source_path": "E:\\Hexo-BotTrainer-hexgt\\data\\hexo-bootstrap-corpus\\hexo_human_corpus.jsonl"
+      },
+      {
+        "pos_id": "human_1d7540b8789196ad_p54",
+        "source_kind": "human",
+        "source_key": "1d7540b8789196ad",
+        "registry_prefix_placements": 54,
+        "phase": "second",
+        "action_placements": 1,
+        "played_next_action": [
+          [
+            -9,
+            6
+          ]
+        ],
+        "member_of_exact_first_action_generator": true,
+        "source_record_placements": 89,
+        "source_path": "E:\\Hexo-BotTrainer-hexgt\\data\\hexo-bootstrap-corpus\\hexo_human_corpus.jsonl"
+      },
+      {
+        "pos_id": "human_20bea7804fffee60_p15",
+        "source_kind": "human",
+        "source_key": "20bea7804fffee60",
+        "registry_prefix_placements": 15,
+        "phase": "first",
+        "action_placements": 2,
+        "played_next_action": [
+          [
+            -4,
+            0
+          ],
+          [
+            1,
+            -5
+          ]
+        ],
+        "member_of_exact_first_action_generator": true,
+        "source_record_placements": 31,
+        "source_path": "E:\\Hexo-BotTrainer-hexgt\\data\\hexo-bootstrap-corpus\\hexo_human_corpus.jsonl"
+      },
+      {
+        "pos_id": "human_27057abe4ee1d907_p15",
+        "source_kind": "human",
+        "source_key": "27057abe4ee1d907",
+        "registry_prefix_placements": 15,
+        "phase": "first",
+        "action_placements": 2,
+        "played_next_action": [
+          [
+            3,
+            -2
+          ],
+          [
+            3,
+            -1
+          ]
+        ],
+        "member_of_exact_first_action_generator": true,
+        "source_record_placements": 29,
+        "source_path": "E:\\Hexo-BotTrainer-hexgt\\data\\hexo-bootstrap-corpus\\hexo_human_corpus.jsonl"
+      },
+      {
+        "pos_id": "human_37979e171ebe14b2_p79",
+        "source_kind": "human",
+        "source_key": "37979e171ebe14b2",
+        "registry_prefix_placements": 79,
+        "phase": "first",
+        "action_placements": 2,
+        "played_next_action": [
+          [
+            11,
+            -1
+          ],
+          [
+            10,
+            0
+          ]
+        ],
+        "member_of_exact_first_action_generator": true,
+        "source_record_placements": 93,
+        "source_path": "E:\\Hexo-BotTrainer-hexgt\\data\\hexo-bootstrap-corpus\\hexo_human_corpus.jsonl"
+      },
+      {
+        "pos_id": "human_3c9423b1a047e24c_p22",
+        "source_kind": "human",
+        "source_key": "3c9423b1a047e24c",
+        "registry_prefix_placements": 22,
+        "phase": "second",
+        "action_placements": 1,
+        "played_next_action": [
+          [
+            3,
+            -9
+          ]
+        ],
+        "member_of_exact_first_action_generator": true,
+        "source_record_placements": 35,
+        "source_path": "E:\\Hexo-BotTrainer-hexgt\\data\\hexo-bootstrap-corpus\\hexo_human_corpus.jsonl"
+      },
+      {
+        "pos_id": "human_41e78c67c2ac8570_p20",
+        "source_kind": "human",
+        "source_key": "41e78c67c2ac8570",
+        "registry_prefix_placements": 20,
+        "phase": "second",
+        "action_placements": 1,
+        "played_next_action": [
+          [
+            2,
+            -2
+          ]
+        ],
+        "member_of_exact_first_action_generator": true,
+        "source_record_placements": 24,
+        "source_path": "E:\\Hexo-BotTrainer-hexgt\\data\\hexo-bootstrap-corpus\\hexo_human_corpus.jsonl"
+      },
+      {
+        "pos_id": "human_6023b2ef70e3ffc6_p76",
+        "source_kind": "human",
+        "source_key": "6023b2ef70e3ffc6",
+        "registry_prefix_placements": 76,
+        "phase": "second",
+        "action_placements": 1,
+        "played_next_action": [
+          [
+            -5,
+            13
+          ]
+        ],
+        "member_of_exact_first_action_generator": true,
+        "source_record_placements": 123,
+        "source_path": "E:\\Hexo-BotTrainer-hexgt\\data\\hexo-bootstrap-corpus\\hexo_human_corpus.jsonl"
+      },
+      {
+        "pos_id": "human_736f572521236d55_p17",
+        "source_kind": "human",
+        "source_key": "736f572521236d55",
+        "registry_prefix_placements": 17,
+        "phase": "first",
+        "action_placements": 2,
+        "played_next_action": [
+          [
+            1,
+            -4
+          ],
+          [
+            4,
+            -4
+          ]
+        ],
+        "member_of_exact_first_action_generator": true,
+        "source_record_placements": 31,
+        "source_path": "E:\\Hexo-BotTrainer-hexgt\\data\\hexo-bootstrap-corpus\\hexo_human_corpus.jsonl"
+      },
+      {
+        "pos_id": "human_c77600999ef0c953_p45",
+        "source_kind": "human",
+        "source_key": "c77600999ef0c953",
+        "registry_prefix_placements": 45,
+        "phase": "first",
+        "action_placements": 2,
+        "played_next_action": [
+          [
+            5,
+            0
+          ],
+          [
+            8,
+            -3
+          ]
+        ],
+        "member_of_exact_first_action_generator": true,
+        "source_record_placements": 59,
+        "source_path": "E:\\Hexo-BotTrainer-hexgt\\data\\hexo-bootstrap-corpus\\hexo_human_corpus.jsonl"
+      },
+      {
+        "pos_id": "human_c77600999ef0c953_p49",
+        "source_kind": "human",
+        "source_key": "c77600999ef0c953",
+        "registry_prefix_placements": 49,
+        "phase": "first",
+        "action_placements": 2,
+        "played_next_action": [
+          [
+            8,
+            -1
+          ],
+          [
+            8,
+            0
+          ]
+        ],
+        "member_of_exact_first_action_generator": true,
+        "source_record_placements": 59,
+        "source_path": "E:\\Hexo-BotTrainer-hexgt\\data\\hexo-bootstrap-corpus\\hexo_human_corpus.jsonl"
+      },
+      {
+        "pos_id": "human_d4f2b0b1853d8565_p44",
+        "source_kind": "human",
+        "source_key": "d4f2b0b1853d8565",
+        "registry_prefix_placements": 44,
+        "phase": "second",
+        "action_placements": 1,
+        "played_next_action": [
+          [
+            20,
+            -5
+          ]
+        ],
+        "member_of_exact_first_action_generator": true,
+        "source_record_placements": 49,
+        "source_path": "E:\\Hexo-BotTrainer-hexgt\\data\\hexo-bootstrap-corpus\\hexo_human_corpus.jsonl"
+      },
+      {
+        "pos_id": "sp_0_p51",
+        "source_kind": "selfplay",
+        "source_key": 0,
+        "registry_prefix_placements": 51,
+        "phase": "first",
+        "action_placements": 2,
+        "played_next_action": [
+          [
+            2,
+            -7
+          ],
+          [
+            3,
+            -8
+          ]
+        ],
+        "member_of_exact_first_action_generator": true,
+        "source_record_placements": 66,
+        "source_path": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\deadline-ladder\\scripts\\tss_harness\\sets\\selfplay_v1.jsonl"
+      },
+      {
+        "pos_id": "sp_13_p59",
+        "source_kind": "selfplay",
+        "source_key": 13,
+        "registry_prefix_placements": 59,
+        "phase": "first",
+        "action_placements": 2,
+        "played_next_action": [
+          [
+            9,
+            -6
+          ],
+          [
+            9,
+            -5
+          ]
+        ],
+        "member_of_exact_first_action_generator": true,
+        "source_record_placements": 78,
+        "source_path": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\deadline-ladder\\scripts\\tss_harness\\sets\\selfplay_v1.jsonl"
+      },
+      {
+        "pos_id": "sp_35_p27",
+        "source_kind": "selfplay",
+        "source_key": 35,
+        "registry_prefix_placements": 27,
+        "phase": "first",
+        "action_placements": 2,
+        "played_next_action": [
+          [
+            -4,
+            3
+          ],
+          [
+            -6,
+            6
+          ]
+        ],
+        "member_of_exact_first_action_generator": true,
+        "source_record_placements": 81,
+        "source_path": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\deadline-ladder\\scripts\\tss_harness\\sets\\selfplay_v1.jsonl"
+      },
+      {
+        "pos_id": "sp_4_p79",
+        "source_kind": "selfplay",
+        "source_key": 4,
+        "registry_prefix_placements": 79,
+        "phase": "first",
+        "action_placements": 2,
+        "played_next_action": [
+          [
+            7,
+            -2
+          ],
+          [
+            7,
+            -4
+          ]
+        ],
+        "member_of_exact_first_action_generator": true,
+        "source_record_placements": 84,
+        "source_path": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\deadline-ladder\\scripts\\tss_harness\\sets\\selfplay_v1.jsonl"
+      },
+      {
+        "pos_id": "sp_5_p61",
+        "source_kind": "selfplay",
+        "source_key": 5,
+        "registry_prefix_placements": 61,
+        "phase": "first",
+        "action_placements": 2,
+        "played_next_action": [
+          [
+            2,
+            -9
+          ],
+          [
+            -1,
+            -3
+          ]
+        ],
+        "member_of_exact_first_action_generator": true,
+        "source_record_placements": 74,
+        "source_path": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\deadline-ladder\\scripts\\tss_harness\\sets\\selfplay_v1.jsonl"
+      }
+    ]
+  },
+  "registry_identity_audit": {
+    "claim": "CODE-FACT",
+    "eligible_ids": 155,
+    "distinct_exact_move_lists": 154,
+    "duplicate_id_groups": [
+      [
+        "atlas_full_oa-c515cddcef6134b3",
+        "atlas_oa-c515cddcef6134b3"
+      ]
+    ]
+  },
+  "proof_status": {
+    "d1_legal_pair_generator": {
+      "claim": "PROOF-SKETCH",
+      "predicate": "L1(x) and (L1(y) or dist(x,y)<=8), or symmetrically",
+      "L1": "root_legal(cell) or within radius 8 of either A1 placement",
+      "protocol_requirement": "root_legal flags, quotient-cell coordinates, and A1; root occupied coordinates are not required"
+    },
+    "empty_and_singleton_projection": {
+      "claim": "PROOF-SKETCH relative to the R3 interaction normalization",
+      "statement": "D1 turns with zero/one retained effects are represented by EMPTY/singleton actions; the omitted filler changes no retained window, and after quota pruning every future retained action is already legal without that filler",
+      "initially_illegal_fringe": "Such a cell is in neither an A1-seeded/anchored attacker window nor an anchored defender window. Alone it can touch only pristine six-empty defender-near windows, leaving residual five with only four D placements left, so its retained effect is EMPTY."
+    },
+    "later_stage_legality": {
+      "claim": "PROOF-SKETCH plus 136-root measured PV audit",
+      "statement": "After D1, every retained A window contains a root/A1 A stone. A retained D-near window has residual at most four, so both D1 stones lie in it; anchored D windows contain a root D stone. Every residual cell is therefore within hex distance five of an occupied stone. The invariant persists through A2, D2, A3, the D3 cover, and the final A completion.",
+      "consequence": "Incidence-twin action quotienting is legality-safe from A2 onward, but not at D1 unless classes carry a legal physical-pair witness."
+    }
+  }
+}

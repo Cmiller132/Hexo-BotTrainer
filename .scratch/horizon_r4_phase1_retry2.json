@@ -1,0 +1,132 @@
+{
+  "metadata": {
+    "binary": "E:\\Hexo-BotTrainer-hexgt\\.claude\\worktrees\\deadline-ladder\\.scratch\\horizon_native\\.target\\release\\horizon_native.exe",
+    "max_cache_entries": 200000,
+    "mode": "registry",
+    "native_threads": 1,
+    "per_root_ms": 10000,
+    "row_evidence": ".scratch\\horizon_r4_phase1_retry2_rows.jsonl",
+    "timeout_is_not_verdict": true
+  },
+  "selection": {
+    "eligible_depth_13_14": 155,
+    "registry_unique": 2941,
+    "target_filter_after": 16,
+    "target_filter_before": 155,
+    "target_filter_missing": [],
+    "target_filter_requested": [
+      "human_162b07d9a12084e2_p61",
+      "human_194ce5fa25e2029d_p40",
+      "human_1d7540b8789196ad_p54",
+      "human_20bea7804fffee60_p15",
+      "human_27057abe4ee1d907_p15",
+      "human_37979e171ebe14b2_p79",
+      "human_3c9423b1a047e24c_p22",
+      "human_6023b2ef70e3ffc6_p76",
+      "human_c77600999ef0c953_p45",
+      "human_c77600999ef0c953_p49",
+      "human_d4f2b0b1853d8565_p44",
+      "sp_0_p51",
+      "sp_13_p59",
+      "sp_35_p27",
+      "sp_4_p79",
+      "sp_5_p61"
+    ]
+  },
+  "summary": {
+    "attempted": 16,
+    "caught_ids": [
+      "human_162b07d9a12084e2_p61",
+      "human_194ce5fa25e2029d_p40",
+      "human_1d7540b8789196ad_p54",
+      "human_27057abe4ee1d907_p15",
+      "human_37979e171ebe14b2_p79",
+      "human_3c9423b1a047e24c_p22",
+      "human_c77600999ef0c953_p45",
+      "human_c77600999ef0c953_p49",
+      "human_d4f2b0b1853d8565_p44",
+      "sp_0_p51"
+    ],
+    "completed_negative_mismatches": [],
+    "completed_negatives": 0,
+    "distributions": {
+      "all": {
+        "first_action_total": {
+          "max": 212691,
+          "mean": 88929.8125,
+          "n": 16,
+          "p50": 80577,
+          "p90": 173826,
+          "total": 1422877
+        },
+        "nodes": {
+          "max": 5875712,
+          "mean": 1928743.75,
+          "n": 16,
+          "p50": 641033,
+          "p90": 4338688,
+          "total": 30859900
+        },
+        "universe": {
+          "max": 898,
+          "mean": 700.125,
+          "n": 16,
+          "p50": 745,
+          "p90": 838,
+          "total": 11202
+        },
+        "wall_ns": {
+          "max": 10022193200,
+          "mean": 4714059106.25,
+          "n": 16,
+          "p50": 1944993800,
+          "p90": 10000853400,
+          "total": 75424945700
+        }
+      },
+      "completed": {
+        "first_action_total": {
+          "max": 173826,
+          "mean": 73052.9,
+          "n": 10,
+          "p50": 72565,
+          "p90": 161382,
+          "total": 730529
+        },
+        "nodes": {
+          "max": 3263749,
+          "mean": 746457.2,
+          "n": 10,
+          "p50": 352135,
+          "p90": 1729526,
+          "total": 7464572
+        },
+        "universe": {
+          "max": 898,
+          "mean": 689.7,
+          "n": 10,
+          "p50": 654,
+          "p90": 790,
+          "total": 6897
+        },
+        "wall_ns": {
+          "max": 7353809100,
+          "mean": 1539946880.0,
+          "n": 10,
+          "p50": 503730600,
+          "p90": 3666539400,
+          "total": 15399468800
+        }
+      }
+    },
+    "errors": 0,
+    "per_cohort_status": {},
+    "python_crosscheck_mismatches": [],
+    "statuses": {
+      "timeout": 6,
+      "win": 10
+    },
+    "timeouts": 6,
+    "wins": 10
+  }
+}

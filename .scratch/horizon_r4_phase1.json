@@ -1,0 +1,1545 @@
+{
+  "frozen_cohorts": {
+    "all_supported_memberships": {
+      "attempted_memberships": 6662,
+      "completed_negatives": 0,
+      "completed_verdicts": 13,
+      "distributions": {
+        "all": {
+          "first_action_total": {
+            "max": 346945,
+            "mean": 49794.96277394176,
+            "n": 6662,
+            "p50": 16381,
+            "p90": 152784,
+            "total": 331734042
+          },
+          "model_wall_ns": {
+            "max": 28387190600,
+            "mean": 188727482.0474332,
+            "n": 6662,
+            "p50": 75298800,
+            "p90": 451128400,
+            "total": 1257302485400
+          },
+          "nodes": {
+            "max": 133120,
+            "mean": 3276.9977484238966,
+            "n": 6662,
+            "p50": 2048,
+            "p90": 4096,
+            "total": 21831359
+          },
+          "universe": {
+            "max": 2421,
+            "mean": 599.9816871810267,
+            "n": 6662,
+            "p50": 577,
+            "p90": 831,
+            "total": 3997078
+          },
+          "wall_ns": {
+            "max": 3413545300,
+            "mean": 142544677.24407086,
+            "n": 6662,
+            "p50": 13495300,
+            "p90": 443763300,
+            "total": 949632639800
+          }
+        },
+        "completed": {
+          "first_action_total": {
+            "max": 41064,
+            "mean": 11945.615384615385,
+            "n": 13,
+            "p50": 546,
+            "p90": 36510,
+            "total": 155293
+          },
+          "model_wall_ns": {
+            "max": 110984600,
+            "mean": 69411384.61538461,
+            "n": 13,
+            "p50": 62264000,
+            "p90": 107064300,
+            "total": 902348000
+          },
+          "nodes": {
+            "max": 71170,
+            "mean": 29621.46153846154,
+            "n": 13,
+            "p50": 1,
+            "p90": 66125,
+            "total": 385079
+          },
+          "universe": {
+            "max": 776,
+            "mean": 529.0,
+            "n": 13,
+            "p50": 501,
+            "p90": 683,
+            "total": 6877
+          },
+          "wall_ns": {
+            "max": 23296700,
+            "mean": 7186600.0,
+            "n": 13,
+            "p50": 2725700,
+            "p90": 11307700,
+            "total": 93425800
+          }
+        }
+      },
+      "duplicate_cross_cohort_memberships": 416,
+      "errors": 0,
+      "native_win_rate_over_attempted": 0.0019513659561693185,
+      "statuses": {
+        "timeout": 6649,
+        "win": 13
+      },
+      "timeout_rate_over_attempted": 0.9980486340438307,
+      "timeouts": 6649,
+      "unique_position_ids": 6246,
+      "wins": 13
+    },
+    "budget_note": "human/self-play used 10 ms and 50,000 cache entries; puzzle/grinds/forcing used 25 ms and 100,000 entries; safe-point wall overruns remain timeouts",
+    "identity_note": "literal pos_id floors preserve the R3 accounting convention; position-history floors transfer a proof across byte-identical ordered move lists and are the semantic figures",
+    "interruption_note": "human shard 1 was killed by the 900 s shell cap after 2,134 durable rows; the disjoint 586-row resume completed",
+    "per_cohort": {
+      "forcing19": {
+        "attempted_memberships": 19,
+        "budget_ms": 25,
+        "completed_negatives": 0,
+        "completed_verdicts": 0,
+        "distributions": {
+          "all": {
+            "first_action_total": {
+              "max": 337865,
+              "mean": 135022.1052631579,
+              "n": 19,
+              "p50": 108750,
+              "p90": 203088,
+              "total": 2565420
+            },
+            "model_wall_ns": {
+              "max": 1416201600,
+              "mean": 377317010.5263158,
+              "n": 19,
+              "p50": 248224800,
+              "p90": 615798900,
+              "total": 7169023200
+            },
+            "nodes": {
+              "max": 7168,
+              "mean": 3826.5263157894738,
+              "n": 19,
+              "p50": 4096,
+              "p90": 6144,
+              "total": 72704
+            },
+            "universe": {
+              "max": 1073,
+              "mean": 701.6842105263158,
+              "n": 19,
+              "p50": 646,
+              "p90": 839,
+              "total": 13332
+            },
+            "wall_ns": {
+              "max": 1425056900,
+              "mean": 212449236.84210527,
+              "n": 19,
+              "p50": 27553900,
+              "p90": 951186300,
+              "total": 4036535500
+            }
+          },
+          "completed": {
+            "first_action_total": {
+              "max": 0,
+              "mean": 0.0,
+              "n": 0,
+              "p50": 0,
+              "p90": 0,
+              "total": 0
+            },
+            "model_wall_ns": {
+              "max": 0,
+              "mean": 0.0,
+              "n": 0,
+              "p50": 0,
+              "p90": 0,
+              "total": 0
+            },
+            "nodes": {
+              "max": 0,
+              "mean": 0.0,
+              "n": 0,
+              "p50": 0,
+              "p90": 0,
+              "total": 0
+            },
+            "universe": {
+              "max": 0,
+              "mean": 0.0,
+              "n": 0,
+              "p50": 0,
+              "p90": 0,
+              "total": 0
+            },
+            "wall_ns": {
+              "max": 0,
+              "mean": 0.0,
+              "n": 0,
+              "p50": 0,
+              "p90": 0,
+              "total": 0
+            }
+          }
+        },
+        "errors": 0,
+        "frozen_memberships": 19,
+        "h8_exact_wins": 0,
+        "inherited_h8_or_registry_floor": 0,
+        "literal_h8_or_registry_le10_floor": 0,
+        "native_new_beyond_h8_or_registry": 0,
+        "native_new_ids": [],
+        "native_win_ids": [],
+        "native_win_ids_sha256_compact_json": "4F53CDA18C2BAA0C0354BB5F9A3ECBE5ED12AB4D8E11BA873C2F11161202B945",
+        "native_win_rate_over_attempted": 0.0,
+        "position_history_h10_plus_native_floor": 0,
+        "position_history_h8_or_registry_le10_floor": 0,
+        "position_history_inherited_floor": 0,
+        "position_history_inherited_ids": [],
+        "position_history_native_new": 0,
+        "position_history_native_new_beyond_h10": 0,
+        "position_history_native_new_beyond_h10_ids": [],
+        "position_history_native_new_ids": [],
+        "position_history_r4_union_floor": 0,
+        "position_history_r4_union_rate_over_frozen": 0.0,
+        "r4_union_floor": 0,
+        "r4_union_floor_rate_over_frozen": 0.0,
+        "registry_le14_members": 0,
+        "statuses": {
+          "timeout": 19
+        },
+        "supported_attempted": 19,
+        "timeout_rate_over_attempted": 1.0,
+        "timeouts": 19,
+        "unsupported_opening": 0,
+        "wins": 0
+      },
+      "grinds": {
+        "attempted_memberships": 248,
+        "budget_ms": 25,
+        "completed_negatives": 0,
+        "completed_verdicts": 0,
+        "distributions": {
+          "all": {
+            "first_action_total": {
+              "max": 346945,
+              "mean": 132762.31451612903,
+              "n": 248,
+              "p50": 147393,
+              "p90": 224845,
+              "total": 32925054
+            },
+            "model_wall_ns": {
+              "max": 1411535200,
+              "mean": 349476670.9677419,
+              "n": 248,
+              "p50": 326056900,
+              "p90": 626788900,
+              "total": 86670214400
+            },
+            "nodes": {
+              "max": 13312,
+              "mean": 4203.354838709677,
+              "n": 248,
+              "p50": 4096,
+              "p90": 8192,
+              "total": 1042432
+            },
+            "universe": {
+              "max": 1087,
+              "mean": 769.0887096774194,
+              "n": 248,
+              "p50": 764,
+              "p90": 900,
+              "total": 190734
+            },
+            "wall_ns": {
+              "max": 1715600200,
+              "mean": 98485050.0,
+              "n": 248,
+              "p50": 26979500,
+              "p90": 33209500,
+              "total": 24424292400
+            }
+          },
+          "completed": {
+            "first_action_total": {
+              "max": 0,
+              "mean": 0.0,
+              "n": 0,
+              "p50": 0,
+              "p90": 0,
+              "total": 0
+            },
+            "model_wall_ns": {
+              "max": 0,
+              "mean": 0.0,
+              "n": 0,
+              "p50": 0,
+              "p90": 0,
+              "total": 0
+            },
+            "nodes": {
+              "max": 0,
+              "mean": 0.0,
+              "n": 0,
+              "p50": 0,
+              "p90": 0,
+              "total": 0
+            },
+            "universe": {
+              "max": 0,
+              "mean": 0.0,
+              "n": 0,
+              "p50": 0,
+              "p90": 0,
+              "total": 0
+            },
+            "wall_ns": {
+              "max": 0,
+              "mean": 0.0,
+              "n": 0,
+              "p50": 0,
+              "p90": 0,
+              "total": 0
+            }
+          }
+        },
+        "errors": 0,
+        "frozen_memberships": 248,
+        "h8_exact_wins": 0,
+        "inherited_h8_or_registry_floor": 0,
+        "literal_h8_or_registry_le10_floor": 0,
+        "native_new_beyond_h8_or_registry": 0,
+        "native_new_ids": [],
+        "native_win_ids": [],
+        "native_win_ids_sha256_compact_json": "4F53CDA18C2BAA0C0354BB5F9A3ECBE5ED12AB4D8E11BA873C2F11161202B945",
+        "native_win_rate_over_attempted": 0.0,
+        "position_history_h10_plus_native_floor": 0,
+        "position_history_h8_or_registry_le10_floor": 0,
+        "position_history_inherited_floor": 0,
+        "position_history_inherited_ids": [],
+        "position_history_native_new": 0,
+        "position_history_native_new_beyond_h10": 0,
+        "position_history_native_new_beyond_h10_ids": [],
+        "position_history_native_new_ids": [],
+        "position_history_r4_union_floor": 0,
+        "position_history_r4_union_rate_over_frozen": 0.0,
+        "r4_union_floor": 0,
+        "r4_union_floor_rate_over_frozen": 0.0,
+        "registry_le14_members": 0,
+        "statuses": {
+          "timeout": 248
+        },
+        "supported_attempted": 248,
+        "timeout_rate_over_attempted": 1.0,
+        "timeouts": 248,
+        "unsupported_opening": 0,
+        "wins": 0
+      },
+      "human_v1": {
+        "attempted_memberships": 2720,
+        "budget_ms": 10,
+        "completed_negatives": 0,
+        "completed_verdicts": 6,
+        "distributions": {
+          "all": {
+            "first_action_total": {
+              "max": 297838,
+              "mean": 35436.9580882353,
+              "n": 2720,
+              "p50": 720,
+              "p90": 95261,
+              "total": 96388526
+            },
+            "model_wall_ns": {
+              "max": 28387190600,
+              "mean": 187370668.8970588,
+              "n": 2720,
+              "p50": 76086900,
+              "p90": 313743700,
+              "total": 509648219400
+            },
+            "nodes": {
+              "max": 115712,
+              "mean": 2286.6761029411764,
+              "n": 2720,
+              "p50": 1024,
+              "p90": 3072,
+              "total": 6219759
+            },
+            "universe": {
+              "max": 2421,
+              "mean": 560.3908088235294,
+              "n": 2720,
+              "p50": 516,
+              "p90": 770,
+              "total": 1524263
+            },
+            "wall_ns": {
+              "max": 3413545300,
+              "mean": 234562009.19117647,
+              "n": 2720,
+              "p50": 13934200,
+              "p90": 1120704600,
+              "total": 638008665000
+            }
+          },
+          "completed": {
+            "first_action_total": {
+              "max": 659,
+              "mean": 458.1666666666667,
+              "n": 6,
+              "p50": 417,
+              "p90": 470,
+              "total": 2749
+            },
+            "model_wall_ns": {
+              "max": 110984600,
+              "mean": 60970616.666666664,
+              "n": 6,
+              "p50": 44434300,
+              "p90": 94174200,
+              "total": 365823700
+            },
+            "nodes": {
+              "max": 66125,
+              "mean": 11021.666666666666,
+              "n": 6,
+              "p50": 1,
+              "p90": 1,
+              "total": 66130
+            },
+            "universe": {
+              "max": 776,
+              "mean": 561.8333333333334,
+              "n": 6,
+              "p50": 507,
+              "p90": 574,
+              "total": 3371
+            },
+            "wall_ns": {
+              "max": 7092300,
+              "mean": 2992083.3333333335,
+              "n": 6,
+              "p50": 1957800,
+              "p90": 2725700,
+              "total": 17952500
+            }
+          }
+        },
+        "errors": 0,
+        "frozen_memberships": 2720,
+        "h8_exact_wins": 157,
+        "inherited_h8_or_registry_floor": 176,
+        "literal_h8_or_registry_le10_floor": 163,
+        "native_new_beyond_h8_or_registry": 0,
+        "native_new_ids": [],
+        "native_win_ids": [
+          "human_3d17d05a42459994_p26",
+          "human_41e78c67c2ac8570_p20",
+          "human_580976936b090a88_p46",
+          "human_7f8d4486eef0ce04_p26",
+          "human_ac3b3e8fc1b9711b_p26",
+          "human_d5c9e65ee824b42e_p56"
+        ],
+        "native_win_ids_sha256_compact_json": "D37196978656DDD68ACEC982598A157596D4CD0B56114FDEDD54EBB8FAB23B74",
+        "native_win_rate_over_attempted": 0.0022058823529411764,
+        "position_history_h10_plus_native_floor": 164,
+        "position_history_h8_or_registry_le10_floor": 163,
+        "position_history_inherited_floor": 176,
+        "position_history_inherited_ids": [
+          "human_0063dbc011a0664e_p45",
+          "human_01eb10f560181c67_p18",
+          "human_05c3471c3ab37ba5_p31",
+          "human_05feb4372684737f_p53",
+          "human_06ee44897e0b4439_p100",
+          "human_07fad44874cd8aad_p19",
+          "human_07fad44874cd8aad_p20",
+          "human_07fdc5d20e89eb68_p27",
+          "human_09410878636df4ad_p30",
+          "human_0b39ea1a6c8eee20_p63",
+          "human_0b39ea1a6c8eee20_p83",
+          "human_0c90c66750c63b48_p86",
+          "human_0c9570189beab16e_p33",
+          "human_0c9570189beab16e_p37",
+          "human_0c9570189beab16e_p45",
+          "human_109c7b52881de543_p95",
+          "human_12a2360cad1617fc_p23",
+          "human_162b07d9a12084e2_p61",
+          "human_194ce5fa25e2029d_p40",
+          "human_194ce5fa25e2029d_p47",
+          "human_1cf87d307bc7c7eb_p15",
+          "human_1cf87d307bc7c7eb_p16",
+          "human_1d7540b8789196ad_p54",
+          "human_1d7540b8789196ad_p83",
+          "human_1f911166322d1ff1_p44",
+          "human_20bea7804fffee60_p15",
+          "human_21609629596d6fd3_p55",
+          "human_27057abe4ee1d907_p15",
+          "human_29367806cdc99f01_p17",
+          "human_29c3b184d10ac9aa_p24",
+          "human_2c3b021c92704555_p15",
+          "human_2c3b021c92704555_p16",
+          "human_2e9fda60e67dc5ed_p19",
+          "human_2f52d27f87809f16_p31",
+          "human_330765c103651880_p20",
+          "human_3686c6ae3dfa6ab7_p58",
+          "human_36cde636fc04ca2b_p48",
+          "human_37979e171ebe14b2_p79",
+          "human_3ad0af6ed8a6e059_p38",
+          "human_3c9423b1a047e24c_p22",
+          "human_3c9423b1a047e24c_p29",
+          "human_3d17d05a42459994_p25",
+          "human_3d17d05a42459994_p26",
+          "human_3e6a7aaa8d136721_p31",
+          "human_41a34b80fd66cef6_p40",
+          "human_41a34b80fd66cef6_p55",
+          "human_41e2eecefcb26883_p15",
+          "human_41e2eecefcb26883_p16",
+          "human_41e78c67c2ac8570_p20",
+          "human_438cf2993db2676d_p43",
+          "human_438cf2993db2676d_p48",
+          "human_470059da30268138_p58",
+          "human_485d7e087ce1ab0d_p24",
+          "human_49450ea28d095793_p29",
+          "human_4a05243f78cd8be2_p17",
+          "human_510e269e505bc623_p54",
+          "human_5416e3843ab1f3b7_p29",
+          "human_572f17e89f6ab4b4_p127",
+          "human_572f17e89f6ab4b4_p63",
+          "human_572f17e89f6ab4b4_p87",
+          "human_57bd45a74adeb628_p39",
+          "human_580976936b090a88_p46",
+          "human_5a047618ae87ac7d_p46",
+          "human_5aef7545813a348a_p34",
+          "human_5cfcb378a9dc6e84_p45",
+          "human_5f3230983f9ea3dd_p85",
+          "human_6023b2ef70e3ffc6_p76",
+          "human_604e9d7a6009c07b_p23",
+          "human_604e9d7a6009c07b_p48",
+          "human_60818dbe5a13a9f9_p31",
+          "human_60818dbe5a13a9f9_p36",
+          "human_617667fc8eefef31_p28",
+          "human_64004c0089a9178d_p27",
+          "human_67630ab3b7277e43_p21",
+          "human_67630ab3b7277e43_p22",
+          "human_68c1c50639039687_p17",
+          "human_6b53c8a83c044b8d_p24",
+          "human_6b53c8a83c044b8d_p31",
+          "human_6d26d0bb77a12b8d_p49",
+          "human_6e548d2127ed37cb_p25",
+          "human_736f572521236d55_p17",
+          "human_736f572521236d55_p25",
+          "human_76f6574804d34081_p23",
+          "human_78f5a4430295cf5c_p77",
+          "human_7d16286a4c1ae774_p19",
+          "human_7eb1319eae1e3435_p107",
+          "human_7ef53ac05dfb6399_p13",
+          "human_7f8d4486eef0ce04_p25",
+          "human_7f8d4486eef0ce04_p26",
+          "human_80beb006905ad691_p81",
+          "human_83531faa75f0ec55_p23",
+          "human_83531faa75f0ec55_p24",
+          "human_89bcfcca5b4215a0_p40",
+          "human_8ab85e27fb65efce_p31",
+          "human_8af5b6a251860d89_p23",
+          "human_8d1e9f4956c2caa3_p39",
+          "human_92b740931483965e_p25",
+          "human_92b740931483965e_p26",
+          "human_96acd073ccd000de_p23",
+          "human_96acd073ccd000de_p53",
+          "human_96acd073ccd000de_p54",
+          "human_97d76a4c55be1155_p59",
+          "human_9801865e98d04f07_p20",
+          "human_9912dd17e41680d7_p151",
+          "human_9ac941b6c3ab9c8c_p17",
+          "human_9ac941b6c3ab9c8c_p18",
+          "human_9ac941b6c3ab9c8c_p21",
+          "human_a1bca2c1b2a01a07_p68",
+          "human_a259b7fc7f19281f_p53",
+          "human_a31d9ccaf73bd24d_p17",
+          "human_a4b108cc9a7b524b_p107",
+          "human_a4c5de7f99c580b0_p27",
+          "human_a7bf376041f893b0_p48",
+          "human_a834277a999c7217_p65",
+          "human_a94f22d36ff7d3cf_p19",
+          "human_ab93c3b77edcd8c1_p57",
+          "human_ac3b3e8fc1b9711b_p25",
+          "human_ac3b3e8fc1b9711b_p26",
+          "human_ad22c1fc354c3ab3_p60",
+          "human_ad22c1fc354c3ab3_p88",
+          "human_b132a09ccb4eb829_p101",
+          "human_b43c0b398667f573_p112",
+          "human_b81f05b4f52ddee3_p25",
+          "human_b8c6422dc42a5552_p23",
+          "human_b9615c6b30115221_p51",
+          "human_ba4c8c74d9d048b5_p18",
+          "human_ba4c8c74d9d048b5_p25",
+          "human_bcae226331bcae63_p26",
+          "human_bec873af729120b3_p26",
+          "human_c47c54aca413210a_p44",
+          "human_c54c79e3ba4eed5a_p319",
+          "human_c71c9ef606916639_p51",
+          "human_c77600999ef0c953_p45",
+          "human_c77600999ef0c953_p49",
+          "human_cb7e982286bebc8e_p15",
+          "human_cb7e982286bebc8e_p16",
+          "human_d190fa3322965e18_p23",
+          "human_d190fa3322965e18_p24",
+          "human_d1a6c5c9d0e705c8_p34",
+          "human_d279f167361bf428_p19",
+          "human_d279f167361bf428_p35",
+          "human_d279f167361bf428_p36",
+          "human_d371694020b025f3_p25",
+          "human_d371694020b025f3_p26",
+          "human_d4f2b0b1853d8565_p44",
+          "human_d5c9e65ee824b42e_p52",
+          "human_d5c9e65ee824b42e_p56",
+          "human_da996f7325a33d85_p33",
+          "human_dab05c7c99af7b40_p43",
+          "human_db9e61448d342d8d_p31",
+          "human_db9e61448d342d8d_p35",
+          "human_dc3c846c4023a751_p15",
+          "human_dc3c846c4023a751_p16",
+          "human_de78dc834d1cf367_p73",
+          "human_df50afc21037f0e5_p70",
+          "human_df50afc21037f0e5_p77",
+          "human_e03d67584409c169_p42",
+          "human_e6650040fbce33aa_p23",
+          "human_e6650040fbce33aa_p24",
+          "human_e6ae44020f50a3cc_p24",
+          "human_eb6d8a81417a17b5_p21",
+          "human_eb6d8a81417a17b5_p22",
+          "human_eba9aa00b7b239a0_p65",
+          "human_ec1214733caef8bf_p49",
+          "human_ee8d776ea554688b_p22",
+          "human_f0dbe3762307339e_p29",
+          "human_f0dbe3762307339e_p34",
+          "human_f3bd4894504de2b8_p33",
+          "human_f3dfd95284c2b5b4_p19",
+          "human_f53f6fd7547d8173_p95",
+          "human_f6f7eac8150ee174_p78",
+          "human_f8c86f9a0f1ed338_p15",
+          "human_f8c86f9a0f1ed338_p16",
+          "human_f9f50871d4efa2d9_p32",
+          "human_fb00d63dc6d7ef92_p131",
+          "human_fc7b96c2cc1c93ee_p38"
+        ],
+        "position_history_native_new": 0,
+        "position_history_native_new_beyond_h10": 1,
+        "position_history_native_new_beyond_h10_ids": [
+          "human_41e78c67c2ac8570_p20"
+        ],
+        "position_history_native_new_ids": [],
+        "position_history_r4_union_floor": 176,
+        "position_history_r4_union_rate_over_frozen": 0.06470588235294118,
+        "r4_union_floor": 176,
+        "r4_union_floor_rate_over_frozen": 0.06470588235294118,
+        "registry_le14_members": 42,
+        "statuses": {
+          "timeout": 2714,
+          "win": 6
+        },
+        "supported_attempted": 2720,
+        "timeout_rate_over_attempted": 0.9977941176470588,
+        "timeouts": 2714,
+        "unsupported_opening": 0,
+        "wins": 6
+      },
+      "puzzle_v3": {
+        "attempted_memberships": 468,
+        "budget_ms": 25,
+        "completed_negatives": 0,
+        "completed_verdicts": 7,
+        "distributions": {
+          "all": {
+            "first_action_total": {
+              "max": 337865,
+              "mean": 48038.929487179485,
+              "n": 468,
+              "p50": 36791,
+              "p90": 108903,
+              "total": 22482219
+            },
+            "model_wall_ns": {
+              "max": 1596840200,
+              "mean": 130081026.92307693,
+              "n": 468,
+              "p50": 83049000,
+              "p90": 252226300,
+              "total": 60877920600
+            },
+            "nodes": {
+              "max": 133120,
+              "mean": 17545.32905982906,
+              "n": 468,
+              "p50": 6144,
+              "p90": 47104,
+              "total": 8211214
+            },
+            "universe": {
+              "max": 1073,
+              "mean": 504.89102564102564,
+              "n": 468,
+              "p50": 455,
+              "p90": 761,
+              "total": 236289
+            },
+            "wall_ns": {
+              "max": 2673725200,
+              "mean": 147842576.7094017,
+              "n": 468,
+              "p50": 27485600,
+              "p90": 314662600,
+              "total": 69190325900
+            }
+          },
+          "completed": {
+            "first_action_total": {
+              "max": 41064,
+              "mean": 21792.0,
+              "n": 7,
+              "p50": 32469,
+              "p90": 41001,
+              "total": 152544
+            },
+            "model_wall_ns": {
+              "max": 110059200,
+              "mean": 76646328.57142857,
+              "n": 7,
+              "p50": 66610500,
+              "p90": 107064300,
+              "total": 536524300
+            },
+            "nodes": {
+              "max": 71170,
+              "mean": 45564.142857142855,
+              "n": 7,
+              "p50": 59110,
+              "p90": 68829,
+              "total": 318949
+            },
+            "universe": {
+              "max": 722,
+              "mean": 500.85714285714283,
+              "n": 7,
+              "p50": 431,
+              "p90": 683,
+              "total": 3506
+            },
+            "wall_ns": {
+              "max": 23296700,
+              "mean": 10781900.0,
+              "n": 7,
+              "p50": 10647800,
+              "p90": 16974500,
+              "total": 75473300
+            }
+          }
+        },
+        "errors": 0,
+        "frozen_memberships": 468,
+        "h8_exact_wins": 20,
+        "inherited_h8_or_registry_floor": 23,
+        "literal_h8_or_registry_le10_floor": 21,
+        "native_new_beyond_h8_or_registry": 4,
+        "native_new_ids": [
+          "atlas_oa-045b851c14df9ba4",
+          "atlas_oa-3b088ddf6709d513",
+          "atlas_oa-608297504efb169d",
+          "atlas_oa-eaaf96adf8a3aa42"
+        ],
+        "native_win_ids": [
+          "atlas_oa-045b851c14df9ba4",
+          "atlas_oa-3b088ddf6709d513",
+          "atlas_oa-3c2762e55c2af7e2",
+          "atlas_oa-4a91f3b61b890567",
+          "atlas_oa-608297504efb169d",
+          "atlas_oa-eaaf96adf8a3aa42",
+          "human_41e78c67c2ac8570_p20"
+        ],
+        "native_win_ids_sha256_compact_json": "D8B8E97664A440C490D2EB303CE73869B7116457D3355195594B126E7835CD5C",
+        "native_win_rate_over_attempted": 0.014957264957264958,
+        "position_history_h10_plus_native_floor": 27,
+        "position_history_h8_or_registry_le10_floor": 23,
+        "position_history_inherited_floor": 31,
+        "position_history_inherited_ids": [
+          "atlas_oa-045b851c14df9ba4",
+          "atlas_oa-0fcffb0c600dd88a",
+          "atlas_oa-1a1bec0f1dfb0146",
+          "atlas_oa-3b088ddf6709d513",
+          "atlas_oa-3bd44a37cd207873",
+          "atlas_oa-3c2762e55c2af7e2",
+          "atlas_oa-3f3d81c2167d0adc",
+          "atlas_oa-4a91f3b61b890567",
+          "atlas_oa-608297504efb169d",
+          "atlas_oa-c515cddcef6134b3",
+          "atlas_oa-eaaf96adf8a3aa42",
+          "human_0b39ea1a6c8eee20_p83",
+          "human_109c7b52881de543_p95",
+          "human_41e78c67c2ac8570_p20",
+          "human_485d7e087ce1ab0d_p24",
+          "human_4a05243f78cd8be2_p17",
+          "human_67630ab3b7277e43_p21",
+          "human_67630ab3b7277e43_p22",
+          "human_96acd073ccd000de_p23",
+          "human_96acd073ccd000de_p53",
+          "human_a1bca2c1b2a01a07_p68",
+          "human_a259b7fc7f19281f_p53",
+          "human_b132a09ccb4eb829_p101",
+          "human_b81f05b4f52ddee3_p25",
+          "human_bec873af729120b3_p26",
+          "human_c71c9ef606916639_p51",
+          "human_da996f7325a33d85_p33",
+          "human_dab05c7c99af7b40_p43",
+          "human_db9e61448d342d8d_p35",
+          "human_f8c86f9a0f1ed338_p15",
+          "human_fb00d63dc6d7ef92_p131"
+        ],
+        "position_history_native_new": 0,
+        "position_history_native_new_beyond_h10": 4,
+        "position_history_native_new_beyond_h10_ids": [
+          "atlas_oa-3b088ddf6709d513",
+          "atlas_oa-608297504efb169d",
+          "atlas_oa-eaaf96adf8a3aa42",
+          "human_41e78c67c2ac8570_p20"
+        ],
+        "position_history_native_new_ids": [],
+        "position_history_r4_union_floor": 31,
+        "position_history_r4_union_rate_over_frozen": 0.06623931623931624,
+        "r4_union_floor": 27,
+        "r4_union_floor_rate_over_frozen": 0.057692307692307696,
+        "registry_le14_members": 9,
+        "statuses": {
+          "timeout": 461,
+          "win": 7
+        },
+        "supported_attempted": 468,
+        "timeout_rate_over_attempted": 0.9850427350427351,
+        "timeouts": 461,
+        "unsupported_opening": 0,
+        "wins": 7
+      },
+      "selfplay_v1": {
+        "attempted_memberships": 3207,
+        "budget_ms": 10,
+        "completed_negatives": 0,
+        "completed_verdicts": 0,
+        "distributions": {
+          "all": {
+            "first_action_total": {
+              "max": 313520,
+              "mean": 55308.02089179919,
+              "n": 3207,
+              "p50": 814,
+              "p90": 161133,
+              "total": 177372823
+            },
+            "model_wall_ns": {
+              "max": 2544396500,
+              "mean": 184888402.80636108,
+              "n": 3207,
+              "p50": 67459000,
+              "p90": 495057100,
+              "total": 592937107800
+            },
+            "nodes": {
+              "max": 115712,
+              "mean": 1959.8534455877768,
+              "n": 3207,
+              "p50": 2048,
+              "p90": 4096,
+              "total": 6285250
+            },
+            "universe": {
+              "max": 1223,
+              "mean": 633.7574056750858,
+              "n": 3207,
+              "p50": 653,
+              "p90": 845,
+              "total": 2032460
+            },
+            "wall_ns": {
+              "max": 1965231100,
+              "mean": 66720555.347676955,
+              "n": 3207,
+              "p50": 12376200,
+              "p90": 21057000,
+              "total": 213972821000
+            }
+          },
+          "completed": {
+            "first_action_total": {
+              "max": 0,
+              "mean": 0.0,
+              "n": 0,
+              "p50": 0,
+              "p90": 0,
+              "total": 0
+            },
+            "model_wall_ns": {
+              "max": 0,
+              "mean": 0.0,
+              "n": 0,
+              "p50": 0,
+              "p90": 0,
+              "total": 0
+            },
+            "nodes": {
+              "max": 0,
+              "mean": 0.0,
+              "n": 0,
+              "p50": 0,
+              "p90": 0,
+              "total": 0
+            },
+            "universe": {
+              "max": 0,
+              "mean": 0.0,
+              "n": 0,
+              "p50": 0,
+              "p90": 0,
+              "total": 0
+            },
+            "wall_ns": {
+              "max": 0,
+              "mean": 0.0,
+              "n": 0,
+              "p50": 0,
+              "p90": 0,
+              "total": 0
+            }
+          }
+        },
+        "errors": 0,
+        "frozen_memberships": 3255,
+        "h8_exact_wins": 101,
+        "inherited_h8_or_registry_floor": 107,
+        "literal_h8_or_registry_le10_floor": 102,
+        "native_new_beyond_h8_or_registry": 0,
+        "native_new_ids": [],
+        "native_win_ids": [],
+        "native_win_ids_sha256_compact_json": "4F53CDA18C2BAA0C0354BB5F9A3ECBE5ED12AB4D8E11BA873C2F11161202B945",
+        "native_win_rate_over_attempted": 0.0,
+        "position_history_h10_plus_native_floor": 102,
+        "position_history_h8_or_registry_le10_floor": 102,
+        "position_history_inherited_floor": 107,
+        "position_history_inherited_ids": [
+          "sp_0_p43",
+          "sp_0_p44",
+          "sp_0_p51",
+          "sp_0_p59",
+          "sp_0_p60",
+          "sp_0_p65",
+          "sp_0_p66",
+          "sp_11_p45",
+          "sp_11_p46",
+          "sp_11_p49",
+          "sp_11_p50",
+          "sp_11_p73",
+          "sp_11_p74",
+          "sp_12_p43",
+          "sp_12_p44",
+          "sp_12_p47",
+          "sp_12_p48",
+          "sp_13_p59",
+          "sp_13_p75",
+          "sp_13_p76",
+          "sp_13_p77",
+          "sp_13_p78",
+          "sp_14_p51",
+          "sp_14_p52",
+          "sp_14_p61",
+          "sp_14_p62",
+          "sp_16_p49",
+          "sp_16_p50",
+          "sp_17_p21",
+          "sp_19_p41",
+          "sp_19_p42",
+          "sp_19_p45",
+          "sp_19_p46",
+          "sp_19_p49",
+          "sp_19_p50",
+          "sp_1_p37",
+          "sp_1_p38",
+          "sp_1_p41",
+          "sp_1_p42",
+          "sp_1_p43",
+          "sp_1_p44",
+          "sp_1_p47",
+          "sp_1_p48",
+          "sp_20_p77",
+          "sp_21_p47",
+          "sp_21_p51",
+          "sp_21_p55",
+          "sp_21_p59",
+          "sp_24_p61",
+          "sp_25_p63",
+          "sp_25_p64",
+          "sp_25_p65",
+          "sp_25_p66",
+          "sp_25_p69",
+          "sp_26_p61",
+          "sp_26_p62",
+          "sp_27_p53",
+          "sp_27_p54",
+          "sp_27_p55",
+          "sp_27_p56",
+          "sp_28_p57",
+          "sp_28_p58",
+          "sp_2_p65",
+          "sp_2_p66",
+          "sp_2_p69",
+          "sp_2_p70",
+          "sp_30_p57",
+          "sp_30_p58",
+          "sp_31_p49",
+          "sp_31_p50",
+          "sp_32_p67",
+          "sp_32_p68",
+          "sp_33_p29",
+          "sp_33_p30",
+          "sp_33_p31",
+          "sp_33_p32",
+          "sp_35_p27",
+          "sp_36_p37",
+          "sp_36_p38",
+          "sp_40_p17",
+          "sp_40_p18",
+          "sp_40_p21",
+          "sp_40_p22",
+          "sp_41_p57",
+          "sp_41_p58",
+          "sp_42_p53",
+          "sp_42_p54",
+          "sp_43_p23",
+          "sp_43_p24",
+          "sp_43_p27",
+          "sp_43_p28",
+          "sp_43_p29",
+          "sp_43_p30",
+          "sp_46_p49",
+          "sp_46_p50",
+          "sp_47_p77",
+          "sp_47_p78",
+          "sp_4_p79",
+          "sp_5_p45",
+          "sp_5_p46",
+          "sp_5_p61",
+          "sp_5_p71",
+          "sp_5_p72",
+          "sp_5_p73",
+          "sp_5_p74",
+          "sp_9_p45",
+          "sp_9_p46"
+        ],
+        "position_history_native_new": 0,
+        "position_history_native_new_beyond_h10": 0,
+        "position_history_native_new_beyond_h10_ids": [],
+        "position_history_native_new_ids": [],
+        "position_history_r4_union_floor": 107,
+        "position_history_r4_union_rate_over_frozen": 0.03287250384024577,
+        "r4_union_floor": 107,
+        "r4_union_floor_rate_over_frozen": 0.03287250384024577,
+        "registry_le14_members": 13,
+        "statuses": {
+          "timeout": 3207
+        },
+        "supported_attempted": 3207,
+        "timeout_rate_over_attempted": 1.0,
+        "timeouts": 3207,
+        "unsupported_opening": 48,
+        "wins": 0
+      }
+    }
+  },
+  "integrity": {
+    "files_sha256": {
+      ".scratch/horizon_h10.py": "C9BCB97096E5C17BD2A6E294969C44CE12E09D193772BFDC2462E5FEA2BCC4E3",
+      ".scratch/horizon_native/.target/release/horizon_native.exe": "49F0F4363E5EC9B62411BE498625114D6B4716050A4BB6AED2677DAC547F4732",
+      ".scratch/horizon_native/Cargo.lock": "09BC24F8B754BC576CAC074E8DE2D42B37BCB0BE9170B442EA0FE6F79330A0A7",
+      ".scratch/horizon_native/Cargo.toml": "3F8DCDCCF60FD6C0252BECF330A53D8D638E78B85B611B7FC25C507BA5B55839",
+      ".scratch/horizon_native/README.md": "926568120C7DAEF52D1281FC96B8174E78F1BBF0AE7A0BD505F85388100DCEC4",
+      ".scratch/horizon_native/driver.py": "B58C000F5B1ABDFCACF4CF408D85B462B4E3074013F9A010349252F09BB0E88A",
+      ".scratch/horizon_native/src/lib.rs": "9CA2C0779832D06302192D2009F5128AD01827BAC68567E2C511868CAEECC84C",
+      ".scratch/horizon_native/src/main.rs": "808802D7D9348D130E6E2378381AD00758B6A9F8B26E2910C3DB39EC5C23E0FA",
+      ".scratch/horizon_r2.py": "76A9F5B10939D9810A15E9539D4B4FEE13A3E70179E2914BCC8D0A8E16544257",
+      ".scratch/horizon_r3_h8.json": "A9B79BAC7E10D15C7D947A85A79F90B3BB444F23B5AC255C40FC54A9C483FAE1",
+      ".scratch/horizon_r4_consolidate.py": "DB7AFC34D0078A508B8C6A86FB174167C166A5DDD5177B71DBD032F84DECA3E5",
+      ".scratch/horizon_r4_phase1_cohorts_human_resume.json": "CEFBDE6F23A375779F4F6490F6A75F882C51C3051B3897F99FF586E7D1B18DFA",
+      ".scratch/horizon_r4_phase1_cohorts_human_resume_rows.jsonl": "14CE903169D5E2AC64F04D3FBCFB1D8B1BD06FBF352E3C2F9D3EA16284B8A831",
+      ".scratch/horizon_r4_phase1_cohorts_human_rows.jsonl": "2B2D191636B121E804BAF9F95CEBC5EA691AB4AEA753CB11EB94A955545524E4",
+      ".scratch/horizon_r4_phase1_cohorts_selfplay_1.json": "5276FBE0BAFD5976976B4BD4EE068CF7D71764B36D9C98BA4F63619FBF0BF697",
+      ".scratch/horizon_r4_phase1_cohorts_selfplay_1_rows.jsonl": "2351EE0CE604C489F1748D18D895BDA9556493D716A1FD834B36379D08D8B976",
+      ".scratch/horizon_r4_phase1_cohorts_selfplay_2.json": "A08674CDAED299890A341B0BAEB9251732FA08533B2B381A7674E04D9A712F10",
+      ".scratch/horizon_r4_phase1_cohorts_selfplay_2_rows.jsonl": "04379052473B08A49A5D55C597505BDAB0E930B5358929B4D418006A44E67F75",
+      ".scratch/horizon_r4_phase1_cohorts_selfplay_3.json": "F78EF89F8321B369D30DCDB022E2BDADEF7647FF200F91BFB94E07B21CD65F0D",
+      ".scratch/horizon_r4_phase1_cohorts_selfplay_3_rows.jsonl": "1DF270DF04CCD9C28587E8B5A82E0D244E49BEF68BAFFBC12510A12C4B6F3DC0",
+      ".scratch/horizon_r4_phase1_cohorts_selfplay_4.json": "28F03180E90E30C0EE3969F9513A2D84CC21441169F1DCC27A0CC58046F90341",
+      ".scratch/horizon_r4_phase1_cohorts_selfplay_4_rows.jsonl": "F78F6EF518BFE2D292F31608EF8DF6F56F96E53A60CBCF00752AC5197DB2E980",
+      ".scratch/horizon_r4_phase1_cohorts_small.json": "6F899BFDF9AE39284D0378F4BF82EB624EAAFD1E3190043960614188640E70CE",
+      ".scratch/horizon_r4_phase1_cohorts_small_rows.jsonl": "C86250433EAD2FF6C313CE738EA769AAA431D818798B42AFEC186E66BAF3BB24",
+      ".scratch/horizon_r4_phase1_registry.json": "77BCCFE2A9007FB3E3BEC92201F7F046D5ED5CD6D0D1F6FCECDBB310EAFBFA9F",
+      ".scratch/horizon_r4_phase1_registry_final.json": "B20FB4B676AE50C75BAF891225086328EB7AD66A5DBFA33B36AEC3309572038F",
+      ".scratch/horizon_r4_phase1_registry_final_rows.jsonl": "B68612E066F34AB71834A201DB2F780F4BBEC7579FB695323D4F0279A859B5ED",
+      ".scratch/horizon_r4_phase1_registry_rows.jsonl": "034CDC8F03FE0D17794E24357B88AB876F8A8FE434B620FD63462493DCD96F40",
+      ".scratch/horizon_r4_phase1_retry.json": "794ABA98F6E729AE80C9E500ECB665700394F86CE69FD998552C5AA07674F4E2",
+      ".scratch/horizon_r4_phase1_retry2.json": "22D51C8D3BE236AF19E024EB3E74F0259F31C070E9BC03DABE588CC22687D81C",
+      ".scratch/horizon_r4_phase1_retry3.json": "0EC999201BA7C9F637957BE76A9F718A07CA4C422B9C0CD1A3D92217038BA4C5",
+      ".scratch/horizon_r4_phase1_retry4.json": "CDCB007B4832A5E11E0278A9F651E56CDB15132EE6642170EFDDE66654C1688B",
+      ".scratch/horizon_r4_phase1_synthetic.json": "F217647DC0D914EEEDF76E379DE6400AD2B8158BC2BB9AA684BE94BBCB339903",
+      ".scratch/horizon_r4_phase1_synthetic_rows.jsonl": "F5CFE609B768F6E96F34D52E1A7F5D312E9B1A14C19E2F20BAAC958B1A9BBB91",
+      ".scratch/horizon_r4_python_boundary.json": "EB5AD2DDF9EA424AE9B536FCB2E672EB478D6F4CF59A0A2BC1B2D03534010A9A",
+      ".scratch/horizon_r4_python_boundary.py": "1A07950874B4BD2DEA0AD17FD648E1A33BE8EFBBAA2FB855DAD436F92BD4D909",
+      ".scratch/horizon_r4_registry.json": "451CDF48687D469EB21BEF7889677F0825F015F7728686FE324843C05FB35612"
+    }
+  },
+  "metadata": {
+    "claim_class": "MEASURED unless a field explicitly says otherwise",
+    "cohort_membership_overlap_note": "grinds/forcing/puzzle memberships can share position IDs with other cohorts; per-cohort rates use memberships",
+    "generated_utc": "2026-07-22T04:52:57.755597+00:00",
+    "native_threads": 1,
+    "schema": 1,
+    "timeout_is_not_a_verdict": true
+  },
+  "position_identity_audit": {
+    "global_h8_unique_ordered_move_histories": 260,
+    "global_h8_win_ids": 260,
+    "registry_duplicate_id_excess_over_histories": 153,
+    "registry_ids": 2941,
+    "registry_le10_ids": 123,
+    "registry_le10_unique_ordered_move_histories": 121,
+    "registry_le14_ids": 278,
+    "registry_le14_unique_ordered_move_histories": 275,
+    "registry_unique_ordered_move_histories": 2788
+  },
+  "registry_validation": {
+    "canonical_final_pass": {
+      "attempted_memberships": 155,
+      "completed_negatives": 0,
+      "completed_verdicts": 155,
+      "distributions": {
+        "all": {
+          "first_action_total": {
+            "max": 212691,
+            "mean": 45135.82580645161,
+            "n": 155,
+            "p50": 37494,
+            "p90": 64043,
+            "total": 6996053
+          },
+          "model_wall_ns": {
+            "max": 960362800,
+            "mean": 132746383.22580644,
+            "n": 155,
+            "p50": 101283700,
+            "p90": 169553000,
+            "total": 20575689400
+          },
+          "nodes": {
+            "max": 1577155,
+            "mean": 135343.6387096774,
+            "n": 155,
+            "p50": 75402,
+            "p90": 145281,
+            "total": 20978264
+          },
+          "universe": {
+            "max": 898,
+            "mean": 452.61290322580646,
+            "n": 155,
+            "p50": 418,
+            "p90": 564,
+            "total": 70155
+          },
+          "wall_ns": {
+            "max": 6826143900,
+            "mean": 281328264.516129,
+            "n": 155,
+            "p50": 27118000,
+            "p90": 304705300,
+            "total": 43605881000
+          }
+        },
+        "completed": {
+          "first_action_total": {
+            "max": 212691,
+            "mean": 45135.82580645161,
+            "n": 155,
+            "p50": 37494,
+            "p90": 64043,
+            "total": 6996053
+          },
+          "model_wall_ns": {
+            "max": 960362800,
+            "mean": 132746383.22580644,
+            "n": 155,
+            "p50": 101283700,
+            "p90": 169553000,
+            "total": 20575689400
+          },
+          "nodes": {
+            "max": 1577155,
+            "mean": 135343.6387096774,
+            "n": 155,
+            "p50": 75402,
+            "p90": 145281,
+            "total": 20978264
+          },
+          "universe": {
+            "max": 898,
+            "mean": 452.61290322580646,
+            "n": 155,
+            "p50": 418,
+            "p90": 564,
+            "total": 70155
+          },
+          "wall_ns": {
+            "max": 6826143900,
+            "mean": 281328264.516129,
+            "n": 155,
+            "p50": 27118000,
+            "p90": 304705300,
+            "total": 43605881000
+          }
+        }
+      },
+      "errors": 0,
+      "native_win_rate_over_attempted": 1.0,
+      "statuses": {
+        "win": 155
+      },
+      "timeout_rate_over_attempted": 0.0,
+      "timeouts": 0,
+      "wins": 155
+    },
+    "canonical_id_sha256_compact_json": "EC4DE6586A39A1382232F529D42923B52D8E9318CD2D7A89D22F925C2B5911DB",
+    "caught": 155,
+    "development_comparison_caveat": "initial and final runs used different cache limits and evolving source/binary snapshots; ratios describe the preserved development evidence, not a reproducible controlled benchmark",
+    "eligible": 155,
+    "initial_compiled_pass": {
+      "attempted_memberships": 155,
+      "completed_negatives": 0,
+      "completed_verdicts": 137,
+      "distributions": {
+        "all": {
+          "first_action_total": {
+            "max": 212691,
+            "mean": 45135.82580645161,
+            "n": 155,
+            "p50": 37494,
+            "p90": 64043,
+            "total": 6996053
+          },
+          "model_wall_ns": {
+            "max": 880791800,
+            "mean": 101111361.93548387,
+            "n": 155,
+            "p50": 70518300,
+            "p90": 137663000,
+            "total": 15672261100
+          },
+          "nodes": {
+            "max": 3155968,
+            "mean": 379420.135483871,
+            "n": 155,
+            "p50": 147958,
+            "p90": 904192,
+            "total": 58810121
+          },
+          "universe": {
+            "max": 898,
+            "mean": 452.61290322580646,
+            "n": 155,
+            "p50": 418,
+            "p90": 564,
+            "total": 70155
+          },
+          "wall_ns": {
+            "max": 10012894400,
+            "mean": 2875765212.903226,
+            "n": 155,
+            "p50": 1820875900,
+            "p90": 10000646600,
+            "total": 445743608000
+          }
+        },
+        "completed": {
+          "first_action_total": {
+            "max": 78155,
+            "mean": 40314.846715328466,
+            "n": 137,
+            "p50": 37026,
+            "p90": 51388,
+            "total": 5523134
+          },
+          "model_wall_ns": {
+            "max": 179019200,
+            "mean": 75635949.6350365,
+            "n": 137,
+            "p50": 67809400,
+            "p90": 108874800,
+            "total": 10362125100
+          },
+          "nodes": {
+            "max": 345815,
+            "mean": 151385.75912408758,
+            "n": 137,
+            "p50": 141006,
+            "p90": 196268,
+            "total": 20739849
+          },
+          "universe": {
+            "max": 611,
+            "mean": 423.6788321167883,
+            "n": 137,
+            "p50": 410,
+            "p90": 480,
+            "total": 58044
+          },
+          "wall_ns": {
+            "max": 5297339900,
+            "mean": 1939298827.0072992,
+            "n": 137,
+            "p50": 1761155200,
+            "p90": 3036408600,
+            "total": 265683939300
+          }
+        }
+      },
+      "errors": 0,
+      "native_win_rate_over_attempted": 0.8838709677419355,
+      "statuses": {
+        "timeout": 18,
+        "win": 137
+      },
+      "timeout_rate_over_attempted": 0.11612903225806452,
+      "timeouts": 18,
+      "wins": 137
+    },
+    "initial_to_final_p50_wall_speedup": 67.14639353934656,
+    "initial_to_final_p90_wall_speedup": 32.820717591718946,
+    "missed": 0,
+    "negative_mismatches": 0,
+    "retry_ladder": [
+      {
+        "attempted": 18,
+        "budget_ms": 10000,
+        "completed_negatives": 0,
+        "errors": 0,
+        "file": ".scratch\\horizon_r4_phase1_retry.json",
+        "max_cache_entries": 200000,
+        "timeouts": 16,
+        "wins": 2
+      },
+      {
+        "attempted": 16,
+        "budget_ms": 10000,
+        "completed_negatives": 0,
+        "errors": 0,
+        "file": ".scratch\\horizon_r4_phase1_retry2.json",
+        "max_cache_entries": 200000,
+        "timeouts": 6,
+        "wins": 10
+      },
+      {
+        "attempted": 6,
+        "budget_ms": 60000,
+        "completed_negatives": 0,
+        "errors": 0,
+        "file": ".scratch\\horizon_r4_phase1_retry3.json",
+        "max_cache_entries": 500000,
+        "timeouts": 6,
+        "wins": 0
+      },
+      {
+        "attempted": 6,
+        "budget_ms": 10000,
+        "completed_negatives": 0,
+        "errors": 0,
+        "file": ".scratch\\horizon_r4_phase1_retry4.json",
+        "max_cache_entries": 500000,
+        "timeouts": 0,
+        "wins": 6
+      }
+    ]
+  },
+  "synthetic_python_crosscheck": {
+    "case_results": [
+      {
+        "first_actions": 1,
+        "horizon": 13,
+        "id": "synthetic_fresh_five",
+        "nodes": 1,
+        "phase": "first",
+        "python_nodes": 1,
+        "python_status": "win",
+        "python_wall_ns": 101196800,
+        "shortcut_d1_defender_completion": 0,
+        "status": "win",
+        "wall_ns": 3341800
+      },
+      {
+        "first_actions": 1,
+        "horizon": 14,
+        "id": "synthetic_fresh_five_h14",
+        "nodes": 1,
+        "phase": "first",
+        "python_nodes": 1,
+        "python_status": "win",
+        "python_wall_ns": 86424500,
+        "shortcut_d1_defender_completion": 0,
+        "status": "win",
+        "wall_ns": 4817000
+      },
+      {
+        "first_actions": 1,
+        "horizon": 13,
+        "id": "synthetic_second_five",
+        "nodes": 1,
+        "phase": "second",
+        "python_nodes": 1,
+        "python_status": "win",
+        "python_wall_ns": 22984100,
+        "shortcut_d1_defender_completion": 0,
+        "status": "win",
+        "wall_ns": 58400
+      },
+      {
+        "first_actions": 29027,
+        "horizon": 13,
+        "id": "synthetic_fresh_cross7_negative",
+        "nodes": 29027,
+        "phase": "first",
+        "python_nodes": 58054,
+        "python_status": "negative",
+        "python_wall_ns": 46885696800,
+        "shortcut_d1_defender_completion": 29027,
+        "status": "negative",
+        "wall_ns": 28658179600
+      }
+    ],
+    "cases": 4,
+    "mismatches": [],
+    "native_negatives": 1,
+    "native_wins": 3,
+    "negative_legality_note": "the cross7 target has two-cell completion replies whose cells are within five of root stones; every Python D1 counterreply used by the proof therefore exists under true radius-eight legality",
+    "python_matches": 4,
+    "summary": {
+      "attempted_memberships": 4,
+      "completed_negatives": 1,
+      "completed_verdicts": 4,
+      "distributions": {
+        "all": {
+          "first_action_total": {
+            "max": 41378,
+            "mean": 28027.25,
+            "n": 4,
+            "p50": 29027,
+            "p90": 41378,
+            "total": 112109
+          },
+          "model_wall_ns": {
+            "max": 157498900,
+            "mean": 92708075.0,
+            "n": 4,
+            "p50": 74144700,
+            "p90": 111674800,
+            "total": 370832300
+          },
+          "nodes": {
+            "max": 29027,
+            "mean": 7257.5,
+            "n": 4,
+            "p50": 1,
+            "p90": 1,
+            "total": 29030
+          },
+          "universe": {
+            "max": 430,
+            "mean": 410.5,
+            "n": 4,
+            "p50": 406,
+            "p90": 430,
+            "total": 1642
+          },
+          "wall_ns": {
+            "max": 28658179600,
+            "mean": 7166599200.0,
+            "n": 4,
+            "p50": 3341800,
+            "p90": 4817000,
+            "total": 28666396800
+          }
+        },
+        "completed": {
+          "first_action_total": {
+            "max": 41378,
+            "mean": 28027.25,
+            "n": 4,
+            "p50": 29027,
+            "p90": 41378,
+            "total": 112109
+          },
+          "model_wall_ns": {
+            "max": 157498900,
+            "mean": 92708075.0,
+            "n": 4,
+            "p50": 74144700,
+            "p90": 111674800,
+            "total": 370832300
+          },
+          "nodes": {
+            "max": 29027,
+            "mean": 7257.5,
+            "n": 4,
+            "p50": 1,
+            "p90": 1,
+            "total": 29030
+          },
+          "universe": {
+            "max": 430,
+            "mean": 410.5,
+            "n": 4,
+            "p50": 406,
+            "p90": 430,
+            "total": 1642
+          },
+          "wall_ns": {
+            "max": 28658179600,
+            "mean": 7166599200.0,
+            "n": 4,
+            "p50": 3341800,
+            "p90": 4817000,
+            "total": 28666396800
+          }
+        }
+      },
+      "errors": 0,
+      "native_win_rate_over_attempted": 0.75,
+      "statuses": {
+        "negative": 1,
+        "win": 3
+      },
+      "timeout_rate_over_attempted": 0.0,
+      "timeouts": 0,
+      "wins": 3
+    }
+  }
+}
