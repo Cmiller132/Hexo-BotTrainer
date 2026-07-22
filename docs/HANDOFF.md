@@ -175,14 +175,26 @@ Live lanes (2026-07-21 evening, third round):
   R2-1/R2-2 amendments `a018befb` → narrow confirmation `af5665be`
   (CONFIRMED-CLEARED-FOR-BUILD). Full-tree is NO-GO; final adoption gate
   remains the owner's.
-- **horizon-r3** (claude/deadline-ladder): legality-bridge lemma
-  (within-8 rule), h≤10 universe shrink, next-rung closure (h13/14),
-  h16 feasibility read. Research-primary.
-- **lean-horizon** (E:\tss-lean): two-cover lemma, legality bridge,
-  h6 decider formalization.
-- **refute finisher** (claude/refute-build): implementing the R3-1
-  corrected Q=4 golden (design `a24c1f00`; independent recompute of
-  pinned bytes mandatory).
+No live lanes. **main_4 RESUMED 2026-07-22T02:11Z from epoch_000025.pt**
+(owner-ordered; the brief main_10 fork was deleted — `cc995164`) on the
+~2x engine at cap 750/J2near-off; stale `_resume_config.toml` (cap 500,
+ep23) was removed so the supervisor regenerated it from the current
+config. First-epoch gates (§4) bind now.
+
+Landed since the last roster: **horizon-r3** (`43cbdffb` on
+claude/deadline-ladder, REPORT_HORIZON_R3.md): true-rules transfer
+bridge (radius-8 legality; 474,525-cell anchored audit, zero
+violations); exact universe shrink with ZERO verdict mismatches on all
+6,443 + 248 rows (Python loss tails 33.6s→0.46s); true rung clocks
+(fresh Win10=Win11=Win12, Win14=Win16; next genuine rungs h13/14,
+registry-confirmed); six-stone two-cover lemma (259 classes); finite
+h13/14 endpoint implemented — Python runtime frontier open (SAT/BDD
+endpoint solver = next step). **lean-horizon** (tss-lean `7a3afd1`):
+R-SH4 two-cover PROVEN (kernel decide), R-SH5 radius-8 legality bridge
+PROVEN, R-SH6 exact h6 decider iff PROVEN; zero sorry/axioms.
+**refute finisher** (`ccaede3f` on claude/refute-build): R3-1 Q=4 golden
+implemented, oracle independently reproduced pinned bytes — build
+UNBLOCKED; adoption = owner gate (economics re-measure needed first).
 
 Exited and folded: **attacker-gen-r3** (`cc75b304` → merge `b1e7e877`):
 1.159x end-to-end bit-identical, all gates incl. WSL Stage-0 34/34;
